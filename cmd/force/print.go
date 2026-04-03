@@ -1,0 +1,534 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"syscall"
+
+	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/store"
+)
+
+func printList(db *sql.DB, statusFilter string, limit int) {
+	query := `SELECT id, type, status, target_repo, owner, retry_count,
+		COALESCE((SELECT MIN(td.depends_on) FROM TaskDependencies td
+		          JOIN BountyBoard dep ON dep.id = td.depends_on
+		          WHERE td.task_id = bb.id AND dep.status != 'Completed'), 0) AS active_dep,
+		payload FROM BountyBoard bb`
+	args := []any{}
+
+	// statusFilter can be a single status or comma-separated list
+	if statusFilter != "" {
+		statuses := strings.Split(statusFilter, ",")
+		placeholders := make([]string, len(statuses))
+		for i, s := range statuses {
+			placeholders[i] = "?"
+			args = append(args, strings.TrimSpace(s))
+		}
+		query += fmt.Sprintf(" WHERE status IN (%s)", strings.Join(placeholders, ","))
+	}
+	query += ` ORDER BY id DESC`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		fmt.Printf("DB error: %v\n", err)
+		return
+	}
+	defer rows.Close()
+	fmt.Printf("%-4s %-12s %-22s %-15s %-15s %s\n", "ID", "STATUS", "TYPE", "REPO", "OWNER", "TASK")
+	fmt.Println(strings.Repeat("-", 100))
+	n := 0
+	for rows.Next() {
+		n++
+		var id, retryCount, activeDep int
+		var taskType, status, repo, owner, payload string
+		rows.Scan(&id, &taskType, &status, &repo, &owner, &retryCount, &activeDep, &payload)
+		taskPreview := truncate(strings.ReplaceAll(payload, "\n", " "), 35)
+
+		abbrev := status
+		if a, ok := statusAbbrev[status]; ok {
+			abbrev = a
+		}
+		if retryCount > 0 {
+			abbrev = fmt.Sprintf("%s(r%d)", abbrev, retryCount)
+		}
+		if activeDep > 0 {
+			abbrev = fmt.Sprintf("Blocked#%d", activeDep)
+		}
+		fmt.Printf("%-4d %-12s %-22s %-15s %-15s %s\n", id, truncate(abbrev, 12), truncate(taskType, 22), truncate(repo, 15), truncate(owner, 15), taskPreview)
+	}
+	if n == 0 {
+		fmt.Println("(no tasks)")
+	}
+}
+
+func printLogs(db *sql.DB, id int) {
+	var b store.Bounty
+	var errorLog string
+	err := db.QueryRow(`
+		SELECT id, parent_id, type, status, target_repo, owner, retry_count, infra_failures,
+		       convoy_id, checkpoint, branch_name, IFNULL(error_log,''), payload
+		FROM BountyBoard WHERE id = ?`, id).
+		Scan(&b.ID, &b.ParentID, &b.Type, &b.Status, &b.TargetRepo, &b.Owner, &b.RetryCount,
+			&b.InfraFailures, &b.ConvoyID, &b.Checkpoint, &b.BranchName, &errorLog, &b.Payload)
+	if err != nil {
+		fmt.Printf("Task %d not found\n", id)
+		return
+	}
+
+	attemptCount := 0
+	db.QueryRow(`SELECT COUNT(*) FROM TaskHistory WHERE task_id = ?`, id).Scan(&attemptCount)
+
+	deps := store.GetDependencies(db, id)
+
+	fmt.Printf("=== Task %d ===\n", b.ID)
+	fmt.Printf("Type:          %s\n", b.Type)
+	fmt.Printf("Status:        %s\n", b.Status)
+	fmt.Printf("Repo:          %s\n", b.TargetRepo)
+	fmt.Printf("Owner:         %s\n", b.Owner)
+	fmt.Printf("Parent ID:     %d\n", b.ParentID)
+	if len(deps) > 0 {
+		depStrs := make([]string, len(deps))
+		for i, d := range deps {
+			depStrs[i] = fmt.Sprintf("#%d", d)
+		}
+		fmt.Printf("Blocked By:    %s\n", strings.Join(depStrs, ", "))
+	}
+	fmt.Printf("Convoy ID:     %d\n", b.ConvoyID)
+	fmt.Printf("Branch:        %s\n", b.BranchName)
+	fmt.Printf("Checkpoint:    %s\n", b.Checkpoint)
+	fmt.Printf("Retries:       %d / %d\n", b.RetryCount, agents.MaxRetries)
+	fmt.Printf("Infra Failures:%d / %d\n", b.InfraFailures, agents.MaxInfraFailures)
+	fmt.Printf("History:       %d attempt(s) — run 'force history %d' for full output\n", attemptCount, id)
+	fmt.Println("\n--- Payload ---")
+	fmt.Println(b.Payload)
+	if errorLog != "" {
+		fmt.Println("\n--- Error Log ---")
+		fmt.Println(errorLog)
+	}
+}
+
+func printHistory(db *sql.DB, id int, full bool) {
+	entries := store.GetTaskHistory(db, id)
+	if len(entries) == 0 {
+		fmt.Printf("No history found for task %d\n", id)
+		return
+	}
+	fmt.Printf("=== History for task %d (%d attempt(s)) ===\n\n", id, len(entries))
+	for _, e := range entries {
+		fmt.Printf("--- Attempt %d | %s | agent: %s | session: %s ---\n", e.Attempt, e.CreatedAt, e.Agent, e.SessionID)
+		fmt.Printf("Outcome: %s\n", e.Outcome)
+		if e.TokensIn > 0 || e.TokensOut > 0 {
+			fmt.Printf("Tokens:  %d input, %d output\n", e.TokensIn, e.TokensOut)
+		}
+		if e.ClaudeOutput != "" {
+			out := e.ClaudeOutput
+			if !full && len(out) > 2000 {
+				out = out[:2000] + fmt.Sprintf("\n... (%d chars truncated — use --full to see all)", len(e.ClaudeOutput)-2000)
+			}
+			fmt.Println(out)
+		}
+		fmt.Println()
+	}
+}
+
+func printEscalations(db *sql.DB, status string) {
+	escalations := agents.ListEscalations(db, status)
+	if len(escalations) == 0 {
+		fmt.Println("No escalations found.")
+		return
+	}
+	fmt.Printf("%-4s %-7s %-8s %-12s %-20s %s\n", "ID", "TASK", "SEV", "STATUS", "CREATED", "MESSAGE")
+	fmt.Println(strings.Repeat("-", 90))
+	for _, e := range escalations {
+		fmt.Printf("%-4d %-7d %-8s %-12s %-20s %s\n",
+			e.ID, e.TaskID, string(e.Severity), e.Status, e.CreatedAt, truncate(e.Message, 40))
+	}
+}
+
+func printStats(db *sql.DB) {
+	fmt.Println("=== Fleet Statistics ===")
+	fmt.Println()
+
+	// Task counts by status
+	fmt.Println("Tasks by status:")
+	rows, err := db.Query(`SELECT status, COUNT(*) FROM BountyBoard GROUP BY status ORDER BY COUNT(*) DESC`)
+	if err == nil {
+		for rows.Next() {
+			var status string
+			var count int
+			rows.Scan(&status, &count)
+			fmt.Printf("  %-25s %d\n", status, count)
+		}
+		rows.Close()
+	}
+
+	// Throughput: completed tasks in the last hour, 24h, all time
+	fmt.Println()
+	fmt.Println("Throughput (CodeEdit completions):")
+	for _, window := range []struct {
+		label string
+		since string
+	}{
+		{"Last 1 hour", "-1 hour"},
+		{"Last 24 hours", "-24 hours"},
+		{"Last 7 days", "-7 days"},
+	} {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM TaskHistory WHERE outcome = 'Completed' AND created_at >= datetime('now', ?)`, window.since).Scan(&n)
+		fmt.Printf("  %-20s %d\n", window.label, n)
+	}
+	var allTime int
+	db.QueryRow(`SELECT COUNT(*) FROM TaskHistory WHERE outcome = 'Completed'`).Scan(&allTime)
+	fmt.Printf("  %-20s %d\n", "All time", allTime)
+
+	// Top agents by completions
+	fmt.Println()
+	fmt.Println("Top agents by completions:")
+	rows, err = db.Query(`SELECT agent, COUNT(*) as n FROM TaskHistory WHERE outcome = 'Completed' GROUP BY agent ORDER BY n DESC LIMIT 10`)
+	if err == nil {
+		for rows.Next() {
+			var agent string
+			var n int
+			rows.Scan(&agent, &n)
+			fmt.Printf("  %-20s %d\n", agent, n)
+		}
+		rows.Close()
+	}
+
+	// Escalations summary
+	var openEsc, totalEsc int
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations`).Scan(&totalEsc)
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open'`).Scan(&openEsc)
+	fmt.Println()
+	fmt.Printf("Escalations: %d open / %d total\n", openEsc, totalEsc)
+
+	// Convoy summary
+	var activeConvoys, completedConvoys int
+	db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&activeConvoys)
+	db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Completed'`).Scan(&completedConvoys)
+	fmt.Printf("Convoys:     %d active, %d completed\n", activeConvoys, completedConvoys)
+
+	// Failure rate
+	var totalAttempts, failedAttempts int
+	db.QueryRow(`SELECT COUNT(*) FROM TaskHistory`).Scan(&totalAttempts)
+	db.QueryRow(`SELECT COUNT(*) FROM TaskHistory WHERE outcome = 'Failed'`).Scan(&failedAttempts)
+	if totalAttempts > 0 {
+		rate := float64(failedAttempts) / float64(totalAttempts) * 100
+		fmt.Printf("Failure rate: %.1f%% (%d/%d attempts)\n", rate, failedAttempts, totalAttempts)
+	}
+
+	// Token usage totals
+	var totalIn, totalOut int
+	db.QueryRow(`SELECT IFNULL(SUM(tokens_in),0), IFNULL(SUM(tokens_out),0) FROM TaskHistory`).Scan(&totalIn, &totalOut)
+	if totalIn > 0 || totalOut > 0 {
+		fmt.Println()
+		fmt.Printf("Token usage (all time): %d input, %d output\n", totalIn, totalOut)
+	}
+}
+
+func printCosts(db *sql.DB) {
+	fmt.Println("=== Fleet Token Usage ===")
+	fmt.Println()
+
+	var totalIn, totalOut int
+	db.QueryRow(`SELECT IFNULL(SUM(tokens_in),0), IFNULL(SUM(tokens_out),0) FROM TaskHistory`).Scan(&totalIn, &totalOut)
+	fmt.Printf("All time:   %d input tokens, %d output tokens\n", totalIn, totalOut)
+
+	for _, w := range []struct{ label, since string }{
+		{"Last 24h", "-24 hours"},
+		{"Last 7d", "-7 days"},
+	} {
+		var in, out int
+		db.QueryRow(`SELECT IFNULL(SUM(tokens_in),0), IFNULL(SUM(tokens_out),0) FROM TaskHistory WHERE created_at >= datetime('now', ?)`, w.since).Scan(&in, &out)
+		fmt.Printf("%-12s %d input, %d output\n", w.label+":", in, out)
+	}
+
+	fmt.Println()
+	fmt.Println("By agent (all time):")
+	rows, err := db.Query(`SELECT agent, IFNULL(SUM(tokens_in),0), IFNULL(SUM(tokens_out),0)
+		FROM TaskHistory GROUP BY agent ORDER BY SUM(tokens_in+tokens_out) DESC LIMIT 10`)
+	if err == nil {
+		for rows.Next() {
+			var agent string
+			var in, out int
+			rows.Scan(&agent, &in, &out)
+			fmt.Printf("  %-22s %6d in  %6d out\n", agent, in, out)
+		}
+		rows.Close()
+	}
+}
+
+func printStatus(db *sql.DB) {
+	counts := map[string]int{}
+	rows, err := db.Query(`SELECT status, COUNT(*) FROM BountyBoard GROUP BY status`)
+	if err == nil {
+		for rows.Next() {
+			var status string
+			var count int
+			rows.Scan(&status, &count)
+			counts[status] = count
+		}
+		rows.Close()
+	}
+
+	var openEsc, highEsc int
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open'`).Scan(&openEsc)
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open' AND severity = 'HIGH'`).Scan(&highEsc)
+
+	var activeConvoys int
+	db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&activeConvoys)
+
+	estopStatus := "off"
+	if agents.IsEstopped(db) {
+		estopStatus = "ACTIVE"
+	}
+
+	daemonStatus := "not running"
+	if pidBytes, pidErr := os.ReadFile("fleet.pid"); pidErr == nil {
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if pid > 0 {
+			proc, procErr := os.FindProcess(pid)
+			if procErr == nil && proc.Signal(syscall.Signal(0)) == nil {
+				daemonStatus = fmt.Sprintf("running (PID %d)", pid)
+			} else {
+				daemonStatus = fmt.Sprintf("stale PID %d (crashed?)", pid)
+			}
+		}
+	}
+
+	fmt.Printf("Daemon:        %s\n", daemonStatus)
+	fmt.Printf("E-stop:        %s\n", estopStatus)
+	fmt.Printf("Pending:       %d\n", counts["Pending"])
+	captainActive := counts["AwaitingCaptainReview"] + counts["UnderCaptainReview"]
+	fmt.Printf("Active:        %d (Locked: %d, Captain: %d, InReview: %d, AwaitReview: %d)\n",
+		counts["Locked"]+captainActive+counts["UnderReview"]+counts["AwaitingCouncilReview"],
+		counts["Locked"], captainActive, counts["UnderReview"], counts["AwaitingCouncilReview"])
+	fmt.Printf("Completed:     %d\n", counts["Completed"])
+	fmt.Printf("Failed:        %d\n", counts["Failed"])
+	fmt.Printf("Escalated:     %d\n", counts["Escalated"])
+	if openEsc > 0 {
+		line := fmt.Sprintf("Open escalations: %d", openEsc)
+		if highEsc > 0 {
+			line += fmt.Sprintf(" (%d HIGH)", highEsc)
+		}
+		fmt.Println(line)
+	}
+	fmt.Printf("Active convoys: %d\n", activeConvoys)
+
+	// Stall detection summary
+	var stalled int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE status IN ('Locked', 'UnderCaptainReview', 'UnderReview')
+		  AND locked_at != ''
+		  AND locked_at < datetime('now', ?)`,
+		fmt.Sprintf("-%d seconds", int(agents.StallWarnTimeout.Seconds()))).Scan(&stalled)
+	if stalled > 0 {
+		fmt.Printf("Stalled agents: %d (locked >%v with no recent commits)\n", stalled, agents.StallWarnTimeout)
+	}
+
+	unread, totalMail := store.MailStats(db, "")
+	if totalMail > 0 {
+		fmt.Printf("Fleet mail:     %d unread / %d total\n", unread, totalMail)
+	}
+}
+
+func printWho(db *sql.DB) {
+	rows, err := db.Query(`
+		SELECT id, type, status, target_repo, owner, payload
+		FROM BountyBoard
+		WHERE status IN ('Locked', 'UnderReview', 'AwaitingCaptainReview', 'UnderCaptainReview', 'AwaitingCouncilReview')
+		  AND owner != ''
+		ORDER BY owner, id`)
+	if err != nil {
+		fmt.Printf("DB error: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		if !found {
+			fmt.Printf("%-20s %-4s %-14s %-15s %s\n", "AGENT", "ID", "STATUS", "REPO", "TASK")
+			fmt.Println(strings.Repeat("-", 90))
+			found = true
+		}
+		var id int
+		var taskType, status, repo, owner, payload string
+		rows.Scan(&id, &taskType, &status, &repo, &owner, &payload)
+		abbrev := status
+		if a, ok := statusAbbrev[status]; ok {
+			abbrev = a
+		}
+		fmt.Printf("%-20s %-4d %-14s %-15s %s\n", owner, id, abbrev, truncate(repo, 15),
+			truncate(strings.ReplaceAll(payload, "\n", " "), 40))
+	}
+	if !found {
+		fmt.Println("No agents currently active.")
+	}
+}
+
+// printTree prints a task and all its children (by parent_id) recursively.
+func printTree(db *sql.DB, id int, depth int) {
+	var taskType, status, repo, payload string
+	err := db.QueryRow(`SELECT type, status, target_repo, payload FROM BountyBoard WHERE id = ?`, id).
+		Scan(&taskType, &status, &repo, &payload)
+	if err != nil {
+		fmt.Printf("%s[%d] (not found)\n", strings.Repeat("  ", depth), id)
+		return
+	}
+	abbrev := status
+	if a, ok := statusAbbrev[status]; ok {
+		abbrev = a
+	}
+	indicator := ""
+	if deps := store.GetDependencies(db, id); len(deps) > 0 {
+		parts := make([]string, len(deps))
+		for i, d := range deps {
+			parts[i] = fmt.Sprintf("#%d", d)
+		}
+		indicator = fmt.Sprintf(" [blocked by %s]", strings.Join(parts, ", "))
+	}
+	preview := truncate(strings.ReplaceAll(payload, "\n", " "), 50)
+	fmt.Printf("%s[%d] %s | %s | %s%s — %s\n",
+		strings.Repeat("  ", depth), id, abbrev, taskType, repo, indicator, preview)
+
+	// Print children (subtasks created by this task).
+	// Drain child IDs into a slice first — avoids deadlock on the SQLite single-connection
+	// pool when printTree recursively calls db.QueryRow while the cursor is still open.
+	rows, err := db.Query(`SELECT id FROM BountyBoard WHERE parent_id = ? ORDER BY id ASC`, id)
+	if err != nil {
+		return
+	}
+	var childIDs []int
+	for rows.Next() {
+		var childID int
+		rows.Scan(&childID)
+		childIDs = append(childIDs, childID)
+	}
+	rows.Close()
+	for _, childID := range childIDs {
+		printTree(db, childID, depth+1)
+	}
+}
+
+func printAgents(db *sql.DB) {
+	rows, err := db.Query(`SELECT agent_name, repo, worktree_path FROM Agents ORDER BY agent_name`)
+	if err != nil {
+		fmt.Printf("DB error: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	fmt.Printf("%-20s %-20s %s\n", "AGENT", "REPO", "WORKTREE PATH")
+	fmt.Println(strings.Repeat("-", 80))
+	found := false
+	for rows.Next() {
+		found = true
+		var agent, repo, path string
+		rows.Scan(&agent, &repo, &path)
+
+		exists := "OK"
+		if _, err := os.Stat(path); err != nil {
+			exists = "MISSING"
+		}
+		fmt.Printf("%-20s %-20s %s [%s]\n", agent, repo, path, exists)
+	}
+	if !found {
+		fmt.Println("No agent worktrees registered.")
+	}
+}
+
+func printUsage() {
+	fmt.Println(`Usage: force <command> [args]
+
+Agent control:
+  daemon                         Start the fleet daemon (all agents)
+  estop                          Emergency stop — halt all agents immediately
+  resume                         Clear e-stop and resume agents
+  scale <n>                      Dynamically add astromechs to a running daemon (SIGUSR1)
+  agents                         List registered persistent agent worktrees
+  cleanup                        Prune dead git worktrees and stale agent entries
+  doctor [--clean]               Pre-flight check: git, claude CLI, repos, DB health
+                                   --clean: auto-fix stale fleet.pid and bad dep edges
+  dogs                           List periodic dog agents and their last-run status
+  config list                    Show all config values
+  config get <key>               Read a system config value
+  config set <key> <value>       Write a system config value
+                                   Keys: num_astromechs, num_captain, num_council,
+                                         max_concurrent, spawn_delay_ms, batch_size, max_turns
+Logs written to fleet.log | Telemetry written to holonet.jsonl
+
+Task management:
+  add [--priority N] [--plan-only] <description>
+                                        Queue a feature task (Commander will decompose it)
+                                        --plan-only: subtasks created as Planned, approve with convoy approve
+  add-task [--blocked-by <id>] [--convoy <id>] [--priority N] [--timeout <secs>] <repo> <desc>
+                                        Queue a direct CodeEdit task (skips Commander)
+  add-jira [--priority N] [--plan-only] <TICKET-ID>
+                                        Fetch a Jira ticket and queue it as a feature task
+  add-repo <name> <path> <desc>         Register a repository
+  repos                                 List registered repositories
+  repos remove <name>                   Remove a registered repository
+  run <id>                              One-shot foreground run — stream Claude to stdout
+  status                                Quick summary of task counts and daemon state
+  stats                                 Task throughput, agent performance, and failure rate
+  who                                   Show which agents are active and what they're working on
+  list [status[,status2]] [--limit N]   List tasks (comma-separated statuses, newest first)
+  logs <id>                             Show full payload and error log for a task
+  history [--full] <id>                 Show full Claude output for every attempt on a task
+  reset <id>                            Reset a task to Pending (clears all error counts)
+  retry <id>                            Alias for reset
+  cancel <id>                           Permanently cancel a task (marks Failed, no retry)
+  retry-all-failed                      Reset all failed tasks to Pending
+  prioritize <id> <N>                   Set task priority (higher = claimed first)
+  block <task-id> <blocker-id>          Add a dependency: task-id waits for blocker-id
+  unblock <id>                          Remove all dependencies from task (unblock entirely)
+  unblock-dependents <id>               Remove all dependency edges pointing to <id>
+  tree <id>                             Show a task and all its subtasks as a tree
+  diff <id>                             Show the current git diff for a task's branch
+  search <query>                        Search task payloads and error logs
+  export [file.json]                    Export full task board to JSON (default: fleet-export.json)
+  import <file.json>                    Import Pending/Failed tasks from a JSON export
+  approve <id>                          Operator approval — merge without Jedi Council review
+  reject <id> <reason>                  Operator rejection — return task for rework with feedback
+  prune [--keep-days N] [--dry-run]     Delete old completed/failed tasks and history (default 30d)
+  audit [--limit N]                     Show operator audit log
+  costs                                 Show token usage by agent and time window
+  mail list                             List all fleet mail
+  mail inbox <agent>                    Show inbox for a specific agent
+  mail read <id>                        Read a mail message (marks as read)
+  mail send <to> [--task <id>] <subj>   Send a mail message to an agent
+  memories [repo] [--limit N]          Show fleet memories (agent learnings across tasks)
+  memories search <repo> <query>       FTS search fleet memories for a repo
+  directive show [role]                Show the active directive for a role
+  directive example [role]             Print an example directive file for a role
+
+Escalations:
+  escalations list [status]      List escalations (optionally filter: Open/Acknowledged/Closed)
+  escalations ack <id>           Acknowledge an escalation
+  escalations close <id>         Close an escalation
+  escalations requeue <id>       Close an escalation and re-queue its task
+
+Convoys:
+  convoy list                    List all convoys with progress
+  convoy create <name>           Create a named convoy
+  convoy show <id>               Show convoy details and dependency tree
+  convoy approve <id>            Approve a plan-only convoy (Planned → Pending)
+  convoy reset <id>              Reset all failed/escalated tasks in a convoy to Pending
+  convoy reject <id> <feedback>  Reject Commander's plan, cancel tasks, and re-queue for re-planning
+
+Dashboard:
+  watch                          Live-updating task dashboard
+  dashboard [--port N]           HTTP dashboard at localhost:8080 (JSON API + SSE events)
+  logs-fleet [--no-follow] [--filter <pattern>] [--agent <name>] [--task <id>] [--convoy <id>]
+                                 Tail fleet.log (all agent output)
+  holonet [--no-follow] [--filter <event_type>] [--task <id>]
+                                 Tail holonet.jsonl (structured telemetry stream)`)
+}

@@ -1,0 +1,328 @@
+package agents
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math/rand"
+	"strings"
+	"time"
+
+	igit "force-orchestrator/internal/git"
+	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/store"
+	"force-orchestrator/internal/telemetry"
+)
+
+const captainSystemPrompt = `You are a Fleet Captain in the Galactic Fleet — a senior engineering lead responsible for ensuring that a multi-task feature convoy stays coherent as it executes.
+
+Your role is NOT to review code quality. That is the Jedi Council's job.
+Your role IS to ensure that each completed task still fits the larger plan, and to update the remaining plan if the implementation has diverged from what was originally designed.
+
+You will receive:
+1. The full convoy state: completed tasks, pending tasks, and the current task being reviewed
+2. The current task's git diff — what was actually built
+
+YOUR JOB:
+1. Review the diff in the context of the full convoy — does what was built align with what the downstream tasks expect?
+2. Update downstream task payloads if the implementation revealed a better or different approach than Commander anticipated
+3. Add new tasks if the implementation revealed missing work Commander didn't anticipate
+4. Approve to forward this work to the Jedi Council for code quality review
+5. Reject only if the implementation is so far off-plan that downstream tasks cannot proceed correctly as written
+6. Escalate only if a fundamental problem with the entire convoy plan requires human judgment
+
+BIAS STRONGLY TOWARD APPROVAL.
+Only reject if downstream tasks are genuinely broken or contradicted by this implementation.
+Only escalate if the convoy plan itself has a fundamental problem you cannot resolve by updating tasks.
+Minor deviations, unexpected file choices, or stylistic differences are fine — approve them.
+If in doubt, approve and add a note in feedback.
+
+Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
+{
+  "decision": "approve" | "reject" | "escalate",
+  "feedback": "reason if rejecting or escalating, empty string if approving",
+  "task_updates": [{"id": <task_id>, "new_payload": "<updated full description>"}],
+  "new_tasks": [{"repo": "<repo_name>", "task": "<description>", "blocked_by": [<task_id>, ...]}]
+}`
+
+// buildConvoyContext assembles a full convoy state summary for the Captain prompt.
+func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
+	if b.ConvoyID == 0 {
+		return ""
+	}
+
+	var convoyName string
+	db.QueryRow(`SELECT name FROM Convoys WHERE id = ?`, b.ConvoyID).Scan(&convoyName)
+	completed, total := store.ConvoyProgress(db, b.ConvoyID)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# CONVOY CONTEXT\nConvoy #%d: %s\nProgress: %d/%d tasks complete\n\n",
+		b.ConvoyID, convoyName, completed, total))
+
+	rows, err := db.Query(`
+		SELECT id, target_repo, payload
+		FROM BountyBoard
+		WHERE convoy_id = ? AND status = 'Completed' AND type = 'CodeEdit'
+		ORDER BY id DESC LIMIT 5`, b.ConvoyID)
+	if err == nil {
+		var lines []string
+		for rows.Next() {
+			var id int
+			var repo, payload string
+			rows.Scan(&id, &repo, &payload)
+			firstLine := payload
+			if nl := strings.Index(payload, "\n"); nl != -1 {
+				firstLine = payload[:nl]
+			}
+			lines = append(lines, fmt.Sprintf("  #%d [%s] %s", id, repo, truncateStr(firstLine, 100)))
+		}
+		rows.Close()
+		if len(lines) > 0 {
+			sb.WriteString("## Completed tasks (already merged into main):\n")
+			sb.WriteString(strings.Join(lines, "\n"))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	rows, err = db.Query(`
+		SELECT id, target_repo, payload,
+		    COALESCE((SELECT MIN(td.depends_on) FROM TaskDependencies td
+		              JOIN BountyBoard dep ON dep.id = td.depends_on
+		              WHERE td.task_id = bb.id AND dep.status != 'Completed'), 0) AS active_dep
+		FROM BountyBoard bb
+		WHERE convoy_id = ? AND status IN ('Pending', 'Planned') AND type = 'CodeEdit' AND id != ?
+		ORDER BY id ASC`, b.ConvoyID, b.ID)
+	if err == nil {
+		var lines []string
+		for rows.Next() {
+			var id, activeDep int
+			var repo, payload string
+			rows.Scan(&id, &repo, &payload, &activeDep)
+			firstLine := payload
+			if nl := strings.Index(payload, "\n"); nl != -1 {
+				firstLine = payload[:nl]
+			}
+			line := fmt.Sprintf("  #%d [%s] %s", id, repo, truncateStr(firstLine, 100))
+			if activeDep > 0 {
+				line += fmt.Sprintf(" (blocked by #%d)", activeDep)
+			}
+			lines = append(lines, line)
+		}
+		rows.Close()
+		if len(lines) > 0 {
+			sb.WriteString("## Remaining tasks (not yet started — update these if needed):\n")
+			sb.WriteString(strings.Join(lines, "\n"))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("## Current task under review: #%d [%s]\n%s\n\n",
+		b.ID, b.TargetRepo, truncateStr(b.Payload, 500)))
+
+	return sb.String()
+}
+
+// isKnownRepo reports whether a repo name is registered in the fleet.
+func isKnownRepo(db *sql.DB, repoName string) bool {
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM Repositories WHERE name = ?`, repoName).Scan(&count)
+	return count > 0
+}
+
+func SpawnCaptain(db *sql.DB, name string) {
+	agentName := name
+	logger := NewLogger(name)
+	logger.Printf("Captain %s standing by", name)
+
+	for {
+		if IsEstopped(db) {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		b, claimed := store.ClaimForCaptainReview(db, agentName)
+		if !claimed {
+			time.Sleep(time.Duration(2500+rand.Intn(1000)) * time.Millisecond)
+			continue
+		}
+
+		runCaptainTask(db, agentName, b, logger)
+	}
+}
+
+// runCaptainTask reviews a single task's diff for convoy plan coherence and routes
+// it to council (approve), back to Pending (reject), or escalates to a human.
+func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.Logger) {
+	sessionID := telemetry.NewSessionID()
+	logger.Printf("[%s] Claimed task %d for captain review [convoy %d]", sessionID, b.ID, b.ConvoyID)
+	telemetry.EmitEvent(telemetry.TelemetryEvent{
+		SessionID: sessionID, Agent: agentName, TaskID: b.ID,
+		EventType: "captain_claimed",
+		Payload:   map[string]any{"convoy_id": b.ConvoyID},
+	})
+
+	directive := LoadDirective("captain", b.TargetRepo)
+	directiveSection := ""
+	if directive != "" {
+		directiveSection = fmt.Sprintf("\n\nOPERATOR DIRECTIVE:\n%s", directive)
+	}
+
+	repoPath := store.GetRepoPath(db, b.TargetRepo)
+	if repoPath == "" {
+		msg := fmt.Sprintf("DB Err: unknown target repository '%s'", b.TargetRepo)
+		store.FailBounty(db, b.ID, msg)
+		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		return
+	}
+
+	branchName := b.BranchName
+	if branchName == "" {
+		branchName = fmt.Sprintf("agent/task-%d", b.ID)
+	}
+
+	diff := igit.GetDiff(repoPath, branchName)
+	if diff == "" {
+		msg := "Git Err: diff is empty — worktree may have no commits or branch does not exist"
+		store.FailBounty(db, b.ID, msg)
+		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		return
+	}
+
+	if len(diff) > MaxDiffBytes {
+		cutAt := MaxDiffBytes
+		if idx := strings.LastIndex(diff[:MaxDiffBytes], "\n"); idx > 0 {
+			cutAt = idx
+		}
+		diff = diff[:cutAt] + fmt.Sprintf("\n\n[NOTE: Diff truncated at %d bytes — evaluate what is visible]", MaxDiffBytes)
+	}
+
+	convoyContext := buildConvoyContext(db, b)
+	inboxContext := buildInboxContext(db, agentName, "captain", b.ID, logger)
+
+	systemPrompt := captainSystemPrompt + directiveSection
+	reviewPrompt := fmt.Sprintf("%s\n# CURRENT TASK DIFF\n%s%s", convoyContext, diff, inboxContext)
+
+	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt, claude.CouncilTools, 5)
+	if err != nil {
+		msg := fmt.Sprintf("Claude CLI Err: %v", err)
+		logger.Printf("Task %d: captain infra failure — %s", b.ID, msg)
+		handleInfraFailure(db, agentName, "captain", b, sessionID, msg, "AwaitingCaptainReview", true, logger)
+		return
+	}
+
+	cleanJSON := claude.ExtractJSON(response)
+	var ruling store.CaptainRuling
+	if err := json.Unmarshal([]byte(cleanJSON), &ruling); err != nil {
+		msg := fmt.Sprintf("JSON Parse Err: %v | Output: %.500s", err, cleanJSON)
+		logger.Printf("Task %d: captain JSON parse failed — returning to queue: %s", b.ID, msg)
+		handleInfraFailure(db, agentName, "captain", b, sessionID, msg, "AwaitingCaptainReview", true, logger)
+		return
+	}
+
+	// Apply downstream task payload updates before routing
+	for _, update := range ruling.TaskUpdates {
+		if update.ID == 0 || update.NewPayload == "" {
+			continue
+		}
+		res, _ := db.Exec(
+			`UPDATE BountyBoard SET payload = ? WHERE id = ? AND convoy_id = ? AND status IN ('Pending', 'Planned')`,
+			update.NewPayload, update.ID, b.ConvoyID)
+		if n, _ := res.RowsAffected(); n > 0 {
+			logger.Printf("Task %d: captain updated downstream task #%d", b.ID, update.ID)
+			store.LogAudit(db, agentName, "captain-update-task", update.ID,
+				fmt.Sprintf("payload updated by captain reviewing task #%d", b.ID))
+		}
+	}
+
+	// Insert new tasks the captain identified as missing
+	for _, nt := range ruling.NewTasks {
+		if nt.Repo == "" || nt.Task == "" {
+			continue
+		}
+		if !isKnownRepo(db, nt.Repo) {
+			logger.Printf("Task %d: captain tried to add task for unknown repo '%s' — skipping", b.ID, nt.Repo)
+			continue
+		}
+		res, _ := db.Exec(
+			`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority)
+			 VALUES (?, ?, 'CodeEdit', 'Pending', ?, ?, ?)`,
+			b.ParentID, nt.Repo, nt.Task, b.ConvoyID, b.Priority)
+		newID, _ := res.LastInsertId()
+		for _, depID := range nt.BlockedBy {
+			if depID <= 0 {
+				continue
+			}
+			// Validate that the referenced task actually exists to prevent phantom dependency edges.
+			var exists int
+			db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE id = ?`, depID).Scan(&exists)
+			if exists == 0 {
+				logger.Printf("Task %d: captain referenced non-existent blocked_by ID %d for new task #%d — skipping dependency", b.ID, depID, newID)
+				continue
+			}
+			store.AddDependency(db, int(newID), depID)
+		}
+		logger.Printf("Task %d: captain added new task #%d [%s]: %s", b.ID, newID, nt.Repo, truncateStr(nt.Task, 60))
+		store.LogAudit(db, agentName, "captain-add-task", int(newID),
+			fmt.Sprintf("added by captain reviewing task #%d", b.ID))
+	}
+
+	store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, ruling.Decision)
+
+	switch ruling.Decision {
+	case "approve":
+		logger.Printf("Task %d: captain APPROVED — forwarding to council", b.ID)
+		store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview")
+		telemetry.EmitEvent(telemetry.TelemetryEvent{
+			SessionID: sessionID, Agent: agentName, TaskID: b.ID,
+			EventType: "captain_approved",
+			Payload:   map[string]any{"updates": len(ruling.TaskUpdates), "new_tasks": len(ruling.NewTasks)},
+		})
+
+	case "reject":
+		retryCount := store.IncrementRetryCount(db, b.ID)
+		logger.Printf("Task %d: captain REJECTED (attempt %d/%d): %s", b.ID, retryCount, MaxRetries, ruling.Feedback)
+		telemetry.EmitEvent(telemetry.TelemetryEvent{
+			SessionID: sessionID, Agent: agentName, TaskID: b.ID,
+			EventType: "captain_rejected",
+			Payload:   map[string]any{"feedback": ruling.Feedback, "attempt": retryCount},
+		})
+
+		if retryCount >= MaxRetries {
+			msg := fmt.Sprintf("Captain: max retries (%d) exceeded. Final rejection: %s", MaxRetries, ruling.Feedback)
+			store.FailBounty(db, b.ID, msg)
+			store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
+				fmt.Sprintf("Task: %s\nCaptain permanently rejected (attempt %d/%d): %s",
+					truncateStr(b.Payload, 300), retryCount, MaxRetries, ruling.Feedback), "")
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("Task #%d permanently failed (captain) — %s", b.ID, b.TargetRepo),
+				fmt.Sprintf("Task #%d has been rejected by the captain %d times and is now permanently failed.\n\nRepo: %s\nFinal rejection: %s\n\nTask payload:\n%s",
+					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, truncateStr(b.Payload, 500)),
+				b.ID, store.MailTypeAlert)
+			return
+		}
+
+		newPayload := fmt.Sprintf("%s\n\nCAPTAIN FEEDBACK (attempt %d/%d): %s",
+			b.Payload, retryCount, MaxRetries, ruling.Feedback)
+		store.ReturnTaskForRework(db, b.ID, newPayload)
+		store.SendMail(db, agentName, "astromech",
+			fmt.Sprintf("[CAPTAIN REJECTED] Task #%d — attempt %d/%d", b.ID, retryCount, MaxRetries),
+			fmt.Sprintf("Fleet Captain %s reviewed your work on task #%d and returned it for rework.\n\nReason: %s\n\nPlease address this feedback in your next attempt.",
+				agentName, b.ID, ruling.Feedback),
+			b.ID, store.MailTypeFeedback)
+
+	case "escalate":
+		logger.Printf("Task %d: captain ESCALATED: %s", b.ID, ruling.Feedback)
+		CreateEscalation(db, b.ID, store.SeverityMedium, ruling.Feedback)
+		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, agentName, b.ID, store.SeverityMedium, ruling.Feedback))
+		store.SendMail(db, agentName, "operator",
+			fmt.Sprintf("[CAPTAIN ESCALATED] Task #%d — %s", b.ID, b.TargetRepo),
+			fmt.Sprintf("Captain %s escalated task #%d during convoy plan review.\n\nConvoy: #%d\nReason: %s\n\nTask payload:\n%s",
+				agentName, b.ID, b.ConvoyID, ruling.Feedback, truncateStr(b.Payload, 500)),
+			b.ID, store.MailTypeAlert)
+
+	default:
+		logger.Printf("Task %d: captain returned unknown decision '%s' — defaulting to approve", b.ID, ruling.Decision)
+		store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview")
+	}
+}

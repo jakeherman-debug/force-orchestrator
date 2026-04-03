@@ -1,0 +1,17 @@
+# Build output
+/force
+/force-orchestrator
+
+# Runtime files
+holocron.db
+holocron.db-shm
+holocron.db-wal
+fleet.log
+fleet.pid
+holonet.jsonl
+events.jsonl
+astromech.log
+
+# Test coverage
+cover.out
+coverage.out

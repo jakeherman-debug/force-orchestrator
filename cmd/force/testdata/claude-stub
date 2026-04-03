@@ -1,0 +1,17 @@
+#!/bin/bash
+# claude-stub: simulates the Claude CLI for testing.
+#
+# Configuration via environment variables:
+#   CLAUDE_STUB_OUTPUT     text to print on stdout (default: empty)
+#   CLAUDE_STUB_EXIT       exit code to return (default: 0)
+#   CLAUDE_STUB_SLEEP_MS   milliseconds to sleep before responding (default: 0)
+#
+# The stub accepts and silently ignores all real claude flags (-p, --max-turns,
+# --allowedTools, etc.) so existing callers need no changes.
+
+if [[ -n "${CLAUDE_STUB_SLEEP_MS:-}" ]]; then
+  sleep "$(echo "scale=3; ${CLAUDE_STUB_SLEEP_MS}/1000" | bc)"
+fi
+
+echo "${CLAUDE_STUB_OUTPUT:-}"
+exit "${CLAUDE_STUB_EXIT:-0}"
