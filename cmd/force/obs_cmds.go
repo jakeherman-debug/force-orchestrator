@@ -1,0 +1,385 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+
+	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/store"
+)
+
+func cmdStatus(db *sql.DB) {
+	printStatus(db)
+}
+
+func cmdWho(db *sql.DB) {
+	printWho(db)
+}
+
+func cmdStats(db *sql.DB) {
+	printStats(db)
+}
+
+func cmdLogsFleet(db *sql.DB, args []string) {
+	// Flags: --no-follow, --filter <pattern>, --agent <name>, --task <id>, --convoy <id>
+	noFollow := false
+	filterPattern := ""
+	fleetArgs := args
+	for i := 0; i < len(fleetArgs); i++ {
+		switch fleetArgs[i] {
+		case "--no-follow":
+			noFollow = true
+		case "--filter":
+			if i+1 < len(fleetArgs) {
+				filterPattern = fleetArgs[i+1]
+				i++
+			}
+		case "--agent":
+			if i+1 < len(fleetArgs) {
+				// Escape brackets so grep treats this as a literal match,
+				// not a character class — agent names like R2-D2 contain [-].
+				filterPattern = `\[` + fleetArgs[i+1] + `\]`
+				i++
+			}
+		case "--task":
+			if i+1 < len(fleetArgs) {
+				taskIDArg, taskArgErr := strconv.Atoi(fleetArgs[i+1])
+				if taskArgErr != nil {
+					fmt.Printf("Invalid task ID: %s\n", fleetArgs[i+1])
+					os.Exit(1)
+				}
+				filterPattern = fmt.Sprintf("Task %d[^0-9]", taskIDArg)
+				i++
+			}
+		case "--convoy":
+			if i+1 < len(fleetArgs) {
+				convoyIDStr := fleetArgs[i+1]
+				i++
+				var cid int
+				fmt.Sscanf(convoyIDStr, "%d", &cid)
+				taskRows, qErr := db.Query(`SELECT id FROM BountyBoard WHERE convoy_id = ?`, cid)
+				if qErr == nil {
+					var parts []string
+					for taskRows.Next() {
+						var tid int
+						taskRows.Scan(&tid)
+						parts = append(parts, fmt.Sprintf("Task %d[^0-9]", tid))
+					}
+					taskRows.Close()
+					if len(parts) > 0 {
+						filterPattern = strings.Join(parts, "|")
+					} else {
+						fmt.Printf("No tasks found for convoy %d.\n", cid)
+						os.Exit(0)
+					}
+				}
+			}
+		}
+	}
+	if filterPattern != "" {
+		if noFollow {
+			grepCmd := exec.Command("grep", "-i", filterPattern, "fleet.log")
+			grepOut, grepErr := grepCmd.Output()
+			if grepErr != nil {
+				fmt.Println("fleet.log not found — start the daemon first.")
+			} else {
+				lines := strings.Split(strings.TrimRight(string(grepOut), "\n"), "\n")
+				if len(lines) > 100 {
+					lines = lines[len(lines)-100:]
+				}
+				fmt.Println(strings.Join(lines, "\n"))
+			}
+		} else {
+			tailCmd := exec.Command("tail", "-f", "fleet.log")
+			tailOut, pipeErr := tailCmd.StdoutPipe()
+			if pipeErr != nil {
+				fmt.Println("fleet.log not found — start the daemon first.")
+			} else {
+				grepCmd := exec.Command("grep", "--line-buffered", "-i", filterPattern)
+				grepCmd.Stdin = tailOut
+				grepCmd.Stdout = os.Stdout
+				grepCmd.Stderr = os.Stderr
+				tailCmd.Start()
+				grepCmd.Run()
+			}
+		}
+	} else {
+		tailArgs := []string{"-f", "fleet.log"}
+		if noFollow {
+			tailArgs = []string{"-n", "100", "fleet.log"}
+		}
+		tailCmd := exec.Command("tail", tailArgs...)
+		tailCmd.Stdout = os.Stdout
+		tailCmd.Stderr = os.Stderr
+		if err := tailCmd.Run(); err != nil {
+			fmt.Println("fleet.log not found — start the daemon first.")
+		}
+	}
+}
+
+func cmdHolonet(db *sql.DB, args []string) {
+	// Flags: --no-follow (dump last 50), --filter <event_type> (grep by type), --task <id>
+	noFollow := false
+	filterType := ""
+	filterTask := ""
+	holoArgs := args
+	for i := 0; i < len(holoArgs); i++ {
+		switch holoArgs[i] {
+		case "--no-follow":
+			noFollow = true
+		case "--filter":
+			if i+1 < len(holoArgs) {
+				filterType = holoArgs[i+1]
+				i++
+			}
+		case "--task":
+			if i+1 < len(holoArgs) {
+				if _, taskArgErr := strconv.Atoi(holoArgs[i+1]); taskArgErr != nil {
+					fmt.Printf("Invalid task ID: %s\n", holoArgs[i+1])
+					os.Exit(1)
+				}
+				filterTask = holoArgs[i+1]
+				i++
+			}
+		}
+	}
+	// Build filter pattern for grep (applied before tail/follow)
+	if filterType != "" || filterTask != "" {
+		typePattern := ""
+		taskPattern := ""
+		if filterType != "" {
+			typePattern = fmt.Sprintf("\"event_type\":\"%s\"", filterType)
+		}
+		if filterTask != "" {
+			taskPattern = fmt.Sprintf("\"task_id\":%s", filterTask)
+		}
+		if noFollow {
+			data, readErr := os.ReadFile("holonet.jsonl")
+			if readErr != nil {
+				fmt.Println("holonet.jsonl not found — start the daemon first.")
+			} else {
+				var matched []string
+				for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+					if line == "" {
+						continue
+					}
+					if typePattern != "" && !strings.Contains(line, typePattern) {
+						continue
+					}
+					if taskPattern != "" && !strings.Contains(line, taskPattern) {
+						continue
+					}
+					matched = append(matched, line)
+				}
+				if len(matched) > 50 {
+					matched = matched[len(matched)-50:]
+				}
+				fmt.Println(strings.Join(matched, "\n"))
+			}
+		} else {
+			tailCmd := exec.Command("tail", "-f", "holonet.jsonl")
+			tailOut, pipeErr := tailCmd.StdoutPipe()
+			if pipeErr != nil {
+				fmt.Println("holonet.jsonl not found — start the daemon first.")
+			} else if typePattern != "" && taskPattern != "" {
+				grep1 := exec.Command("grep", "--line-buffered", typePattern)
+				grep2 := exec.Command("grep", "--line-buffered", taskPattern)
+				grep1Out, _ := grep1.StdoutPipe()
+				grep1.Stdin = tailOut
+				grep2.Stdin = grep1Out
+				grep2.Stdout = os.Stdout
+				grep2.Stderr = os.Stderr
+				tailCmd.Start()
+				grep1.Start()
+				grep2.Run()
+			} else {
+				pattern := typePattern
+				if pattern == "" {
+					pattern = taskPattern
+				}
+				grepCmd := exec.Command("grep", "--line-buffered", pattern)
+				grepCmd.Stdin = tailOut
+				grepCmd.Stdout = os.Stdout
+				grepCmd.Stderr = os.Stderr
+				tailCmd.Start()
+				grepCmd.Run()
+			}
+		}
+	} else {
+		tailArgs := []string{"-f", "holonet.jsonl"}
+		if noFollow {
+			tailArgs = []string{"-n", "50", "holonet.jsonl"}
+		}
+		tailCmd := exec.Command("tail", tailArgs...)
+		tailCmd.Stdout = os.Stdout
+		tailCmd.Stderr = os.Stderr
+		if err := tailCmd.Run(); err != nil {
+			fmt.Println("holonet.jsonl not found — start the daemon first.")
+		}
+	}
+}
+
+func cmdExport(db *sql.DB, file string) {
+	if err := exportFleet(db, file); err != nil {
+		fmt.Printf("Export failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Fleet exported to %s\n", file)
+}
+
+func cmdImport(db *sql.DB, file string) {
+	n, err := importFleet(db, file)
+	if err != nil {
+		fmt.Printf("Import failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Imported %d task(s).\n", n)
+}
+
+func cmdSearch(db *sql.DB, query string) {
+	escapedQuery := strings.ReplaceAll(query, `\`, `\\`)
+	escapedQuery = strings.ReplaceAll(escapedQuery, `%`, `\%`)
+	escapedQuery = strings.ReplaceAll(escapedQuery, `_`, `\_`)
+	likeQuery := "%" + escapedQuery + "%"
+	rows, err := db.Query(`
+		SELECT id, target_repo, type, status, payload
+		FROM BountyBoard
+		WHERE payload LIKE ? ESCAPE '\' OR error_log LIKE ? ESCAPE '\'
+		ORDER BY id DESC
+		LIMIT 50`, likeQuery, likeQuery)
+	if err != nil {
+		fmt.Printf("Search error: %v\n", err)
+		os.Exit(1)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		found = true
+		var id int
+		var repo, taskType, status, payload string
+		rows.Scan(&id, &repo, &taskType, &status, &payload)
+		// Show first line of payload for readability
+		firstLine := payload
+		if nl := strings.Index(payload, "\n"); nl != -1 {
+			firstLine = payload[:nl]
+		}
+		fmt.Printf("[#%d] %s | %s | %s | %s\n", id, status, taskType, repo, truncate(firstLine, 80))
+	}
+	if !found {
+		fmt.Println("No tasks match your query.")
+	}
+}
+
+func cmdAudit(db *sql.DB, limit int) {
+	entries := store.ListAuditLog(db, limit)
+	if len(entries) == 0 {
+		fmt.Println("No audit log entries.")
+		return
+	}
+	fmt.Printf("%-4s %-16s %-18s %-6s %-20s %s\n", "ID", "ACTOR", "ACTION", "TASK", "CREATED", "DETAIL")
+	fmt.Println(strings.Repeat("-", 100))
+	for _, e := range entries {
+		taskStr := ""
+		if e.TaskID > 0 {
+			taskStr = fmt.Sprintf("#%d", e.TaskID)
+		}
+		fmt.Printf("%-4d %-16s %-18s %-6s %-20s %s\n",
+			e.ID, truncate(e.Actor, 16), truncate(e.Action, 18),
+			taskStr, truncate(e.CreatedAt, 20), truncate(e.Detail, 40))
+	}
+}
+
+func cmdPrune(db *sql.DB, keepDays int, dryRun bool) {
+	pruneFleet(db, keepDays, dryRun)
+}
+
+func cmdDogs(db *sql.DB) {
+	dogs := agents.ListDogs(db)
+	fmt.Printf("%-20s %-10s %-20s %s\n", "DOG", "RUNS", "LAST RUN", "NEXT RUN")
+	fmt.Println(strings.Repeat("-", 75))
+	for _, d := range dogs {
+		lastRun := d.LastRun
+		if lastRun == "" {
+			lastRun = "(never)"
+		}
+		fmt.Printf("%-20s %-10d %-20s %s\n", d.Name, d.RunCount, truncate(lastRun, 20), d.NextRun)
+	}
+}
+
+func cmdEscalations(db *sql.DB, args []string) {
+	subCmd := ""
+	if len(args) >= 1 {
+		subCmd = args[0]
+	}
+	switch subCmd {
+	case "list", "":
+		statusFilter := ""
+		if len(args) >= 2 {
+			statusFilter = args[1]
+		}
+		printEscalations(db, statusFilter)
+	case "ack":
+		if len(args) < 2 {
+			fmt.Println("Usage: force escalations ack <id>")
+			os.Exit(1)
+		}
+		id := mustParseID(args[1])
+		agents.AckEscalation(db, id)
+		fmt.Printf("Escalation %d acknowledged.\n", id)
+		// Surface the task ID so the operator knows the next step
+		var e store.Escalation
+		db.QueryRow(`SELECT task_id FROM Escalations WHERE id = ?`, id).Scan(&e.TaskID)
+		if e.TaskID > 0 {
+			fmt.Printf("Task #%d is still in Escalated status.\n", e.TaskID)
+			fmt.Printf("  To requeue for retry:     force escalations requeue %d\n", id)
+			fmt.Printf("  To inspect the task:      force logs %d\n", e.TaskID)
+			fmt.Printf("  To manually reset it:     force reset %d\n", e.TaskID)
+		}
+	case "close":
+		if len(args) < 2 {
+			fmt.Println("Usage: force escalations close <id>")
+			os.Exit(1)
+		}
+		id := mustParseID(args[1])
+		agents.CloseEscalation(db, id, false)
+		fmt.Printf("Escalation %d closed.\n", id)
+	case "requeue":
+		if len(args) < 2 {
+			fmt.Println("Usage: force escalations requeue <id>")
+			os.Exit(1)
+		}
+		id := mustParseID(args[1])
+		agents.CloseEscalation(db, id, true)
+		fmt.Printf("Escalation %d closed and task re-queued.\n", id)
+	default:
+		fmt.Printf("Unknown escalations subcommand: %s\n", subCmd)
+		fmt.Println("Usage: force escalations [list|ack <id>|close <id>|requeue <id>]")
+		os.Exit(1)
+	}
+}
+
+func cmdCosts(db *sql.DB) {
+	printCosts(db)
+}
+
+func cmdDashboard(db *sql.DB, port int) {
+	RunDashboard(db, port)
+}
+
+func cmdWatch(db *sql.DB) {
+	watchSigChan := make(chan os.Signal, 1)
+	signal.Notify(watchSigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-watchSigChan
+		fmt.Print("\033[?25h")
+		fmt.Print("\033[H\033[2J")
+		os.Exit(0)
+	}()
+	RunCommandCenter(db)
+}

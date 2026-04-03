@@ -18,6 +18,7 @@ import (
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
+	"force-orchestrator/internal/util"
 )
 
 const astromechTimeout = 15 * time.Minute
@@ -86,35 +87,6 @@ func nextReviewStatus(db *sql.DB, convoyID int) string {
 	return "AwaitingCouncilReview"
 }
 
-// logWriter is a synchronized wrapper around a shared log file, opened once
-// for the entire process. All loggers write through this to avoid multiple FDs
-// pointing at fleet.log and to prevent interleaved log lines.
-type lockedWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-func (lw *lockedWriter) Write(p []byte) (n int, err error) {
-	lw.mu.Lock()
-	defer lw.mu.Unlock()
-	return lw.w.Write(p)
-}
-
-var (
-	sharedLog     = &lockedWriter{w: os.Stderr}
-	sharedLogOnce sync.Once
-)
-
-func NewLogger(name string) *log.Logger {
-	sharedLogOnce.Do(func() {
-		f, err := os.OpenFile("fleet.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			sharedLog.w = f
-		}
-	})
-	return log.New(sharedLog, fmt.Sprintf("[%s] ", name), log.LstdFlags)
-}
-
 // rateLimitRetries caches per-agent rate-limit hit count in memory, keyed by agent name.
 // It is initialized from SystemConfig on first access and persisted after each hit.
 // sync.Map is required because multiple SpawnAstromech goroutines access this concurrently.
@@ -149,7 +121,7 @@ After fixing, run: force reset %d`,
 
 	// Store failure memory so future agents know this infra issue occurred
 	store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
-		fmt.Sprintf("Task: %s\nInfra failure (permanent): %s", truncateStr(bounty.Payload, 300), msg),
+		fmt.Sprintf("Task: %s\nInfra failure (permanent): %s", util.TruncateStr(bounty.Payload, 300), msg),
 		"")
 
 	// Notify operator via mail
@@ -203,7 +175,7 @@ func buildAstromechContext(
 	if memories := store.GetFleetMemories(db, bounty.TargetRepo, bounty.Payload, 10); len(memories) > 0 {
 		var successes, failures []string
 		for _, m := range memories {
-			entry := fmt.Sprintf("- [Task #%d] %s", m.TaskID, truncateStr(m.Summary, 250))
+			entry := fmt.Sprintf("- [Task #%d] %s", m.TaskID, util.TruncateStr(m.Summary, 250))
 			if m.FilesChanged != "" {
 				entry += fmt.Sprintf("\n  Files: %s", m.FilesChanged)
 			}
@@ -451,7 +423,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr[:min(len(outputStr), 4000)]+"...[truncated for history]", "ContextBlown")
 		store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
 			fmt.Sprintf("Task produced %d bytes of output (context blown) — was re-queued for decomposition.\nTask: %s",
-				len(outputStr), truncateStr(bounty.Payload, 300)),
+				len(outputStr), util.TruncateStr(bounty.Payload, 300)),
 			"")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
@@ -462,7 +434,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		store.SendMail(db, name, "operator",
 			fmt.Sprintf("[SHARD] Task #%d context-blown — re-queued for decomposition", bounty.ID),
 			fmt.Sprintf("Task #%d produced %d bytes of output, exceeding the %d-byte limit.\n\nThis indicates Claude hit the context limit mid-task. The task has been re-queued as a Decompose request so Commander can break it into smaller pieces.\n\nRepo: %s\nOriginal task:\n%s",
-				bounty.ID, len(outputStr), maxOutputBytes, bounty.TargetRepo, truncateStr(bounty.Payload, 500)),
+				bounty.ID, len(outputStr), maxOutputBytes, bounty.TargetRepo, util.TruncateStr(bounty.Payload, 500)),
 			bounty.ID, store.MailTypeAlert)
 		return
 	}
@@ -478,7 +450,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		store.SendMail(db, name, "operator",
 			fmt.Sprintf("[%s] Task #%d escalated — %s", string(sev), bounty.ID, bounty.TargetRepo),
 			fmt.Sprintf("Agent %s escalated task #%d at %s severity.\n\nRepo: %s\nReason: %s\n\nTask payload:\n%s",
-				name, bounty.ID, string(sev), bounty.TargetRepo, msg, truncateStr(bounty.Payload, 500)),
+				name, bounty.ID, string(sev), bounty.TargetRepo, msg, util.TruncateStr(bounty.Payload, 500)),
 			bounty.ID, store.MailTypeAlert)
 		return
 	}
@@ -489,7 +461,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Sharded")
 		store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
 			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
-				truncateStr(bounty.Payload, 300)),
+				util.TruncateStr(bounty.Payload, 300)),
 			"")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
@@ -500,7 +472,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		store.SendMail(db, name, "operator",
 			fmt.Sprintf("[SHARD] Task #%d too large — re-queued for decomposition", bounty.ID),
 			fmt.Sprintf("Task #%d was determined to be too large for a single session and has been re-queued as a Decompose request for Commander to break into smaller pieces.\n\nRepo: %s\nOriginal task:\n%s",
-				bounty.ID, bounty.TargetRepo, truncateStr(bounty.Payload, 500)),
+				bounty.ID, bounty.TargetRepo, util.TruncateStr(bounty.Payload, 500)),
 			bounty.ID, store.MailTypeAlert)
 		return
 	}
@@ -529,7 +501,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 	logger.Printf("Task %d: git status after add: %s", bounty.ID, strings.TrimSpace(string(gitStatusOut)))
 
 	// Truncate payload to 72 chars for the commit subject line
-	commitSubject := truncateStr(strings.SplitN(bounty.Payload, "\n", 2)[0], 72)
+	commitSubject := util.TruncateStr(strings.SplitN(bounty.Payload, "\n", 2)[0], 72)
 	commitOut, commitErr := exec.Command("git", "-C", worktreeDir, "commit", "-m",
 		fmt.Sprintf("task(%d): %s", bounty.ID, commitSubject)).CombinedOutput()
 	logger.Printf("Task %d: git commit output: %s", bounty.ID, strings.TrimSpace(string(commitOut)))
@@ -664,7 +636,65 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 		os.Exit(1)
 	}
 
-	// Check for commits ahead of the default branch — same check as the daemon loop.
+	// Scan output for checkpoint signals
+	for _, line := range strings.Split(outputStr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[CHECKPOINT:") && strings.HasSuffix(line, "]") {
+			cp := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "[CHECKPOINT:"), "]"))
+			if cp != "" {
+				store.UpdateCheckpoint(db, taskID, cp)
+				fmt.Printf("[force run] Checkpoint recorded: %s\n", cp)
+			}
+		}
+	}
+
+	// [ESCALATED] signal — agent needs human input
+	if sev, msg, ok := ParseEscalationSignal(outputStr); ok {
+		fmt.Printf("\n[force run] ESCALATED [%s]: %s\n", sev, msg)
+		store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Escalated")
+		CreateEscalation(db, taskID, sev, msg)
+		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, fgAgent, taskID, sev, msg))
+		store.SendMail(db, fgAgent, "operator",
+			fmt.Sprintf("[%s] Task #%d escalated — %s", string(sev), taskID, b.TargetRepo),
+			fmt.Sprintf("Task #%d escalated during foreground run at %s severity.\n\nRepo: %s\nReason: %s\n\nTask payload:\n%s",
+				taskID, string(sev), b.TargetRepo, msg, util.TruncateStr(b.Payload, 500)),
+			taskID, store.MailTypeAlert)
+		return
+	}
+
+	// [SHARD_NEEDED] signal — task is too large, hand off to Commander
+	if strings.Contains(outputStr, "[SHARD_NEEDED]") {
+		fmt.Printf("\n[force run] SHARD_NEEDED — re-queuing as Decompose for Commander\n")
+		store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Sharded")
+		store.StoreFleetMemory(db, b.TargetRepo, taskID, "failure",
+			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
+				util.TruncateStr(b.Payload, 300)),
+			"")
+		base := igit.GetDefaultBranch(repoPath)
+		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
+		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+		store.AddBounty(db, taskID, "Decompose", b.Payload)
+		store.UpdateBountyStatus(db, taskID, "Completed")
+		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, fgAgent, taskID))
+		return
+	}
+
+	// [DONE] signal — agent committed and is ready for review
+	if strings.Contains(outputStr, "[DONE]") {
+		nextStatus := nextReviewStatus(db, b.ConvoyID)
+		fmt.Printf("\n[force run] [DONE] signal — submitting for review (%s)\n", nextStatus)
+		histID := store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Completed")
+		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
+		if tokIn > 0 || tokOut > 0 {
+			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+		}
+		telemetry.EmitEvent(telemetry.EventTaskDoneSignal(sessionID, fgAgent, taskID))
+		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, fgAgent, taskID))
+		store.UpdateBountyStatus(db, taskID, nextStatus)
+		return
+	}
+
+	// Commit inference — same logic as the daemon loop
 	base := igit.GetDefaultBranch(repoPath)
 	aheadOut, _ := exec.Command("git", "-C", worktreeDir, "log", base+"..HEAD", "--oneline").CombinedOutput()
 	if strings.TrimSpace(string(aheadOut)) == "" {

@@ -13,6 +13,7 @@ import (
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
+	"force-orchestrator/internal/util"
 )
 
 const MaxDiffBytes = 80_000
@@ -134,18 +135,26 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 	telemetry.EmitEvent(telemetry.EventCouncilRuling(sessionID, agentName, b.ID, ruling.Approved, ruling.Feedback))
 
+	tokIn, tokOut := claude.ParseTokenUsage(response)
+
 	if ruling.Approved {
 		logger.Printf("Task %d: APPROVED — merging branch %s", b.ID, branchName)
 		if mergeErr := igit.MergeAndCleanup(repoPath, branchName, worktreeDir); mergeErr != nil {
 			logger.Printf("Task %d: merge failed: %v", b.ID, mergeErr)
 			msg := fmt.Sprintf("Merge Err: %v", mergeErr)
-			store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Failed")
+			histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Failed")
+			if tokIn > 0 || tokOut > 0 {
+				store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+			}
 			store.FailBounty(db, b.ID, msg)
 			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 			return
 		}
 		store.UpdateBountyStatus(db, b.ID, "Completed")
-		store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Completed")
+		histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Completed")
+		if tokIn > 0 || tokOut > 0 {
+			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+		}
 		store.LogAudit(db, agentName, "council-approve", b.ID, ruling.Feedback)
 
 		// Remove dependency edges that pointed to this task so dependents become claimable.
@@ -155,7 +164,7 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 		changedFiles := igit.ExtractDiffFiles(diff)
 		filesStr := strings.Join(changedFiles, ", ")
-		memorySummary := fmt.Sprintf("Task: %s", truncateStr(b.Payload, 400))
+		memorySummary := fmt.Sprintf("Task: %s", util.TruncateStr(b.Payload, 400))
 		if ruling.Feedback != "" {
 			memorySummary += fmt.Sprintf("\nCouncil note: %s", ruling.Feedback)
 		}
@@ -174,14 +183,17 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			}
 		}
 	} else {
-		store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Rejected")
+		histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Rejected")
+		if tokIn > 0 || tokOut > 0 {
+			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+		}
 		store.LogAudit(db, agentName, "council-reject", b.ID, ruling.Feedback)
 		retryCount := store.IncrementRetryCount(db, b.ID)
 		logger.Printf("Task %d: REJECTED (attempt %d/%d): %s", b.ID, retryCount, MaxRetries, ruling.Feedback)
 
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
 			fmt.Sprintf("Task: %s\nRejected (attempt %d/%d): %s",
-				truncateStr(b.Payload, 300), retryCount, MaxRetries, ruling.Feedback),
+				util.TruncateStr(b.Payload, 300), retryCount, MaxRetries, ruling.Feedback),
 			"")
 
 		if retryCount >= MaxRetries {
@@ -196,7 +208,7 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 					store.SendMail(db, agentName, "operator",
 						fmt.Sprintf("[REMEDIATION FAILED] Task #%d could not fix task #%d — manual intervention needed", b.ID, b.ParentID),
 						fmt.Sprintf("Remediation task #%d has permanently failed after %d attempts.\n\nThe infra issue blocking original task #%d (%s) requires manual intervention.\n\nFinal rejection reason: %s\n\nTask payload:\n%s",
-							b.ID, MaxRetries, b.ParentID, b.TargetRepo, ruling.Feedback, truncateStr(b.Payload, 500)),
+							b.ID, MaxRetries, b.ParentID, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
 						b.ID, store.MailTypeAlert)
 					return
 				}
@@ -204,7 +216,7 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("Task #%d permanently failed — %s", b.ID, b.TargetRepo),
 				fmt.Sprintf("Task #%d has been rejected %d times and is now permanently failed.\n\nRepo: %s\nFinal rejection: %s\n\nTask payload:\n%s",
-					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, truncateStr(b.Payload, 500)),
+					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
 				b.ID, store.MailTypeAlert)
 			return
 		}

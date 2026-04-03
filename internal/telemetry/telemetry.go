@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/store"
+	"force-orchestrator/internal/util"
 )
 
 // TelemetryEvent is a structured event written to holonet.jsonl.
@@ -144,7 +145,7 @@ func EventTaskClaimed(sessionID, agent string, taskID int, repo, payload string)
 	return TelemetryEvent{
 		SessionID: sessionID, Agent: agent, TaskID: taskID,
 		EventType: "task_claimed",
-		Payload:   map[string]any{"repo": repo, "payload_preview": truncateStr(payload, 120)},
+		Payload:   map[string]any{"repo": repo, "payload_preview": util.TruncateStr(payload, 120)},
 	}
 }
 
@@ -202,7 +203,7 @@ func EventInfraFailure(sessionID, agent string, taskID, count int, reason string
 	return TelemetryEvent{
 		SessionID: sessionID, Agent: agent, TaskID: taskID,
 		EventType: "infra_failure",
-		Payload:   map[string]any{"count": count, "reason": truncateStr(reason, 200)},
+		Payload:   map[string]any{"count": count, "reason": util.TruncateStr(reason, 200)},
 	}
 }
 
@@ -236,9 +237,3 @@ func EventStallDetected(taskID int, agent, repo string, lockedMinutes float64) T
 	}
 }
 
-func truncateStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}

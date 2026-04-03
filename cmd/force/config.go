@@ -36,6 +36,7 @@ func cmdConfig(db *sql.DB, args []string) {
 		// cryptic claude CLI errors at runtime.
 		integerKeys := map[string]bool{
 			"num_astromechs": true,
+			"num_captain":    true,
 			"num_council":    true,
 			"max_concurrent": true,
 			"spawn_delay_ms": true,

@@ -108,35 +108,35 @@ func TestCreateConvoy_DuplicateName(t *testing.T) {
 	}
 }
 
-// ── GetConvoyByName ───────────────────────────────────────────────────────────
+// ── ListConvoys ───────────────────────────────────────────────────────────────
 
-func TestGetConvoyByName_Found(t *testing.T) {
+func TestListConvoys_Empty(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoys := store.ListConvoys(db)
+	if len(convoys) != 0 {
+		t.Errorf("expected 0 convoys, got %d", len(convoys))
+	}
+}
+
+func TestListConvoys_ReturnsCreated(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
 	id, _ := store.CreateConvoy(db, "my-convoy")
-	c, err := store.GetConvoyByName(db, "my-convoy")
-	if err != nil {
-		t.Fatalf("GetConvoyByName error: %v", err)
+	convoys := store.ListConvoys(db)
+	if len(convoys) != 1 {
+		t.Fatalf("expected 1 convoy, got %d", len(convoys))
 	}
-	if c.ID != id {
-		t.Errorf("expected ID %d, got %d", id, c.ID)
+	if convoys[0].ID != id {
+		t.Errorf("expected ID %d, got %d", id, convoys[0].ID)
 	}
-	if c.Name != "my-convoy" {
-		t.Errorf("expected name 'my-convoy', got %q", c.Name)
+	if convoys[0].Name != "my-convoy" {
+		t.Errorf("expected name 'my-convoy', got %q", convoys[0].Name)
 	}
-	if c.Status != "Active" {
-		t.Errorf("expected status 'Active', got %q", c.Status)
-	}
-}
-
-func TestGetConvoyByName_NotFound(t *testing.T) {
-	db := store.InitHolocronDSN(":memory:")
-	defer db.Close()
-
-	_, err := store.GetConvoyByName(db, "nonexistent")
-	if err == nil {
-		t.Error("expected error for nonexistent convoy")
+	if convoys[0].Status != "Active" {
+		t.Errorf("expected status 'Active', got %q", convoys[0].Status)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/util"
 )
 
 // BootDecision is the triage verdict for a stalled task.
@@ -41,7 +42,7 @@ Decision guide:
 func BootTriage(db *sql.DB, taskID int, owner, repo string, lockedMinutes float64, errorLog string) BootVerdict {
 	summary := fmt.Sprintf(
 		"Task ID: %d\nAgent: %s\nRepo: %s\nLocked for: %.0f minutes\nError log: %s",
-		taskID, owner, repo, lockedMinutes, truncateStr(errorLog, 500),
+		taskID, owner, repo, lockedMinutes, util.TruncateStr(errorLog, 500),
 	)
 
 	resp, err := claude.AskClaudeCLI(bootSystemPrompt, summary, "", 3)

@@ -470,6 +470,11 @@ func pruneFleet(db *sql.DB, keepDays int, dryRun bool) {
 				AND task_id IN (SELECT id FROM BountyBoard WHERE created_at < datetime('now', '%s'))`, since, since),
 		},
 		{
+			"orphaned task dependencies",
+			`SELECT COUNT(*) FROM TaskDependencies WHERE task_id NOT IN (SELECT id FROM BountyBoard) OR depends_on NOT IN (SELECT id FROM BountyBoard)`,
+			`DELETE FROM TaskDependencies WHERE task_id NOT IN (SELECT id FROM BountyBoard) OR depends_on NOT IN (SELECT id FROM BountyBoard)`,
+		},
+		{
 			"old tasks",
 			fmt.Sprintf(`SELECT COUNT(*) FROM BountyBoard WHERE status IN ('Completed', 'Failed') AND created_at < datetime('now', '%s')`, since),
 			fmt.Sprintf(`DELETE FROM BountyBoard WHERE status IN ('Completed', 'Failed') AND created_at < datetime('now', '%s')`, since),

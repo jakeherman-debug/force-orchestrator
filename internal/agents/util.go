@@ -9,13 +9,6 @@ import (
 	"force-orchestrator/internal/telemetry"
 )
 
-func truncateStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
 // handleInfraFailure handles a transient or permanent CLI/infra error for an agent stage.
 // It increments the infra failure counter, applies backoff on retry, and permanently fails
 // the task (with operator mail) once MaxInfraFailures is reached.

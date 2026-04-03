@@ -13,6 +13,7 @@ import (
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
+	"force-orchestrator/internal/util"
 )
 
 const captainSystemPrompt = `You are a Fleet Captain in the Galactic Fleet — a senior engineering lead responsible for ensuring that a multi-task feature convoy stays coherent as it executes.
@@ -75,7 +76,7 @@ func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
 			if nl := strings.Index(payload, "\n"); nl != -1 {
 				firstLine = payload[:nl]
 			}
-			lines = append(lines, fmt.Sprintf("  #%d [%s] %s", id, repo, truncateStr(firstLine, 100)))
+			lines = append(lines, fmt.Sprintf("  #%d [%s] %s", id, repo, util.TruncateStr(firstLine, 100)))
 		}
 		rows.Close()
 		if len(lines) > 0 {
@@ -103,7 +104,7 @@ func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
 			if nl := strings.Index(payload, "\n"); nl != -1 {
 				firstLine = payload[:nl]
 			}
-			line := fmt.Sprintf("  #%d [%s] %s", id, repo, truncateStr(firstLine, 100))
+			line := fmt.Sprintf("  #%d [%s] %s", id, repo, util.TruncateStr(firstLine, 100))
 			if activeDep > 0 {
 				line += fmt.Sprintf(" (blocked by #%d)", activeDep)
 			}
@@ -118,7 +119,7 @@ func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
 	}
 
 	sb.WriteString(fmt.Sprintf("## Current task under review: #%d [%s]\n%s\n\n",
-		b.ID, b.TargetRepo, truncateStr(b.Payload, 500)))
+		b.ID, b.TargetRepo, util.TruncateStr(b.Payload, 500)))
 
 	return sb.String()
 }
@@ -262,12 +263,27 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			}
 			store.AddDependency(db, int(newID), depID)
 		}
-		logger.Printf("Task %d: captain added new task #%d [%s]: %s", b.ID, newID, nt.Repo, truncateStr(nt.Task, 60))
+		logger.Printf("Task %d: captain added new task #%d [%s]: %s", b.ID, newID, nt.Repo, util.TruncateStr(nt.Task, 60))
 		store.LogAudit(db, agentName, "captain-add-task", int(newID),
 			fmt.Sprintf("added by captain reviewing task #%d", b.ID))
 	}
 
-	store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, ruling.Decision)
+	var captainOutcome string
+	switch ruling.Decision {
+	case "approve":
+		captainOutcome = "Completed"
+	case "reject":
+		captainOutcome = "Rejected"
+	case "escalate":
+		captainOutcome = "Escalated"
+	default:
+		captainOutcome = "Completed"
+	}
+	histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, captainOutcome)
+	tokIn, tokOut := claude.ParseTokenUsage(response)
+	if tokIn > 0 || tokOut > 0 {
+		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+	}
 
 	switch ruling.Decision {
 	case "approve":
@@ -293,11 +309,11 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			store.FailBounty(db, b.ID, msg)
 			store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
 				fmt.Sprintf("Task: %s\nCaptain permanently rejected (attempt %d/%d): %s",
-					truncateStr(b.Payload, 300), retryCount, MaxRetries, ruling.Feedback), "")
+					util.TruncateStr(b.Payload, 300), retryCount, MaxRetries, ruling.Feedback), "")
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("Task #%d permanently failed (captain) — %s", b.ID, b.TargetRepo),
 				fmt.Sprintf("Task #%d has been rejected by the captain %d times and is now permanently failed.\n\nRepo: %s\nFinal rejection: %s\n\nTask payload:\n%s",
-					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, truncateStr(b.Payload, 500)),
+					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
 				b.ID, store.MailTypeAlert)
 			return
 		}
@@ -318,7 +334,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CAPTAIN ESCALATED] Task #%d — %s", b.ID, b.TargetRepo),
 			fmt.Sprintf("Captain %s escalated task #%d during convoy plan review.\n\nConvoy: #%d\nReason: %s\n\nTask payload:\n%s",
-				agentName, b.ID, b.ConvoyID, ruling.Feedback, truncateStr(b.Payload, 500)),
+				agentName, b.ID, b.ConvoyID, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
 			b.ID, store.MailTypeAlert)
 
 	default:

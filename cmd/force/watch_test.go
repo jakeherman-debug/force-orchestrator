@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"force-orchestrator/internal/store"
 )
 
 // ── truncate ──────────────────────────────────────────────────────────────────
@@ -28,5 +31,57 @@ func TestTruncate_ExactLength(t *testing.T) {
 	got := truncate("exactly7", 8)
 	if !strings.HasPrefix(got, "exactly7") {
 		t.Errorf("expected exact string, got %q", got)
+	}
+}
+
+// ── RunCommandCenter ──────────────────────────────────────────────────────────
+
+func TestRunCommandCenter_DoesNotPanicOnEmptyDB(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked <- r
+			}
+		}()
+		// Capture stdout so ANSI escape codes don't pollute test output.
+		captureOutput(func() { RunCommandCenter(db) })
+	}()
+
+	select {
+	case r := <-panicked:
+		t.Errorf("RunCommandCenter panicked: %v", r)
+	case <-time.After(100 * time.Millisecond):
+		// Ran at least one full iteration without panicking.
+	}
+}
+
+func TestRunCommandCenter_WithTasks(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Seed some tasks in various states
+	store.AddRepo(db, "api", "/tmp/fake", "test repo")
+	store.AddBounty(db, 0, "Feature", "pending feature")
+	store.AddCodeEditTask(db, "api", "pending codeedit", 0, 0, 0)
+
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked <- r
+			}
+		}()
+		captureOutput(func() { RunCommandCenter(db) })
+	}()
+
+	select {
+	case r := <-panicked:
+		t.Errorf("RunCommandCenter panicked with tasks present: %v", r)
+	case <-time.After(100 * time.Millisecond):
+		// Ran at least one full iteration with real tasks without panicking.
 	}
 }

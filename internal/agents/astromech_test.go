@@ -373,3 +373,117 @@ func TestRunAstromechTask_Timeout(t *testing.T) {
 		t.Errorf("expected Pending after timeout (infra failure), got %q", b.Status)
 	}
 }
+
+// ── RunTaskForeground ──────────────────────────────────────────────────────────
+
+func TestRunTaskForeground_DoneSignal(t *testing.T) {
+	repoDir := initTestRepo(t)
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test")
+
+	id := store.AddCodeEditTask(db, "myrepo", "fix bug", 0, 0, 0)
+
+	withClaudeStub(t, map[string]string{"CLAUDE_STUB_OUTPUT": "[DONE]"})
+
+	captureOutput(func() { RunTaskForeground(db, id) })
+
+	b, _ := store.GetBounty(db, id)
+	if b.Status != "AwaitingCouncilReview" {
+		t.Errorf("expected AwaitingCouncilReview after [DONE], got %q", b.Status)
+	}
+	// Token history should be recorded
+	hist := store.GetTaskHistory(db, id)
+	if len(hist) == 0 {
+		t.Error("expected task history entry after [DONE]")
+	}
+}
+
+func TestRunTaskForeground_ShardNeeded(t *testing.T) {
+	repoDir := initTestRepo(t)
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test")
+
+	id := store.AddCodeEditTask(db, "myrepo", "massive feature", 0, 0, 0)
+
+	withClaudeStub(t, map[string]string{"CLAUDE_STUB_OUTPUT": "[SHARD_NEEDED]"})
+
+	captureOutput(func() { RunTaskForeground(db, id) })
+
+	b, _ := store.GetBounty(db, id)
+	if b.Status != "Completed" {
+		t.Errorf("expected Completed after [SHARD_NEEDED], got %q", b.Status)
+	}
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = ? AND type = 'Decompose'`, id).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 Decompose child task, got %d", count)
+	}
+}
+
+func TestRunTaskForeground_Escalated(t *testing.T) {
+	repoDir := initTestRepo(t)
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test")
+
+	id := store.AddCodeEditTask(db, "myrepo", "ambiguous task", 0, 0, 0)
+
+	withClaudeStub(t, map[string]string{
+		"CLAUDE_STUB_OUTPUT": "[ESCALATED:HIGH:Cannot determine correct API version]",
+	})
+
+	captureOutput(func() { RunTaskForeground(db, id) })
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, id).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 escalation, got %d", count)
+	}
+}
+
+func TestRunTaskForeground_CheckpointRecorded(t *testing.T) {
+	repoDir := initTestRepo(t)
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test")
+
+	id := store.AddCodeEditTask(db, "myrepo", "long task", 0, 0, 0)
+
+	// Emits a checkpoint then [DONE] so the function returns cleanly
+	withClaudeStub(t, map[string]string{
+		"CLAUDE_STUB_OUTPUT": "[CHECKPOINT: schema_written]\n[DONE]",
+	})
+
+	captureOutput(func() { RunTaskForeground(db, id) })
+
+	b, _ := store.GetBounty(db, id)
+	if b.Checkpoint != "schema_written" {
+		t.Errorf("expected checkpoint 'schema_written', got %q", b.Checkpoint)
+	}
+}
+
+func TestRunTaskForeground_NoCommits_ReturnsToPending(t *testing.T) {
+	repoDir := initTestRepo(t)
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test")
+
+	id := store.AddCodeEditTask(db, "myrepo", "fix bug", 0, 0, 0)
+
+	// Claude exits cleanly but makes no commits and sends no signals
+	withClaudeStub(t, map[string]string{"CLAUDE_STUB_OUTPUT": "nothing done"})
+
+	captureOutput(func() { RunTaskForeground(db, id) })
+
+	b, _ := store.GetBounty(db, id)
+	if b.Status != "Pending" {
+		t.Errorf("expected Pending when no commits, got %q", b.Status)
+	}
+}

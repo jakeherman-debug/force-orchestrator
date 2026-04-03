@@ -35,7 +35,15 @@ func cmdMail(db *sql.DB, args []string) {
 				}
 			case "--type":
 				if i+1 < len(mailArgs) {
-					msgType = store.MailType(mailArgs[i+1])
+					t := store.MailType(mailArgs[i+1])
+					switch t {
+					case store.MailTypeDirective, store.MailTypeFeedback, store.MailTypeAlert,
+						store.MailTypeRemediation, store.MailTypeInfo:
+						msgType = t
+					default:
+						fmt.Printf("Unknown mail type '%s'. Valid types: directive, feedback, alert, remediation, info\n", mailArgs[i+1])
+						os.Exit(1)
+					}
 					mailArgs = append(mailArgs[:i], mailArgs[i+2:]...)
 					i--
 				}

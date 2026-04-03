@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/store"
+	"force-orchestrator/internal/util"
 )
 
 // ── NewSessionID ──────────────────────────────────────────────────────────────
@@ -361,13 +362,13 @@ func TestSendOTLPLog_WithServer(t *testing.T) {
 // ── truncateStr ───────────────────────────────────────────────────────────────
 
 func TestTruncateStr(t *testing.T) {
-	if got := truncateStr("hello world", 5); got != "hello…" {
+	if got := util.TruncateStr("hello world", 5); got != "hello…" {
 		t.Errorf("got %q", got)
 	}
-	if got := truncateStr("hi", 10); got != "hi" {
+	if got := util.TruncateStr("hi", 10); got != "hi" {
 		t.Errorf("got %q", got)
 	}
-	if got := truncateStr("", 5); got != "" {
+	if got := util.TruncateStr("", 5); got != "" {
 		t.Errorf("got %q", got)
 	}
 }

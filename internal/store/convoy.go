@@ -19,14 +19,6 @@ func CreateConvoy(db *sql.DB, name string) (int, error) {
 	return int(id), nil
 }
 
-// GetConvoyByName returns a convoy by name.
-func GetConvoyByName(db *sql.DB, name string) (*Convoy, error) {
-	var c Convoy
-	err := db.QueryRow(`SELECT id, name, status, created_at FROM Convoys WHERE name = ?`, name).
-		Scan(&c.ID, &c.Name, &c.Status, &c.CreatedAt)
-	return &c, err
-}
-
 // ApproveConvoyTasks transitions all Planned tasks in a convoy to Pending.
 // Returns the number of tasks activated.
 func ApproveConvoyTasks(db *sql.DB, convoyID int) int {

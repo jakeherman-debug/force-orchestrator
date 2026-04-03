@@ -14,6 +14,7 @@ import (
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
+	"force-orchestrator/internal/util"
 )
 
 // findPlanCycle detects circular dependencies in a task plan using DFS with grey/black coloring.
@@ -114,11 +115,11 @@ func SpawnCommander(db *sql.DB) {
 // runCommanderTask decomposes a single Feature or Decompose bounty into CodeEdit subtasks.
 func runCommanderTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
-	logger.Printf("[%s] Claimed task %d (%s): %s", sessionID, bounty.ID, bounty.Type, truncateStr(bounty.Payload, 80))
+	logger.Printf("[%s] Claimed task %d (%s): %s", sessionID, bounty.ID, bounty.Type, util.TruncateStr(bounty.Payload, 80))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
 		SessionID: sessionID, Agent: agentName, TaskID: bounty.ID,
 		EventType: "task_decomposing",
-		Payload:   map[string]any{"type": bounty.Type, "payload_preview": truncateStr(bounty.Payload, 120)},
+		Payload:   map[string]any{"type": bounty.Type, "payload_preview": util.TruncateStr(bounty.Payload, 120)},
 	})
 
 	// Build repo context — include name, description, and README preview for smarter decomposition
@@ -343,7 +344,7 @@ EXAMPLE:
 		// Notify operator
 		var taskLines []string
 		for _, t := range tasks {
-			line := fmt.Sprintf("  #%d [%s] %s", idMapping[t.TempID], t.Repo, truncateStr(t.Task, 80))
+			line := fmt.Sprintf("  #%d [%s] %s", idMapping[t.TempID], t.Repo, util.TruncateStr(t.Task, 80))
 			if len(t.BlockedBy) > 0 {
 				var afterIDs []string
 				for _, depTempID := range t.BlockedBy {
@@ -360,7 +361,7 @@ EXAMPLE:
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[DECOMPOSED] Feature #%d → %d task(s)", bounty.ID, len(tasks)),
 			fmt.Sprintf("Feature request #%d has been broken into %d task(s) in convoy #%d:\n\n%s\n\nOriginal request:\n%s",
-				bounty.ID, len(tasks), convoyID, strings.Join(taskLines, "\n"), truncateStr(bounty.Payload, 500)),
+				bounty.ID, len(tasks), convoyID, strings.Join(taskLines, "\n"), util.TruncateStr(bounty.Payload, 500)),
 			bounty.ID, store.MailTypeInfo)
 	}
 }
