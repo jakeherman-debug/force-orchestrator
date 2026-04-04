@@ -9,6 +9,27 @@ import (
 	"time"
 )
 
+// ── AstromechTimeoutForAttempt ────────────────────────────────────────────────
+
+func TestAstromechTimeoutForAttempt(t *testing.T) {
+	cases := []struct {
+		infraFailures int
+		want          time.Duration
+	}{
+		{0, 15 * time.Minute},
+		{1, 22*time.Minute + 30*time.Second},
+		{2, 33*time.Minute + 45*time.Second},
+		{3, 45 * time.Minute},
+		{10, 45 * time.Minute},
+	}
+	for _, c := range cases {
+		got := AstromechTimeoutForAttempt(c.infraFailures)
+		if got != c.want {
+			t.Errorf("AstromechTimeoutForAttempt(%d) = %v, want %v", c.infraFailures, got, c.want)
+		}
+	}
+}
+
 // ── IsRateLimitError ──────────────────────────────────────────────────────────
 
 func TestIsRateLimitError_Detected(t *testing.T) {
