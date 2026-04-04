@@ -173,7 +173,7 @@ func TestPermanentInfraFail(t *testing.T) {
 
 	// A remediation Feature task should be spawned
 	var remCount int
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'Feature' AND parent_id = ?`, id).Scan(&remCount)
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'CodeEdit' AND parent_id = ?`, id).Scan(&remCount)
 	if remCount != 1 {
 		t.Errorf("expected 1 remediation task, got %d", remCount)
 	}
