@@ -76,6 +76,11 @@ func SpawnInquisitor(db *sql.DB) {
 			}
 		}
 
+		CheckStaleEscalations(db)
+		CheckConvoyCompletions(db, logger)
+		cleanOrphanedBranches(db, logger)
+		detectStalledTasks(db, logger)
+
 		// Prune bootLastCalled entries for tasks that are no longer in a locked state
 		// (completed, failed, reset, or escalated since the last cycle). This prevents
 		// unbounded growth of the map across long-running daemons.
@@ -87,10 +92,6 @@ func SpawnInquisitor(db *sql.DB) {
 			}
 		}
 
-		CheckStaleEscalations(db)
-		CheckConvoyCompletions(db, logger)
-		cleanOrphanedBranches(db, logger)
-		detectStalledTasks(db, logger)
 		RunDogs(db, logger)
 
 		db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
