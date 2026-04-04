@@ -177,9 +177,20 @@ func handleTasksSubroutes(db *sql.DB) http.HandlerFunc {
 					http.Error(w, `{"error":"cannot cancel a completed task"}`, http.StatusConflict)
 					return
 				}
+				var cancelBody struct {
+					RequeueType string `json:"requeue_type"`
+				}
+				json.NewDecoder(r.Body).Decode(&cancelBody)
 				store.CancelTask(db, id, "Cancelled via dashboard")
 				store.LogAudit(db, "dashboard", "cancel", id, "cancelled via dashboard")
-				fmt.Fprintf(w, `{"ok":true,"id":%d}`, id)
+				if cancelBody.RequeueType != "" {
+					var originalPayload string
+					db.QueryRow(`SELECT payload FROM BountyBoard WHERE id = ?`, id).Scan(&originalPayload)
+					newID := store.AddBounty(db, 0, cancelBody.RequeueType, originalPayload)
+					fmt.Fprintf(w, `{"ok":true,"id":%d,"requeued_id":%d}`, id, newID)
+				} else {
+					fmt.Fprintf(w, `{"ok":true,"id":%d}`, id)
+				}
 
 			case "approve":
 				if err := approveTask(db, id, w); err != nil {
