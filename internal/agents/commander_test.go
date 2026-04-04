@@ -308,6 +308,144 @@ func TestRunCommanderTask_Success(t *testing.T) {
 	}
 }
 
+// ── validateTaskPlan ──────────────────────────────────────────────────────────
+
+func TestValidateTaskPlan_Valid(t *testing.T) {
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "myrepo", BlockedBy: []int{}},
+		{TempID: 2, Repo: "myrepo", BlockedBy: []int{1}},
+	}
+	known := map[string]bool{"myrepo": true}
+	if err := validateTaskPlan(tasks, known); err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+}
+
+func TestValidateTaskPlan_EmptyRepo(t *testing.T) {
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "", BlockedBy: []int{}},
+	}
+	if err := validateTaskPlan(tasks, map[string]bool{}); err == nil {
+		t.Error("expected error for empty repo")
+	}
+}
+
+func TestValidateTaskPlan_UnknownRepo(t *testing.T) {
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "ghost", BlockedBy: []int{}},
+	}
+	if err := validateTaskPlan(tasks, map[string]bool{"known": true}); err == nil {
+		t.Error("expected error for unknown repo")
+	}
+}
+
+func TestValidateTaskPlan_InvalidBlockedBy(t *testing.T) {
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "myrepo", BlockedBy: []int{99}},
+	}
+	if err := validateTaskPlan(tasks, map[string]bool{"myrepo": true}); err == nil {
+		t.Error("expected error for invalid blocked_by reference")
+	}
+}
+
+func TestValidateTaskPlan_Cycle(t *testing.T) {
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "myrepo", BlockedBy: []int{2}},
+		{TempID: 2, Repo: "myrepo", BlockedBy: []int{1}},
+	}
+	if err := validateTaskPlan(tasks, map[string]bool{"myrepo": true}); err == nil {
+		t.Error("expected error for cyclic dependency")
+	}
+}
+
+// ── insertConvoyAndTasks ──────────────────────────────────────────────────────
+
+func TestInsertConvoyAndTasks_Success(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", t.TempDir(), "test")
+
+	parentID := store.AddBounty(db, 0, "Feature", "add login")
+	b, _ := store.GetBounty(db, parentID)
+
+	convoyID, _ := store.CreateConvoy(db, "test convoy")
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "myrepo", Task: "task one", BlockedBy: []int{}},
+		{TempID: 2, Repo: "myrepo", Task: "task two", BlockedBy: []int{1}},
+	}
+
+	idMapping, err := insertConvoyAndTasks(db, tasks, b, convoyID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(idMapping) != 2 {
+		t.Errorf("expected 2 mapped IDs, got %d", len(idMapping))
+	}
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = ? AND type = 'CodeEdit'`, parentID).Scan(&count)
+	if count != 2 {
+		t.Errorf("expected 2 subtasks inserted, got %d", count)
+	}
+}
+
+func TestInsertConvoyAndTasks_PlanOnly(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", t.TempDir(), "test")
+
+	parentID := store.AddBounty(db, 0, "Feature", "[PLAN_ONLY]\ndo the thing")
+	b, _ := store.GetBounty(db, parentID)
+
+	convoyID, _ := store.CreateConvoy(db, "plan convoy")
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "myrepo", Task: "plan task", BlockedBy: []int{}},
+	}
+
+	if _, err := insertConvoyAndTasks(db, tasks, b, convoyID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE parent_id = ? AND type = 'CodeEdit'`, parentID).Scan(&status)
+	if status != "Planned" {
+		t.Errorf("expected Planned status for [PLAN_ONLY], got %q", status)
+	}
+}
+
+func TestInsertConvoyAndTasks_DeletesStaleSubtasks(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", t.TempDir(), "test")
+
+	parentID := store.AddBounty(db, 0, "Feature", "redo work")
+	b, _ := store.GetBounty(db, parentID)
+
+	// Insert a stale subtask from a prior attempt
+	convoyID1, _ := store.CreateConvoy(db, "old convoy")
+	store.AddConvoyTask(db, parentID, "myrepo", "stale task", convoyID1, 0, "Pending")
+
+	var before int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = ?`, parentID).Scan(&before)
+	if before != 1 {
+		t.Fatalf("expected 1 stale subtask, got %d", before)
+	}
+
+	convoyID2, _ := store.CreateConvoy(db, "new convoy")
+	tasks := []store.TaskPlan{
+		{TempID: 1, Repo: "myrepo", Task: "fresh task", BlockedBy: []int{}},
+	}
+	if _, err := insertConvoyAndTasks(db, tasks, b, convoyID2); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var after int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = ? AND type = 'CodeEdit'`, parentID).Scan(&after)
+	if after != 1 {
+		t.Errorf("expected 1 subtask after stale deletion + re-insert, got %d", after)
+	}
+}
+
 func TestRunCommanderTask_PlanOnly(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()

@@ -221,6 +221,27 @@ func AddDependency(db *sql.DB, taskID, dependsOn int) {
 	db.Exec(`INSERT OR IGNORE INTO TaskDependencies (task_id, depends_on) VALUES (?, ?)`, taskID, dependsOn)
 }
 
+// AddConvoyTaskTx creates a CodeEdit subtask within a convoy using an existing transaction.
+// Mirrors AddConvoyTask for use inside a caller-owned transaction.
+func AddConvoyTaskTx(tx *sql.Tx, parentID int, repo, payload string, convoyID, priority int, status string) (int, error) {
+	res, err := tx.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		 VALUES (?, ?, 'CodeEdit', ?, ?, ?, ?, datetime('now'))`,
+		parentID, repo, status, payload, convoyID, priority)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
+// AddDependencyTx records that taskID depends on dependsOn using an existing transaction.
+// Returns an error so callers can roll back on failure.
+func AddDependencyTx(tx *sql.Tx, taskID, dependsOn int) error {
+	_, err := tx.Exec(`INSERT OR IGNORE INTO TaskDependencies (task_id, depends_on) VALUES (?, ?)`, taskID, dependsOn)
+	return err
+}
+
 // GetDependencies returns all task IDs that taskID depends on (its blockers).
 func GetDependencies(db *sql.DB, taskID int) []int {
 	rows, err := db.Query(`SELECT depends_on FROM TaskDependencies WHERE task_id = ? ORDER BY depends_on ASC`, taskID)
