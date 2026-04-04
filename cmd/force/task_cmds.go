@@ -14,33 +14,55 @@ import (
 )
 
 func cmdAdd(db *sql.DB, args []string) {
+	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] <task description>"
 	if len(args) == 0 {
-		fmt.Println("Usage: force add [--priority N] [--plan-only] <task description>")
+		fmt.Println(usageMsg)
 		os.Exit(1)
 	}
 	priority := 0
 	planOnly := false
+	taskType := ""
+	validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true}
 	addArgs := args
 	for i := 0; i < len(addArgs); i++ {
-		if addArgs[i] == "--priority" && i+1 < len(addArgs) {
+		switch {
+		case addArgs[i] == "--priority" && i+1 < len(addArgs):
 			priority = mustParseID(addArgs[i+1])
 			addArgs = append(addArgs[:i], addArgs[i+2:]...)
 			i--
-		} else if addArgs[i] == "--plan-only" {
+		case addArgs[i] == "--plan-only":
 			planOnly = true
 			addArgs = append(addArgs[:i], addArgs[i+1:]...)
+			i--
+		case addArgs[i] == "--type" && i+1 < len(addArgs):
+			taskType = addArgs[i+1]
+			if !validTypes[taskType] {
+				fmt.Printf("Invalid type '%s'. Valid values: Feature, CodeEdit, Investigate, Audit\n", taskType)
+				os.Exit(1)
+			}
+			addArgs = append(addArgs[:i], addArgs[i+2:]...)
 			i--
 		}
 	}
 	if len(addArgs) == 0 {
-		fmt.Println("Usage: force add [--priority N] [--plan-only] <task description>")
+		fmt.Println(usageMsg)
 		os.Exit(1)
 	}
 	taskPayload := strings.Join(addArgs, " ")
 	if planOnly {
 		taskPayload = "[PLAN_ONLY]\n" + taskPayload
 	}
-	id := store.AddBounty(db, 0, "Feature", taskPayload)
+	if taskType == "" {
+		classified, reason, err := claude.ClassifyTaskType(taskPayload)
+		if err != nil {
+			fmt.Printf("Auto-classification failed: %v — defaulting to Feature\n", err)
+			taskType = "Feature"
+		} else {
+			taskType = classified
+			fmt.Printf("Classified as %s — %s\n", taskType, reason)
+		}
+	}
+	id := store.AddBounty(db, 0, taskType, taskPayload)
 	if priority != 0 {
 		store.SetBountyPriority(db, id, priority)
 	}
@@ -48,7 +70,7 @@ func cmdAdd(db *sql.DB, args []string) {
 	if planOnly {
 		planSuffix = " — Commander will plan only; approve with: force convoy approve <convoy-id>"
 	}
-	fmt.Printf("Order transmitted to the Fleet: '%s'%s\n", strings.Join(addArgs, " "), planSuffix)
+	fmt.Printf("Queued as task #%d: '%s'%s\n", id, strings.Join(addArgs, " "), planSuffix)
 }
 
 func cmdAddTask(db *sql.DB, args []string) {
