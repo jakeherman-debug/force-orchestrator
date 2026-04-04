@@ -7,6 +7,7 @@ import (
 
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
+	"force-orchestrator/internal/util"
 )
 
 // handleInfraFailure handles a transient or permanent CLI/infra error for an agent stage.
@@ -34,10 +35,29 @@ func handleInfraFailure(
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "", "Failed")
 		}
 		store.FailBounty(db, b.ID, msg)
+		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
+			fmt.Sprintf("Task: %s\nInfra failure in %s (permanent): %s",
+				util.TruncateStr(b.Payload, 300), stageName, msg), "")
+
+		// Spawn a Feature remediation task so an agent can investigate the infra issue
+		// and re-queue the original task once fixed.
+		remPayload := fmt.Sprintf(
+			"Infra failure on task #%d (repo: %s, stage: %s).\n\nError: %s\n\n"+
+				"Investigate and fix the underlying infrastructure issue so the original task can be retried.\n"+
+				"Common causes:\n"+
+				"- Claude API temporarily unavailable → verify API key and network connectivity\n"+
+				"- Repository path misconfigured → run 'force repos' to verify\n"+
+				"- Worktree corruption → run 'force cleanup' or manually remove stale worktrees\n"+
+				"- Disk full or permission denied → check disk space and file permissions\n\n"+
+				"After fixing, run: force reset %d",
+			b.ID, b.TargetRepo, stageName, msg, b.ID)
+		remID := store.AddBounty(db, b.ID, "Feature", remPayload)
+		logger.Printf("Task %d: permanently failed in %s — spawned remediation Feature task #%d", b.ID, stageName, remID)
+
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
-			fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nRun: force reset %d",
-				b.ID, stageName, MaxInfraFailures, msg, b.ID),
+			fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nRemediation task #%d has been queued to investigate.\nOnce fixed, run: force reset %d",
+				b.ID, stageName, MaxInfraFailures, msg, remID, b.ID),
 			b.ID, store.MailTypeAlert)
 	} else {
 		store.UpdateBountyStatus(db, b.ID, retryStatus)
