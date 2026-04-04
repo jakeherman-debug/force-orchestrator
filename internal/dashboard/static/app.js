@@ -2,17 +2,18 @@
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
-  status:      null,
-  tasks:       [],
-  taskFilter:  'active',
-  repos:       [],
-  escFilter:   'Open',
-  logMode:     'fleet',   // 'fleet' | 'holonet'
-  logSource:   null,
-  selectedID:  null,
-  detail:      null,
-  rejectID:    null,
-  activeTab:   'tasks',
+  status:       null,
+  tasks:        [],
+  taskFilter:   'active',
+  convoyFilter: 0,
+  repos:        [],
+  escFilter:    'Open',
+  logMode:      'fleet',   // 'fleet' | 'holonet'
+  logSource:    null,
+  selectedID:   null,
+  detail:       null,
+  rejectID:     null,
+  activeTab:    'tasks',
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -145,6 +146,11 @@ function renderStats() {
 function switchTab(name) {
   S.activeTab = name;
 
+  if (name !== 'tasks') {
+    S.convoyFilter = 0;
+    hideConvoyBanner();
+  }
+
   document.querySelectorAll('.tab-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === name);
   });
@@ -177,7 +183,10 @@ const FILTER_STATUS = {
 
 async function loadTasks() {
   const status = FILTER_STATUS[S.taskFilter] || '';
-  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+  const params = [];
+  if (status) params.push(`status=${encodeURIComponent(status)}`);
+  if (S.convoyFilter > 0) params.push(`convoy_id=${S.convoyFilter}`);
+  const qs = params.length ? `?${params.join('&')}` : '';
   try {
     S.tasks = await api(`/api/tasks${qs}`);
     renderTasks();
@@ -609,6 +618,27 @@ function jumpToTask(id) {
   setTimeout(() => openPanel(id), 400);
 }
 
+function showConvoyTasks(convoyID, convoyName) {
+  S.convoyFilter = convoyID;
+  S.taskFilter = 'all';
+  document.querySelectorAll('#tab-tasks .filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === 'all');
+  });
+  $('convoy-filter-label').textContent = `Showing tasks for convoy: ${convoyName}  —`;
+  $('convoy-filter-banner').style.display = 'flex';
+  switchTab('tasks');
+}
+
+function clearConvoyFilter() {
+  S.convoyFilter = 0;
+  hideConvoyBanner();
+  loadTasks();
+}
+
+function hideConvoyBanner() {
+  $('convoy-filter-banner').style.display = 'none';
+}
+
 // ── Convoys ───────────────────────────────────────────────────────────────────
 async function loadConvoys() {
   try {
@@ -634,8 +664,8 @@ function renderConvoys(convoys) {
     return `
       <div class="convoy-card">
         <div class="convoy-header">
-          <span class="convoy-name">${escHtml(c.name || 'Convoy')}</span>
-          <span class="convoy-id">#${c.id}</span>
+          <span class="convoy-name" style="cursor:pointer;text-decoration:underline" onclick="showConvoyTasks(${c.id}, ${JSON.stringify(escHtml(c.name || 'Convoy'))})">${escHtml(c.name || 'Convoy')}</span>
+          <span class="convoy-id" style="cursor:pointer" onclick="showConvoyTasks(${c.id}, ${JSON.stringify(escHtml(c.name || 'Convoy'))})">#${c.id}</span>
           ${statusPill(c.status)}
           <span class="convoy-ts">${fmtTS(c.created_at)}</span>
         </div>

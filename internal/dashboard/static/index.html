@@ -77,6 +77,10 @@
 
   <!-- Tasks tab -->
   <div class="tab-pane active" id="tab-tasks">
+    <div id="convoy-filter-banner" style="display:none;padding:6px 14px;background:var(--surface2);border-bottom:1px solid var(--border);font-size:12px;color:var(--text1);align-items:center;gap:8px">
+      <span id="convoy-filter-label"></span>
+      <a style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="clearConvoyFilter()">Clear filter</a>
+    </div>
     <div class="filter-bar">
       <button class="filter-btn active" data-filter="active"  onclick="setTaskFilter('active')">Active</button>
       <button class="filter-btn"        data-filter="review"  onclick="setTaskFilter('review')">Review</button>
