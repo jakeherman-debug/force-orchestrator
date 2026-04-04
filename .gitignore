@@ -2,6 +2,9 @@
 /force
 /force-orchestrator
 
+# Agent worktrees (git worktrees created at runtime — not part of the repo)
+/worktrees/
+
 # Runtime files
 holocron.db
 holocron.db-shm
