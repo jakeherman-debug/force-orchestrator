@@ -1,8 +1,10 @@
 package claude
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -24,10 +26,14 @@ func IsRateLimitError(output string) bool {
 	return rateLimitPatterns.MatchString(output)
 }
 
-// tokenPattern matches lines Claude CLI emits with token usage, e.g.:
+// tokenUsageLine matches the embedded usage annotation appended by CLI runners:
+//
+//	"[claude_usage: 12345 input 678 output]"
+var tokenUsageLine = regexp.MustCompile(`\[claude_usage:\s*(\d+)\s+input\s+(\d+)\s+output\]`)
+
+// tokenPattern matches legacy token lines Claude CLI may emit in text mode, e.g.:
 //
 //	"Tokens: 1,234 input, 567 output"
-//	"Input tokens: 1234  Output tokens: 567"
 //	"1234 input tokens, 567 output tokens"
 var tokenInPattern  = regexp.MustCompile(`(?i)(\d[\d,]*)\s+input\s+tokens?`)
 var tokenOutPattern = regexp.MustCompile(`(?i)(\d[\d,]*)\s+output\s+tokens?`)
@@ -35,16 +41,23 @@ var tokenLinePattern = regexp.MustCompile(`(?i)tokens?[:\s]+(\d[\d,]*)\s+input[,
 
 // ParseTokenUsage scans Claude CLI output for token counts.
 // Returns (input, output) tokens; both are 0 if not found.
+// Checks for the embedded [claude_usage: X input Y output] annotation first
+// (injected by the CLI runners from --output-format json), then falls back to
+// legacy text patterns.
 func ParseTokenUsage(output string) (int, int) {
 	clean := func(s string) int {
 		n, _ := strconv.Atoi(strings.ReplaceAll(s, ",", ""))
 		return n
 	}
-	// Try "Tokens: X input, Y output" form first (most common)
+	// Embedded usage annotation (most reliable — injected by CLI runner)
+	if m := tokenUsageLine.FindStringSubmatch(output); m != nil {
+		return clean(m[1]), clean(m[2])
+	}
+	// Legacy: "Tokens: X input, Y output" form
 	if m := tokenLinePattern.FindStringSubmatch(output); m != nil {
 		return clean(m[1]), clean(m[2])
 	}
-	// Fall back to separate patterns
+	// Legacy: separate patterns
 	var in, out int
 	if m := tokenInPattern.FindStringSubmatch(output); m != nil {
 		in = clean(m[1])
@@ -53,6 +66,67 @@ func ParseTokenUsage(output string) (int, int) {
 		out = clean(m[1])
 	}
 	return in, out
+}
+
+// parseJSONResult parses a claude CLI --output-format json result object.
+// Returns (resultText, totalInputTokens, outputTokens).
+// totalInputTokens sums input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+// for a complete picture of tokens processed.
+// Falls back to returning the raw string with 0 tokens if parsing fails.
+func parseJSONResult(raw string) (string, int, int) {
+	var result struct {
+		Type   string `json:"type"`
+		Result string `json:"result"`
+		Usage  struct {
+			InputTokens              int `json:"input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil || result.Type != "result" {
+		return raw, 0, 0
+	}
+	tokIn := result.Usage.InputTokens + result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
+	return result.Result, tokIn, result.Usage.OutputTokens
+}
+
+// parseStreamEvent parses one line from --output-format stream-json --verbose output.
+// For assistant messages it returns extracted text. For the result event it returns
+// total input tokens (regular + cache creation + cache reads) and output tokens.
+func parseStreamEvent(line string) (text string, tokIn, tokOut int, isResult bool) {
+	var event struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return "", 0, 0, false
+	}
+	switch event.Type {
+	case "assistant":
+		var sb strings.Builder
+		for _, c := range event.Message.Content {
+			if c.Type == "text" {
+				sb.WriteString(c.Text)
+			}
+		}
+		return sb.String(), 0, 0, false
+	case "result":
+		total := event.Usage.InputTokens + event.Usage.CacheCreationInputTokens + event.Usage.CacheReadInputTokens
+		return "", total, event.Usage.OutputTokens, true
+	}
+	return "", 0, 0, false
 }
 
 // claudeCLITimeout is the default timeout for simple reasoning calls (Council, etc.).
@@ -171,7 +245,7 @@ func defaultCLIRunner(prompt, tools, dir string, maxTurns int, timeout time.Dura
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns)}
+	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns), "--output-format", "json"}
 	if tools != "" {
 		args = append(args, "--allowedTools", tools)
 	}
@@ -186,7 +260,12 @@ func defaultCLIRunner(prompt, tools, dir string, maxTurns int, timeout time.Dura
 		}
 		return string(rawOut), fmt.Errorf("claude CLI failed: %v", err)
 	}
-	return string(rawOut), nil
+	// Parse JSON output to extract result text and token usage.
+	text, tokIn, tokOut := parseJSONResult(strings.TrimSpace(string(rawOut)))
+	if tokIn > 0 || tokOut > 0 {
+		text += fmt.Sprintf("\n[claude_usage: %d input %d output]", tokIn, tokOut)
+	}
+	return text, nil
 }
 
 // SetCLIRunner replaces the active CLI runner. Used by tests to inject stubs.
@@ -214,6 +293,10 @@ func RunCLI(prompt, tools, dir string, maxTurns int, timeout time.Duration) (str
 // it arrives, so the caller can tail or display progress in real-time. The full
 // combined output is still returned as a string on completion.
 //
+// Uses --output-format stream-json --verbose to capture token usage from the
+// final result event. Only the assistant's text content is written to w (not
+// raw JSON events), keeping the live display readable.
+//
 // When a test stub is installed via SetCLIRunner, streaming is not meaningful
 // (the stub returns immediately), so this falls back to the stub and writes
 // the stub's output to w after it returns.
@@ -230,7 +313,7 @@ func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Durat
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns)}
+	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns), "--output-format", "stream-json", "--verbose"}
 	if tools != "" {
 		args = append(args, "--allowedTools", tools)
 	}
@@ -238,17 +321,55 @@ func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Durat
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	var buf strings.Builder
-	cmd.Stdout = io.MultiWriter(&buf, w)
-	cmd.Stderr = io.MultiWriter(&buf, w)
-	err := cmd.Run()
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return buf.String(), fmt.Errorf("claude CLI timed out after %v", timeout)
-		}
-		return buf.String(), fmt.Errorf("claude CLI failed: %v", err)
+
+	// Stderr holds error text; stdout holds newline-delimited JSON events.
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	stdout, pipeErr := cmd.StdoutPipe()
+	if pipeErr != nil {
+		return "", fmt.Errorf("claude CLI stdout pipe: %v", pipeErr)
 	}
-	return buf.String(), nil
+	if startErr := cmd.Start(); startErr != nil {
+		return "", fmt.Errorf("claude CLI start: %v", startErr)
+	}
+
+	// Process stream-json events: extract text for display and capture token counts.
+	var textBuf strings.Builder
+	var tokIn, tokOut int
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB — large events fit
+	for scanner.Scan() {
+		text, in, out, isResult := parseStreamEvent(scanner.Text())
+		if text != "" {
+			textBuf.WriteString(text)
+			if w != nil {
+				w.Write([]byte(text)) //nolint:errcheck
+			}
+		}
+		if isResult {
+			tokIn, tokOut = in, out
+		}
+	}
+
+	runErr := cmd.Wait()
+	if runErr != nil {
+		combined := textBuf.String() + stderrBuf.String()
+		if ctx.Err() == context.DeadlineExceeded {
+			return combined, fmt.Errorf("claude CLI timed out after %v", timeout)
+		}
+		return combined, fmt.Errorf("claude CLI failed: %v", runErr)
+	}
+
+	result := textBuf.String()
+	if tokIn > 0 || tokOut > 0 {
+		tokenLine := fmt.Sprintf("\n[claude_usage: %d input %d output]", tokIn, tokOut)
+		result += tokenLine
+		if w != nil {
+			w.Write([]byte(tokenLine)) //nolint:errcheck
+		}
+	}
+	return result, nil
 }
 
 // AskClaudeCLI is a convenience wrapper for simple (non-worktree) Claude calls.
