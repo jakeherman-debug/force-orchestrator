@@ -229,7 +229,7 @@ func TestGetOrCreateAgentWorktree_StaleEntry(t *testing.T) {
 		"BB-8", dir, "/nonexistent/old/worktree")
 
 	// GetOrCreateAgentWorktree should detect the stale entry and recreate
-	// (it will try to create a new worktree at dir/worktrees/BB-8)
+	// (it will try to create a new worktree at ../.force-worktrees/<repo>/BB-8)
 	path, err := GetOrCreateAgentWorktree(db, "BB-8", dir)
 	if err != nil {
 		// Expected to fail if there's no remote HEAD, but covers the stale-entry path
