@@ -52,6 +52,20 @@ func main() {
 	case "add-task":
 		cmdAddTask(db, os.Args[2:])
 
+	case "investigate", "add-investigate":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: force investigate [--priority N] [--repo <name>] <question>")
+			os.Exit(1)
+		}
+		cmdAddInvestigate(db, os.Args[2:])
+
+	case "scan", "add-audit":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: force scan [--priority N] [--repo <name>] <scope/question>")
+			os.Exit(1)
+		}
+		cmdAddAudit(db, os.Args[2:])
+
 	case "add-jira":
 		cmdAddJira(db, os.Args[2:])
 

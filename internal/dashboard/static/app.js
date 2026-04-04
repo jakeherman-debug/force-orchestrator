@@ -775,7 +775,11 @@ async function showAddModal() {
 
 function onAddTypeChange() {
   const type = $('add-type').value;
-  $('add-repo-row').style.display = type === 'CodeEdit' ? '' : 'none';
+  $('add-repo-row').style.display = (type === 'CodeEdit' || type === 'Investigate' || type === 'Audit') ? '' : 'none';
+  const repoLabel = $('add-repo-label');
+  if (repoLabel) {
+    repoLabel.textContent = type === 'CodeEdit' ? 'Repo (required)' : 'Repo (optional — leave blank for fleet-wide)';
+  }
 }
 
 async function submitAddTask() {

@@ -127,6 +127,11 @@ const CouncilTools = atlassianReadTools + "," + gleanReadTools + "," + sonarRead
 // docs, quality signals, and observability for debugging and implementation.
 const AstromechExtraTools = atlassianReadTools + "," + gleanReadTools + "," + sonarReadTools + "," + datadogReadTools
 
+// InvestigateTools — tools for Investigator and Auditor agents.
+// Read-only access to the codebase and all external observability/doc systems.
+// No Edit or Write tools — these agents must never modify files.
+const InvestigateTools = "Read,Grep,Glob,Bash," + atlassianReadTools + "," + gleanReadTools + "," + sonarReadTools + "," + datadogReadTools
+
 // AtlassianReadTools exposes the atlassian tools for use in cmd/force (add-jira command).
 const AtlassianReadTools = atlassianReadTools
 

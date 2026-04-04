@@ -471,6 +471,7 @@ Agent control:
   config get <key>               Read a system config value
   config set <key> <value>       Write a system config value
                                    Keys: num_astromechs, num_captain, num_council,
+                                         num_investigators, num_auditors,
                                          max_concurrent, spawn_delay_ms, batch_size, max_turns
 Logs written to fleet.log | Telemetry written to holonet.jsonl
 
@@ -482,6 +483,12 @@ Task management:
                                         Queue a direct CodeEdit task (skips Commander)
   add-jira [--priority N] [--plan-only] <TICKET-ID>
                                         Fetch a Jira ticket and queue it as a feature task
+  investigate [--priority N] [--repo <name>] <question>
+                                        Research question — agent reads code + external systems,
+                                        delivers a written report via fleet mail
+  scan [--priority N] [--repo <name>] <scope/question>
+                                        Scan codebase for issues — findings become Planned
+                                        CodeEdit tasks; approve with: force convoy approve <id>
   add-repo <name> <path> <desc>         Register a repository
   repos                                 List registered repositories
   repos remove <name>                   Remove a registered repository

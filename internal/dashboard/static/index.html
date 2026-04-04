@@ -196,12 +196,14 @@
       <div>
         <label class="field-label" for="add-type">Type</label>
         <select class="field-select" id="add-type" onchange="onAddTypeChange()">
-          <option value="Feature">Feature</option>
-          <option value="CodeEdit">CodeEdit</option>
+          <option value="Feature">Feature — Commander decomposes into CodeEdit tasks</option>
+          <option value="CodeEdit">CodeEdit — direct code change (skips Commander)</option>
+          <option value="Investigate">Investigate — research question, delivers a report</option>
+          <option value="Audit">Audit — scans for issues, queues fixes as Planned tasks</option>
         </select>
       </div>
       <div id="add-repo-row" style="display:none">
-        <label class="field-label" for="add-repo">Repo</label>
+        <label class="field-label" id="add-repo-label" for="add-repo">Repo</label>
         <select class="field-select" id="add-repo">
           <option value="">— select —</option>
         </select>

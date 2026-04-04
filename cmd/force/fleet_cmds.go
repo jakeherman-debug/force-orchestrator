@@ -69,11 +69,23 @@ func cmdDaemon(db *sql.DB) {
 		fmt.Sscanf(n, "%d", &numCaptain)
 	}
 
-	astromechRoster := []string{"R2-D2", "BB-8", "R5-D4", "K-2SO", "BD-1", "R7-A7", "R4-P17", "D-O", "C1-10P", "R3-S6"}
-	councilRoster   := []string{"Council-Yoda", "Council-Mace", "Council-Ki-Adi", "Council-Kit-Fisto", "Council-Shaak-Ti"}
-	captainRoster   := []string{"Captain-Rex", "Captain-Wolffe", "Captain-Bly", "Captain-Gree", "Captain-Ponds"}
+	numInvestigators := 1
+	if n := store.GetConfig(db, "num_investigators", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numInvestigators)
+	}
+	numAuditors := 1
+	if n := store.GetConfig(db, "num_auditors", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numAuditors)
+	}
 
-	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s))...\n", numAgents, numCaptain, numCouncil)
+	astromechRoster    := []string{"R2-D2", "BB-8", "R5-D4", "K-2SO", "BD-1", "R7-A7", "R4-P17", "D-O", "C1-10P", "R3-S6"}
+	councilRoster      := []string{"Council-Yoda", "Council-Mace", "Council-Ki-Adi", "Council-Kit-Fisto", "Council-Shaak-Ti"}
+	captainRoster      := []string{"Captain-Rex", "Captain-Wolffe", "Captain-Bly", "Captain-Gree", "Captain-Ponds"}
+	investigatorRoster := []string{"Ahsoka-Tano", "Kanan-Jarrus", "Ezra-Bridger", "Hera-Syndulla"}
+	auditorRoster      := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
+
+	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d investigator(s), %d auditor(s))...\n",
+		numAgents, numCaptain, numCouncil, numInvestigators, numAuditors)
 	go agents.SpawnCommander(db)
 	for i := 0; i < numAgents; i++ {
 		name := fmt.Sprintf("Astromech-%d", i+1)
@@ -95,6 +107,20 @@ func cmdDaemon(db *sql.DB) {
 			name = councilRoster[i]
 		}
 		go agents.SpawnJediCouncil(db, name)
+	}
+	for i := 0; i < numInvestigators; i++ {
+		name := fmt.Sprintf("Investigator-%d", i+1)
+		if i < len(investigatorRoster) {
+			name = investigatorRoster[i]
+		}
+		go agents.SpawnInvestigator(db, name)
+	}
+	for i := 0; i < numAuditors; i++ {
+		name := fmt.Sprintf("Auditor-%d", i+1)
+		if i < len(auditorRoster) {
+			name = auditorRoster[i]
+		}
+		go agents.SpawnAuditor(db, name)
 	}
 	go agents.SpawnInquisitor(db)
 

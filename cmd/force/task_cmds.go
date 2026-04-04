@@ -110,6 +110,90 @@ func cmdAddTask(db *sql.DB, args []string) {
 	fmt.Printf("CodeEdit task #%d queued for '%s'%s: %s\n", newID, repo, suffix, taskPayload)
 }
 
+func cmdAddInvestigate(db *sql.DB, args []string) {
+	// Usage: force investigate [--priority N] [--repo <name>] <question>
+	priority := 0
+	repo := ""
+	taskArgs := args
+	for i := 0; i < len(taskArgs); i++ {
+		switch taskArgs[i] {
+		case "--priority":
+			if i+1 < len(taskArgs) {
+				priority = mustParseID(taskArgs[i+1])
+				taskArgs = append(taskArgs[:i], taskArgs[i+2:]...)
+				i--
+			}
+		case "--repo":
+			if i+1 < len(taskArgs) {
+				repo = taskArgs[i+1]
+				taskArgs = append(taskArgs[:i], taskArgs[i+2:]...)
+				i--
+			}
+		}
+	}
+	if len(taskArgs) == 0 {
+		fmt.Println("Usage: force investigate [--priority N] [--repo <name>] <question>")
+		os.Exit(1)
+	}
+	if repo != "" && store.GetRepoPath(db, repo) == "" {
+		fmt.Printf("Unknown repo '%s'. Register it first with: force add-repo\n", repo)
+		os.Exit(1)
+	}
+	payload := strings.Join(taskArgs, " ")
+	res, _ := db.Exec(
+		`INSERT INTO BountyBoard (target_repo, type, status, payload, priority, created_at)
+		 VALUES (?, 'Investigate', 'Pending', ?, ?, datetime('now'))`,
+		repo, payload, priority)
+	id, _ := res.LastInsertId()
+	repoSuffix := ""
+	if repo != "" {
+		repoSuffix = fmt.Sprintf(" (scoped to %s)", repo)
+	}
+	fmt.Printf("Investigation #%d queued%s: %s\n", id, repoSuffix, payload)
+}
+
+func cmdAddAudit(db *sql.DB, args []string) {
+	// Usage: force audit [--priority N] [--repo <name>] <scope/question>
+	priority := 0
+	repo := ""
+	taskArgs := args
+	for i := 0; i < len(taskArgs); i++ {
+		switch taskArgs[i] {
+		case "--priority":
+			if i+1 < len(taskArgs) {
+				priority = mustParseID(taskArgs[i+1])
+				taskArgs = append(taskArgs[:i], taskArgs[i+2:]...)
+				i--
+			}
+		case "--repo":
+			if i+1 < len(taskArgs) {
+				repo = taskArgs[i+1]
+				taskArgs = append(taskArgs[:i], taskArgs[i+2:]...)
+				i--
+			}
+		}
+	}
+	if len(taskArgs) == 0 {
+		fmt.Println("Usage: force audit [--priority N] [--repo <name>] <scope/question>")
+		os.Exit(1)
+	}
+	if repo != "" && store.GetRepoPath(db, repo) == "" {
+		fmt.Printf("Unknown repo '%s'. Register it first with: force add-repo\n", repo)
+		os.Exit(1)
+	}
+	payload := strings.Join(taskArgs, " ")
+	res, _ := db.Exec(
+		`INSERT INTO BountyBoard (target_repo, type, status, payload, priority, created_at)
+		 VALUES (?, 'Audit', 'Pending', ?, ?, datetime('now'))`,
+		repo, payload, priority)
+	id, _ := res.LastInsertId()
+	repoSuffix := ""
+	if repo != "" {
+		repoSuffix = fmt.Sprintf(" (scoped to %s)", repo)
+	}
+	fmt.Printf("Audit #%d queued%s — findings will be Planned tasks awaiting your approval: %s\n", id, repoSuffix, payload)
+}
+
 func cmdAddJira(db *sql.DB, args []string) {
 	// Usage: force add-jira [--priority N] [--plan-only] <TICKET-ID>
 	priority := 0

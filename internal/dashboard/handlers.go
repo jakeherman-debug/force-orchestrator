@@ -606,6 +606,22 @@ func handleMailSubroutes(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// insertTypedTask inserts an Investigate or Audit task, optionally scoped to a repo.
+func insertTypedTask(db *sql.DB, taskType, repo, payload string, priority int) (int, error) {
+	if repo != "" && store.GetRepoPath(db, repo) == "" {
+		return 0, fmt.Errorf("unknown repo: %s", repo)
+	}
+	res, err := db.Exec(
+		`INSERT INTO BountyBoard (target_repo, type, status, payload, priority, created_at)
+		 VALUES (?, ?, 'Pending', ?, ?, datetime('now'))`,
+		repo, taskType, payload, priority)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
 // ── Add task ──────────────────────────────────────────────────────────────────
 
 func handleAdd(db *sql.DB) http.HandlerFunc {
@@ -642,8 +658,22 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			newID = store.AddCodeEditTask(db, body.Repo, body.Payload, 0, body.Priority, 0)
+		case "Investigate":
+			var err error
+			newID, err = insertTypedTask(db, "Investigate", body.Repo, body.Payload, body.Priority)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusUnprocessableEntity)
+				return
+			}
+		case "Audit":
+			var err error
+			newID, err = insertTypedTask(db, "Audit", body.Repo, body.Payload, body.Priority)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusUnprocessableEntity)
+				return
+			}
 		default:
-			http.Error(w, `{"error":"type must be Feature or CodeEdit"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"type must be Feature, CodeEdit, Investigate, or Audit"}`, http.StatusBadRequest)
 			return
 		}
 		store.LogAudit(db, "dashboard", "add-task", newID,
