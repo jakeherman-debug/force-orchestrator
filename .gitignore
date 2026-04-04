@@ -13,6 +13,9 @@
 holocron.db
 holocron.db-shm
 holocron.db-wal
+fleet.db
+fleet.db-shm
+fleet.db-wal
 fleet.log
 fleet.pid
 holonet.jsonl
