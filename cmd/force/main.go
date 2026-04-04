@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
@@ -325,17 +326,15 @@ func main() {
 		cmdHardReset(db, confirmed, purgeRepos)
 
 	case "scale":
-		// Dynamically add astromech goroutines to a running daemon via SIGUSR1.
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force scale <num_astromechs>")
-			os.Exit(1)
-		}
-		n, err := strconv.Atoi(os.Args[2])
-		if err != nil || n < 1 {
-			fmt.Fprintln(os.Stderr, "scale: argument must be a positive integer")
-			os.Exit(1)
-		}
-		cmdScale(db, n)
+		// Dynamically scale agent counts via named flags.
+		fs := flag.NewFlagSet("scale", flag.ExitOnError)
+		scaleAstromechs := fs.Int("astromechs", -1, "number of astromechs")
+		scaleCouncil := fs.Int("council", -1, "number of council members")
+		scaleCaptain := fs.Int("captain", -1, "number of captains")
+		scaleInvestigators := fs.Int("investigators", -1, "number of investigators")
+		scaleAuditors := fs.Int("auditors", -1, "number of auditors")
+		fs.Parse(os.Args[2:])
+		cmdScale(db, *scaleAstromechs, *scaleCouncil, *scaleCaptain, *scaleInvestigators, *scaleAuditors)
 
 	case "estop":
 		cmdEstop(db)
