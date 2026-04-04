@@ -508,6 +508,10 @@ Task management:
   approve <id>                          Operator approval — merge without Jedi Council review
   reject <id> <reason>                  Operator rejection — return task for rework with feedback
   prune [--keep-days N] [--dry-run]     Delete old completed/failed tasks and history (default 30d)
+  purge [--confirm]                     Delete all log files, worktrees, and agent branches (keeps DB task data)
+  hard-reset [--purge-repos] [--confirm]
+                                        Factory reset: wipe all task data, history, memories, logs, worktrees.
+                                        Repositories and config are preserved unless --purge-repos is set.
   audit [--limit N]                     Show operator audit log
   costs                                 Show token usage by agent and time window
   mail list                             List all fleet mail

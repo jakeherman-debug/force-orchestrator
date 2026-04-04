@@ -182,7 +182,7 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 		changedFiles := igit.ExtractDiffFiles(diff)
 		filesStr := strings.Join(changedFiles, ", ")
-		memorySummary := fmt.Sprintf("Task: %s", util.TruncateStr(b.Payload, 400))
+		memorySummary := fmt.Sprintf("Task: %s", util.TruncateStr(directiveText(b.Payload), 400))
 		if ruling.Feedback != "" {
 			memorySummary += fmt.Sprintf("\nCouncil note: %s", ruling.Feedback)
 		}
@@ -211,7 +211,7 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
 			fmt.Sprintf("Task: %s\nRejected (attempt %d/%d): %s",
-				util.TruncateStr(b.Payload, 300), retryCount, MaxRetries, ruling.Feedback),
+				util.TruncateStr(directiveText(b.Payload), 300), retryCount, MaxRetries, ruling.Feedback),
 			"")
 
 		if retryCount >= MaxRetries {

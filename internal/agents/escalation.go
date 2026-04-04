@@ -115,7 +115,9 @@ func CheckStaleEscalations(db *sql.DB) {
 	for _, e := range stale {
 		// Bump severity: LOW→MEDIUM→HIGH
 		newSev := bumpSeverity(e.sev)
-		db.Exec(`UPDATE Escalations SET severity = ?, message = ? WHERE id = ?`,
+		// Reset created_at to now so this escalation won't fire again for another staleThreshold.
+		// Without this, every 5-minute inquisitor cycle would send a new re-escalation mail.
+		db.Exec(`UPDATE Escalations SET severity = ?, message = ?, created_at = datetime('now') WHERE id = ?`,
 			string(newSev),
 			fmt.Sprintf("[RE-ESCALATED after %v unacknowledged] %s", staleThreshold, e.msg),
 			e.id,

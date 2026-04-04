@@ -33,6 +33,9 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 	for _, c := range active {
 		completed, total := store.ConvoyProgress(db, c.id)
 		if total == 0 {
+			// No tasks were ever added — close as Completed so it doesn't sit Active forever.
+			db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ?`, c.id)
+			logger.Printf("Convoy '%s' closed — no tasks were added", c.name)
 			continue
 		}
 

@@ -51,9 +51,15 @@ func SpawnInquisitor(db *sql.DB) {
 		}
 
 		if len(staleIDs) > 0 {
+			// Also clear infra_failures: a stale-lock reset almost always means the host
+			// went to sleep and killed the Claude process, not a genuine infra issue.
+			// Leaving infra_failures elevated would push the task toward permanent failure
+			// for what is a laptop availability event, not a code or environment problem.
 			_, resetErr := db.Exec(`
 				UPDATE BountyBoard
-				SET status = 'Pending', owner = '', locked_at = '', error_log = 'Inquisitor: reset after stale lock timeout'
+				SET status = 'Pending', owner = '', locked_at = '',
+				    infra_failures = 0,
+				    error_log = 'Inquisitor: reset after stale lock timeout (infra_failures cleared)'
 				WHERE status IN ('Locked', 'UnderReview', 'UnderCaptainReview')
 				  AND locked_at != ''
 				  AND locked_at < datetime('now', ?)

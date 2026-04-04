@@ -264,6 +264,30 @@ func main() {
 		}
 		cmdPrune(db, keepDays, dryRun)
 
+	case "purge":
+		// Usage: force purge [--confirm]
+		confirmed := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--confirm" {
+				confirmed = true
+			}
+		}
+		cmdPurge(db, confirmed)
+
+	case "hard-reset":
+		// Usage: force hard-reset [--purge-repos] [--confirm]
+		confirmed := false
+		purgeRepos := false
+		for _, arg := range os.Args[2:] {
+			switch arg {
+			case "--confirm":
+				confirmed = true
+			case "--purge-repos":
+				purgeRepos = true
+			}
+		}
+		cmdHardReset(db, confirmed, purgeRepos)
+
 	case "scale":
 		// Dynamically add astromech goroutines to a running daemon via SIGUSR1.
 		if len(os.Args) < 3 {

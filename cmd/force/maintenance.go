@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -525,8 +526,159 @@ func pruneFleet(db *sql.DB, keepDays int, dryRun bool) {
 		db.Exec(`DELETE FROM FleetMemory_fts WHERE rowid NOT IN (SELECT id FROM FleetMemory)`)
 		db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 		db.Exec(`VACUUM`)
-		store.LogAudit(db, "operator", "prune", 0, fmt.Sprintf("pruned %d rows older than %d days", total, keepDays))
 	}
 	fmt.Printf("%sTotal: %d rows %s.\n", prefix, total, map[bool]string{true: "would be removed", false: "removed"}[dryRun])
+}
+
+// purgeFilesystem removes all filesystem artifacts created by fleet runs:
+// log files, rotated telemetry, agent git worktrees, agent branches, and the
+// Dogs cooldown table. Safe to call while the daemon is stopped.
+func purgeFilesystem(db *sql.DB) {
+	// Log and telemetry files
+	for _, name := range []string{"fleet.log", "holonet.jsonl", "fleet.pid"} {
+		if err := os.Remove(name); err == nil {
+			fmt.Printf("  Deleted %s\n", name)
+		}
+	}
+	rotated, _ := filepath.Glob("holonet-*.jsonl")
+	for _, f := range rotated {
+		if err := os.Remove(f); err == nil {
+			fmt.Printf("  Deleted %s\n", f)
+		}
+	}
+
+	// Worktrees and agent branches for every registered repo
+	rows, err := db.Query(`SELECT name, local_path FROM Repositories`)
+	if err == nil {
+		type repo struct{ name, path string }
+		var repos []repo
+		for rows.Next() {
+			var r repo
+			rows.Scan(&r.name, &r.path)
+			repos = append(repos, r)
+		}
+		rows.Close()
+
+		for _, r := range repos {
+			worktreeBase := filepath.Join(filepath.Dir(r.path), ".force-worktrees", filepath.Base(r.path))
+			entries, readErr := os.ReadDir(worktreeBase)
+			if readErr == nil {
+				for _, e := range entries {
+					wtPath := filepath.Join(worktreeBase, e.Name())
+					out, rmErr := igit.RunCmd(r.path, "worktree", "remove", "--force", wtPath)
+					if rmErr == nil {
+						fmt.Printf("  Removed worktree %s/%s\n", r.name, e.Name())
+					} else if !strings.Contains(out, "not a working tree") {
+						// Directory exists but git doesn't know about it — remove directly
+						os.RemoveAll(wtPath)
+						fmt.Printf("  Removed orphaned worktree dir %s/%s\n", r.name, e.Name())
+					}
+				}
+				// Prune any remaining stale git refs
+				igit.RunCmd(r.path, "worktree", "prune")
+				// Remove the now-empty worktree base dir
+				os.Remove(worktreeBase)
+			}
+
+			// Delete all agent/* branches
+			branchOut, branchErr := exec.Command("git", "-C", r.path, "for-each-ref",
+				"--format=%(refname:short)", "refs/heads/agent/").Output()
+			if branchErr == nil {
+				deleted := 0
+				for _, branch := range strings.Split(strings.TrimSpace(string(branchOut)), "\n") {
+					branch = strings.TrimSpace(branch)
+					if branch == "" {
+						continue
+					}
+					if _, delErr := exec.Command("git", "-C", r.path, "branch", "-D", branch).Output(); delErr == nil {
+						deleted++
+					}
+				}
+				if deleted > 0 {
+					fmt.Printf("  Deleted %d agent branch(es) in %s\n", deleted, r.name)
+				}
+			}
+		}
+	}
+
+	// Reset dog cooldown timers
+	if res, err := db.Exec(`DELETE FROM Dogs`); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			fmt.Printf("  Cleared %d dog cooldown timer(s)\n", n)
+		}
+	}
+}
+
+// cmdPurge cleans all filesystem run artifacts and dog timers without touching
+// task data in the database.
+func cmdPurge(db *sql.DB, confirmed bool) {
+	if !confirmed {
+		fmt.Fprintln(os.Stderr, "This will delete fleet.log, holonet.jsonl, all agent worktrees, and agent branches.")
+		fmt.Fprintln(os.Stderr, "Re-run with --confirm to proceed.")
+		os.Exit(1)
+	}
+	if _, alive := readDaemonPID(); alive {
+		fmt.Fprintln(os.Stderr, "Daemon is running — stop it first with 'force estop' then kill the daemon process.")
+		os.Exit(1)
+	}
+	fmt.Println("Purging filesystem artifacts...")
+	purgeFilesystem(db)
+	fmt.Println("Done.")
+}
+
+// cmdHardReset wipes all task data from the database, purges filesystem artifacts,
+// and resets the fleet to a factory-fresh state. Repositories and SystemConfig are
+// preserved unless --purge-repos is passed.
+func cmdHardReset(db *sql.DB, confirmed, purgeRepos bool) {
+	if !confirmed {
+		fmt.Fprintln(os.Stderr, "WARNING: This permanently deletes ALL task data, history, memories, mail, escalations,")
+		fmt.Fprintln(os.Stderr, "         audit log, worktrees, branches, and log files.")
+		if purgeRepos {
+			fmt.Fprintln(os.Stderr, "         --purge-repos: repositories and system config will also be wiped.")
+		} else {
+			fmt.Fprintln(os.Stderr, "         Repositories and system config will be preserved.")
+		}
+		fmt.Fprintln(os.Stderr, "Re-run with --confirm to proceed.")
+		os.Exit(1)
+	}
+	if _, alive := readDaemonPID(); alive {
+		fmt.Fprintln(os.Stderr, "Daemon is running — stop it first with 'force estop' then kill the daemon process.")
+		os.Exit(1)
+	}
+
+	fmt.Println("Hard reset: purging filesystem artifacts...")
+	purgeFilesystem(db)
+
+	fmt.Println("Hard reset: wiping database...")
+	tables := []string{
+		"TaskHistory", "TaskDependencies", "BountyBoard",
+		"Convoys", "Agents", "Escalations", "Fleet_Mail",
+		"AuditLog", "FleetMemory",
+	}
+	if purgeRepos {
+		tables = append(tables, "Repositories", "SystemConfig")
+	}
+	for _, t := range tables {
+		res, err := db.Exec("DELETE FROM " + t)
+		if err != nil {
+			fmt.Printf("  ERROR clearing %s: %v\n", t, err)
+			continue
+		}
+		n, _ := res.RowsAffected()
+		fmt.Printf("  Cleared %5d row(s) — %s\n", n, t)
+	}
+
+	// Rebuild FTS from scratch (FleetMemory is now empty)
+	db.Exec(`DELETE FROM FleetMemory_fts WHERE rowid NOT IN (SELECT id FROM FleetMemory)`)
+
+	// Reset autoincrement counters so IDs restart from 1
+	resetTables := []string{"BountyBoard", "Convoys", "TaskHistory", "Escalations", "Fleet_Mail", "AuditLog", "FleetMemory"}
+	for _, t := range resetTables {
+		db.Exec(`DELETE FROM sqlite_sequence WHERE name = ?`, t)
+	}
+
+	db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	db.Exec(`VACUUM`)
+	fmt.Println("Hard reset complete — fleet is ready for fresh use.")
 }
 

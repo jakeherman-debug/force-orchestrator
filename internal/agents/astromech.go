@@ -121,7 +121,7 @@ After fixing, run: force reset %d`,
 
 	// Store failure memory so future agents know this infra issue occurred
 	store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
-		fmt.Sprintf("Task: %s\nInfra failure (permanent): %s", util.TruncateStr(bounty.Payload, 300), msg),
+		fmt.Sprintf("Task: %s\nInfra failure (permanent): %s", util.TruncateStr(directiveText(bounty.Payload), 300), msg),
 		"")
 
 	// Notify operator via mail
@@ -488,7 +488,7 @@ The original task directive (what the code should accomplish) is shown below.`
 		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr[:min(len(outputStr), 4000)]+"...[truncated for history]", "ContextBlown")
 		store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
 			fmt.Sprintf("Task produced %d bytes of output (context blown) — was re-queued for decomposition.\nTask: %s",
-				len(outputStr), util.TruncateStr(bounty.Payload, 300)),
+				len(outputStr), util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
@@ -526,7 +526,7 @@ The original task directive (what the code should accomplish) is shown below.`
 		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Sharded")
 		store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
 			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
-				util.TruncateStr(bounty.Payload, 300)),
+				util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
@@ -578,11 +578,24 @@ The original task directive (what the code should accomplish) is shown below.`
 		logger.Printf("Task %d: commits ahead of base: %s", bounty.ID, strings.TrimSpace(string(aheadOut)))
 
 		if len(strings.TrimSpace(string(aheadOut))) == 0 {
-			msg := "Git Commit Err: Claude CLI finished but made zero file changes"
-			logger.Printf("Task %d FAILED: %s", bounty.ID, msg)
-			store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
-			store.FailBounty(db, bounty.ID, msg)
-			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, msg))
+			// Claude finished but made no commits. This is often caused by the host going
+			// to sleep mid-run, leaving the agent in a confused state on wake. Re-queue
+			// with a note up to MaxRetries so the agent gets a clean attempt; only
+			// permanently fail if it keeps producing zero changes across all retries.
+			retryCount := store.IncrementRetryCount(db, bounty.ID)
+			msg := fmt.Sprintf("Zero file changes (attempt %d/%d) — re-queuing for retry", retryCount, MaxRetries)
+			logger.Printf("Task %d: %s", bounty.ID, msg)
+			store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "ZeroChanges")
+			if retryCount >= MaxRetries {
+				failMsg := fmt.Sprintf("Git Commit Err: Claude CLI finished but made zero file changes after %d attempts", MaxRetries)
+				store.FailBounty(db, bounty.ID, failMsg)
+				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, failMsg))
+			} else {
+				note := "\n\nNOTE (from orchestrator): A prior attempt of this task completed without making any file changes. " +
+					"If the work described already exists in the codebase, verify that and confirm with a commit. " +
+					"If it does not exist yet, implement it from scratch — do not rely on prior seance context about what was 'already done'."
+				store.ReturnTaskForRework(db, bounty.ID, bounty.Payload+note)
+			}
 			return
 		}
 		logger.Printf("Task %d: Claude already committed, treating as success", bounty.ID)
@@ -733,7 +746,7 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 		store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Sharded")
 		store.StoreFleetMemory(db, b.TargetRepo, taskID, "failure",
 			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
-				util.TruncateStr(b.Payload, 300)),
+				util.TruncateStr(directiveText(b.Payload), 300)),
 			"")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
