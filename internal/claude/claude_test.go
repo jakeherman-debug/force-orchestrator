@@ -268,3 +268,55 @@ func TestParseTokenUsage_NotPresent(t *testing.T) {
 		t.Errorf("expected 0,0 got %d,%d", in, out)
 	}
 }
+
+func TestParseTokenUsage_EmbeddedUsageLine(t *testing.T) {
+	// Matches the [claude_usage: X input Y output] line injected by CLI runners
+	// after parsing --output-format json / stream-json responses.
+	output := "The task is complete.\n[DONE]\n[claude_usage: 18321 input 412 output]"
+	in, out := ParseTokenUsage(output)
+	if in != 18321 {
+		t.Errorf("expected 18321 input tokens, got %d", in)
+	}
+	if out != 412 {
+		t.Errorf("expected 412 output tokens, got %d", out)
+	}
+}
+
+func TestParseJSONResult(t *testing.T) {
+	raw := `{"type":"result","subtype":"success","result":"Task done.\n[DONE]","usage":{"input_tokens":500,"cache_creation_input_tokens":2000,"cache_read_input_tokens":8000,"output_tokens":150}}`
+	text, tokIn, tokOut := parseJSONResult(raw)
+	if text != "Task done.\n[DONE]" {
+		t.Errorf("unexpected result text: %q", text)
+	}
+	if tokIn != 10500 { // 500 + 2000 + 8000
+		t.Errorf("expected 10500 total input tokens, got %d", tokIn)
+	}
+	if tokOut != 150 {
+		t.Errorf("expected 150 output tokens, got %d", tokOut)
+	}
+}
+
+func TestParseStreamEvent_AssistantText(t *testing.T) {
+	line := `{"type":"assistant","message":{"content":[{"type":"text","text":"[CHECKPOINT: work_done]\nAll done."}]}}`
+	text, tokIn, tokOut, isResult := parseStreamEvent(line)
+	if text != "[CHECKPOINT: work_done]\nAll done." {
+		t.Errorf("unexpected text: %q", text)
+	}
+	if tokIn != 0 || tokOut != 0 || isResult {
+		t.Errorf("unexpected token counts or isResult: %d, %d, %v", tokIn, tokOut, isResult)
+	}
+}
+
+func TestParseStreamEvent_Result(t *testing.T) {
+	line := `{"type":"result","subtype":"success","usage":{"input_tokens":100,"cache_creation_input_tokens":500,"cache_read_input_tokens":4000,"output_tokens":75}}`
+	_, tokIn, tokOut, isResult := parseStreamEvent(line)
+	if !isResult {
+		t.Error("expected isResult=true")
+	}
+	if tokIn != 4600 { // 100 + 500 + 4000
+		t.Errorf("expected 4600 total input tokens, got %d", tokIn)
+	}
+	if tokOut != 75 {
+		t.Errorf("expected 75 output tokens, got %d", tokOut)
+	}
+}
