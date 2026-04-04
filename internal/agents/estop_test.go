@@ -148,7 +148,7 @@ func TestIsThrottledByBatchSize_AtLimit(t *testing.T) {
 	// Insert 3 tasks that were locked within the last 60 seconds with eligible statuses
 	for i := 0; i < 3; i++ {
 		db.Exec(`INSERT INTO BountyBoard (type, status, payload, locked_at)
-			VALUES ('CodeEdit', 'Completed', 'recent task', datetime('now', '-5 seconds'))`)
+			VALUES ('CodeEdit', 'Locked', 'recent task', datetime('now', '-5 seconds'))`)
 	}
 
 	if !IsThrottledByBatchSize(db) {

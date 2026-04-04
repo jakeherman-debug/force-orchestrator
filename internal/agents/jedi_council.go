@@ -182,7 +182,15 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 		changedFiles := igit.ExtractDiffFiles(diff)
 		filesStr := strings.Join(changedFiles, ", ")
-		memorySummary := fmt.Sprintf("Task: %s", util.TruncateStr(directiveText(b.Payload), 400))
+		// Strip the [AUDIT FINDING ...] header line from audit-fix tasks so the memory
+		// summary starts with the actionable content (Title/Description) rather than metadata.
+		memPayload := b.Payload
+		if strings.HasPrefix(memPayload, "[AUDIT FINDING ") {
+			if nl := strings.Index(memPayload, "\n"); nl != -1 {
+				memPayload = strings.TrimLeft(memPayload[nl:], "\n")
+			}
+		}
+		memorySummary := fmt.Sprintf("Task: %s", util.TruncateStr(directiveText(memPayload), 400))
 		if ruling.Feedback != "" {
 			memorySummary += fmt.Sprintf("\nCouncil note: %s", ruling.Feedback)
 		}
