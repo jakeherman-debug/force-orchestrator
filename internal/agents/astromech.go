@@ -21,8 +21,6 @@ import (
 	"force-orchestrator/internal/util"
 )
 
-const astromechTimeout = 15 * time.Minute
-
 // maxOutputBytes is the circuit-breaker threshold for blown-context detection.
 // If Claude's combined output exceeds this size, the task is re-queued for
 // decomposition rather than sent to council review with potentially garbled output.
@@ -373,12 +371,13 @@ Do not re-do work that is already correctly committed.`
 	maxTurns := store.GetConfig(db, "max_turns", fmt.Sprintf("%d", defaultMaxTurns))
 
 	// Per-task timeout overrides the fleet default when set.
-	sessionTimeout := astromechTimeout
+	sessionTimeout := claude.AstromechTimeoutForAttempt(bounty.InfraFailures)
 	if bounty.TaskTimeout > 0 {
 		sessionTimeout = time.Duration(bounty.TaskTimeout) * time.Second
 	}
 
 	maxTurnsInt, _ := strconv.Atoi(maxTurns)
+	logger.Printf("Task %d: using timeout %v (infra_failures=%d)", bounty.ID, sessionTimeout, bounty.InfraFailures)
 	logger.Printf("Task %d: running claude CLI (timeout: %v)", bounty.ID, sessionTimeout)
 
 	// Heartbeat goroutine — logs every 2 minutes so fleet.log confirms Claude is alive
@@ -716,11 +715,12 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 
 	maxTurns := store.GetConfig(db, "max_turns", fmt.Sprintf("%d", defaultMaxTurns))
 
-	sessionTimeout := astromechTimeout
+	sessionTimeout := claude.AstromechTimeoutForAttempt(b.InfraFailures)
 	if b.TaskTimeout > 0 {
 		sessionTimeout = time.Duration(b.TaskTimeout) * time.Second
 	}
 
+	fgLogger.Printf("Task %d: using timeout %v (infra_failures=%d)", taskID, sessionTimeout, b.InfraFailures)
 	fmt.Printf("=== force run: task #%d ===\n", taskID)
 	fmt.Printf("Repo:    %s\n", b.TargetRepo)
 	fmt.Printf("Branch:  %s\n", branchName)
