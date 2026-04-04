@@ -461,25 +461,24 @@ The original task directive (what the code should accomplish) is shown below.`
 	rateLimitRetries.Delete(name)
 	claude.ClearRateLimitHits(db, name)
 
-	// ── Ownership check ───────────────────────────────────────────────────
-	var currentStatus, currentOwner string
-	db.QueryRow(`SELECT status, owner FROM BountyBoard WHERE id = ?`, bounty.ID).Scan(&currentStatus, &currentOwner)
-	if currentStatus != "Locked" || currentOwner != name {
-		logger.Printf("Task %d: ownership lost mid-run (status=%s, owner=%s) — recording and discarding result", bounty.ID, currentStatus, currentOwner)
-		// Record completed work so future agents have seance context even though result was lost.
+	// ── Ownership check (atomic) ──────────────────────────────────────────
+	// A SELECT followed by a separate UPDATE is a TOCTOU race: another agent or
+	// the inquisitor can claim the row between the two statements. Instead, issue
+	// a no-op UPDATE that only matches when we still own the row. Zero rows
+	// affected means ownership was lost while Claude was running.
+	ownerRes, _ := db.Exec(
+		`UPDATE BountyBoard SET status = 'Locked' WHERE id = ? AND owner = ? AND status = 'Locked'`,
+		bounty.ID, name,
+	)
+	if n, _ := ownerRes.RowsAffected(); n == 0 {
+		logger.Printf("Task %d: ownership lost mid-run — recording and discarding result", bounty.ID)
 		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Discarded")
 		store.LogAudit(db, name, "ownership-lost", bounty.ID,
-			fmt.Sprintf("Claude completed work but ownership changed mid-run: status=%s owner=%s", currentStatus, currentOwner))
+			"Claude completed work but ownership changed mid-run — work discarded")
 		// Clean up the branch — the work is gone.
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
 		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
-		// Escalate only when the task is in a state we don't understand — if it's Pending it's
-		// already queued for retry (inquisitor or operator reset it), so no escalation needed.
-		if currentStatus != "Pending" && currentStatus != "Completed" && currentStatus != "Failed" && currentStatus != "Escalated" {
-			CreateEscalation(db, bounty.ID, store.SeverityMedium,
-				fmt.Sprintf("Ownership lost mid-run: %s completed Claude work but task is in unexpected state (status=%s, owner=%s) — work was discarded", name, currentStatus, currentOwner))
-		}
 		return
 	}
 
