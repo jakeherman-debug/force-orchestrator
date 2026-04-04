@@ -15,17 +15,19 @@ type DashboardStatus struct {
 
 // DashboardTask is one row in GET /api/tasks
 type DashboardTask struct {
-	ID         int    `json:"id"`
-	Type       string `json:"type"`
-	Status     string `json:"status"`
-	Repo       string `json:"repo"`
-	Owner      string `json:"owner"`
-	RetryCount int    `json:"retry_count"`
-	ConvoyID   int    `json:"convoy_id"`
-	Payload    string `json:"payload"`
-	ErrorLog   string `json:"error_log,omitempty"`
-	LockedAt   string `json:"locked_at,omitempty"`
-	Priority   int    `json:"priority"`
+	ID             int    `json:"id"`
+	Type           string `json:"type"`
+	Status         string `json:"status"`
+	Repo           string `json:"repo"`
+	Owner          string `json:"owner"`
+	RetryCount     int    `json:"retry_count"`
+	ConvoyID       int    `json:"convoy_id"`
+	Payload        string `json:"payload"`
+	ErrorLog       string `json:"error_log,omitempty"`
+	LockedAt       string `json:"locked_at,omitempty"`
+	Priority       int    `json:"priority"`
+	RuntimeSeconds int    `json:"runtime_seconds"`
+	BlockedBy      []int  `json:"blocked_by"`
 }
 
 // DashboardMail is a single fleet mail message
@@ -61,24 +63,26 @@ type DashboardAttempt struct {
 
 // DashboardTaskDetail is the payload for GET /api/tasks/{id}
 type DashboardTaskDetail struct {
-	ID            int                `json:"id"`
-	Type          string             `json:"type"`
-	Status        string             `json:"status"`
-	Repo          string             `json:"repo"`
-	Owner         string             `json:"owner"`
-	ParentID      int                `json:"parent_id"`
-	ConvoyID      int                `json:"convoy_id"`
-	BranchName    string             `json:"branch_name"`
-	RetryCount    int                `json:"retry_count"`
-	InfraFailures int                `json:"infra_failures"`
-	Priority      int                `json:"priority"`
-	LockedAt      string             `json:"locked_at,omitempty"`
-	ErrorLog      string             `json:"error_log,omitempty"`
-	BroaderGoal   string             `json:"broader_goal,omitempty"`
-	Directive     string             `json:"directive"`
-	Memories      []DashboardMemory  `json:"memories"`
-	History       []DashboardAttempt `json:"history"`
-	Mail          []DashboardMail    `json:"mail"`
+	ID             int                `json:"id"`
+	Type           string             `json:"type"`
+	Status         string             `json:"status"`
+	Repo           string             `json:"repo"`
+	Owner          string             `json:"owner"`
+	ParentID       int                `json:"parent_id"`
+	ConvoyID       int                `json:"convoy_id"`
+	BranchName     string             `json:"branch_name"`
+	RetryCount     int                `json:"retry_count"`
+	InfraFailures  int                `json:"infra_failures"`
+	Priority       int                `json:"priority"`
+	LockedAt       string             `json:"locked_at,omitempty"`
+	ErrorLog       string             `json:"error_log,omitempty"`
+	BroaderGoal    string             `json:"broader_goal,omitempty"`
+	Directive      string             `json:"directive"`
+	RuntimeSeconds int                `json:"runtime_seconds"`
+	BlockedBy      []int              `json:"blocked_by"`
+	Memories       []DashboardMemory  `json:"memories"`
+	History        []DashboardAttempt `json:"history"`
+	Mail           []DashboardMail    `json:"mail"`
 }
 
 // DashboardEscalation is a single escalation
