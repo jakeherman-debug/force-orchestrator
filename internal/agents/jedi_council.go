@@ -140,14 +140,20 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 	if ruling.Approved {
 		logger.Printf("Task %d: APPROVED — merging branch %s", b.ID, branchName)
 		if mergeErr := igit.MergeAndCleanup(repoPath, branchName, worktreeDir); mergeErr != nil {
-			logger.Printf("Task %d: merge failed: %v", b.ID, mergeErr)
 			msg := fmt.Sprintf("Merge Err: %v", mergeErr)
-			histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Failed")
-			if tokIn > 0 || tokOut > 0 {
-				store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+			logger.Printf("Task %d: merge failed: %v", b.ID, mergeErr)
+			errStr := mergeErr.Error()
+			if strings.Contains(errStr, "conflict") || strings.Contains(errStr, "CONFLICT") {
+				logger.Printf("Task %d: merge conflict detected — escalating for operator intervention", b.ID)
+				histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Failed")
+				if tokIn > 0 || tokOut > 0 {
+					store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+				}
+				CreateEscalation(db, b.ID, store.SeverityHigh, msg)
+				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+			} else {
+				handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
 			}
-			store.FailBounty(db, b.ID, msg)
-			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 			return
 		}
 		store.UpdateBountyStatus(db, b.ID, "Completed")
