@@ -49,8 +49,11 @@ func GetOrCreateAgentWorktree(db *sql.DB, agentName, repoPath string) (string, e
 		exec.Command("git", "-C", repoPath, "worktree", "prune").Run()
 	}
 
-	worktreePath = filepath.Join(repoPath, "worktrees", agentName)
-	os.MkdirAll(filepath.Join(repoPath, "worktrees"), 0755)
+	// Place worktrees in a sibling directory (.force-worktrees/<repo>/<agent>) so they
+	// live outside the repo working tree and never appear in git status.
+	worktreeBase := filepath.Join(filepath.Dir(repoPath), ".force-worktrees", filepath.Base(repoPath))
+	worktreePath = filepath.Join(worktreeBase, agentName)
+	os.MkdirAll(worktreeBase, 0755)
 	exec.Command("git", "-C", repoPath, "worktree", "remove", worktreePath, "--force").Run()
 
 	base := GetDefaultBranch(repoPath)
@@ -109,7 +112,7 @@ func ResolveWorktreeDir(db *sql.DB, branchName, repoPath string, taskID int, bra
 			return p
 		}
 	}
-	return fmt.Sprintf("%s/worktrees/task-%d", repoPath, taskID)
+	return filepath.Join(filepath.Dir(repoPath), ".force-worktrees", filepath.Base(repoPath), fmt.Sprintf("task-%d", taskID))
 }
 
 // RunCmd runs a git subcommand in repoPath and returns combined output.
