@@ -510,6 +510,7 @@ Task management:
   who                                   Show which agents are active and what they're working on
   list [status[,status2]] [--status <s>] [--repo <name>] [--type <type>] [--limit N]
                                         List tasks; filters are optional and combinable
+  list active                           All non-terminal tasks (Pending, Locked, Planned, etc.)
   logs <id>                             Show full payload and error log for a task
   history [--full] <id>                 Show full Claude output for every attempt on a task
   reset <id>                            Reset a task to Pending (clears all error counts)

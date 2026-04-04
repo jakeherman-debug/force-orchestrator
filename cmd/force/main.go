@@ -194,6 +194,9 @@ func main() {
 			default:
 				if !strings.HasPrefix(listArgs[i], "--") {
 					statusFilter = listArgs[i]
+					if strings.EqualFold(statusFilter, "active") {
+						statusFilter = "Pending,Locked,Planned,AwaitingCaptainReview,UnderCaptainReview,AwaitingCouncilReview,UnderReview,Failed,Escalated,ConflictPending"
+					}
 				}
 			}
 		}
