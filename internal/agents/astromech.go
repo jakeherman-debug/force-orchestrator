@@ -299,6 +299,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 	}
 
 	var branchName string
+	var isResume bool
 	if cb := conflictBranchFromPayload(bounty.Payload); cb != "" {
 		// Conflict resolution task — check out the existing branch and start the merge
 		// so Claude sees the conflict markers and can resolve them.
@@ -312,7 +313,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		branchName = cb
 	} else {
 		var branchErr error
-		branchName, branchErr = igit.PrepareAgentBranch(worktreeDir, repoPath, bounty.ID, name)
+		branchName, isResume, branchErr = igit.PrepareAgentBranch(worktreeDir, repoPath, bounty.ID, name, bounty.BranchName)
 		if branchErr != nil {
 			msg := fmt.Sprintf("Branch Err: %v", branchErr)
 			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
@@ -321,7 +322,11 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		}
 	}
 	store.SetBranchName(db, bounty.ID, branchName)
-	logger.Printf("Task %d: branch %s ready in %s", bounty.ID, branchName, worktreeDir)
+	if isResume {
+		logger.Printf("Task %d: resuming existing branch %s in %s", bounty.ID, branchName, worktreeDir)
+	} else {
+		logger.Printf("Task %d: branch %s ready in %s", bounty.ID, branchName, worktreeDir)
+	}
 
 	// ── Build prompt ─────────────────────────────────────────────────────
 
@@ -334,9 +339,9 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		directiveSection = fmt.Sprintf("\n\n# OPERATOR DIRECTIVE\n%s", directive)
 	}
 
-	conflictResolutionCtx := ""
+	specialCtx := ""
 	if conflictBranchFromPayload(bounty.Payload) != "" {
-		conflictResolutionCtx = `
+		specialCtx = `
 
 # CONFLICT RESOLUTION TASK
 Your worktree has been set up with the feature branch checked out and a merge of the default branch already started.
@@ -350,12 +355,20 @@ Your job:
 5. Do NOT use git merge --abort. Resolve and commit.
 
 The original task directive (what the code should accomplish) is shown below.`
+	} else if isResume {
+		specialCtx = `
+
+# RESUMING PRIOR WORK
+Your previous work is already committed on this branch — you are NOT starting from scratch.
+Run: git log --oneline -5 to see what has already been done.
+Read the feedback at the bottom of YOUR CURRENT DIRECTIVE, then make a NEW forward commit that addresses only what was flagged.
+Do not re-do work that is already correctly committed.`
 	}
 
 	systemPrompt := AstromechSystemPrompt + directiveSection
 	fullPrompt := fmt.Sprintf("%s%s%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s",
 		systemPrompt, goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext,
-		conflictResolutionCtx, directiveText(bounty.Payload))
+		specialCtx, directiveText(bounty.Payload))
 
 	maxTurns := store.GetConfig(db, "max_turns", fmt.Sprintf("%d", defaultMaxTurns))
 
@@ -650,7 +663,8 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 		os.Exit(1)
 	}
 
-	branchName, branchErr := igit.PrepareAgentBranch(worktreeDir, repoPath, taskID, fgAgent)
+	// Foreground runs always start fresh — pass empty existingBranch to ignore any prior branch.
+	branchName, _, branchErr := igit.PrepareAgentBranch(worktreeDir, repoPath, taskID, fgAgent, "")
 	if branchErr != nil {
 		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '' WHERE id = ?`, taskID)
 		fmt.Printf("Branch error: %v\n", branchErr)

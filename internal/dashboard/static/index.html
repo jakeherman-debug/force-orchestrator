@@ -77,9 +77,10 @@
       <button class="filter-btn active" data-filter="active"  onclick="setTaskFilter('active')">Active</button>
       <button class="filter-btn"        data-filter="review"  onclick="setTaskFilter('review')">Review</button>
       <button class="filter-btn"        data-filter="pending" onclick="setTaskFilter('pending')">Pending</button>
-      <button class="filter-btn"        data-filter="failed"  onclick="setTaskFilter('failed')">Failed</button>
-      <button class="filter-btn"        data-filter="done"    onclick="setTaskFilter('done')">Completed</button>
-      <button class="filter-btn"        data-filter="all"     onclick="setTaskFilter('all')">All</button>
+      <button class="filter-btn"        data-filter="failed"    onclick="setTaskFilter('failed')">Failed</button>
+      <button class="filter-btn"        data-filter="cancelled" onclick="setTaskFilter('cancelled')">Cancelled</button>
+      <button class="filter-btn"        data-filter="done"      onclick="setTaskFilter('done')">Completed</button>
+      <button class="filter-btn"        data-filter="all"       onclick="setTaskFilter('all')">All</button>
       <div class="filter-spacer"></div>
       <input class="search-input" id="task-search" type="text" placeholder="Search tasks…" oninput="renderTasks()">
     </div>

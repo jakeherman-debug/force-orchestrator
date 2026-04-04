@@ -39,7 +39,8 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 			continue
 		}
 
-		// Check for any failed or escalated tasks — convoy is stalled
+		// Check for any failed or escalated tasks — convoy is stalled.
+		// Cancelled tasks are not problems: they represent intentional operator removal of scope.
 		var problemCount int
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit' AND status IN ('Failed','Escalated')`, c.id).Scan(&problemCount)
 

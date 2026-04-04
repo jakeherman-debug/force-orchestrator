@@ -6,8 +6,10 @@ import (
 )
 
 // ConvoyProgress returns (completed, total) task counts for a convoy.
+// Cancelled tasks are excluded from total — they represent intentionally removed scope,
+// not blocking work. A convoy with 2 done + 2 cancelled shows 2/2, not 2/4.
 func ConvoyProgress(db *sql.DB, convoyID int) (completed, total int) {
-	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit'`, convoyID).Scan(&total); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit' AND status != 'Cancelled'`, convoyID).Scan(&total); err != nil {
 		log.Printf("ConvoyProgress: scan total error for convoy %d: %v", convoyID, err)
 		return
 	}
@@ -52,7 +54,7 @@ func ResetConvoyTasks(db *sql.DB, convoyID int) int {
 func CancelConvoyPendingTasks(db *sql.DB, convoyID int) int {
 	res, _ := db.Exec(`
 		UPDATE BountyBoard
-		SET status = 'Failed', owner = '', error_log = 'Operator rejected convoy plan'
+		SET status = 'Cancelled', owner = '', error_log = 'Operator rejected convoy plan'
 		WHERE convoy_id = ? AND status IN ('Planned', 'Pending')`, convoyID)
 	n, _ := res.RowsAffected()
 	return int(n)

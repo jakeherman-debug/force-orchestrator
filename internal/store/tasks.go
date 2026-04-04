@@ -132,10 +132,11 @@ func FailBounty(db *sql.DB, id int, errorMsg string) {
 		errorMsg, id)
 }
 
-// CancelTask marks a task as Failed with a cancellation reason.
+// CancelTask marks a task as Cancelled with a reason. Cancelled is distinct from Failed —
+// it reflects deliberate operator action, not an agent error.
 // No-op if the task is already Completed. Returns true if the task was cancelled.
 func CancelTask(db *sql.DB, id int, reason string) bool {
-	res, _ := db.Exec(`UPDATE BountyBoard SET status = 'Failed', owner = '', locked_at = '', error_log = ?
+	res, _ := db.Exec(`UPDATE BountyBoard SET status = 'Cancelled', owner = '', locked_at = '', error_log = ?
 		WHERE id = ? AND status != 'Completed'`, reason, id)
 	n, _ := res.RowsAffected()
 	return n > 0
@@ -158,8 +159,10 @@ func ResetAllFailed(db *sql.DB) int {
 }
 
 // ReturnTaskForRework sends a task back to Pending with a new payload (feedback injected).
+// branch_name is intentionally preserved so the agent can resume from prior work rather
+// than redoing everything from scratch.
 func ReturnTaskForRework(db *sql.DB, id int, newPayload string) {
-	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '', payload = ?, branch_name = '', checkpoint = ''
+	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '', payload = ?, checkpoint = ''
 		WHERE id = ?`, newPayload, id)
 }
 

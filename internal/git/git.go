@@ -68,32 +68,44 @@ func GetOrCreateAgentWorktree(db *sql.DB, agentName, repoPath string) (string, e
 	return worktreePath, nil
 }
 
-// PrepareAgentBranch creates a fresh task branch in the agent's persistent worktree,
-// based off the current default branch HEAD. Returns the branch name.
-// Any uncommitted changes in the worktree are forcibly discarded — the worktree
-// belongs to the agent for this task only and should always start from a clean base.
-func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName string) (string, error) {
-	branchName := fmt.Sprintf("agent/%s/task-%d", agentName, taskID)
-	base := GetDefaultBranch(repoPath)
-
-	// Force-discard any uncommitted changes (e.g. from a prior interrupted run)
-	// before detaching. Without -f, checkout errors on a dirty tree.
+// PrepareAgentBranch creates or resumes a task branch in the agent's persistent worktree.
+// If existingBranch is non-empty and that branch still exists in the repo, the function
+// checks it out so the agent can build on top of its prior work (isResume=true).
+// Otherwise a fresh branch is created from the current default branch HEAD (isResume=false).
+// Any uncommitted changes in the worktree are forcibly discarded before switching branches.
+func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, existingBranch string) (branchName string, isResume bool, err error) {
+	// Force-discard any uncommitted changes before switching branches.
 	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
 	exec.Command("git", "-C", worktreeDir, "clean", "-fd").Run()
 
-	if out, err := exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("failed to detach to %s: %s", base, strings.TrimSpace(string(out)))
+	// Resume an existing branch if one was preserved from a prior attempt.
+	if existingBranch != "" {
+		verifyOut, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", existingBranch).CombinedOutput()
+		if verifyErr == nil && strings.TrimSpace(string(verifyOut)) != "" {
+			if _, coErr := exec.Command("git", "-C", worktreeDir, "checkout", existingBranch).CombinedOutput(); coErr == nil {
+				return existingBranch, true, nil
+			}
+			// Checkout failed (e.g. worktree conflict) — fall through to fresh branch.
+		}
 	}
 
-	// Clean up any stale branch from a prior failed attempt
-	exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+	// Fresh branch from current main.
+	base := GetDefaultBranch(repoPath)
+	newBranch := fmt.Sprintf("agent/%s/task-%d", agentName, taskID)
 
-	out, err := exec.Command("git", "-C", worktreeDir, "checkout", "-b", branchName).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("failed to create task branch: %s", strings.TrimSpace(string(out)))
+	if out, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).CombinedOutput(); coErr != nil {
+		return "", false, fmt.Errorf("failed to detach to %s: %s", base, strings.TrimSpace(string(out)))
 	}
 
-	return branchName, nil
+	// Clean up any stale branch from a prior failed attempt.
+	exec.Command("git", "-C", repoPath, "branch", "-D", newBranch).Run()
+
+	out, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "-b", newBranch).CombinedOutput()
+	if coErr != nil {
+		return "", false, fmt.Errorf("failed to create task branch: %s", strings.TrimSpace(string(out)))
+	}
+
+	return newBranch, false, nil
 }
 
 // GetAgentWorktreePath looks up the persistent worktree path for an agent+repo pair.

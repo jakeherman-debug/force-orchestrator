@@ -148,12 +148,13 @@ function switchTab(name) {
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 const FILTER_STATUS = {
-  active:  'Locked',
-  review:  'AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
-  pending: 'Pending,Blocked,Planned',
-  failed:  'Failed,Escalated',
-  done:    'Completed',
-  all:     '',
+  active:    'Locked',
+  review:    'AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
+  pending:   'Pending,Blocked,Planned',
+  failed:    'Failed,Escalated',
+  done:      'Completed',
+  cancelled: 'Cancelled',
+  all:       '',
 };
 
 async function loadTasks() {

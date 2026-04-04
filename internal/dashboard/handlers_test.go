@@ -1,4 +1,4 @@
-package main
+package dashboard
 
 import (
 	"context"
@@ -38,34 +38,6 @@ func TestHandleHealthz_ReturnsOK(t *testing.T) {
 	}
 	if _, ok := got["ts"]; !ok {
 		t.Error("missing ts field")
-	}
-}
-
-// ── handleRoot ────────────────────────────────────────────────────────────────
-
-func TestHandleRoot_ServesHTML(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handleRoot(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-	if ct := w.Header().Get("Content-Type"); ct != "text/html" {
-		t.Errorf("unexpected Content-Type: %s", ct)
-	}
-	if !strings.Contains(w.Body.String(), "Galactic Fleet Command") {
-		t.Error("response body missing expected HTML content")
-	}
-}
-
-func TestHandleRoot_NotFoundForOtherPaths(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/unknown", nil)
-	w := httptest.NewRecorder()
-	handleRoot(w, r)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
 	}
 }
 
@@ -293,104 +265,60 @@ func TestHandleTasks_CORS(t *testing.T) {
 	}
 }
 
-// ── handleEscalationAck ───────────────────────────────────────────────────────
+// ── task cancel (Cancelled status) ───────────────────────────────────────────
 
-func TestHandleEscalationAck_Success(t *testing.T) {
+func TestHandleTasksSubroutes_Cancel(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	taskID := store.AddBounty(db, 0, "Feature", "some task")
-	db.Exec(`INSERT INTO Escalations (task_id, severity, message, status) VALUES (?, 'LOW', 'problem', 'Open')`, taskID)
-	var escID int
-	db.QueryRow(`SELECT id FROM Escalations WHERE task_id = ?`, taskID).Scan(&escID)
+	id := store.AddBounty(db, 0, "Feature", "some task")
 
-	path := fmt.Sprintf("/api/escalations/%d/ack", escID)
-	r := httptest.NewRequest(http.MethodPost, path, nil)
+	r := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/tasks/%d/cancel", id), nil)
 	w := httptest.NewRecorder()
-	handleEscalationAck(db)(w, r)
+	handleTasksSubroutes(db)(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if resp["ok"] != true {
-		t.Errorf("expected ok:true, got %v", resp["ok"])
-	}
-
 	var status string
-	db.QueryRow(`SELECT status FROM Escalations WHERE id = ?`, escID).Scan(&status)
-	if status != "Acknowledged" {
-		t.Errorf("expected escalation to be Acknowledged, got %s", status)
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&status)
+	if status != "Cancelled" {
+		t.Errorf("expected status Cancelled, got %s", status)
 	}
 }
 
-func TestHandleEscalationAck_MethodNotAllowed(t *testing.T) {
+func TestHandleTasksSubroutes_CancelCompleted(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	r := httptest.NewRequest(http.MethodGet, "/api/escalations/1/ack", nil)
-	w := httptest.NewRecorder()
-	handleEscalationAck(db)(w, r)
+	id := store.AddBounty(db, 0, "Feature", "done task")
+	db.Exec(`UPDATE BountyBoard SET status = 'Completed' WHERE id = ?`, id)
 
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", w.Code)
+	r := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/tasks/%d/cancel", id), nil)
+	w := httptest.NewRecorder()
+	handleTasksSubroutes(db)(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d", w.Code)
 	}
 }
 
-func TestHandleEscalationAck_ZeroID(t *testing.T) {
-	db := store.InitHolocronDSN(":memory:")
-	defer db.Close()
+// ── handleTasksSubroutes — retry ─────────────────────────────────────────────
 
-	r := httptest.NewRequest(http.MethodPost, "/api/escalations/0/ack", nil)
-	w := httptest.NewRecorder()
-	handleEscalationAck(db)(w, r)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
-	}
-}
-
-func TestHandleEscalationAck_BadActionPath(t *testing.T) {
-	db := store.InitHolocronDSN(":memory:")
-	defer db.Close()
-
-	r := httptest.NewRequest(http.MethodPost, "/api/escalations/1/other", nil)
-	w := httptest.NewRecorder()
-	handleEscalationAck(db)(w, r)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
-	}
-}
-
-// ── handleTaskRetry ───────────────────────────────────────────────────────────
-
-func TestHandleTaskRetry_Success(t *testing.T) {
+func TestHandleTasksSubroutes_Retry(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
 	id := store.AddBounty(db, 0, "Feature", "fix something")
 	db.Exec(`UPDATE BountyBoard SET status = 'Failed', error_log = 'oops', retry_count = 3 WHERE id = ?`, id)
 
-	path := fmt.Sprintf("/api/tasks/%d/retry", id)
-	r := httptest.NewRequest(http.MethodPost, path, nil)
+	r := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/tasks/%d/retry", id), nil)
 	w := httptest.NewRecorder()
-	handleTaskRetry(db)(w, r)
+	handleTasksSubroutes(db)(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if resp["ok"] != true {
-		t.Errorf("expected ok:true")
-	}
-
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&status)
 	if status != "Pending" {
@@ -398,7 +326,7 @@ func TestHandleTaskRetry_Success(t *testing.T) {
 	}
 }
 
-func TestHandleTaskRetry_ResetsEscalated(t *testing.T) {
+func TestHandleTasksSubroutes_RetryEscalated(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -407,7 +335,7 @@ func TestHandleTaskRetry_ResetsEscalated(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/tasks/%d/retry", id), nil)
 	w := httptest.NewRecorder()
-	handleTaskRetry(db)(w, r)
+	handleTasksSubroutes(db)(w, r)
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&status)
@@ -416,46 +344,46 @@ func TestHandleTaskRetry_ResetsEscalated(t *testing.T) {
 	}
 }
 
-func TestHandleTaskRetry_MethodNotAllowed(t *testing.T) {
+func TestHandleTasksSubroutes_RetryMethodNotAllowed(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
 	r := httptest.NewRequest(http.MethodGet, "/api/tasks/1/retry", nil)
 	w := httptest.NewRecorder()
-	handleTaskRetry(db)(w, r)
+	handleTasksSubroutes(db)(w, r)
 
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for GET on action route, got %d", w.Code)
 	}
 }
 
-func TestHandleTaskRetry_NonNumericID(t *testing.T) {
+func TestHandleTasksSubroutes_BadID(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
 	r := httptest.NewRequest(http.MethodPost, "/api/tasks/abc/retry", nil)
 	w := httptest.NewRecorder()
-	handleTaskRetry(db)(w, r)
+	handleTasksSubroutes(db)(w, r)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
 
-func TestHandleTaskRetry_BadActionPath(t *testing.T) {
+func TestHandleTasksSubroutes_UnknownAction(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	r := httptest.NewRequest(http.MethodPost, "/api/tasks/1/cancel", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/tasks/1/unknown-action", nil)
 	w := httptest.NewRecorder()
-	handleTaskRetry(db)(w, r)
+	handleTasksSubroutes(db)(w, r)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
 	}
 }
 
-func TestHandleTaskRetry_DoesNotResetLocked(t *testing.T) {
+func TestHandleTasksSubroutes_DoesNotResetLocked(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -464,9 +392,9 @@ func TestHandleTaskRetry_DoesNotResetLocked(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/tasks/%d/retry", id), nil)
 	w := httptest.NewRecorder()
-	handleTaskRetry(db)(w, r)
+	handleTasksSubroutes(db)(w, r)
 
-	// Response is 200 (SQL UPDATE simply matches 0 rows), but status must be unchanged
+	// Retry only affects Failed/Escalated — Locked task stays Locked
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&status)
 	if status != "Locked" {
@@ -474,15 +402,66 @@ func TestHandleTaskRetry_DoesNotResetLocked(t *testing.T) {
 	}
 }
 
-// ── handleEvents ─────────────────────────────────────────────────────────────
+// ── handleEscalationsSubroutes — ack ─────────────────────────────────────────
 
-func TestHandleEvents_MissingFile(t *testing.T) {
+func TestHandleEscalationsSubroutes_Ack(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	taskID := store.AddBounty(db, 0, "Feature", "some task")
+	db.Exec(`INSERT INTO Escalations (task_id, severity, message, status) VALUES (?, 'LOW', 'problem', 'Open')`, taskID)
+	var escID int
+	db.QueryRow(`SELECT id FROM Escalations WHERE task_id = ?`, taskID).Scan(&escID)
+
+	r := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/escalations/%d/ack", escID), nil)
+	w := httptest.NewRecorder()
+	handleEscalationsSubroutes(db)(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var status string
+	db.QueryRow(`SELECT status FROM Escalations WHERE id = ?`, escID).Scan(&status)
+	if status != "Acknowledged" {
+		t.Errorf("expected escalation to be Acknowledged, got %s", status)
+	}
+}
+
+func TestHandleEscalationsSubroutes_ZeroID(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/escalations/0/ack", nil)
+	w := httptest.NewRecorder()
+	handleEscalationsSubroutes(db)(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleEscalationsSubroutes_UnknownAction(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/escalations/1/unknown", nil)
+	w := httptest.NewRecorder()
+	handleEscalationsSubroutes(db)(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// ── handleHolonetStream ───────────────────────────────────────────────────────
+
+func TestHandleHolonetStream_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "nonexistent.jsonl")
 
 	r := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	w := httptest.NewRecorder()
-	handleEvents(logPath)(w, r)
+	handleHolonetStream(logPath)(w, r)
 
 	body := w.Body.String()
 	if !strings.Contains(body, "holonet.jsonl not found") {
@@ -490,7 +469,7 @@ func TestHandleEvents_MissingFile(t *testing.T) {
 	}
 }
 
-func TestHandleEvents_ContextCancelReturns(t *testing.T) {
+func TestHandleHolonetStream_ContextCancelReturns(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "events.jsonl")
 	if err := os.WriteFile(logPath, []byte(""), 0644); err != nil {
@@ -505,19 +484,18 @@ func TestHandleEvents_ContextCancelReturns(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleEvents(logPath)(w, r)
+		handleHolonetStream(logPath)(w, r)
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		// handler returned as expected
 	case <-time.After(2 * time.Second):
-		t.Fatal("handleEvents did not return after context cancellation")
+		t.Fatal("handleHolonetStream did not return after context cancellation")
 	}
 }
 
-func TestHandleEvents_SSEHeaders(t *testing.T) {
+func TestHandleHolonetStream_SSEHeaders(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "events.jsonl")
 	if err := os.WriteFile(logPath, []byte(""), 0644); err != nil {
@@ -529,7 +507,7 @@ func TestHandleEvents_SSEHeaders(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
-	handleEvents(logPath)(w, r)
+	handleHolonetStream(logPath)(w, r)
 
 	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("expected text/event-stream, got %s", ct)
@@ -541,4 +519,3 @@ func TestHandleEvents_SSEHeaders(t *testing.T) {
 		t.Error("missing CORS header")
 	}
 }
-

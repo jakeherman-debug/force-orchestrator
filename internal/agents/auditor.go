@@ -19,12 +19,14 @@ const auditorTimeout = 25 * time.Minute
 
 // AuditFinding is one issue found by the Auditor agent.
 type AuditFinding struct {
+	ID           int    `json:"id"`            // 1-based, used for blocked_by references
 	Severity     string `json:"severity"`      // HIGH | MEDIUM | LOW
 	Title        string `json:"title"`         // short label, becomes CodeEdit task title
 	Repo         string `json:"repo"`          // target repo for the fix task
 	Location     string `json:"location"`      // file:line or package path
 	Description  string `json:"description"`   // full explanation of the issue
 	SuggestedFix string `json:"suggested_fix"` // what the Astromech should do
+	BlockedBy    []int  `json:"blocked_by"`    // IDs of findings that must complete first
 }
 
 type auditReport struct {
@@ -56,15 +58,24 @@ Respond ONLY with a JSON object (no markdown, no prose outside the JSON):
   "summary": "one-paragraph summary of what you found",
   "findings": [
     {
+      "id": 1,
       "severity": "HIGH|MEDIUM|LOW",
       "title": "Short descriptive title (max 80 chars)",
       "repo": "registered-repo-name",
       "location": "path/to/file.go:42 or package name",
       "description": "Clear explanation of the issue and why it matters",
-      "suggested_fix": "Concrete instructions for the Astromech — what to change and how"
+      "suggested_fix": "Concrete instructions for the Astromech — what to change and how",
+      "blocked_by": []
     }
   ]
 }
+
+DEPENDENCY RULES (blocked_by):
+- Number findings starting from 1, incrementing by 1.
+- If fixing finding B requires the changes from finding A to already be in place, put A's id in B's blocked_by array.
+- More importantly: if two findings touch the same file or overlapping code, they MUST be sequenced — put the lower-severity or lower-impact one in blocked_by of the other. Two agents must never modify the same file concurrently.
+- If a finding has no dependencies, set blocked_by to [].
+- blocked_by values must reference an id within this same response.
 
 If findings is an empty array, that is a valid result meaning no issues were found.
 If you cannot complete the audit without human input, emit [ESCALATED:LOW|MEDIUM|HIGH:reason] instead of JSON.`
@@ -194,19 +205,45 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 		return
 	}
 
+	// First pass: insert all tasks and build a finding ID → real task ID mapping.
+	idMapping := make(map[int]int, len(report.Findings))
 	var queued []string
 	for i, f := range report.Findings {
 		if strings.TrimSpace(f.Title) == "" || strings.TrimSpace(f.Repo) == "" {
 			logger.Printf("Task %d: skipping finding %d (missing title or repo)", bounty.ID, i+1)
 			continue
 		}
-		payload := buildFindingPayload(bounty.ID, i+1, f)
-		_, err := store.AddConvoyTask(db, bounty.ID, f.Repo, payload, convoyID, bounty.Priority, "Planned")
+		findingNum := i + 1
+		if f.ID > 0 {
+			findingNum = f.ID
+		}
+		payload := buildFindingPayload(bounty.ID, findingNum, f)
+		taskID, err := store.AddConvoyTask(db, bounty.ID, f.Repo, payload, convoyID, bounty.Priority, "Planned")
 		if err != nil {
-			logger.Printf("Task %d: failed to queue finding %d: %v", bounty.ID, i+1, err)
+			logger.Printf("Task %d: failed to queue finding %d: %v", bounty.ID, findingNum, err)
 			continue
 		}
+		idMapping[findingNum] = taskID
 		queued = append(queued, fmt.Sprintf("[%s] %s — %s", f.Severity, f.Title, f.Location))
+	}
+
+	// Second pass: wire up dependencies between findings.
+	for _, f := range report.Findings {
+		findingNum := f.ID
+		if findingNum == 0 {
+			continue
+		}
+		taskID, ok := idMapping[findingNum]
+		if !ok {
+			continue
+		}
+		for _, depFindingID := range f.BlockedBy {
+			if depTaskID, ok := idMapping[depFindingID]; ok && depTaskID > 0 {
+				store.AddDependency(db, taskID, depTaskID)
+				logger.Printf("Task %d: finding #%d blocks finding #%d (task #%d → #%d)",
+					bounty.ID, depFindingID, findingNum, depTaskID, taskID)
+			}
+		}
 	}
 
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
