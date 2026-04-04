@@ -78,6 +78,7 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jsonCORS(w)
 		statusFilter := r.URL.Query().Get("status")
+		convoyIDStr := r.URL.Query().Get("convoy_id")
 		query := `SELECT id, type, status, target_repo, owner, retry_count, convoy_id,
 			payload, IFNULL(error_log,''), IFNULL(locked_at,''), COALESCE(priority,0),
 			COALESCE(CAST((julianday('now') - julianday(NULLIF(locked_at,''))) * 86400 AS INTEGER), 0),
@@ -88,6 +89,7 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id)
 			FROM BountyBoard`
 		args := []any{}
+		var conditions []string
 		if statusFilter != "" {
 			statuses := strings.Split(statusFilter, ",")
 			placeholders := make([]string, len(statuses))
@@ -95,7 +97,17 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 				placeholders[i] = "?"
 				args = append(args, strings.TrimSpace(s))
 			}
-			query += ` WHERE status IN (` + strings.Join(placeholders, ",") + `)`
+			conditions = append(conditions, `status IN (`+strings.Join(placeholders, ",")+`)`)
+		}
+		if convoyIDStr != "" {
+			convoyID, err := strconv.Atoi(convoyIDStr)
+			if err == nil && convoyID != 0 {
+				conditions = append(conditions, `convoy_id = ?`)
+				args = append(args, convoyID)
+			}
+		}
+		if len(conditions) > 0 {
+			query += ` WHERE ` + strings.Join(conditions, ` AND `)
 		}
 		query += ` ORDER BY id DESC LIMIT 500`
 
