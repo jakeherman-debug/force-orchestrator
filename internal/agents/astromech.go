@@ -423,18 +423,6 @@ Do not re-do work that is already correctly committed.`
 	}
 	logger.Printf("Task %d: claude output preview:\n%s", bounty.ID, outputPreview)
 
-	// Scan output for checkpoint signals
-	for _, line := range strings.Split(outputStr, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "[CHECKPOINT:") && strings.HasSuffix(line, "]") {
-			cp := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "[CHECKPOINT:"), "]"))
-			if cp != "" {
-				store.UpdateCheckpoint(db, bounty.ID, cp)
-				logger.Printf("Task %d: checkpoint recorded: %s", bounty.ID, cp)
-			}
-		}
-	}
-
 	// ── Handle Claude CLI errors ─────────────────────────────────────────
 
 	if err != nil {
@@ -474,46 +462,81 @@ Do not re-do work that is already correctly committed.`
 	rateLimitRetries.Delete(name)
 	claude.ClearRateLimitHits(db, name)
 
-	// ── Ownership check (atomic) ──────────────────────────────────────────
+	processAstromechOutput(db, name, bounty, sessionID, outputStr, worktreeDir, branchName, repoPath, logger, true)
+}
+
+// processAstromechOutput handles all post-Claude-run logic shared between the daemon
+// loop (runAstromechTask) and the foreground runner (RunTaskForeground): checkpoint
+// scanning, optional ownership check, output size circuit breaker, signal parsing
+// (ESCALATED, SHARD_NEEDED, DONE), commit inference, and history recording.
+// checkOwnership should be true for daemon runs to guard against inquisitor races.
+func processAstromechOutput(
+	db *sql.DB,
+	name string,
+	bounty *store.Bounty,
+	sessionID string,
+	outputStr string,
+	worktreeDir string,
+	branchName string,
+	repoPath string,
+	logger interface{ Printf(string, ...any) },
+	checkOwnership bool,
+) {
+	taskID := bounty.ID
+
+	// Scan output for checkpoint signals
+	for _, line := range strings.Split(outputStr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[CHECKPOINT:") && strings.HasSuffix(line, "]") {
+			cp := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "[CHECKPOINT:"), "]"))
+			if cp != "" {
+				store.UpdateCheckpoint(db, taskID, cp)
+				logger.Printf("Task %d: checkpoint recorded: %s", taskID, cp)
+			}
+		}
+	}
+
+	// ── Ownership check (atomic, daemon only) ────────────────────────────
 	// A SELECT followed by a separate UPDATE is a TOCTOU race: another agent or
 	// the inquisitor can claim the row between the two statements. Instead, issue
 	// a no-op UPDATE that only matches when we still own the row. Zero rows
 	// affected means ownership was lost while Claude was running.
-	ownerRes, _ := db.Exec(
-		`UPDATE BountyBoard SET status = 'Locked' WHERE id = ? AND owner = ? AND status = 'Locked'`,
-		bounty.ID, name,
-	)
-	if n, _ := ownerRes.RowsAffected(); n == 0 {
-		logger.Printf("Task %d: ownership lost mid-run — recording and discarding result", bounty.ID)
-		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Discarded")
-		store.LogAudit(db, name, "ownership-lost", bounty.ID,
-			"Claude completed work but ownership changed mid-run — work discarded")
-		// Clean up the branch — the work is gone.
-		base := igit.GetDefaultBranch(repoPath)
-		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
-		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
-		return
+	if checkOwnership {
+		ownerRes, _ := db.Exec(
+			`UPDATE BountyBoard SET status = 'Locked' WHERE id = ? AND owner = ? AND status = 'Locked'`,
+			taskID, name,
+		)
+		if n, _ := ownerRes.RowsAffected(); n == 0 {
+			logger.Printf("Task %d: ownership lost mid-run — recording and discarding result", taskID)
+			store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Discarded")
+			store.LogAudit(db, name, "ownership-lost", taskID,
+				"Claude completed work but ownership changed mid-run — work discarded")
+			base := igit.GetDefaultBranch(repoPath)
+			exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
+			exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+			return
+		}
 	}
 
 	// ── Output size circuit breaker ──────────────────────────────────────
 	if len(outputStr) > maxOutputBytes {
-		logger.Printf("Task %d: output too large (%d bytes) — likely context-blown, re-queuing as Decompose", bounty.ID, len(outputStr))
-		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr[:min(len(outputStr), 4000)]+"...[truncated for history]", "ContextBlown")
-		store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
+		logger.Printf("Task %d: output too large (%d bytes) — likely context-blown, re-queuing as Decompose", taskID, len(outputStr))
+		store.RecordTaskHistory(db, taskID, name, sessionID, outputStr[:min(len(outputStr), 4000)]+"...[truncated for history]", "ContextBlown")
+		store.StoreFleetMemory(db, bounty.TargetRepo, taskID, "failure",
 			fmt.Sprintf("Task produced %d bytes of output (context blown) — was re-queued for decomposition.\nTask: %s",
 				len(outputStr), util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
 		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
-		store.AddBounty(db, bounty.ID, "Decompose", bounty.Payload)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
-		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, name, bounty.ID))
+		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
+		store.UpdateBountyStatus(db, taskID, "Completed")
+		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, name, taskID))
 		store.SendMail(db, name, "operator",
-			fmt.Sprintf("[SHARD] Task #%d context-blown — re-queued for decomposition", bounty.ID),
+			fmt.Sprintf("[SHARD] Task #%d context-blown — re-queued for decomposition", taskID),
 			fmt.Sprintf("Task #%d produced %d bytes of output, exceeding the %d-byte limit.\n\nThis indicates Claude hit the context limit mid-task. The task has been re-queued as a Decompose request so Commander can break it into smaller pieces.\n\nRepo: %s\nOriginal task:\n%s",
-				bounty.ID, len(outputStr), maxOutputBytes, bounty.TargetRepo, util.TruncateStr(bounty.Payload, 500)),
-			bounty.ID, store.MailTypeAlert)
+				taskID, len(outputStr), maxOutputBytes, bounty.TargetRepo, util.TruncateStr(bounty.Payload, 500)),
+			taskID, store.MailTypeAlert)
 		return
 	}
 
@@ -521,108 +544,108 @@ Do not re-do work that is already correctly committed.`
 
 	// Astromech signaled it needs human input
 	if sev, msg, ok := ParseEscalationSignal(outputStr); ok {
-		logger.Printf("Task %d: escalated [%s] %s", bounty.ID, sev, msg)
-		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Escalated")
-		CreateEscalation(db, bounty.ID, sev, msg)
-		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, bounty.ID, sev, msg))
+		logger.Printf("Task %d: escalated [%s] %s", taskID, sev, msg)
+		store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Escalated")
+		CreateEscalation(db, taskID, sev, msg)
+		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, taskID, sev, msg))
 		store.SendMail(db, name, "operator",
-			fmt.Sprintf("[%s] Task #%d escalated — %s", string(sev), bounty.ID, bounty.TargetRepo),
+			fmt.Sprintf("[%s] Task #%d escalated — %s", string(sev), taskID, bounty.TargetRepo),
 			fmt.Sprintf("Agent %s escalated task #%d at %s severity.\n\nRepo: %s\nReason: %s\n\nTask payload:\n%s",
-				name, bounty.ID, string(sev), bounty.TargetRepo, msg, util.TruncateStr(bounty.Payload, 500)),
-			bounty.ID, store.MailTypeAlert)
+				name, taskID, string(sev), bounty.TargetRepo, msg, util.TruncateStr(bounty.Payload, 500)),
+			taskID, store.MailTypeAlert)
 		return
 	}
 
 	// Astromech detected the task is too large — hand off to Commander
 	if strings.Contains(outputStr, "[SHARD_NEEDED]") {
-		logger.Printf("Task %d: task too large, re-queuing as Decompose for Commander", bounty.ID)
-		store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Sharded")
-		store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
+		logger.Printf("Task %d: task too large, re-queuing as Decompose for Commander", taskID)
+		store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Sharded")
+		store.StoreFleetMemory(db, bounty.TargetRepo, taskID, "failure",
 			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
 				util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
 		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
-		store.AddBounty(db, bounty.ID, "Decompose", bounty.Payload)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
-		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, name, bounty.ID))
+		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
+		store.UpdateBountyStatus(db, taskID, "Completed")
+		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, name, taskID))
 		store.SendMail(db, name, "operator",
-			fmt.Sprintf("[SHARD] Task #%d too large — re-queued for decomposition", bounty.ID),
+			fmt.Sprintf("[SHARD] Task #%d too large — re-queued for decomposition", taskID),
 			fmt.Sprintf("Task #%d was determined to be too large for a single session and has been re-queued as a Decompose request for Commander to break into smaller pieces.\n\nRepo: %s\nOriginal task:\n%s",
-				bounty.ID, bounty.TargetRepo, util.TruncateStr(bounty.Payload, 500)),
-			bounty.ID, store.MailTypeAlert)
+				taskID, bounty.TargetRepo, util.TruncateStr(bounty.Payload, 500)),
+			taskID, store.MailTypeAlert)
 		return
 	}
 
 	// Explicit [DONE] signal — agent is confident work is committed, skip inference
 	if strings.Contains(outputStr, "[DONE]") {
 		nextStatus := nextReviewStatus(db, bounty.ConvoyID)
-		logger.Printf("Task %d: [DONE] signal received — submitting for review (%s)", bounty.ID, nextStatus)
-		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Completed")
+		logger.Printf("Task %d: [DONE] signal received — submitting for review (%s)", taskID, nextStatus)
+		histID := store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Completed")
 		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 		}
-		telemetry.EmitEvent(telemetry.EventTaskDoneSignal(sessionID, name, bounty.ID))
-		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, bounty.ID))
-		store.UpdateBountyStatus(db, bounty.ID, nextStatus)
+		telemetry.EmitEvent(telemetry.EventTaskDoneSignal(sessionID, name, taskID))
+		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
+		store.UpdateBountyStatus(db, taskID, nextStatus)
 		return
 	}
 
 	// ── Commit inference ─────────────────────────────────────────────────
 
 	gitAddOut, _ := exec.Command("git", "-C", worktreeDir, "add", ".").CombinedOutput()
-	logger.Printf("Task %d: git add output: %s", bounty.ID, strings.TrimSpace(string(gitAddOut)))
+	logger.Printf("Task %d: git add output: %s", taskID, strings.TrimSpace(string(gitAddOut)))
 
 	gitStatusOut, _ := exec.Command("git", "-C", worktreeDir, "status", "--short").CombinedOutput()
-	logger.Printf("Task %d: git status after add: %s", bounty.ID, strings.TrimSpace(string(gitStatusOut)))
+	logger.Printf("Task %d: git status after add: %s", taskID, strings.TrimSpace(string(gitStatusOut)))
 
 	// Truncate payload to 72 chars for the commit subject line
 	commitSubject := util.TruncateStr(strings.SplitN(bounty.Payload, "\n", 2)[0], 72)
 	commitOut, commitErr := exec.Command("git", "-C", worktreeDir, "commit", "-m",
-		fmt.Sprintf("task(%d): %s", bounty.ID, commitSubject)).CombinedOutput()
-	logger.Printf("Task %d: git commit output: %s", bounty.ID, strings.TrimSpace(string(commitOut)))
+		fmt.Sprintf("task(%d): %s", taskID, commitSubject)).CombinedOutput()
+	logger.Printf("Task %d: git commit output: %s", taskID, strings.TrimSpace(string(commitOut)))
 
 	if commitErr != nil {
 		// Claude may have already committed — check for commits ahead of the default branch
 		base := igit.GetDefaultBranch(repoPath)
 		aheadOut, _ := exec.Command("git", "-C", worktreeDir, "log", base+"..HEAD", "--oneline").CombinedOutput()
-		logger.Printf("Task %d: commits ahead of base: %s", bounty.ID, strings.TrimSpace(string(aheadOut)))
+		logger.Printf("Task %d: commits ahead of base: %s", taskID, strings.TrimSpace(string(aheadOut)))
 
 		if len(strings.TrimSpace(string(aheadOut))) == 0 {
 			// Claude finished but made no commits. This is often caused by the host going
 			// to sleep mid-run, leaving the agent in a confused state on wake. Re-queue
 			// with a note up to MaxRetries so the agent gets a clean attempt; only
 			// permanently fail if it keeps producing zero changes across all retries.
-			retryCount := store.IncrementRetryCount(db, bounty.ID)
+			retryCount := store.IncrementRetryCount(db, taskID)
 			msg := fmt.Sprintf("Zero file changes (attempt %d/%d) — re-queuing for retry", retryCount, MaxRetries)
-			logger.Printf("Task %d: %s", bounty.ID, msg)
-			store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "ZeroChanges")
+			logger.Printf("Task %d: %s", taskID, msg)
+			store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "ZeroChanges")
 			if retryCount >= MaxRetries {
 				failMsg := fmt.Sprintf("Git Commit Err: Claude CLI finished but made zero file changes after %d attempts", MaxRetries)
-				store.FailBounty(db, bounty.ID, failMsg)
-				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, failMsg))
+				store.FailBounty(db, taskID, failMsg)
+				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, taskID, failMsg))
 			} else {
 				note := "\n\nNOTE (from orchestrator): A prior attempt of this task completed without making any file changes. " +
 					"If the work described already exists in the codebase, verify that and confirm with a commit. " +
 					"If it does not exist yet, implement it from scratch — do not rely on prior seance context about what was 'already done'."
-				store.ReturnTaskForRework(db, bounty.ID, bounty.Payload+note)
+				store.ReturnTaskForRework(db, taskID, bounty.Payload+note)
 			}
 			return
 		}
-		logger.Printf("Task %d: Claude already committed, treating as success", bounty.ID)
+		logger.Printf("Task %d: Claude already committed, treating as success", taskID)
 	}
 
-	histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Completed")
+	histID := store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Completed")
 	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 	if tokIn > 0 || tokOut > 0 {
 		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 	}
-	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, bounty.ID))
+	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
 	nextStatus := nextReviewStatus(db, bounty.ConvoyID)
-	logger.Printf("Task %d: SUCCESS, status -> %s", bounty.ID, nextStatus)
-	store.UpdateBountyStatus(db, bounty.ID, nextStatus)
+	logger.Printf("Task %d: SUCCESS, status -> %s", taskID, nextStatus)
+	store.UpdateBountyStatus(db, taskID, nextStatus)
 }
 
 // RunTaskForeground claims a specific task by ID and runs it in the foreground,
@@ -728,79 +751,5 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 		os.Exit(1)
 	}
 
-	// Scan output for checkpoint signals
-	for _, line := range strings.Split(outputStr, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "[CHECKPOINT:") && strings.HasSuffix(line, "]") {
-			cp := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "[CHECKPOINT:"), "]"))
-			if cp != "" {
-				store.UpdateCheckpoint(db, taskID, cp)
-				fmt.Printf("[force run] Checkpoint recorded: %s\n", cp)
-			}
-		}
-	}
-
-	// [ESCALATED] signal — agent needs human input
-	if sev, msg, ok := ParseEscalationSignal(outputStr); ok {
-		fmt.Printf("\n[force run] ESCALATED [%s]: %s\n", sev, msg)
-		store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Escalated")
-		CreateEscalation(db, taskID, sev, msg)
-		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, fgAgent, taskID, sev, msg))
-		store.SendMail(db, fgAgent, "operator",
-			fmt.Sprintf("[%s] Task #%d escalated — %s", string(sev), taskID, b.TargetRepo),
-			fmt.Sprintf("Task #%d escalated during foreground run at %s severity.\n\nRepo: %s\nReason: %s\n\nTask payload:\n%s",
-				taskID, string(sev), b.TargetRepo, msg, util.TruncateStr(b.Payload, 500)),
-			taskID, store.MailTypeAlert)
-		return
-	}
-
-	// [SHARD_NEEDED] signal — task is too large, hand off to Commander
-	if strings.Contains(outputStr, "[SHARD_NEEDED]") {
-		fmt.Printf("\n[force run] SHARD_NEEDED — re-queuing as Decompose for Commander\n")
-		store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Sharded")
-		store.StoreFleetMemory(db, b.TargetRepo, taskID, "failure",
-			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
-				util.TruncateStr(directiveText(b.Payload), 300)),
-			"")
-		base := igit.GetDefaultBranch(repoPath)
-		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
-		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
-		store.AddBounty(db, taskID, "Decompose", b.Payload)
-		store.UpdateBountyStatus(db, taskID, "Completed")
-		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, fgAgent, taskID))
-		return
-	}
-
-	// [DONE] signal — agent committed and is ready for review
-	if strings.Contains(outputStr, "[DONE]") {
-		nextStatus := nextReviewStatus(db, b.ConvoyID)
-		fmt.Printf("\n[force run] [DONE] signal — submitting for review (%s)\n", nextStatus)
-		histID := store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Completed")
-		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
-		telemetry.EmitEvent(telemetry.EventTaskDoneSignal(sessionID, fgAgent, taskID))
-		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, fgAgent, taskID))
-		store.UpdateBountyStatus(db, taskID, nextStatus)
-		return
-	}
-
-	// Commit inference — same logic as the daemon loop
-	base := igit.GetDefaultBranch(repoPath)
-	aheadOut, _ := exec.Command("git", "-C", worktreeDir, "log", base+"..HEAD", "--oneline").CombinedOutput()
-	if strings.TrimSpace(string(aheadOut)) == "" {
-		fmt.Println("\n[force run] No commits ahead of default branch — returning task to Pending.")
-		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '' WHERE id = ?`, taskID)
-	} else {
-		histID := store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Completed")
-		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
-		fmt.Printf("\n[force run] Commits ahead of %s:\n%s\n", base, strings.TrimSpace(string(aheadOut)))
-		nextStatus := nextReviewStatus(db, b.ConvoyID)
-		fmt.Printf("[force run] Work committed. Task → %s.\n", nextStatus)
-		store.UpdateBountyStatus(db, taskID, nextStatus)
-	}
+	processAstromechOutput(db, fgAgent, b, sessionID, outputStr, worktreeDir, branchName, repoPath, fgLogger, false)
 }
