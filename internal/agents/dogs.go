@@ -93,9 +93,25 @@ func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error
 	return nil
 }
 
-func dogDBVacuum(db *sql.DB, _ interface{ Printf(string, ...any) }) error {
-	db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+const vacuumThresholdBytes = 100 * 1024 * 1024 // 100 MB
+
+func dogDBVacuum(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	// WAL checkpointing is handled by SpawnInquisitor every 5 minutes — no need to repeat here.
 	db.Exec(`ANALYZE`)
+
+	// Only VACUUM when the database file exceeds the threshold; VACUUM holds an
+	// exclusive lock for its entire duration, so we avoid it during normal operation.
+	var seq int
+	var dbName, dbFile string
+	db.QueryRow(`PRAGMA database_list`).Scan(&seq, &dbName, &dbFile)
+	if dbFile != "" {
+		info, err := os.Stat(dbFile)
+		if err == nil && info.Size() < vacuumThresholdBytes {
+			logger.Printf("Dog db-vacuum: skipping VACUUM (%.1f MB < threshold)", float64(info.Size())/1024/1024)
+			return nil
+		}
+	}
+
 	_, err := db.Exec(`VACUUM`)
 	return err
 }
