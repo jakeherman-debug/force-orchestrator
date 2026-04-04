@@ -62,6 +62,7 @@
   <button class="tab-btn"        data-tab="convoys"     onclick="switchTab('convoys')">Convoys <span class="tab-badge" id="tbadge-convoys"></span></button>
   <button class="tab-btn"        data-tab="agents"      onclick="switchTab('agents')">Agents <span class="tab-badge" id="tbadge-agents"></span></button>
   <button class="tab-btn"        data-tab="mail"        onclick="switchTab('mail')">Mail <span class="tab-badge" id="tbadge-mail"></span></button>
+  <button class="tab-btn"        data-tab="knowledge"   onclick="switchTab('knowledge')">Knowledge <span class="tab-badge" id="tbadge-knowledge"></span></button>
   <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
   <div id="tab-spacer"></div>
   <span id="last-refresh" style="font-size:11px;color:var(--text2);align-self:center"></span>
@@ -172,6 +173,38 @@
     </div>
   </div>
 
+  <!-- Knowledge tab -->
+  <div class="tab-pane" id="tab-knowledge">
+    <div class="filter-bar">
+      <button class="filter-btn active" data-kout=""         onclick="setMemFilter('outcome','')">All</button>
+      <button class="filter-btn"        data-kout="success"  onclick="setMemFilter('outcome','success')">Successes</button>
+      <button class="filter-btn"        data-kout="failure"  onclick="setMemFilter('outcome','failure')">Failures</button>
+      <div style="width:12px"></div>
+      <select class="field-select" id="mem-repo-filter" style="width:160px;padding:3px 8px;font-size:12px" onchange="loadMemories()">
+        <option value="">All repos</option>
+      </select>
+      <div class="filter-spacer"></div>
+      <input class="search-input" id="mem-search" type="text" placeholder="Search memories…" oninput="loadMemories()">
+    </div>
+    <div class="table-wrap" id="mem-table-wrap">
+      <table id="mem-table">
+        <thead>
+          <tr>
+            <th style="width:50px">ID</th>
+            <th style="width:90px">Repo</th>
+            <th style="width:70px">Task</th>
+            <th style="width:75px">Outcome</th>
+            <th>Summary</th>
+            <th style="width:200px">Files Changed</th>
+            <th style="width:140px">Date</th>
+            <th style="width:50px"></th>
+          </tr>
+        </thead>
+        <tbody id="mem-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Logs tab -->
   <div class="tab-pane" id="tab-logs">
     <div class="filter-bar">
@@ -254,6 +287,24 @@
     <div class="modal-body">
       <div class="meta-grid" id="mail-modal-meta" style="margin-bottom:10px"></div>
       <div class="directive-box" id="mail-modal-body" style="max-height:320px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Memory detail modal ──────────────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="mem-modal">
+  <div class="modal-box" style="width:600px">
+    <div class="modal-header">
+      <h2 id="mem-modal-title">Memory</h2>
+      <button class="modal-close" onclick="closeModal('mem-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="meta-grid" id="mem-modal-meta" style="margin-bottom:10px"></div>
+      <div class="directive-box" id="mem-modal-summary" style="max-height:300px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger" id="mem-modal-delete" onclick="deleteMemFromModal()">Delete Memory</button>
+      <button class="btn" onclick="closeModal('mem-modal')">Close</button>
     </div>
   </div>
 </div>

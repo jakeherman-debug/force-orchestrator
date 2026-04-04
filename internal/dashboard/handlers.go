@@ -606,6 +606,90 @@ func handleMailSubroutes(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// ── Knowledge base (Fleet Memory) ────────────────────────────────────────────
+
+// GET  /api/memories?repo=&outcome=&q=&limit=N
+// DELETE /api/memories/{id}
+func handleMemories(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jsonCORS(w)
+
+		// DELETE /api/memories/{id}
+		if r.Method == http.MethodDelete {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			if len(parts) < 3 {
+				http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+				return
+			}
+			var id int
+			fmt.Sscanf(parts[2], "%d", &id)
+			if id <= 0 {
+				http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+				return
+			}
+			store.DeleteFleetMemory(db, id)
+			store.LogAudit(db, "dashboard", "delete-memory", id, "deleted via dashboard")
+			fmt.Fprintf(w, `{"ok":true,"id":%d}`, id)
+			return
+		}
+
+		// GET /api/memories
+		repoFilter    := r.URL.Query().Get("repo")
+		outcomeFilter := r.URL.Query().Get("outcome")
+		search        := r.URL.Query().Get("q")
+		limit         := 200
+		if lStr := r.URL.Query().Get("limit"); lStr != "" {
+			fmt.Sscanf(lStr, "%d", &limit)
+		}
+
+		query := `SELECT id, repo, task_id, outcome, summary, IFNULL(files_changed,''), created_at
+		          FROM FleetMemory WHERE 1=1`
+		args := []any{}
+		if repoFilter != "" {
+			query += ` AND repo = ?`
+			args = append(args, repoFilter)
+		}
+		if outcomeFilter != "" {
+			query += ` AND outcome = ?`
+			args = append(args, outcomeFilter)
+		}
+		if search != "" {
+			query += ` AND (summary LIKE ? OR files_changed LIKE ?)`
+			like := "%" + search + "%"
+			args = append(args, like, like)
+		}
+		query += ` ORDER BY id DESC LIMIT ?`
+		args = append(args, limit)
+
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer rows.Close()
+
+		type MemoryRow struct {
+			ID           int    `json:"id"`
+			Repo         string `json:"repo"`
+			TaskID       int    `json:"task_id"`
+			Outcome      string `json:"outcome"`
+			Summary      string `json:"summary"`
+			FilesChanged string `json:"files_changed"`
+			CreatedAt    string `json:"created_at"`
+		}
+		var out []MemoryRow
+		for rows.Next() {
+			var m MemoryRow
+			rows.Scan(&m.ID, &m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged, &m.CreatedAt)
+			out = append(out, m)
+		}
+		if out == nil {
+			out = []MemoryRow{}
+		}
+		json.NewEncoder(w).Encode(out)
+	}
+}
+
 // insertTypedTask inserts an Investigate or Audit task, optionally scoped to a repo.
 func insertTypedTask(db *sql.DB, taskType, repo, payload string, priority int) (int, error) {
 	if repo != "" && store.GetRepoPath(db, repo) == "" {

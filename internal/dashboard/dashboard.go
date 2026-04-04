@@ -40,6 +40,8 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/mail", handleMailList(db))
 	mux.HandleFunc("/api/mail/", handleMailSubroutes(db))
 	mux.HandleFunc("/api/add", handleAdd(db))
+	mux.HandleFunc("/api/memories", handleMemories(db))
+	mux.HandleFunc("/api/memories/", handleMemories(db))
 	mux.HandleFunc("/api/events", handleHolonetStream("holonet.jsonl"))
 	mux.HandleFunc("/api/fleet-log", handleFleetLogStream("fleet.log"))
 	mux.HandleFunc("/healthz", handleHealthz)

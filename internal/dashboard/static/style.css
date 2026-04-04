@@ -643,6 +643,41 @@ td.mail-body-preview {
   to   { transform: translateY(0);    opacity: 1; }
 }
 
+/* ── Knowledge base ───────────────────────────────────────────────────────── */
+.mem-summary-cell {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mem-summary-cell:hover { color: var(--accent); }
+
+.mem-files-cell {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text2);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.del-btn {
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all .15s;
+}
+.del-btn:hover { border-color: var(--red); color: var(--red); background: rgba(248,81,73,.08); }
+
+/* Memory detail modal */
+#mem-modal .directive-box { max-height: 400px; }
+
 /* scrollbars */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

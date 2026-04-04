@@ -140,6 +140,7 @@ function switchTab(name) {
     case 'convoys':     loadConvoys(); break;
     case 'agents':      loadAgents(); break;
     case 'mail':        loadMail(); break;
+    case 'knowledge':   loadMemoryRepos().then(() => loadMemories()); break;
     case 'logs':        startLogStream(); break;
   }
   if (name !== 'logs') stopLogStream();
@@ -826,6 +827,107 @@ document.addEventListener('keydown', e => {
   }
 });
 
+// ── Knowledge base (Fleet Memory) ─────────────────────────────────────────────
+const MEM = { outcome: '', repo: '', data: [], openID: null };
+
+function setMemFilter(key, val) {
+  MEM[key] = val;
+  if (key === 'outcome') {
+    document.querySelectorAll('#tab-knowledge .filter-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.kout === val);
+    });
+  }
+  loadMemories();
+}
+
+async function loadMemories() {
+  const repo    = $('mem-repo-filter').value;
+  const search  = ($('mem-search').value || '').trim();
+  const qs = new URLSearchParams();
+  if (MEM.outcome) qs.set('outcome', MEM.outcome);
+  if (repo)        qs.set('repo',    repo);
+  if (search)      qs.set('q',       search);
+  qs.set('limit', '500');
+
+  try {
+    const data = await api('/api/memories?' + qs.toString());
+    MEM.data = data;
+    $('tbadge-knowledge').textContent = data.length || '';
+    renderMemories(data);
+  } catch(e) {
+    showToast('Failed to load memories: ' + e.message, 'err');
+  }
+}
+
+async function loadMemoryRepos() {
+  try {
+    const repos = await api('/api/repos');
+    const sel = $('mem-repo-filter');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">All repos</option>' +
+      repos.map(r => `<option value="${escHtml(r)}"${r===cur?' selected':''}>${escHtml(r)}</option>`).join('');
+  } catch(_) {}
+}
+
+function renderMemories(data) {
+  const tbody = $('mem-tbody');
+  if (!data || !data.length) {
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state"><span class="icon">🧠</span>No memories yet — they accumulate as tasks complete.</div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data.map(m => {
+    const oc = m.outcome === 'success'
+      ? `<span class="status s-Completed">success</span>`
+      : `<span class="status s-Failed">failure</span>`;
+    const taskLink = m.task_id
+      ? `<span class="esc-task" onclick="jumpToTask(${m.task_id})">#${m.task_id}</span>`
+      : '—';
+    return `<tr>
+      <td class="mono dim">${m.id}</td>
+      <td class="mono dim" style="font-size:11px">${escHtml(m.repo || '')}</td>
+      <td>${taskLink}</td>
+      <td>${oc}</td>
+      <td class="mem-summary-cell" onclick="openMemory(${m.id})" title="${escHtml(m.summary)}">${escHtml(truncate(m.summary, 120))}</td>
+      <td class="mem-files-cell" title="${escHtml(m.files_changed)}">${escHtml(m.files_changed || '')}</td>
+      <td class="mono dim" style="font-size:11px">${fmtTS(m.created_at)}</td>
+      <td><button class="del-btn" onclick="deleteMem(${m.id})" title="Delete memory">✕</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function openMemory(id) {
+  const m = MEM.data.find(x => x.id === id);
+  if (!m) return;
+  MEM.openID = id;
+  $('mem-modal-title').textContent = `Memory #${m.id} — ${m.repo}`;
+  $('mem-modal-meta').innerHTML = `
+    <span class="meta-key">Repo</span>    <span class="meta-val">${escHtml(m.repo || '—')}</span>
+    <span class="meta-key">Task</span>    <span class="meta-val">${m.task_id || '—'}</span>
+    <span class="meta-key">Outcome</span> <span class="meta-val">${m.outcome}</span>
+    <span class="meta-key">Files</span>   <span class="meta-val">${escHtml(m.files_changed || '—')}</span>
+    <span class="meta-key">Date</span>    <span class="meta-val">${fmtTS(m.created_at)}</span>
+  `;
+  $('mem-modal-summary').textContent = m.summary;
+  $('mem-modal').classList.remove('hidden');
+}
+
+async function deleteMem(id) {
+  if (!confirm(`Delete memory #${id}? This cannot be undone.`)) return;
+  try {
+    await api(`/api/memories/${id}`, { method: 'DELETE' });
+    showToast(`Memory #${id} deleted`, 'ok');
+    loadMemories();
+  } catch(e) {
+    showToast('Delete failed: ' + e.message, 'err');
+  }
+}
+
+async function deleteMemFromModal() {
+  if (!MEM.openID) return;
+  await deleteMem(MEM.openID);
+  closeModal('mem-modal');
+}
+
 // ── Polling ───────────────────────────────────────────────────────────────────
 function startPolling() {
   pollStatus();
@@ -838,6 +940,7 @@ function startPolling() {
       case 'convoys':     loadConvoys();     break;
       case 'agents':      loadAgents();      break;
       case 'mail':        loadMail();        break;
+      case 'knowledge':   loadMemories();    break;
     }
   }, 12000);
 }
