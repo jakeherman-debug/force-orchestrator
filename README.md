@@ -202,6 +202,54 @@ A lightweight Claude-backed triage agent called by the Inquisitor when a stall i
 | `WARN` | Log a warning but take no action yet |
 | `IGNORE` | Agent is still making progress |
 
+### Auditor — Codebase Scanner
+
+**File:** `auditor.go`
+
+A read-only analysis agent that systematically scans the codebase (and external systems) for issues and produces structured findings. Each finding becomes a discrete `CodeEdit` task for an Astromech to fix — but they are created as **Planned** tasks in a new convoy, not activated immediately. The operator must review and approve the convoy before any work begins.
+
+Submit an audit with:
+
+```bash
+force scan [--priority N] [--repo <name>] <scope/question>
+```
+
+- **Without `--repo`**: scans all registered repositories and reports findings across them.
+- **With `--repo myapp`**: scopes the audit to that repository only; the agent runs from its local path.
+
+The Auditor uses read-only tools (Read, Glob, Grep, Bash read-only commands, Jira, Confluence, Glean, SonarQube, Datadog). It does not modify any files.
+
+When the audit completes:
+1. A **Convoy** is created containing one Planned `CodeEdit` task per finding, labeled with severity (`HIGH`, `MEDIUM`, or `LOW`).
+2. The operator receives a mail summarizing the findings and the convoy ID.
+3. Run `force convoy show <convoy-id>` to inspect the plan, then `force convoy approve <convoy-id>` to activate the fixes.
+
+If no findings are reported, the Audit task completes immediately with a mail saying so — no convoy is created.
+
+### Investigator — Research Agent
+
+**File:** `investigator.go`
+
+A free-form research agent that investigates an open-ended question and delivers a written report. Unlike the Auditor it produces prose, not structured findings, and does not spawn follow-up tasks.
+
+Submit an investigation with:
+
+```bash
+force investigate [--priority N] [--repo <name>] <question>
+```
+
+- **Without `--repo`**: the agent operates from the force-orchestrator working directory with access to all registered repos.
+- **With `--repo myapp`**: runs from that repository's local path and focuses its investigation there.
+
+The Investigator uses the same read-only toolset as the Auditor (Read, Glob, Grep, Bash, Jira, Confluence, Glean, SonarQube, Datadog). It does not modify any files.
+
+When the investigation completes the full prose report is delivered to the operator as fleet mail:
+
+```bash
+force mail inbox operator   # see the report arrive
+force mail read <id>        # read the full report
+```
+
 ---
 
 ## Fleet Memory & RAG
@@ -452,6 +500,8 @@ force convoy approve <convoy-id>
 | `force add [--priority N] [--plan-only] <description>` | Submit a feature request. Commander decomposes it into subtasks. `--plan-only` creates subtasks as Planned until you approve. |
 | `force add-task [--blocked-by <id>] [--convoy <id>] [--priority N] [--timeout <secs>] <repo> <desc>` | Add a direct CodeEdit task, bypassing Commander. |
 | `force add-jira <TICKET-ID>` | Fetch a Jira ticket and submit it as a feature. |
+| `force scan [--priority N] [--repo <name>] <scope>` | Submit a codebase audit. Findings are queued as Planned CodeEdit tasks in a new convoy awaiting `force convoy approve`. |
+| `force investigate [--priority N] [--repo <name>] <question>` | Submit a research investigation. The Investigator's prose report is delivered as fleet mail to the operator. |
 | `force list [status[,status2]] [--limit N]` | List tasks. Comma-separate statuses: `Pending,Failed`. |
 | `force logs <id>` | Show the full payload and error log for a task. |
 | `force history [--full] <id>` | Show all Claude attempts for a task. `--full` shows complete output. |
