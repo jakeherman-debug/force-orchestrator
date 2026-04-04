@@ -624,6 +624,17 @@ force mail send astromech --task 42 --type directive \
 | `force config get <key>` | Read a config value. |
 | `force config list` | List all config values. |
 
+### Danger Zone
+
+> **These commands are destructive and irreversible. Stop the daemon before running them (`force estop`, then kill the daemon process).**
+
+| Command | Description |
+|---|---|
+| `force purge [--confirm]` | Delete all filesystem run artifacts: `fleet.log`, `holonet.jsonl`, all agent worktrees, and all agent branches in registered repositories. Dog cooldown timers are also cleared. **Task data in the database is NOT affected.** |
+| `force hard-reset [--purge-repos] [--confirm]` | Wipe ALL fleet state: task data, history, memories, mail, escalations, audit log, worktrees, branches, and log files. Repositories and system config are preserved unless `--purge-repos` is also passed. **This cannot be undone.** |
+
+Both commands print a full list of what will be destroyed before executing. Without `--confirm`, you are prompted to type `DELETE` interactively. Passing `--confirm` skips the interactive prompt but the warning is always shown.
+
 ---
 
 ## Configuration
