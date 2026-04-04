@@ -99,11 +99,17 @@ func MarkMailRead(db *sql.DB, id int) {
 	db.Exec(`UPDATE Fleet_Mail SET read_at = datetime('now') WHERE id = ? AND read_at = ''`, id)
 }
 
-// MailStats returns (unread, total) counts for a given recipient (or fleet-wide if toAgent="").
-func MailStats(db *sql.DB, toAgent string) (unread, total int) {
-	if toAgent != "" {
-		db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE to_agent = ?`, toAgent).Scan(&total)
-		db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE to_agent = ? AND read_at = ''`, toAgent).Scan(&unread)
+// MailStats returns (unread, total) counts for a given recipient (or fleet-wide if agentName="").
+// When agentName is set, uses the same addressing logic as ReadInboxForAgent:
+// matches to_agent = agentName, OR to_agent = role, OR to_agent = 'all'.
+func MailStats(db *sql.DB, agentName, role string) (unread, total int) {
+	if agentName != "" {
+		db.QueryRow(
+			`SELECT COUNT(*) FROM Fleet_Mail WHERE to_agent = ? OR to_agent = ? OR to_agent = 'all'`,
+			agentName, role).Scan(&total)
+		db.QueryRow(
+			`SELECT COUNT(*) FROM Fleet_Mail WHERE (to_agent = ? OR to_agent = ? OR to_agent = 'all') AND read_at = ''`,
+			agentName, role).Scan(&unread)
 	} else {
 		db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail`).Scan(&total)
 		db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE read_at = ''`).Scan(&unread)
