@@ -61,6 +61,18 @@ func TestFindPlanCycle_LongerCycle(t *testing.T) {
 	}
 }
 
+func TestFindPlanCycle_ParallelDiamond(t *testing.T) {
+	// A and B both depend on C — no cycle
+	tasks := []store.TaskPlan{
+		{TempID: 1, BlockedBy: []int{}},    // C: no deps
+		{TempID: 2, BlockedBy: []int{1}},   // A depends on C
+		{TempID: 3, BlockedBy: []int{1}},   // B depends on C
+	}
+	if cid := findPlanCycle(tasks); cid != 0 {
+		t.Errorf("expected no cycle in parallel diamond, got cycle at %d", cid)
+	}
+}
+
 // ── loadKnownRepos ────────────────────────────────────────────────────────────
 
 func TestLoadKnownRepos_Empty(t *testing.T) {
