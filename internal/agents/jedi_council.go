@@ -149,11 +149,16 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 				// resolution task's parent-complete mail logic fires on success.
 				logger.Printf("Task %d: true merge conflict on branch %s — spawning conflict resolution task", b.ID, branchName)
 				conflictPayload := fmt.Sprintf("[CONFLICT_BRANCH: %s]\n\n%s", branchName, b.Payload)
-				resTaskID := store.AddBounty(db, b.ID, "CodeEdit", conflictPayload)
+				resTaskID, _ := store.AddConvoyTask(db, b.ID, b.TargetRepo, conflictPayload, b.ConvoyID, b.Priority, "Pending")
 				logger.Printf("Task %d: spawned conflict resolution task #%d", b.ID, resTaskID)
 				failMsg := fmt.Sprintf("Merge conflict on branch %s — conflict resolution task #%d spawned", branchName, resTaskID)
-				store.FailBounty(db, b.ID, failMsg)
-				histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Failed")
+				store.MarkConflictPending(db, b.ID, failMsg)
+				// If the convoy was already marked Failed (stall detector fired before the
+				// conflict resolution task was spawned), reset it to Active so it can complete.
+				if b.ConvoyID > 0 {
+					db.Exec(`UPDATE Convoys SET status = 'Active' WHERE id = ? AND status = 'Failed'`, b.ConvoyID)
+				}
+				histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "ConflictPending")
 				if tokIn > 0 || tokOut > 0 {
 					store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 				}
@@ -200,7 +205,19 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 		if b.ParentID > 0 {
 			var parentStatus string
 			db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, b.ParentID).Scan(&parentStatus)
-			if parentStatus == "Failed" {
+			if parentStatus == "ConflictPending" {
+				// This was a conflict resolution task — mark the original task Completed
+				// since its code is now in main, and unblock any of its dependents.
+				store.UpdateBountyStatus(db, b.ParentID, "Completed")
+				if n := store.UnblockDependentsOf(db, b.ParentID); n > 0 {
+					logger.Printf("Task %d: unblocked %d dependent(s) of parent #%d after conflict resolution", b.ID, n, b.ParentID)
+				}
+				store.SendMail(db, agentName, "operator",
+					fmt.Sprintf("[CONFLICT RESOLVED] Task #%d is complete — merged via #%d", b.ParentID, b.ID),
+					fmt.Sprintf("Conflict resolution task #%d has been approved and merged.\n\nTask #%d (%s) is now complete — the feature is in main. No further action needed.\n\nCouncil feedback: %s",
+						b.ID, b.ParentID, b.TargetRepo, ruling.Feedback),
+					b.ID, store.MailTypeInfo)
+			} else if parentStatus == "Failed" {
 				store.SendMail(db, agentName, "operator",
 					fmt.Sprintf("[REMEDIATION COMPLETE] Task #%d fixed — run: force reset %d", b.ID, b.ParentID),
 					fmt.Sprintf("Remediation task #%d has been approved and merged.\n\nThe infra issue blocking task #%d (%s) should now be resolved.\n\nRun the following to retry the original task:\n  force reset %d\n\nCouncil feedback: %s",
@@ -230,12 +247,11 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			if b.ParentID > 0 {
 				var parentStatus string
 				db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, b.ParentID).Scan(&parentStatus)
-				if parentStatus == "Failed" {
-					store.SendMail(db, agentName, "operator",
-						fmt.Sprintf("[REMEDIATION FAILED] Task #%d could not fix task #%d — manual intervention needed", b.ID, b.ParentID),
-						fmt.Sprintf("Remediation task #%d has permanently failed after %d attempts.\n\nThe infra issue blocking original task #%d (%s) requires manual intervention.\n\nFinal rejection reason: %s\n\nTask payload:\n%s",
-							b.ID, MaxRetries, b.ParentID, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
-						b.ID, store.MailTypeAlert)
+				if parentStatus == "ConflictPending" || parentStatus == "Failed" {
+					subject := fmt.Sprintf("[REMEDIATION FAILED] Task #%d could not fix task #%d — manual intervention needed", b.ID, b.ParentID)
+					body := fmt.Sprintf("Remediation task #%d has permanently failed after %d attempts.\n\nOriginal task #%d (%s) requires manual intervention.\n\nFinal rejection reason: %s\n\nTask payload:\n%s",
+						b.ID, MaxRetries, b.ParentID, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500))
+					store.SendMail(db, agentName, "operator", subject, body, b.ID, store.MailTypeAlert)
 					return
 				}
 			}

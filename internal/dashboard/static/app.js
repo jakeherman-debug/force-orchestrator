@@ -169,7 +169,7 @@ const FILTER_STATUS = {
   active:    'Locked',
   review:    'AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
   pending:   'Pending,Blocked,Planned',
-  failed:    'Failed,Escalated',
+  failed:    'Failed,Escalated,ConflictPending',
   done:      'Completed',
   cancelled: 'Cancelled',
   all:       '',

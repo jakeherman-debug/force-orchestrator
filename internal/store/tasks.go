@@ -132,6 +132,14 @@ func FailBounty(db *sql.DB, id int, errorMsg string) {
 		errorMsg, id)
 }
 
+// MarkConflictPending transitions a task to ConflictPending, indicating it was
+// approved by the council but couldn't merge due to a conflict. A resolution
+// task has been spawned and will complete this task's work.
+func MarkConflictPending(db *sql.DB, id int, msg string) {
+	db.Exec(`UPDATE BountyBoard SET status = 'ConflictPending', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
+		msg, id)
+}
+
 // CancelTask marks a task as Cancelled with a reason. Cancelled is distinct from Failed —
 // it reflects deliberate operator action, not an agent error.
 // No-op if the task is already Completed. Returns true if the task was cancelled.

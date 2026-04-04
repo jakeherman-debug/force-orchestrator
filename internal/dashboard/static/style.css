@@ -287,6 +287,7 @@ td.dim  { color: var(--text2); }
 .s-Failed           { background: rgba(248,81,73,.15);   color: var(--red);    border: 1px solid rgba(248,81,73,.3); }
 .s-Escalated        { background: rgba(227,101,42,.15);  color: var(--orange); border: 1px solid rgba(227,101,42,.3); }
 .s-Cancelled        { background: rgba(139,148,158,.1);  color: var(--text2);  border: 1px solid var(--border); }
+.s-ConflictPending  { background: rgba(227,101,42,.15);  color: var(--orange); border: 1px solid rgba(227,101,42,.3); }
 .s-Planned          { background: rgba(139,148,158,.1);  color: var(--text2);  border: 1px solid var(--border); }
 .s-Blocked          { background: rgba(227,101,42,.12);  color: var(--orange); border: 1px solid rgba(227,101,42,.25); }
 .s-AwaitingCouncilReview { background: rgba(188,140,255,.15); color: var(--purple); border: 1px solid rgba(188,140,255,.3); }
