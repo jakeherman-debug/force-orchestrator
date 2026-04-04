@@ -271,7 +271,7 @@ func TestGetOrCreateAgentWorktree_NoExisting(t *testing.T) {
 		_ = path
 		return
 	}
-	// If it succeeds, path should be under dir/worktrees/NewBot
+	// If it succeeds, path should be under .force-worktrees/<repo>/NewBot
 	if !strings.Contains(path, "NewBot") {
 		t.Errorf("expected worktree path to contain 'NewBot', got %q", path)
 	}

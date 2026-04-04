@@ -2,7 +2,11 @@
 /force
 /force-orchestrator
 
-# Agent worktrees (git worktrees created at runtime — not part of the repo)
+# Legacy agent worktrees that were created inside the repo before the
+# .force-worktrees migration. New worktrees are created as siblings of the repo
+# at ../.force-worktrees/<repo>/<agent> so they never appear in git status.
+# This entry prevents any remaining inside-repo worktrees from being tracked
+# as gitlink (mode 160000) entries.
 /worktrees/
 
 # Runtime files
