@@ -294,17 +294,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 	if wtErr != nil {
 		msg := fmt.Sprintf("Worktree Err: %v", wtErr)
 		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
-		count := store.IncrementInfraFailures(db, bounty.ID)
-		telemetry.EmitEvent(telemetry.EventInfraFailure(sessionID, name, bounty.ID, count, msg))
-		if count >= MaxInfraFailures {
-			store.RecordTaskHistory(db, bounty.ID, name, sessionID, "", "Failed")
-			permanentInfraFail(db, logger, sessionID, name, bounty, msg)
-		} else {
-			store.UpdateBountyStatus(db, bounty.ID, "Pending")
-			backoff := InfraBackoff(count)
-			logger.Printf("Task %d: infra failure %d/%d, backing off %v", bounty.ID, count, MaxInfraFailures, backoff)
-			time.Sleep(backoff)
-		}
+		handleInfraFailure(db, name, "worktree", bounty, sessionID, msg, "Pending", true, logger)
 		return
 	}
 
@@ -316,17 +306,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		if cbErr := igit.PrepareConflictBranch(worktreeDir, repoPath, cb); cbErr != nil {
 			msg := fmt.Sprintf("Conflict Branch Err: %v", cbErr)
 			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
-			count := store.IncrementInfraFailures(db, bounty.ID)
-			telemetry.EmitEvent(telemetry.EventInfraFailure(sessionID, name, bounty.ID, count, msg))
-			if count >= MaxInfraFailures {
-				store.RecordTaskHistory(db, bounty.ID, name, sessionID, "", "Failed")
-				permanentInfraFail(db, logger, sessionID, name, bounty, msg)
-			} else {
-				store.UpdateBountyStatus(db, bounty.ID, "Pending")
-				backoff := InfraBackoff(count)
-				logger.Printf("Task %d: infra failure %d/%d, backing off %v", bounty.ID, count, MaxInfraFailures, backoff)
-				time.Sleep(backoff)
-			}
+			handleInfraFailure(db, name, "branch preparation", bounty, sessionID, msg, "Pending", true, logger)
 			return
 		}
 		branchName = cb
@@ -336,17 +316,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		if branchErr != nil {
 			msg := fmt.Sprintf("Branch Err: %v", branchErr)
 			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
-			count := store.IncrementInfraFailures(db, bounty.ID)
-			telemetry.EmitEvent(telemetry.EventInfraFailure(sessionID, name, bounty.ID, count, msg))
-			if count >= MaxInfraFailures {
-				store.RecordTaskHistory(db, bounty.ID, name, sessionID, "", "Failed")
-				permanentInfraFail(db, logger, sessionID, name, bounty, msg)
-			} else {
-				store.UpdateBountyStatus(db, bounty.ID, "Pending")
-				backoff := InfraBackoff(count)
-				logger.Printf("Task %d: infra failure %d/%d, backing off %v", bounty.ID, count, MaxInfraFailures, backoff)
-				time.Sleep(backoff)
-			}
+			handleInfraFailure(db, name, "branch preparation", bounty, sessionID, msg, "Pending", true, logger)
 			return
 		}
 	}
@@ -483,16 +453,7 @@ The original task directive (what the code should accomplish) is shown below.`
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 		}
-		count := store.IncrementInfraFailures(db, bounty.ID)
-		telemetry.EmitEvent(telemetry.EventInfraFailure(sessionID, name, bounty.ID, count, msg))
-		if count >= MaxInfraFailures {
-			permanentInfraFail(db, logger, sessionID, name, bounty, msg)
-		} else {
-			store.UpdateBountyStatus(db, bounty.ID, "Pending")
-			backoff := InfraBackoff(count)
-			logger.Printf("Task %d: infra failure %d/%d, backing off %v", bounty.ID, count, MaxInfraFailures, backoff)
-			time.Sleep(backoff)
-		}
+		handleInfraFailure(db, name, "claude", bounty, sessionID, msg, "Pending", false, logger)
 		return
 	}
 
