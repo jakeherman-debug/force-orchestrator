@@ -296,6 +296,116 @@ func TestRunCaptainTask_Escalate(t *testing.T) {
 	}
 }
 
+// ── Integration tests: task operations ───────────────────────────────────────
+
+func TestRunCaptainTask_TaskUpdatePersistsInDB(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	repoDir := initTestRepo(t)
+	branchName := setupBranchWithCommit(t, repoDir, "agent/R2-D2/task-300")
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test repo")
+	convoyID, _ := store.CreateConvoy(db, "update-payload convoy")
+
+	reviewID := store.AddBounty(db, 0, "CodeEdit", "implement feature")
+	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCaptainReview', target_repo = 'myrepo', branch_name = ?, convoy_id = ? WHERE id = ?`,
+		branchName, convoyID, reviewID)
+
+	// Downstream pending task whose payload the captain will update
+	downstreamID := store.AddBounty(db, 0, "CodeEdit", "original downstream description")
+	db.Exec(`UPDATE BountyBoard SET convoy_id = ?, status = 'Pending', target_repo = 'myrepo' WHERE id = ?`, convoyID, downstreamID)
+
+	b, _ := store.GetBounty(db, reviewID)
+
+	ruling := fmt.Sprintf(`{"decision":"approve","feedback":"","task_updates":[{"id":%d,"new_payload":"updated description with implementation context"}],"new_tasks":[]}`, downstreamID)
+	withStubCLIRunner(t, ruling, nil)
+	logger := log.New(io.Discard, "", 0)
+	runCaptainTask(db, "Captain-Rex", b, logger)
+
+	downstream, _ := store.GetBounty(db, downstreamID)
+	if downstream.Payload != "updated description with implementation context" {
+		t.Errorf("expected downstream payload to be updated in DB, got %q", downstream.Payload)
+	}
+	b, _ = store.GetBounty(db, reviewID)
+	if b.Status != "AwaitingCouncilReview" {
+		t.Errorf("expected AwaitingCouncilReview after approve with task_updates, got %q", b.Status)
+	}
+}
+
+func TestRunCaptainTask_NewSubtaskWithBlockedByWritesDependency(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	repoDir := initTestRepo(t)
+	branchName := setupBranchWithCommit(t, repoDir, "agent/R2-D2/task-301")
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test repo")
+	convoyID, _ := store.CreateConvoy(db, "new-subtask convoy")
+
+	reviewID := store.AddBounty(db, 0, "CodeEdit", "implement feature")
+	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCaptainReview', target_repo = 'myrepo', branch_name = ?, convoy_id = ? WHERE id = ?`,
+		branchName, convoyID, reviewID)
+
+	// Existing task the new subtask will be blocked by
+	blockerID := store.AddBounty(db, 0, "CodeEdit", "prerequisite task")
+	db.Exec(`UPDATE BountyBoard SET convoy_id = ?, target_repo = 'myrepo' WHERE id = ?`, convoyID, blockerID)
+
+	b, _ := store.GetBounty(db, reviewID)
+
+	ruling := fmt.Sprintf(`{"decision":"approve","feedback":"","task_updates":[],"new_tasks":[{"repo":"myrepo","task":"write integration tests for new endpoint","blocked_by":[%d]}]}`, blockerID)
+	withStubCLIRunner(t, ruling, nil)
+	logger := log.New(io.Discard, "", 0)
+	runCaptainTask(db, "Captain-Rex", b, logger)
+
+	var newTaskID int
+	if err := db.QueryRow(`SELECT id FROM BountyBoard WHERE payload = 'write integration tests for new endpoint' AND convoy_id = ?`, convoyID).Scan(&newTaskID); err != nil {
+		t.Fatalf("expected new subtask to be inserted, got: %v", err)
+	}
+	deps := store.GetDependencies(db, newTaskID)
+	if len(deps) != 1 || deps[0] != blockerID {
+		t.Errorf("expected TaskDependencies row pointing to blocker %d, got %v", blockerID, deps)
+	}
+}
+
+func TestRunCaptainTask_UnknownRepoInNewTasksCreatesEscalation(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	repoDir := initTestRepo(t)
+	branchName := setupBranchWithCommit(t, repoDir, "agent/R2-D2/task-302")
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "myrepo", repoDir, "test repo")
+	// "phantom-repo" is intentionally NOT registered
+	convoyID, _ := store.CreateConvoy(db, "unknown-repo convoy")
+
+	reviewID := store.AddBounty(db, 0, "CodeEdit", "implement feature")
+	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCaptainReview', target_repo = 'myrepo', branch_name = ?, convoy_id = ? WHERE id = ?`,
+		branchName, convoyID, reviewID)
+	b, _ := store.GetBounty(db, reviewID)
+
+	ruling := `{"decision":"approve","feedback":"","task_updates":[],"new_tasks":[{"repo":"phantom-repo","task":"do something in unregistered repo","blocked_by":[]}]}`
+	withStubCLIRunner(t, ruling, nil)
+	logger := log.New(io.Discard, "", 0)
+	runCaptainTask(db, "Captain-Rex", b, logger)
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, reviewID).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 escalation created for unknown repo reference, got %d", count)
+	}
+	b, _ = store.GetBounty(db, reviewID)
+	if b.Status != "Escalated" {
+		t.Errorf("expected task status Escalated after unknown repo, got %q", b.Status)
+	}
+}
+
 func TestRunCaptainTask_UnknownDecision(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")

@@ -242,8 +242,10 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			continue
 		}
 		if !isKnownRepo(db, nt.Repo) {
-			logger.Printf("Task %d: captain tried to add task for unknown repo '%s' — skipping", b.ID, nt.Repo)
-			continue
+			msg := fmt.Sprintf("captain plan references unknown repository '%s' — convoy cannot proceed without human review", nt.Repo)
+			logger.Printf("Task %d: %s", b.ID, msg)
+			CreateEscalation(db, b.ID, store.SeverityMedium, msg)
+			return
 		}
 		res, _ := db.Exec(
 			`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority)
