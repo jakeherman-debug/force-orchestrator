@@ -251,7 +251,37 @@ func cmdReset(db *sql.DB, id int, via string) {
 	fmt.Printf("Task %d reset to Pending.\n", id)
 }
 
-func cmdCancel(db *sql.DB, id int) {
+func cmdCancel(db *sql.DB, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: force cancel <task-id> [--requeue <type>]")
+		os.Exit(1)
+	}
+
+	requeueType := ""
+	cancelArgs := args
+	for i := 0; i < len(cancelArgs); i++ {
+		if cancelArgs[i] == "--requeue" && i+1 < len(cancelArgs) {
+			requeueType = cancelArgs[i+1]
+			cancelArgs = append(cancelArgs[:i], cancelArgs[i+2:]...)
+			i--
+		}
+	}
+
+	if len(cancelArgs) == 0 {
+		fmt.Println("Usage: force cancel <task-id> [--requeue <type>]")
+		os.Exit(1)
+	}
+
+	id := mustParseID(cancelArgs[0])
+
+	if requeueType != "" {
+		validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true}
+		if !validTypes[requeueType] {
+			fmt.Printf("Invalid requeue type %q — must be one of: Feature, CodeEdit, Investigate, Audit\n", requeueType)
+			os.Exit(1)
+		}
+	}
+
 	var currentStatus string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&currentStatus)
 	if currentStatus == "" {
@@ -264,7 +294,15 @@ func cmdCancel(db *sql.DB, id int) {
 	}
 	store.CancelTask(db, id, "Cancelled by operator")
 	store.LogAudit(db, "operator", "cancel", id, "cancelled via CLI")
-	fmt.Printf("Task %d cancelled.\n", id)
+
+	if requeueType != "" {
+		var payload string
+		db.QueryRow(`SELECT payload FROM BountyBoard WHERE id = ?`, id).Scan(&payload)
+		newID := store.AddBounty(db, 0, requeueType, payload)
+		fmt.Printf("Task #%d cancelled — re-queued as %s #%d\n", id, requeueType, newID)
+	} else {
+		fmt.Printf("Task %d cancelled.\n", id)
+	}
 }
 
 func cmdBlock(db *sql.DB, taskID, blockerID int) {

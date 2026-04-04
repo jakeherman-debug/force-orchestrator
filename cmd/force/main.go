@@ -95,10 +95,10 @@ func main() {
 
 	case "cancel":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: force cancel <task-id>")
+			fmt.Println("Usage: force cancel <task-id> [--requeue <type>]")
 			os.Exit(1)
 		}
-		cmdCancel(db, mustParseID(os.Args[2]))
+		cmdCancel(db, os.Args[2:])
 
 	case "block":
 		if len(os.Args) < 4 {
