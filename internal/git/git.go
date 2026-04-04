@@ -170,7 +170,10 @@ func PrepareConflictBranch(worktreeDir, repoPath, conflictBranch string) error {
 
 func GetDiff(repoPath string, branchName string) string {
 	base := GetDefaultBranch(repoPath)
-	cmd := exec.Command("git", "-C", repoPath, "diff", base+".."+branchName)
+	// Three-dot diff: shows only what branchName introduced since it diverged from base.
+	// Two-dot diff would also include reversals of any commits merged into base after
+	// the branch was created, making the diff misleading for review and conflict resolution.
+	cmd := exec.Command("git", "-C", repoPath, "diff", base+"..."+branchName)
 	out, _ := cmd.CombinedOutput()
 	return string(out)
 }
