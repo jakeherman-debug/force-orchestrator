@@ -35,11 +35,13 @@ func handleInfraFailure(
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "", "Failed")
 		}
 		store.FailBounty(db, b.ID, msg)
+		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		store.LogAudit(db, agentName, "infra-fail", b.ID, msg)
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
 			fmt.Sprintf("Task: %s\nInfra failure in %s (permanent): %s",
 				util.TruncateStr(b.Payload, 300), stageName, msg), "")
 
-		// Spawn a Feature remediation task so an agent can investigate the infra issue
+		// Spawn a CodeEdit remediation task so an agent can investigate the infra issue
 		// and re-queue the original task once fixed.
 		remPayload := fmt.Sprintf(
 			"Infra failure on task #%d (repo: %s, stage: %s).\n\nError: %s\n\n"+
@@ -51,8 +53,8 @@ func handleInfraFailure(
 				"- Disk full or permission denied → check disk space and file permissions\n\n"+
 				"After fixing, run: force reset %d",
 			b.ID, b.TargetRepo, stageName, msg, b.ID)
-		remID := store.AddBounty(db, b.ID, "Feature", remPayload)
-		logger.Printf("Task %d: permanently failed in %s — spawned remediation Feature task #%d", b.ID, stageName, remID)
+		remID := store.AddBounty(db, b.ID, "CodeEdit", remPayload)
+		logger.Printf("Task %d: permanently failed in %s — spawned remediation CodeEdit task #%d", b.ID, stageName, remID)
 
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
