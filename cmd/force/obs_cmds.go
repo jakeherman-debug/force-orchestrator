@@ -364,10 +364,6 @@ func cmdCosts(db *sql.DB) {
 	printCosts(db)
 }
 
-func cmdDashboard(db *sql.DB, port int) {
-	RunDashboard(db, port)
-}
-
 // cmdTailTask streams the live Claude output for an actively running task.
 // The daemon writes fleet-task-<id>.log while Claude runs; this command tails it.
 func cmdTailTask(db *sql.DB, taskID int) {

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fleet Command Center</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<header id="header">
+  <div id="header-title">Fleet <span>Command Center</span></div>
+  <span id="daemon-badge" class="badge badge-idle">&#9679; Daemon</span>
+  <span id="estop-badge" class="badge" style="display:none">&#9888; E-STOP</span>
+  <div style="flex:1"></div>
+  <button id="estop-btn"  class="hdr-btn estop-btn"  onclick="triggerEstop()">E-Stop</button>
+  <button id="resume-btn" class="hdr-btn resume-btn" onclick="triggerResume()" style="display:none">Resume</button>
+  <button class="hdr-btn primary" onclick="showAddModal()">+ Queue Task</button>
+</header>
+
+<!-- ── Stats bar ────────────────────────────────────────────────────────────── -->
+<div id="stats-bar">
+  <div class="stat-cell" data-color="blue"   data-tip="Locked">
+    <span class="stat-num" id="st-locked">0</span>
+    <span class="stat-lbl">Running</span>
+  </div>
+  <div class="stat-cell" data-color="yellow" data-tip="Pending">
+    <span class="stat-num" id="st-pending">0</span>
+    <span class="stat-lbl">Pending</span>
+  </div>
+  <div class="stat-cell" data-color="purple" data-tip="Review">
+    <span class="stat-num" id="st-review">0</span>
+    <span class="stat-lbl">Review</span>
+  </div>
+  <div class="stat-cell" data-color="green"  data-tip="Completed">
+    <span class="stat-num" id="st-completed">0</span>
+    <span class="stat-lbl">Done</span>
+  </div>
+  <div class="stat-cell" data-color="red"    data-tip="Failed/Escalated">
+    <span class="stat-num" id="st-failed">0</span>
+    <span class="stat-lbl">Failed</span>
+  </div>
+  <div class="stat-cell" data-color="red"    data-tip="Open escalations">
+    <span class="stat-num" id="st-esc">0</span>
+    <span class="stat-lbl">Escalations</span>
+  </div>
+  <div class="stat-cell" data-color="teal"   data-tip="Active convoys">
+    <span class="stat-num" id="st-convoys">0</span>
+    <span class="stat-lbl">Convoys</span>
+  </div>
+  <div class="stat-cell" data-color="yellow" data-tip="Unread mail">
+    <span class="stat-num" id="st-mail">0</span>
+    <span class="stat-lbl">Unread Mail</span>
+  </div>
+</div>
+
+<!-- ── Tab bar ──────────────────────────────────────────────────────────────── -->
+<nav id="tab-bar">
+  <button class="tab-btn active" data-tab="tasks"       onclick="switchTab('tasks')">Tasks <span class="tab-badge" id="tbadge-tasks"></span></button>
+  <button class="tab-btn"        data-tab="escalations" onclick="switchTab('escalations')">Escalations <span class="tab-badge" id="tbadge-escalations"></span></button>
+  <button class="tab-btn"        data-tab="convoys"     onclick="switchTab('convoys')">Convoys <span class="tab-badge" id="tbadge-convoys"></span></button>
+  <button class="tab-btn"        data-tab="agents"      onclick="switchTab('agents')">Agents <span class="tab-badge" id="tbadge-agents"></span></button>
+  <button class="tab-btn"        data-tab="mail"        onclick="switchTab('mail')">Mail <span class="tab-badge" id="tbadge-mail"></span></button>
+  <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
+  <div id="tab-spacer"></div>
+  <span id="last-refresh" style="font-size:11px;color:var(--text2);align-self:center"></span>
+</nav>
+
+<!-- ── Main ─────────────────────────────────────────────────────────────────── -->
+<div id="main">
+
+  <!-- Tasks tab -->
+  <div class="tab-pane active" id="tab-tasks">
+    <div class="filter-bar">
+      <button class="filter-btn active" data-filter="active"  onclick="setTaskFilter('active')">Active</button>
+      <button class="filter-btn"        data-filter="review"  onclick="setTaskFilter('review')">Review</button>
+      <button class="filter-btn"        data-filter="pending" onclick="setTaskFilter('pending')">Pending</button>
+      <button class="filter-btn"        data-filter="failed"  onclick="setTaskFilter('failed')">Failed</button>
+      <button class="filter-btn"        data-filter="done"    onclick="setTaskFilter('done')">Completed</button>
+      <button class="filter-btn"        data-filter="all"     onclick="setTaskFilter('all')">All</button>
+      <div class="filter-spacer"></div>
+      <input class="search-input" id="task-search" type="text" placeholder="Search tasks…" oninput="renderTasks()">
+    </div>
+    <div style="display:flex;flex:1;overflow:hidden">
+      <div class="table-wrap" id="tasks-table-wrap">
+        <table id="tasks-table">
+          <thead>
+            <tr>
+              <th style="width:50px">ID</th>
+              <th style="width:90px">Status</th>
+              <th style="width:80px">Type</th>
+              <th>Payload</th>
+              <th style="width:90px">Repo</th>
+              <th style="width:55px">Priority</th>
+              <th style="width:60px">Retry</th>
+            </tr>
+          </thead>
+          <tbody id="tasks-tbody"></tbody>
+        </table>
+      </div>
+      <!-- Task detail side panel -->
+      <div id="task-panel" class="hidden">
+        <div id="panel-header">
+          <div id="panel-header-info">
+            <div>
+              <span id="panel-task-id" class="mono"></span>
+              &nbsp;
+              <span id="panel-task-type" class="dim"></span>
+              &nbsp;
+              <span id="panel-task-status"></span>
+            </div>
+            <div id="panel-title"></div>
+          </div>
+          <button id="panel-close" onclick="closePanel()">&times;</button>
+        </div>
+        <div id="panel-actions"></div>
+        <div id="panel-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Escalations tab -->
+  <div class="tab-pane" id="tab-escalations">
+    <div class="filter-bar">
+      <button class="filter-btn active" data-filter="Open"   onclick="setEscFilter('Open')">Open</button>
+      <button class="filter-btn"        data-filter="Closed" onclick="setEscFilter('Closed')">Closed</button>
+      <button class="filter-btn"        data-filter=""       onclick="setEscFilter('')">All</button>
+    </div>
+    <div class="esc-list" id="esc-list"></div>
+  </div>
+
+  <!-- Convoys tab -->
+  <div class="tab-pane" id="tab-convoys">
+    <div class="convoy-list" id="convoy-list"></div>
+  </div>
+
+  <!-- Agents tab -->
+  <div class="tab-pane" id="tab-agents">
+    <div class="table-wrap">
+      <table id="agents-table">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th style="width:120px">Repo</th>
+            <th style="width:70px">Task</th>
+            <th style="width:120px">Status</th>
+            <th style="width:160px">Locked At</th>
+          </tr>
+        </thead>
+        <tbody id="agents-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Mail tab -->
+  <div class="tab-pane" id="tab-mail">
+    <div class="table-wrap">
+      <table id="mail-table">
+        <thead>
+          <tr>
+            <th style="width:50px">ID</th>
+            <th style="width:120px">From</th>
+            <th style="width:120px">To</th>
+            <th style="width:90px">Type</th>
+            <th>Subject</th>
+            <th style="width:150px">Date</th>
+          </tr>
+        </thead>
+        <tbody id="mail-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Logs tab -->
+  <div class="tab-pane" id="tab-logs">
+    <div class="filter-bar">
+      <button class="filter-btn active" data-log="fleet" onclick="switchLog('fleet')">fleet.log</button>
+      <button class="filter-btn"        data-log="holonet" onclick="switchLog('holonet')">holonet events</button>
+      <div class="filter-spacer"></div>
+      <button class="hdr-btn" onclick="clearLog()">Clear</button>
+    </div>
+    <div id="log-wrap"></div>
+  </div>
+
+</div><!-- #main -->
+
+<!-- ── Add task modal ────────────────────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="add-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>Queue New Task</h2>
+      <button class="modal-close" onclick="closeModal('add-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div>
+        <label class="field-label" for="add-type">Type</label>
+        <select class="field-select" id="add-type" onchange="onAddTypeChange()">
+          <option value="Feature">Feature</option>
+          <option value="CodeEdit">CodeEdit</option>
+        </select>
+      </div>
+      <div id="add-repo-row" style="display:none">
+        <label class="field-label" for="add-repo">Repo</label>
+        <select class="field-select" id="add-repo">
+          <option value="">— select —</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="add-payload">Payload / Description</label>
+        <textarea class="field-textarea" id="add-payload" rows="5" placeholder="Describe the task…"></textarea>
+      </div>
+      <div>
+        <label class="field-label" for="add-priority">Priority (default 0, higher = first)</label>
+        <input class="field-input" id="add-priority" type="number" value="0" min="-99" max="99">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('add-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitAddTask()">Queue Task</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Reject modal ──────────────────────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="reject-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>Reject Task <span id="reject-task-id"></span></h2>
+      <button class="modal-close" onclick="closeModal('reject-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div>
+        <label class="field-label" for="reject-reason">Reason / Feedback for agent</label>
+        <textarea class="field-textarea" id="reject-reason" rows="4" placeholder="Explain what went wrong and what to fix…"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('reject-modal')">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmReject()">Reject</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Mail detail modal ─────────────────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="mail-modal">
+  <div class="modal-box" style="width:560px">
+    <div class="modal-header">
+      <h2 id="mail-modal-subject"></h2>
+      <button class="modal-close" onclick="closeModal('mail-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="meta-grid" id="mail-modal-meta" style="margin-bottom:10px"></div>
+      <div class="directive-box" id="mail-modal-body" style="max-height:320px"></div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
