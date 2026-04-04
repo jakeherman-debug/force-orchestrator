@@ -16,7 +16,7 @@ type Bounty struct {
 	Checkpoint    string
 	BranchName    string
 	Priority      int
-	TaskTimeout   int // seconds; 0 means use the default astromechTimeout
+	TaskTimeout   int // seconds; 0 means use AstromechTimeoutForAttempt progressive default
 }
 
 // ── Planning ──────────────────────────────────────────────────────────────────
