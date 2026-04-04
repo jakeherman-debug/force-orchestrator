@@ -52,15 +52,20 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 				fmt.Sprintf("Convoy '%s' has completed — all %d task(s) have been approved and merged.", c.name, total),
 				0, store.MailTypeInfo)
 		} else if problemCount > 0 {
+			db.Exec(`UPDATE Convoys SET status = 'Failed' WHERE id = ?`, c.id)
 			logger.Printf("Convoy '%s' STALLED — %d problem task(s), %d/%d complete", c.name, problemCount, completed, total)
 			subject := fmt.Sprintf("[CONVOY STALLED] %s", c.name)
 			var existing int
 			db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE subject = ? AND read_at = ''`, subject).Scan(&existing)
 			if existing == 0 {
-				store.SendMail(db, "inquisitor", "operator", subject,
-					fmt.Sprintf("Convoy '%s' is stalled — %d task(s) have failed or escalated.\n\n%d/%d tasks completed.\n\nInspect: force convoy show %d\nRetry failed tasks: force convoy reset %d",
-						c.name, problemCount, completed, total, c.id, c.id),
-					0, store.MailTypeAlert)
+				var taskErr string
+				db.QueryRow(`SELECT error_log FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit' AND status IN ('Failed','Escalated') ORDER BY id ASC LIMIT 1`, c.id).Scan(&taskErr)
+				body := fmt.Sprintf("Convoy '%s' is stalled — %d task(s) have failed or escalated.\n\n%d/%d tasks completed.\n\nInspect: force convoy show %d\nRetry failed tasks: force convoy reset %d",
+					c.name, problemCount, completed, total, c.id, c.id)
+				if taskErr != "" {
+					body += "\n\nFirst failure:\n" + taskErr
+				}
+				store.SendMail(db, "inquisitor", "operator", subject, body, 0, store.MailTypeAlert)
 			}
 		}
 	}
