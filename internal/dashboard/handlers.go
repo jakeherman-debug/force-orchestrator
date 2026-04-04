@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/claude"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -778,9 +779,23 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Auto-classify if no type specified.
+		var classifiedType, classifyReason string
+		resolvedType := body.Type
+		if body.Type == "" || strings.EqualFold(body.Type, "auto") {
+			t, reason, err := claude.ClassifyTaskType(body.Payload)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"classification failed: %s"}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			resolvedType = t
+			classifiedType = t
+			classifyReason = reason
+		}
+
 		var newID int
-		switch body.Type {
-		case "Feature", "":
+		switch resolvedType {
+		case "Feature":
 			newID = store.AddBounty(db, 0, "Feature", body.Payload)
 			if body.Priority != 0 {
 				store.SetBountyPriority(db, newID, body.Priority)
@@ -814,7 +829,17 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		store.LogAudit(db, "dashboard", "add-task", newID,
-			fmt.Sprintf("queued %s via dashboard", body.Type))
-		fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
+			fmt.Sprintf("queued %s via dashboard", resolvedType))
+		if classifiedType != "" {
+			resp, _ := json.Marshal(map[string]any{
+				"ok":              true,
+				"id":              newID,
+				"classified_type": classifiedType,
+				"reason":          classifyReason,
+			})
+			w.Write(resp)
+		} else {
+			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
+		}
 	}
 }

@@ -822,7 +822,7 @@ async function showAddModal() {
     S.repos.map(r => `<option value="${escHtml(r)}">${escHtml(r)}</option>`).join('');
   $('add-payload').value  = '';
   $('add-priority').value = '0';
-  $('add-type').value     = 'Feature';
+  $('add-type').value     = '';
   onAddTypeChange();
   $('add-modal').classList.remove('hidden');
   setTimeout(() => $('add-payload').focus(), 50);
@@ -830,7 +830,7 @@ async function showAddModal() {
 
 function onAddTypeChange() {
   const type = $('add-type').value;
-  $('add-repo-row').style.display = (type === 'CodeEdit' || type === 'Investigate' || type === 'Audit') ? '' : 'none';
+  $('add-repo-row').style.display = (type === '' || type === 'CodeEdit' || type === 'Investigate' || type === 'Audit') ? '' : 'none';
   const repoLabel = $('add-repo-label');
   if (repoLabel) {
     repoLabel.textContent = type === 'CodeEdit' ? 'Repo (required)' : 'Repo (optional — leave blank for fleet-wide)';
@@ -852,7 +852,11 @@ async function submitAddTask() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type, payload, repo, priority }),
     });
-    showToast(`Task #${r.id} queued`, 'ok');
+    if (r.classified_type) {
+      showToast(`Queued as ${r.classified_type} — ${r.reason} (task #${r.id})`, 'ok');
+    } else {
+      showToast(`Task #${r.id} queued`, 'ok');
+    }
     closeModal('add-modal');
     loadTasks();
     pollStatus();
