@@ -12,13 +12,14 @@ import (
 	"force-orchestrator/internal/store"
 )
 
-func printList(db *sql.DB, statusFilter string, limit int) {
+func printList(db *sql.DB, statusFilter, repoFilter, typeFilter string, limit int) {
 	query := `SELECT id, type, status, target_repo, owner, retry_count,
 		COALESCE((SELECT MIN(td.depends_on) FROM TaskDependencies td
 		          JOIN BountyBoard dep ON dep.id = td.depends_on
 		          WHERE td.task_id = bb.id AND dep.status != 'Completed'), 0) AS active_dep,
 		payload FROM BountyBoard bb`
 	args := []any{}
+	conditions := []string{}
 
 	// statusFilter can be a single status or comma-separated list
 	if statusFilter != "" {
@@ -28,7 +29,18 @@ func printList(db *sql.DB, statusFilter string, limit int) {
 			placeholders[i] = "?"
 			args = append(args, strings.TrimSpace(s))
 		}
-		query += fmt.Sprintf(" WHERE status IN (%s)", strings.Join(placeholders, ","))
+		conditions = append(conditions, fmt.Sprintf("status IN (%s)", strings.Join(placeholders, ",")))
+	}
+	if repoFilter != "" {
+		conditions = append(conditions, "target_repo = ?")
+		args = append(args, repoFilter)
+	}
+	if typeFilter != "" {
+		conditions = append(conditions, "type = ?")
+		args = append(args, typeFilter)
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	query += ` ORDER BY id DESC`
 	if limit > 0 {
@@ -496,7 +508,8 @@ Task management:
   status                                Quick summary of task counts and daemon state
   stats                                 Task throughput, agent performance, and failure rate
   who                                   Show which agents are active and what they're working on
-  list [status[,status2]] [--limit N]   List tasks (comma-separated statuses, newest first)
+  list [status[,status2]] [--status <s>] [--repo <name>] [--type <type>] [--limit N]
+                                        List tasks; filters are optional and combinable
   logs <id>                             Show full payload and error log for a task
   history [--full] <id>                 Show full Claude output for every attempt on a task
   reset <id>                            Reset a task to Pending (clears all error counts)
