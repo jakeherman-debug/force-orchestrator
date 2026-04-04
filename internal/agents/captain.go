@@ -267,11 +267,11 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			CreateEscalation(db, b.ID, store.SeverityMedium, msg)
 			return
 		}
-		res, _ := db.Exec(
-			`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority)
-			 VALUES (?, ?, 'CodeEdit', 'Pending', ?, ?, ?)`,
-			b.ParentID, nt.Repo, nt.Task, b.ConvoyID, b.Priority)
-		newID, _ := res.LastInsertId()
+		newID, insertErr := store.AddConvoyTask(db, b.ParentID, nt.Repo, nt.Task, b.ConvoyID, b.Priority, "Pending")
+		if insertErr != nil {
+			logger.Printf("Task %d: failed to insert convoy task for repo %s: %v", b.ID, nt.Repo, insertErr)
+			continue
+		}
 		for _, depID := range nt.BlockedBy {
 			if depID <= 0 {
 				continue
@@ -283,10 +283,10 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 				logger.Printf("Task %d: captain referenced non-existent blocked_by ID %d for new task #%d — skipping dependency", b.ID, depID, newID)
 				continue
 			}
-			store.AddDependency(db, int(newID), depID)
+			store.AddDependency(db, newID, depID)
 		}
 		logger.Printf("Task %d: captain added new task #%d [%s]: %s", b.ID, newID, nt.Repo, util.TruncateStr(nt.Task, 60))
-		store.LogAudit(db, agentName, "captain-add-task", int(newID),
+		store.LogAudit(db, agentName, "captain-add-task", newID,
 			fmt.Sprintf("added by captain reviewing task #%d", b.ID))
 	}
 
