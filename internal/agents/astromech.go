@@ -102,7 +102,7 @@ func permanentInfraFail(db *sql.DB, logger interface{ Printf(string, ...any) },
 	telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, bounty.ID, msg))
 	store.LogAudit(db, agentName, "infra-fail", bounty.ID, msg)
 
-	// Spawn a Feature remediation task so Commander can plan a recovery strategy.
+	// Spawn a CodeEdit remediation task so an agent can investigate and fix the infra issue.
 	remPayload := fmt.Sprintf(
 		`Infra failure on task #%d (repo: %s).
 
@@ -116,8 +116,8 @@ Common causes:
 
 After fixing, run: force reset %d`,
 		bounty.ID, bounty.TargetRepo, msg, bounty.ID)
-	remID := store.AddBounty(db, bounty.ID, "Feature", remPayload)
-	logger.Printf("Task %d: permanently failed — spawned remediation Feature task #%d", bounty.ID, remID)
+	remID := store.AddBounty(db, bounty.ID, "CodeEdit", remPayload)
+	logger.Printf("Task %d: permanently failed — spawned remediation CodeEdit task #%d", bounty.ID, remID)
 
 	// Store failure memory so future agents know this infra issue occurred
 	store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
@@ -127,7 +127,7 @@ After fixing, run: force reset %d`,
 	// Notify operator via mail
 	store.SendMail(db, agentName, "operator",
 		fmt.Sprintf("[INFRA FAIL] Task #%d — %s", bounty.ID, bounty.TargetRepo),
-		fmt.Sprintf("Task #%d permanently failed after %d infra errors.\n\nRepo: %s\nError: %s\n\nRemediation task #%d has been queued (Commander will plan the recovery).\nOnce fixed, run: force reset %d",
+		fmt.Sprintf("Task #%d permanently failed after %d infra errors.\n\nRepo: %s\nError: %s\n\nRemediation task #%d has been queued to investigate.\nOnce fixed, run: force reset %d",
 			bounty.ID, MaxInfraFailures, bounty.TargetRepo, msg, remID, bounty.ID),
 		bounty.ID, store.MailTypeAlert)
 }
