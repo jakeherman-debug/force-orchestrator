@@ -15,11 +15,11 @@ func printConvoys(db *sql.DB) {
 		fmt.Println("No convoys found.")
 		return
 	}
-	fmt.Printf("%-4s %-10s %-20s %s\n", "ID", "STATUS", "CREATED", "NAME")
-	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("%-4s %-30s %-12s %-10s %-20s\n", "ID", "NAME", "STATUS", "PROGRESS", "CREATED")
+	fmt.Println(strings.Repeat("-", 100))
 	for _, c := range convoys {
 		completed, total := store.ConvoyProgress(db, c.ID)
-		fmt.Printf("%-4d %-10s %-20s %s (%d/%d)\n", c.ID, c.Status, c.CreatedAt, c.Name, completed, total)
+		fmt.Printf("%-4d %-30s %-12s %-10s %-20s\n", c.ID, c.Name, c.Status, fmt.Sprintf("%d/%d", completed, total), c.CreatedAt)
 	}
 }
 
