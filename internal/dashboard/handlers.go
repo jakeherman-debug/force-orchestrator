@@ -53,6 +53,7 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoys)
 		unread, _ := store.MailStats(db, "", "")
 		s.UnreadMail = unread
+		s.TotalSpendDollars = store.TotalSpendDollars(db)
 
 		if pidBytes, err := os.ReadFile("fleet.pid"); err == nil {
 			var pid int
@@ -81,7 +82,9 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			COALESCE(CAST((julianday('now') - julianday(NULLIF(locked_at,''))) * 86400 AS INTEGER), 0),
 			(SELECT GROUP_CONCAT(td.depends_on) FROM TaskDependencies td
 			 JOIN BountyBoard dep ON dep.id = td.depends_on
-			 WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed')
+			 WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed'),
+			(SELECT COALESCE(SUM(tokens_in),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
+			(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id)
 			FROM BountyBoard`
 		args := []any{}
 		if statusFilter != "" {
@@ -105,10 +108,12 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var t DashboardTask
 			var activeBlockersStr sql.NullString
+			var tokensIn, tokensOut int
 			rows.Scan(&t.ID, &t.Type, &t.Status, &t.Repo, &t.Owner, &t.RetryCount,
 				&t.ConvoyID, &t.Payload, &t.ErrorLog, &t.LockedAt, &t.Priority,
-				&t.RuntimeSeconds, &activeBlockersStr)
+				&t.RuntimeSeconds, &activeBlockersStr, &tokensIn, &tokensOut)
 			t.BlockedBy = parseBlockers(activeBlockersStr.String)
+			t.CostDollars = store.TaskCostDollars(tokensIn, tokensOut)
 			if len(t.Payload) > 300 {
 				t.Payload = t.Payload[:300] + "…"
 			}
@@ -303,6 +308,7 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 
 	rawHist := store.GetTaskHistory(db, id)
 	hist := make([]DashboardAttempt, 0, len(rawHist))
+	var totalTokensIn, totalTokensOut int
 	for _, h := range rawHist {
 		hist = append(hist, DashboardAttempt{
 			Attempt:   h.Attempt,
@@ -312,6 +318,8 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 			TokensOut: h.TokensOut,
 			CreatedAt: h.CreatedAt,
 		})
+		totalTokensIn += h.TokensIn
+		totalTokensOut += h.TokensOut
 	}
 
 	blockers := store.GetDependencies(db, id)
@@ -339,6 +347,7 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 		Directive:      directive,
 		RuntimeSeconds: runtimeSecs,
 		BlockedBy:      blockers,
+		CostDollars:    store.TaskCostDollars(totalTokensIn, totalTokensOut),
 		Memories:       mems,
 		History:        hist,
 		Mail:           fetchMailForTask(db, id),

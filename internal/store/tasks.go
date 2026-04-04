@@ -275,6 +275,29 @@ func UnblockDependentsOf(db *sql.DB, id int) int {
 	return int(n)
 }
 
+// ── Cost computation ──────────────────────────────────────────────────────────
+
+// Pricing constants for Claude Sonnet (per million tokens).
+const (
+	PriceInputPerMillion  = 3.0  // $3.00/M input tokens
+	PriceOutputPerMillion = 15.0 // $15.00/M output tokens
+)
+
+// TaskCostDollars computes the cost in dollars for a given token usage.
+func TaskCostDollars(tokensIn, tokensOut int) float64 {
+	return float64(tokensIn)*PriceInputPerMillion/1_000_000 +
+		float64(tokensOut)*PriceOutputPerMillion/1_000_000
+}
+
+// TotalSpendDollars returns the total spend in dollars across all TaskHistory rows.
+func TotalSpendDollars(db *sql.DB) float64 {
+	var tokensIn, tokensOut int64
+	db.QueryRow(`SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0) FROM TaskHistory`).
+		Scan(&tokensIn, &tokensOut)
+	return float64(tokensIn)*PriceInputPerMillion/1_000_000 +
+		float64(tokensOut)*PriceOutputPerMillion/1_000_000
+}
+
 // ── Task history ──────────────────────────────────────────────────────────────
 
 // RecordTaskHistory inserts a history entry and returns its row ID.
