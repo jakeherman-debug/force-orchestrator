@@ -488,8 +488,8 @@ Agent control:
 Logs written to fleet.log | Telemetry written to holonet.jsonl
 
 Task management:
-  add [--priority N] [--plan-only] <description>
-                                        Queue a feature task (Commander will decompose it)
+  add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] <description>
+                                        Queue a task (type auto-classified if omitted)
                                         --plan-only: subtasks created as Planned, approve with convoy approve
   add-task [--blocked-by <id>] [--convoy <id>] [--priority N] [--timeout <secs>] <repo> <desc>
                                         Queue a direct CodeEdit task (skips Commander)

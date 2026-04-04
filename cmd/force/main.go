@@ -44,7 +44,7 @@ func main() {
 
 	case "add":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: force add [--priority N] [--plan-only] <task description>")
+			fmt.Println("Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] <task description>")
 			os.Exit(1)
 		}
 		cmdAdd(db, os.Args[2:])
