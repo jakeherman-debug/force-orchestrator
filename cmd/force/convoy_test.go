@@ -263,7 +263,7 @@ func TestCheckConvoyCompletions_EmptyConvoy(t *testing.T) {
 	agents.CheckConvoyCompletions(db, logger)
 
 	// No mail should be sent
-	_, total := store.MailStats(db, "")
+	_, total := store.MailStats(db, "", "")
 	if total != 0 {
 		t.Errorf("expected no mail for empty convoy, got %d", total)
 	}

@@ -329,7 +329,7 @@ func TestMailStats(t *testing.T) {
 	id2 := int(SendMail(db, "astromech", "operator", "msg2", "", 0, MailTypeInfo))
 	MarkMailRead(db, id2)
 
-	unread, total := MailStats(db, "operator")
+	unread, total := MailStats(db, "operator", "operator")
 	if total != 2 {
 		t.Errorf("expected 2 total, got %d", total)
 	}
@@ -345,7 +345,7 @@ func TestMailStats_EmptyToAgent(t *testing.T) {
 	SendMail(db, "a", "operator", "msg1", "", 0, MailTypeInfo)
 	SendMail(db, "a", "astromech", "msg2", "", 0, MailTypeInfo)
 
-	unread, total := MailStats(db, "")
+	unread, total := MailStats(db, "", "")
 	if total != 2 {
 		t.Errorf("expected 2 total fleet-wide, got %d", total)
 	}
@@ -361,12 +361,44 @@ func TestMailStats_WithMail(t *testing.T) {
 	SendMail(db, "op", "agent1", "s1", "", 0, MailTypeInfo)
 	SendMail(db, "op", "agent2", "s2", "", 0, MailTypeAlert)
 
-	unread, total := MailStats(db, "")
+	unread, total := MailStats(db, "", "")
 	if total != 2 {
 		t.Errorf("expected 2 total, got %d", total)
 	}
 	if unread != 2 {
 		t.Errorf("expected 2 unread, got %d", unread)
+	}
+}
+
+func TestMailStats_RoleAddressing(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Direct to agent
+	SendMail(db, "operator", "R2-D2", "personal", "", 0, MailTypeInfo)
+	// Addressed to the role — any astromech should count it
+	SendMail(db, "operator", "astromech", "role-wide directive", "", 0, MailTypeDirective)
+	// Fleet-wide — every agent should count it
+	SendMail(db, "operator", "all", "fleet alert", "", 0, MailTypeAlert)
+	// To a different agent — should NOT be counted
+	SendMail(db, "operator", "captain", "not yours", "", 0, MailTypeInfo)
+
+	unread, total := MailStats(db, "R2-D2", "astromech")
+	if total != 3 {
+		t.Errorf("expected 3 total (direct + role + all), got %d", total)
+	}
+	if unread != 3 {
+		t.Errorf("expected 3 unread, got %d", unread)
+	}
+
+	// Mark the role-addressed one read; unread count should drop
+	var roleID int
+	db.QueryRow(`SELECT id FROM Fleet_Mail WHERE to_agent = 'astromech'`).Scan(&roleID)
+	MarkMailRead(db, roleID)
+
+	unread2, _ := MailStats(db, "R2-D2", "astromech")
+	if unread2 != 2 {
+		t.Errorf("expected 2 unread after marking role mail read, got %d", unread2)
 	}
 }
 
@@ -433,8 +465,8 @@ func TestReadInboxForAgent_RoleAddressing(t *testing.T) {
 	}
 
 	// All should now be marked read
-	unread, _ := MailStats(db, "R2-D2")
-	// The astromech-addressed one was not to R2-D2 so MailStats won't show it, but verify via DB
+	unread, _ := MailStats(db, "R2-D2", "astromech")
+	// MailStats now uses the same addressing logic as ReadInboxForAgent; verify via DB too
 	var unreadTotal int
 	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE read_at = '' AND (to_agent = 'R2-D2' OR to_agent = 'astromech' OR to_agent = 'all')`).Scan(&unreadTotal)
 	if unreadTotal != 0 {

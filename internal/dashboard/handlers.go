@@ -50,7 +50,7 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open'`).Scan(&s.OpenEscalations)
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open' AND severity = 'HIGH'`).Scan(&s.HighEscalations)
 		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoys)
-		unread, _ := store.MailStats(db, "")
+		unread, _ := store.MailStats(db, "", "")
 		s.UnreadMail = unread
 
 		if pidBytes, err := os.ReadFile("fleet.pid"); err == nil {

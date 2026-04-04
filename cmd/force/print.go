@@ -354,7 +354,7 @@ func printStatus(db *sql.DB) {
 		fmt.Printf("Stalled agents: %d (locked >%v with no recent commits)\n", stalled, agents.StallWarnTimeout)
 	}
 
-	unread, totalMail := store.MailStats(db, "")
+	unread, totalMail := store.MailStats(db, "", "")
 	if totalMail > 0 {
 		fmt.Printf("Fleet mail:     %d unread / %d total\n", unread, totalMail)
 	}
