@@ -39,6 +39,18 @@ function statusPill(st) {
   return `<span class="status ${statusCls(st)}">${st || ''}</span>`;
 }
 
+function fmtRuntime(secs) {
+  if (!secs) return '';
+  if (secs < 3600) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${String(s).padStart(2, '0')}s`;
+  }
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return `${h}h ${String(m).padStart(2, '0')}m`;
+}
+
 function showToast(msg, type = 'ok') {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
@@ -191,7 +203,7 @@ function renderTasks() {
 
   const tbody = $('tasks-tbody');
   if (!tasks.length) {
-    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
     $('tbadge-tasks').textContent = '';
     return;
   }
@@ -202,6 +214,14 @@ function renderTasks() {
     const retry = t.retry_count > 0 ? `<span style="color:var(--orange)">${t.retry_count}x</span>` : '';
     const prio  = t.priority   > 0 ? `<span style="color:var(--accent)">${t.priority}</span>`
                 : t.priority   < 0 ? `<span style="color:var(--text2)">${t.priority}</span>` : '0';
+    const runtimeStr = t.status === 'Locked' ? fmtRuntime(t.runtime_seconds) : '';
+    const blockedBy = (t.blocked_by && t.blocked_by.length > 0)
+      ? 'blocked by ' + t.blocked_by.map(id => `<a onclick="openPanel(${id});event.stopPropagation()" style="cursor:pointer">#${id}</a>`).join(', ')
+      : '';
+    const infoCell = [
+      runtimeStr ? `<span class="runtime-badge">${runtimeStr}</span>` : '',
+      blockedBy,
+    ].filter(Boolean).join(' ');
     return `<tr class="task-row${sel}" onclick="openPanel(${t.id})" data-id="${t.id}">
       <td class="mono dim">${t.id}</td>
       <td>${statusPill(t.status)}</td>
@@ -210,6 +230,7 @@ function renderTasks() {
       <td class="mono dim" style="font-size:11px">${escHtml(t.repo || '')}</td>
       <td style="text-align:center">${prio}</td>
       <td style="text-align:center">${retry}</td>
+      <td class="dim" style="font-size:11px;white-space:nowrap">${infoCell}</td>
     </tr>`;
   }).join('');
 }
@@ -288,17 +309,22 @@ function renderPanel(d) {
 
   // Meta
   const lockedAt = d.locked_at ? fmtTS(d.locked_at) : '—';
+  const blockedByLinks = (d.blocked_by && d.blocked_by.length > 0)
+    ? d.blocked_by.map(id => `<a onclick="openPanel(${id})" style="cursor:pointer">#${id}</a>`).join(', ')
+    : '';
   sections.push(`
     <div class="panel-section">
       <h3>Details</h3>
       <div class="meta-grid">
-        <span class="meta-key">Repo</span>     <span class="meta-val">${escHtml(d.repo || '—')}</span>
-        <span class="meta-key">Owner</span>    <span class="meta-val">${escHtml(d.owner || '—')}</span>
-        <span class="meta-key">Branch</span>   <span class="meta-val">${escHtml(d.branch_name || '—')}</span>
-        <span class="meta-key">Convoy</span>   <span class="meta-val">${d.convoy_id || '—'}</span>
-        <span class="meta-key">Retries</span>  <span class="meta-val">${d.retry_count} / infra:${d.infra_failures}</span>
-        <span class="meta-key">Priority</span> <span class="meta-val">${d.priority}</span>
-        <span class="meta-key">Locked at</span><span class="meta-val">${lockedAt}</span>
+        <span class="meta-key">Repo</span>      <span class="meta-val">${escHtml(d.repo || '—')}</span>
+        <span class="meta-key">Owner</span>     <span class="meta-val">${escHtml(d.owner || '—')}</span>
+        <span class="meta-key">Branch</span>    <span class="meta-val">${escHtml(d.branch_name || '—')}</span>
+        <span class="meta-key">Convoy</span>    <span class="meta-val">${d.convoy_id || '—'}</span>
+        <span class="meta-key">Retries</span>   <span class="meta-val">${d.retry_count} / infra:${d.infra_failures}</span>
+        <span class="meta-key">Priority</span>  <span class="meta-val">${d.priority}</span>
+        <span class="meta-key">Locked at</span> <span class="meta-val">${lockedAt}</span>
+        <span class="meta-key">Runtime</span>   <span class="meta-val">${fmtRuntime(d.runtime_seconds) || '—'}</span>
+        <span class="meta-key">Blocked by</span><span class="meta-val">${blockedByLinks || '—'}</span>
       </div>
     </div>`);
 
