@@ -1,11 +1,20 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"log"
+)
 
 // ConvoyProgress returns (completed, total) task counts for a convoy.
 func ConvoyProgress(db *sql.DB, convoyID int) (completed, total int) {
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit'`, convoyID).Scan(&total)
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit' AND status = 'Completed'`, convoyID).Scan(&completed)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit'`, convoyID).Scan(&total); err != nil {
+		log.Printf("ConvoyProgress: scan total error for convoy %d: %v", convoyID, err)
+		return
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit' AND status = 'Completed'`, convoyID).Scan(&completed); err != nil {
+		log.Printf("ConvoyProgress: scan completed error for convoy %d: %v", convoyID, err)
+		return
+	}
 	return
 }
 
@@ -59,7 +68,10 @@ func ListConvoys(db *sql.DB) []Convoy {
 	var convoys []Convoy
 	for rows.Next() {
 		var c Convoy
-		rows.Scan(&c.ID, &c.Name, &c.Status, &c.CreatedAt)
+		if err := rows.Scan(&c.ID, &c.Name, &c.Status, &c.CreatedAt); err != nil {
+			log.Printf("ListConvoys: scan error: %v", err)
+			return nil
+		}
 		convoys = append(convoys, c)
 	}
 	return convoys

@@ -68,7 +68,10 @@ func loadKnownRepos(db *sql.DB) map[string]bool {
 	defer rows.Close()
 	for rows.Next() {
 		var name string
-		rows.Scan(&name)
+		if err := rows.Scan(&name); err != nil {
+			log.Printf("loadKnownRepos: scan error: %v", err)
+			return repos
+		}
 		repos[name] = true
 	}
 	return repos
