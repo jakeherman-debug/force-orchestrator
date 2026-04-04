@@ -222,27 +222,50 @@ func cmdDaemon(db *sql.DB) {
 	}
 }
 
-func cmdScale(db *sql.DB, n int) {
-	store.SetConfig(db, "num_astromechs", strconv.Itoa(n))
-	pidData, pidErr := os.ReadFile("fleet.pid")
-	if pidErr != nil {
-		fmt.Printf("Updated num_astromechs=%d. (No running daemon — takes effect on next start.)\n", n)
+func cmdScale(db *sql.DB, astromechs, council, captain, investigators, auditors int) {
+	type update struct {
+		key   string
+		label string
+		val   int
+	}
+	candidates := []update{
+		{"num_astromechs", "astromechs", astromechs},
+		{"num_council", "council", council},
+		{"num_captain", "captain", captain},
+		{"num_investigators", "investigators", investigators},
+		{"num_auditors", "auditors", auditors},
+	}
+
+	var updated []string
+	for _, u := range candidates {
+		if u.val >= 0 {
+			store.SetConfig(db, u.key, strconv.Itoa(u.val))
+			updated = append(updated, fmt.Sprintf("%s=%d", u.label, u.val))
+		}
+	}
+
+	if len(updated) == 0 {
+		fmt.Println("Usage: force scale [--astromechs N] [--council N] [--captain N] [--investigators N] [--auditors N]")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Updated: %s\n", strings.Join(updated, ", "))
+
+	pid, alive := readDaemonPID()
+	if !alive {
+		fmt.Println("No running daemon found — changes take effect on next start.")
 		return
 	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if pid <= 0 {
-		fmt.Printf("Updated num_astromechs=%d. (Invalid PID in fleet.pid.)\n", n)
-		return
-	}
+
 	proc, findErr := os.FindProcess(pid)
 	if findErr != nil {
-		fmt.Printf("Updated num_astromechs=%d. (Cannot find daemon process.)\n", n)
+		fmt.Printf("Cannot find daemon process (PID %d).\n", pid)
 		return
 	}
 	if sigErr := proc.Signal(syscall.SIGUSR1); sigErr != nil {
-		fmt.Printf("Updated num_astromechs=%d. (Signal failed: %v)\n", n, sigErr)
+		fmt.Printf("Signal failed: %v\n", sigErr)
 	} else {
-		fmt.Printf("Scaling to %d astromech(s) — SIGUSR1 sent to daemon (PID %d).\n", n, pid)
+		fmt.Printf("Signaled daemon (PID %d) — new agents will start shortly.\n", pid)
 	}
 }
 
