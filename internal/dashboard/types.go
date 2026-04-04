@@ -2,32 +2,34 @@ package dashboard
 
 // DashboardStatus is the payload for GET /api/status
 type DashboardStatus struct {
-	Timestamp       string         `json:"timestamp"`
-	DaemonRunning   bool           `json:"daemon_running"`
-	DaemonPID       int            `json:"daemon_pid,omitempty"`
-	Estopped        bool           `json:"estopped"`
-	Tasks           map[string]int `json:"tasks"`
-	OpenEscalations int            `json:"open_escalations"`
-	HighEscalations int            `json:"high_escalations"`
-	ActiveConvoys   int            `json:"active_convoys"`
-	UnreadMail      int            `json:"unread_mail"`
+	Timestamp         string         `json:"timestamp"`
+	DaemonRunning     bool           `json:"daemon_running"`
+	DaemonPID         int            `json:"daemon_pid,omitempty"`
+	Estopped          bool           `json:"estopped"`
+	Tasks             map[string]int `json:"tasks"`
+	OpenEscalations   int            `json:"open_escalations"`
+	HighEscalations   int            `json:"high_escalations"`
+	ActiveConvoys     int            `json:"active_convoys"`
+	UnreadMail        int            `json:"unread_mail"`
+	TotalSpendDollars float64        `json:"total_spend_dollars"`
 }
 
 // DashboardTask is one row in GET /api/tasks
 type DashboardTask struct {
-	ID             int    `json:"id"`
-	Type           string `json:"type"`
-	Status         string `json:"status"`
-	Repo           string `json:"repo"`
-	Owner          string `json:"owner"`
-	RetryCount     int    `json:"retry_count"`
-	ConvoyID       int    `json:"convoy_id"`
-	Payload        string `json:"payload"`
-	ErrorLog       string `json:"error_log,omitempty"`
-	LockedAt       string `json:"locked_at,omitempty"`
-	Priority       int    `json:"priority"`
-	RuntimeSeconds int    `json:"runtime_seconds"`
-	BlockedBy      []int  `json:"blocked_by"`
+	ID             int     `json:"id"`
+	Type           string  `json:"type"`
+	Status         string  `json:"status"`
+	Repo           string  `json:"repo"`
+	Owner          string  `json:"owner"`
+	RetryCount     int     `json:"retry_count"`
+	ConvoyID       int     `json:"convoy_id"`
+	Payload        string  `json:"payload"`
+	ErrorLog       string  `json:"error_log,omitempty"`
+	LockedAt       string  `json:"locked_at,omitempty"`
+	Priority       int     `json:"priority"`
+	RuntimeSeconds int     `json:"runtime_seconds"`
+	BlockedBy      []int   `json:"blocked_by"`
+	CostDollars    float64 `json:"cost_dollars"`
 }
 
 // DashboardMail is a single fleet mail message
@@ -80,6 +82,7 @@ type DashboardTaskDetail struct {
 	Directive      string             `json:"directive"`
 	RuntimeSeconds int                `json:"runtime_seconds"`
 	BlockedBy      []int              `json:"blocked_by"`
+	CostDollars    float64            `json:"cost_dollars"`
 	Memories       []DashboardMemory  `json:"memories"`
 	History        []DashboardAttempt `json:"history"`
 	Mail           []DashboardMail    `json:"mail"`
