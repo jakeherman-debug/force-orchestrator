@@ -244,6 +244,55 @@ func AskClaudeCLI(systemPrompt, userPrompt, tools string, maxTurns int) (string,
 	return out, nil
 }
 
+// validTaskTypes is the set of accepted classification outputs.
+var validTaskTypes = map[string]bool{
+	"Feature":     true,
+	"CodeEdit":    true,
+	"Investigate": true,
+	"Audit":       true,
+}
+
+const classifySystemPrompt = `You are a task classifier. Given a task prompt, respond with EXACTLY one line in this format:
+TypeName — one-sentence reason
+
+Choose TypeName from exactly one of:
+- Feature: large or multi-system change that benefits from decomposition into subtasks
+- CodeEdit: targeted, well-defined code change in known files
+- Investigate: open-ended research question with no clear code change yet
+- Audit: broad codebase scan looking for issues to fix
+
+Respond with only the single line. No preamble, no explanation, no markdown.`
+
+// ClassifyTaskType calls Claude to classify a task prompt into one of four types.
+// Returns (taskType, reason, err). taskType is one of: Feature, CodeEdit, Investigate, Audit.
+// reason is a one-sentence explanation. Returns an error if the response cannot be parsed
+// or the type is not one of the four valid values.
+func ClassifyTaskType(prompt string) (string, string, error) {
+	out, err := AskClaudeCLI(classifySystemPrompt, prompt, "", 1)
+	if err != nil {
+		return "", "", fmt.Errorf("classification failed: %w", err)
+	}
+
+	// Find the classification line — Claude may emit preamble; scan for a valid type.
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " — ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		taskType := strings.TrimSpace(parts[0])
+		reason := strings.TrimSpace(parts[1])
+		if validTaskTypes[taskType] {
+			return taskType, reason, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("could not parse classification from response: %q", strings.TrimSpace(out))
+}
+
 // ExtractJSON safely pulls JSON out of Claude's markdown wrappers
 func ExtractJSON(response string) string {
 	start := strings.Index(response, "```json")
