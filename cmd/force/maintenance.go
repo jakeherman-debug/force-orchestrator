@@ -612,10 +612,22 @@ func purgeFilesystem(db *sql.DB) {
 // cmdPurge cleans all filesystem run artifacts and dog timers without touching
 // task data in the database.
 func cmdPurge(db *sql.DB, confirmed bool) {
+	// Always print the warning regardless of --confirm (defense-in-depth).
+	fmt.Fprintln(os.Stderr, "WARNING: This will permanently delete:")
+	fmt.Fprintln(os.Stderr, "  - fleet.log and holonet.jsonl log files")
+	fmt.Fprintln(os.Stderr, "  - All agent worktrees (from disk)")
+	fmt.Fprintln(os.Stderr, "  - All agent branches in registered repositories")
+	fmt.Fprintln(os.Stderr, "  - Dog cooldown timers")
+	fmt.Fprintln(os.Stderr, "Task data in the database is NOT affected.")
+	fmt.Fprintln(os.Stderr, "This action is IRREVERSIBLE.")
 	if !confirmed {
-		fmt.Fprintln(os.Stderr, "This will delete fleet.log, holonet.jsonl, all agent worktrees, and agent branches.")
-		fmt.Fprintln(os.Stderr, "Re-run with --confirm to proceed.")
-		os.Exit(1)
+		fmt.Fprint(os.Stderr, "\nType DELETE to confirm, or press Ctrl-C to abort: ")
+		var input string
+		fmt.Scanln(&input)
+		if input != "DELETE" {
+			fmt.Fprintln(os.Stderr, "Aborted.")
+			os.Exit(1)
+		}
 	}
 	if _, alive := readDaemonPID(); alive {
 		fmt.Fprintln(os.Stderr, "Daemon is running — stop it first with 'force estop' then kill the daemon process.")
@@ -630,16 +642,27 @@ func cmdPurge(db *sql.DB, confirmed bool) {
 // and resets the fleet to a factory-fresh state. Repositories and SystemConfig are
 // preserved unless --purge-repos is passed.
 func cmdHardReset(db *sql.DB, confirmed, purgeRepos bool) {
+	// Always print the warning regardless of --confirm (defense-in-depth).
+	fmt.Fprintln(os.Stderr, "WARNING: This permanently destroys ALL fleet state:")
+	fmt.Fprintln(os.Stderr, "  - All task data, history, and dependencies")
+	fmt.Fprintln(os.Stderr, "  - Fleet memories, mail, and escalations")
+	fmt.Fprintln(os.Stderr, "  - Audit log")
+	fmt.Fprintln(os.Stderr, "  - All agent worktrees and branches")
+	fmt.Fprintln(os.Stderr, "  - Log files (fleet.log, holonet.jsonl)")
+	if purgeRepos {
+		fmt.Fprintln(os.Stderr, "  - Repositories and system config (--purge-repos)")
+	} else {
+		fmt.Fprintln(os.Stderr, "  Repositories and system config will be preserved.")
+	}
+	fmt.Fprintln(os.Stderr, "This action is IRREVERSIBLE.")
 	if !confirmed {
-		fmt.Fprintln(os.Stderr, "WARNING: This permanently deletes ALL task data, history, memories, mail, escalations,")
-		fmt.Fprintln(os.Stderr, "         audit log, worktrees, branches, and log files.")
-		if purgeRepos {
-			fmt.Fprintln(os.Stderr, "         --purge-repos: repositories and system config will also be wiped.")
-		} else {
-			fmt.Fprintln(os.Stderr, "         Repositories and system config will be preserved.")
+		fmt.Fprint(os.Stderr, "\nType DELETE to confirm, or press Ctrl-C to abort: ")
+		var input string
+		fmt.Scanln(&input)
+		if input != "DELETE" {
+			fmt.Fprintln(os.Stderr, "Aborted.")
+			os.Exit(1)
 		}
-		fmt.Fprintln(os.Stderr, "Re-run with --confirm to proceed.")
-		os.Exit(1)
 	}
 	if _, alive := readDaemonPID(); alive {
 		fmt.Fprintln(os.Stderr, "Daemon is running — stop it first with 'force estop' then kill the daemon process.")
