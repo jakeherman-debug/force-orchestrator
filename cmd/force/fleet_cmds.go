@@ -129,6 +129,8 @@ func cmdDaemon(db *sql.DB) {
 	spawnedAgents := numAgents
 	spawnedCaptains := numCaptain
 	spawnedCouncil := numCouncil
+	spawnedInvestigators := numInvestigators
+	spawnedAuditors := numAuditors
 
 	for {
 		sig := <-sigChan
@@ -197,6 +199,48 @@ func cmdDaemon(db *sql.DB) {
 			}
 			if newCouncil < spawnedCouncil {
 				fmt.Printf("Scale-down to %d council member(s) requested (currently %d running) — takes effect on restart.\n", newCouncil, spawnedCouncil)
+			}
+
+			// Investigators
+			newInvestigators := spawnedInvestigators
+			if n := store.GetConfig(db, "num_investigators", ""); n != "" {
+				fmt.Sscanf(n, "%d", &newInvestigators)
+			}
+			if newInvestigators < 1 {
+				newInvestigators = 1
+			}
+			for spawnedInvestigators < newInvestigators {
+				name := fmt.Sprintf("Investigator-%d", spawnedInvestigators+1)
+				if spawnedInvestigators < len(investigatorRoster) {
+					name = investigatorRoster[spawnedInvestigators]
+				}
+				fmt.Printf("Scaling: spawning %s (investigators: %d → %d)\n", name, spawnedInvestigators, newInvestigators)
+				go agents.SpawnInvestigator(db, name)
+				spawnedInvestigators++
+			}
+			if newInvestigators < spawnedInvestigators {
+				fmt.Printf("Scale-down to %d investigator(s) requested (currently %d running) — takes effect on restart.\n", newInvestigators, spawnedInvestigators)
+			}
+
+			// Auditors
+			newAuditors := spawnedAuditors
+			if n := store.GetConfig(db, "num_auditors", ""); n != "" {
+				fmt.Sscanf(n, "%d", &newAuditors)
+			}
+			if newAuditors < 1 {
+				newAuditors = 1
+			}
+			for spawnedAuditors < newAuditors {
+				name := fmt.Sprintf("Auditor-%d", spawnedAuditors+1)
+				if spawnedAuditors < len(auditorRoster) {
+					name = auditorRoster[spawnedAuditors]
+				}
+				fmt.Printf("Scaling: spawning %s (auditors: %d → %d)\n", name, spawnedAuditors, newAuditors)
+				go agents.SpawnAuditor(db, name)
+				spawnedAuditors++
+			}
+			if newAuditors < spawnedAuditors {
+				fmt.Printf("Scale-down to %d auditor(s) requested (currently %d running) — takes effect on restart.\n", newAuditors, spawnedAuditors)
 			}
 
 		default:
