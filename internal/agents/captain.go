@@ -331,7 +331,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			store.FailBounty(db, b.ID, msg)
 			store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
 				fmt.Sprintf("Task: %s\nCaptain permanently rejected (attempt %d/%d): %s",
-					util.TruncateStr(b.Payload, 300), retryCount, MaxRetries, ruling.Feedback), "")
+					util.TruncateStr(directiveText(b.Payload), 300), retryCount, MaxRetries, ruling.Feedback), "")
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("Task #%d permanently failed (captain) — %s", b.ID, b.TargetRepo),
 				fmt.Sprintf("Task #%d has been rejected by the captain %d times and is now permanently failed.\n\nRepo: %s\nFinal rejection: %s\n\nTask payload:\n%s",
