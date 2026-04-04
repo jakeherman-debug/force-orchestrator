@@ -471,11 +471,30 @@ async function resetTask(id) {
   }
 }
 
-async function cancelTask(id) {
-  if (!confirm(`Cancel task #${id}?`)) return;
+function cancelTask(id) {
+  S.cancelID = id;
+  $('cancel-task-id').textContent = `#${id}`;
+  $('cancel-requeue-type').value = '';
+  $('cancel-modal').classList.remove('hidden');
+}
+
+async function confirmCancel() {
+  const requeueType = $('cancel-requeue-type').value;
+  const id = S.cancelID;
   try {
-    await api(`/api/tasks/${id}/cancel`, { method: 'POST' });
-    showToast(`Task #${id} cancelled`, 'ok');
+    const body = requeueType ? JSON.stringify({ requeue_type: requeueType }) : undefined;
+    const opts = { method: 'POST' };
+    if (body) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = body;
+    }
+    const res = await api(`/api/tasks/${id}/cancel`, opts);
+    if (res && res.requeued_id) {
+      showToast(`Task #${id} cancelled — re-queued as ${requeueType} #${res.requeued_id}`, 'ok');
+    } else {
+      showToast(`Task #${id} cancelled`, 'ok');
+    }
+    closeModal('cancel-modal');
     closePanel();
     loadTasks();
     pollStatus();

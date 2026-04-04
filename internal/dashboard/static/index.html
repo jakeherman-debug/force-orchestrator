@@ -264,6 +264,32 @@
   </div>
 </div>
 
+<!-- ── Cancel modal ──────────────────────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="cancel-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>Cancel Task <span id="cancel-task-id"></span></h2>
+      <button class="modal-close" onclick="closeModal('cancel-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div>
+        <label class="field-label" for="cancel-requeue-type">Re-queue as</label>
+        <select class="field-select" id="cancel-requeue-type">
+          <option value="">No re-queue</option>
+          <option value="Feature">Feature</option>
+          <option value="CodeEdit">CodeEdit</option>
+          <option value="Investigate">Investigate</option>
+          <option value="Audit">Audit</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('cancel-modal')">Back</button>
+      <button class="btn btn-danger" onclick="confirmCancel()">Cancel Task</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Reject modal ──────────────────────────────────────────────────────────── -->
 <div class="modal-backdrop hidden" id="reject-modal">
   <div class="modal-box">
