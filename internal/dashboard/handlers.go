@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -76,7 +77,11 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		jsonCORS(w)
 		statusFilter := r.URL.Query().Get("status")
 		query := `SELECT id, type, status, target_repo, owner, retry_count, convoy_id,
-			payload, IFNULL(error_log,''), IFNULL(locked_at,''), COALESCE(priority,0)
+			payload, IFNULL(error_log,''), IFNULL(locked_at,''), COALESCE(priority,0),
+			COALESCE(CAST((julianday('now') - julianday(NULLIF(locked_at,''))) * 86400 AS INTEGER), 0),
+			(SELECT GROUP_CONCAT(td.depends_on) FROM TaskDependencies td
+			 JOIN BountyBoard dep ON dep.id = td.depends_on
+			 WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed')
 			FROM BountyBoard`
 		args := []any{}
 		if statusFilter != "" {
@@ -99,8 +104,11 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		var tasks []DashboardTask
 		for rows.Next() {
 			var t DashboardTask
+			var activeBlockersStr sql.NullString
 			rows.Scan(&t.ID, &t.Type, &t.Status, &t.Repo, &t.Owner, &t.RetryCount,
-				&t.ConvoyID, &t.Payload, &t.ErrorLog, &t.LockedAt, &t.Priority)
+				&t.ConvoyID, &t.Payload, &t.ErrorLog, &t.LockedAt, &t.Priority,
+				&t.RuntimeSeconds, &activeBlockersStr)
+			t.BlockedBy = parseBlockers(activeBlockersStr.String)
 			if len(t.Payload) > 300 {
 				t.Payload = t.Payload[:300] + "…"
 			}
@@ -306,28 +314,53 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 		})
 	}
 
+	blockers := store.GetDependencies(db, id)
+	if blockers == nil {
+		blockers = []int{}
+	}
+
+	var runtimeSecs int
+	db.QueryRow(`SELECT COALESCE(CAST((julianday('now') - julianday(NULLIF(locked_at,''))) * 86400 AS INTEGER), 0) FROM BountyBoard WHERE id = ?`, id).
+		Scan(&runtimeSecs)
+
 	detail := DashboardTaskDetail{
-		ID:            b.ID,
-		Type:          b.Type,
-		Status:        b.Status,
-		Repo:          b.TargetRepo,
-		Owner:         b.Owner,
-		ParentID:      b.ParentID,
-		ConvoyID:      b.ConvoyID,
-		BranchName:    b.BranchName,
-		RetryCount:    b.RetryCount,
-		InfraFailures: b.InfraFailures,
-		Priority:      b.Priority,
-		BroaderGoal:   goal,
-		Directive:     directive,
-		Memories:      mems,
-		History:       hist,
-		Mail:          fetchMailForTask(db, id),
+		ID:             b.ID,
+		Type:           b.Type,
+		Status:         b.Status,
+		Repo:           b.TargetRepo,
+		Owner:          b.Owner,
+		ParentID:       b.ParentID,
+		ConvoyID:       b.ConvoyID,
+		BranchName:     b.BranchName,
+		RetryCount:     b.RetryCount,
+		InfraFailures:  b.InfraFailures,
+		Priority:       b.Priority,
+		BroaderGoal:    goal,
+		Directive:      directive,
+		RuntimeSeconds: runtimeSecs,
+		BlockedBy:      blockers,
+		Memories:       mems,
+		History:        hist,
+		Mail:           fetchMailForTask(db, id),
 	}
 	db.QueryRow(`SELECT IFNULL(locked_at,''), IFNULL(error_log,'') FROM BountyBoard WHERE id = ?`, id).
 		Scan(&detail.LockedAt, &detail.ErrorLog)
 
 	json.NewEncoder(w).Encode(detail)
+}
+
+func parseBlockers(s string) []int {
+	if s == "" {
+		return []int{}
+	}
+	parts := strings.Split(s, ",")
+	ids := make([]int, 0, len(parts))
+	for _, p := range parts {
+		if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
+			ids = append(ids, n)
+		}
+	}
+	return ids
 }
 
 func splitGoalDirective(payload string) (goal, directive string) {
