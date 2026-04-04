@@ -514,7 +514,8 @@ Task management:
   history [--full] <id>                 Show full Claude output for every attempt on a task
   reset <id>                            Reset a task to Pending (clears all error counts)
   retry <id>                            Alias for reset
-  cancel <id>                           Permanently cancel a task (marks Failed, no retry)
+  cancel <id> [--requeue <type>]        Permanently cancel a task (marks Failed, no retry)
+                                        --requeue: re-queue with same payload as Feature|CodeEdit|Investigate|Audit
   retry-all-failed                      Reset all failed tasks to Pending
   prioritize <id> <N>                   Set task priority (higher = claimed first)
   block <task-id> <blocker-id>          Add a dependency: task-id waits for blocker-id
