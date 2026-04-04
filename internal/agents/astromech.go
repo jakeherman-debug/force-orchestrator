@@ -446,6 +446,26 @@ Do not re-do work that is already correctly committed.`
 			return
 		}
 
+		// Auto-shard check: if this is a timeout and the agent has failed repeatedly
+		// without making any commits, re-queue as Decompose instead of retrying.
+		if strings.HasPrefix(err.Error(), "claude CLI timed out") && bounty.InfraFailures >= 2 {
+			base := igit.GetDefaultBranch(repoPath)
+			logOut, _ := igit.RunCmd(repoPath, "log", base+".."+branchName, "--oneline")
+			if strings.TrimSpace(logOut) == "" {
+				newID := store.AddBounty(db, bounty.ID, "Decompose", bounty.Payload)
+				failMsg := fmt.Sprintf("Auto-sharded after %d timeout failures with no commits — re-queued as Decompose #%d", bounty.InfraFailures, newID)
+				store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
+				store.FailBounty(db, bounty.ID, failMsg)
+				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, failMsg))
+				store.SendMail(db, name, "operator",
+					fmt.Sprintf("[AUTO-SHARDED] Task #%d — re-queued as Decompose #%d after repeated timeouts with no progress", bounty.ID, newID),
+					fmt.Sprintf("Task #%d has timed out %d times without making any commits on branch %s in repo %s.\n\nThis indicates the task is too large for a single session. It has been automatically re-queued as Decompose #%d so Commander can break it into smaller pieces.\n\nOriginal task:\n%s",
+						bounty.ID, bounty.InfraFailures, branchName, bounty.TargetRepo, newID, util.TruncateStr(bounty.Payload, 500)),
+					bounty.ID, store.MailTypeAlert)
+				return
+			}
+		}
+
 		// Generic infra failure
 		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
