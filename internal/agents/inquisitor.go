@@ -127,14 +127,7 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 		if repoPath == "" {
 			continue
 		}
-		worktreePath := ""
-		if agent := BranchAgentName(t.branchName); agent != "" {
-			worktreePath = igit.GetAgentWorktreePath(db, agent, repoPath)
-		}
-		if worktreePath == "" {
-			// Legacy branch format — fall back to per-task worktree path.
-			worktreePath = fmt.Sprintf("%s/worktrees/task-%d", repoPath, t.id)
-		}
+		worktreePath := igit.ResolveWorktreeDir(db, t.branchName, repoPath, t.id, BranchAgentName)
 
 		lockedAtTime, parseErr := time.Parse("2006-01-02 15:04:05", strings.TrimSpace(t.lockedAt))
 		if parseErr != nil {
