@@ -39,6 +39,11 @@ function statusPill(st) {
   return `<span class="status ${statusCls(st)}">${st || ''}</span>`;
 }
 
+function fmtCost(dollars) {
+  if (!dollars) return '$0.00';
+  return '$' + dollars.toFixed(2);
+}
+
 function fmtRuntime(secs) {
   if (!secs) return '';
   if (secs < 3600) {
@@ -125,6 +130,7 @@ function renderStats() {
   $('st-esc').textContent      = s.open_escalations || 0;
   $('st-convoys').textContent  = s.active_convoys   || 0;
   $('st-mail').textContent     = s.unread_mail      || 0;
+  $('st-spend').textContent    = fmtCost(s.total_spend_dollars || 0);
 
   // Tab badges
   const escEl = $('tbadge-escalations');
@@ -203,7 +209,7 @@ function renderTasks() {
 
   const tbody = $('tasks-tbody');
   if (!tasks.length) {
-    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
     $('tbadge-tasks').textContent = '';
     return;
   }
@@ -231,6 +237,7 @@ function renderTasks() {
       <td style="text-align:center">${prio}</td>
       <td style="text-align:center">${retry}</td>
       <td class="dim" style="font-size:11px;white-space:nowrap">${infoCell}</td>
+      <td class="mono dim" style="font-size:11px;text-align:right">${fmtCost(t.cost_dollars)}</td>
     </tr>`;
   }).join('');
 }
@@ -325,6 +332,7 @@ function renderPanel(d) {
         <span class="meta-key">Locked at</span> <span class="meta-val">${lockedAt}</span>
         <span class="meta-key">Runtime</span>   <span class="meta-val">${fmtRuntime(d.runtime_seconds) || '—'}</span>
         <span class="meta-key">Blocked by</span><span class="meta-val">${blockedByLinks || '—'}</span>
+        <span class="meta-key">Cost</span>       <span class="meta-val">${fmtCost(d.cost_dollars)}</span>
       </div>
     </div>`);
 
