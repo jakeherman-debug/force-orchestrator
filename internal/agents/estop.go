@@ -115,8 +115,10 @@ func IsThrottledByBatchSize(db *sql.DB) bool {
 		return false
 	}
 	var recent int
+	// Only 'Locked', 'UnderReview', and 'UnderCaptainReview' retain a non-empty
+	// locked_at; UpdateBountyStatus clears locked_at for all other statuses.
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 		WHERE locked_at >= datetime('now', '-60 seconds')
-		  AND status IN ('Locked','UnderReview','AwaitingCouncilReview','Completed','Failed')`).Scan(&recent)
+		  AND status IN ('Locked','UnderReview','UnderCaptainReview')`).Scan(&recent)
 	return recent >= max
 }
