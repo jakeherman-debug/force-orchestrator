@@ -49,7 +49,7 @@ func printList(db *sql.DB, statusFilter string, limit int) {
 		var id, retryCount, activeDep int
 		var taskType, status, repo, owner, payload string
 		rows.Scan(&id, &taskType, &status, &repo, &owner, &retryCount, &activeDep, &payload)
-		taskPreview := truncate(strings.ReplaceAll(payload, "\n", " "), 35)
+		taskPreview := payloadSummary(payload, 35)
 
 		abbrev := status
 		if a, ok := statusAbbrev[status]; ok {
@@ -263,6 +263,15 @@ func printCosts(db *sql.DB) {
 		}
 		rows.Close()
 	}
+
+	// Warn about sessions where token data is missing (timed-out or very early failures).
+	// Claude CLI only prints the token summary at the end of a session; if the process is
+	// killed mid-run, no token data is available in the output.
+	var missing int
+	db.QueryRow(`SELECT COUNT(*) FROM TaskHistory WHERE IFNULL(tokens_in,0) = 0 AND IFNULL(tokens_out,0) = 0`).Scan(&missing)
+	if missing > 0 {
+		fmt.Printf("\n  Note: %d session(s) have no token data (timed out or early failure — tokens were consumed but not measurable).\n", missing)
+	}
 }
 
 func printStatus(db *sql.DB) {
@@ -367,7 +376,7 @@ func printWho(db *sql.DB) {
 			abbrev = a
 		}
 		fmt.Printf("%-20s %-4d %-14s %-15s %s\n", owner, id, abbrev, truncate(repo, 15),
-			truncate(strings.ReplaceAll(payload, "\n", " "), 40))
+			payloadSummary(payload, 40))
 	}
 	if !found {
 		fmt.Println("No agents currently active.")
@@ -395,7 +404,7 @@ func printTree(db *sql.DB, id int, depth int) {
 		}
 		indicator = fmt.Sprintf(" [blocked by %s]", strings.Join(parts, ", "))
 	}
-	preview := truncate(strings.ReplaceAll(payload, "\n", " "), 50)
+	preview := payloadSummary(payload, 50)
 	fmt.Printf("%s[%d] %s | %s | %s%s — %s\n",
 		strings.Repeat("  ", depth), id, abbrev, taskType, repo, indicator, preview)
 

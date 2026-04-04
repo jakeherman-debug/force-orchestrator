@@ -144,13 +144,25 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			logger.Printf("Task %d: merge failed: %v", b.ID, mergeErr)
 			errStr := mergeErr.Error()
 			if strings.Contains(errStr, "conflict") || strings.Contains(errStr, "CONFLICT") {
-				logger.Printf("Task %d: merge conflict detected — escalating for operator intervention", b.ID)
+				// True merge conflict — spawn a conflict resolution CodeEdit task so an Astromech
+				// can resolve the markers automatically. Mark the original task as Failed so the
+				// resolution task's parent-complete mail logic fires on success.
+				logger.Printf("Task %d: true merge conflict on branch %s — spawning conflict resolution task", b.ID, branchName)
+				conflictPayload := fmt.Sprintf("[CONFLICT_BRANCH: %s]\n\n%s", branchName, b.Payload)
+				resTaskID := store.AddBounty(db, b.ID, "CodeEdit", conflictPayload)
+				logger.Printf("Task %d: spawned conflict resolution task #%d", b.ID, resTaskID)
+				failMsg := fmt.Sprintf("Merge conflict on branch %s — conflict resolution task #%d spawned", branchName, resTaskID)
+				store.FailBounty(db, b.ID, failMsg)
 				histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Failed")
 				if tokIn > 0 || tokOut > 0 {
 					store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 				}
-				CreateEscalation(db, b.ID, store.SeverityHigh, msg)
-				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+				store.SendMail(db, agentName, "operator",
+					fmt.Sprintf("[CONFLICT] Task #%d — conflict resolution task #%d spawned", b.ID, resTaskID),
+					fmt.Sprintf("Task #%d was approved but had a merge conflict on branch %s.\n\nConflict resolution task #%d has been spawned. An Astromech will resolve the conflict markers and resubmit for council review.\n\nYou will be notified when the resolution is complete.\n\nOriginal task: %s",
+						b.ID, branchName, resTaskID, util.TruncateStr(b.Payload, 400)),
+					b.ID, store.MailTypeAlert)
+				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, failMsg))
 			} else {
 				handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
 			}

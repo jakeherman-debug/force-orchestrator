@@ -140,6 +140,31 @@ func ExtractDiffFiles(diff string) []string {
 	return files
 }
 
+// PrepareConflictBranch sets up the agent worktree to resolve merge conflicts on an
+// existing branch. It checks out the conflicting branch and merges the default branch
+// into it, intentionally leaving conflict markers in files for Claude to resolve.
+// After Claude resolves the markers and commits, the branch can be merged cleanly.
+func PrepareConflictBranch(worktreeDir, repoPath, conflictBranch string) error {
+	base := GetDefaultBranch(repoPath)
+
+	// Abort any in-progress merge or rebase left over from prior attempts
+	exec.Command("git", "-C", worktreeDir, "merge", "--abort").Run()
+	exec.Command("git", "-C", worktreeDir, "rebase", "--abort").Run()
+	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
+	exec.Command("git", "-C", worktreeDir, "clean", "-fd").Run()
+
+	if out, err := exec.Command("git", "-C", worktreeDir, "checkout", conflictBranch).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to checkout conflict branch %s: %s", conflictBranch, strings.TrimSpace(string(out)))
+	}
+
+	// Merge default branch into the conflict branch — leaves conflict markers for Claude.
+	// We intentionally ignore the exit code here: a non-zero exit is expected when
+	// there are conflicts, and that is exactly the state we want Claude to work in.
+	exec.Command("git", "-C", worktreeDir, "merge", base).Run()
+
+	return nil
+}
+
 func GetDiff(repoPath string, branchName string) string {
 	base := GetDefaultBranch(repoPath)
 	cmd := exec.Command("git", "-C", repoPath, "diff", base+".."+branchName)
@@ -156,15 +181,40 @@ func MergeAndCleanup(repoPath string, branchName string, worktreeDir string) err
 
 	base := GetDefaultBranch(repoPath)
 
-	// Ensure the main worktree is on the default branch before merging
+	// Stash any uncommitted changes in the main worktree so checkout succeeds
+	// even when the operator has made manual edits (e.g. live debugging).
+	stashed := false
+	if statusOut, err := exec.Command("git", "-C", repoPath, "status", "--porcelain").Output(); err == nil && len(strings.TrimSpace(string(statusOut))) > 0 {
+		if _, err := exec.Command("git", "-C", repoPath, "stash", "--include-untracked").Output(); err == nil {
+			stashed = true
+		}
+	}
+
+	// Ensure the main worktree is on the default branch before merging.
 	if out, err := exec.Command("git", "-C", repoPath, "checkout", base).CombinedOutput(); err != nil {
+		if stashed {
+			exec.Command("git", "-C", repoPath, "stash", "pop").Run()
+		}
 		return fmt.Errorf("checkout %s failed: %s", base, strings.TrimSpace(string(out)))
 	}
 
 	out, err := exec.Command("git", "-C", repoPath, "merge", "--no-ff", branchName).CombinedOutput()
 	if err != nil {
 		exec.Command("git", "-C", repoPath, "merge", "--abort").Run()
+		if stashed {
+			exec.Command("git", "-C", repoPath, "stash", "pop").Run()
+		}
 		return fmt.Errorf("merge failed: %s", strings.TrimSpace(string(out)))
+	}
+
+	// Restore any stashed operator changes on top of the merge result.
+	// If pop conflicts with the merge, discard the stash — the merge is the
+	// authoritative result and the operator's edits are likely now superseded.
+	if stashed {
+		if _, popErr := exec.Command("git", "-C", repoPath, "stash", "pop").Output(); popErr != nil {
+			exec.Command("git", "-C", repoPath, "checkout", "--", ".").Run()
+			exec.Command("git", "-C", repoPath, "stash", "drop").Run()
+		}
 	}
 
 	// Reset agent worktree to a clean detached HEAD — ready for the next task.

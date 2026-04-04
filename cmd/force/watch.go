@@ -17,6 +17,18 @@ func truncate(text string, maxLen int) string {
 	return text + strings.Repeat(" ", maxLen-len(text))
 }
 
+// payloadSummary returns a compact single-line preview of a task payload,
+// stripping the [GOAL: ...]\n\n prefix Commander adds to subtask payloads.
+func payloadSummary(payload string, maxLen int) string {
+	s := payload
+	if strings.HasPrefix(s, "[GOAL: ") {
+		if end := strings.Index(s, "]\n\n"); end != -1 {
+			s = s[end+3:]
+		}
+	}
+	return truncate(strings.ReplaceAll(s, "\n", " "), maxLen)
+}
+
 func RunCommandCenter(db *sql.DB) {
 	fmt.Print("\033[?25l")
 	defer fmt.Print("\033[?25h")
@@ -39,11 +51,13 @@ func RunCommandCenter(db *sql.DB) {
 			    COALESCE((SELECT MIN(td.depends_on) FROM TaskDependencies td
 			              JOIN BountyBoard dep ON dep.id = td.depends_on
 			              WHERE td.task_id = bb.id AND dep.status != 'Completed'), 0) AS active_dep,
-			    status, payload, owner, IFNULL(error_log, ''), retry_count
+			    status, payload, owner, IFNULL(error_log, ''), retry_count,
+			    IFNULL(locked_at, '') AS locked_at
 			FROM BountyBoard bb
 			WHERE status != 'Completed'
 			UNION ALL
-			SELECT id, target_repo, 0, status, payload, owner, IFNULL(error_log, ''), retry_count
+			SELECT id, target_repo, 0, status, payload, owner, IFNULL(error_log, ''), retry_count,
+			    '' AS locked_at
 			FROM (SELECT id, target_repo, status, payload, owner, error_log, retry_count
 			      FROM BountyBoard WHERE status = 'Completed' ORDER BY id DESC LIMIT 10)
 			ORDER BY id ASC`)
@@ -57,11 +71,11 @@ func RunCommandCenter(db *sql.DB) {
 
 		for rows.Next() {
 			var id, activeDep, retryCount int
-			var repo, status, payload, owner, errorLog string
-			rows.Scan(&id, &repo, &activeDep, &status, &payload, &owner, &errorLog, &retryCount)
+			var repo, status, payload, owner, errorLog, lockedAt string
+			rows.Scan(&id, &repo, &activeDep, &status, &payload, &owner, &errorLog, &retryCount, &lockedAt)
 
 			repoStr := truncate(repo, 15)
-			taskStr := truncate(strings.ReplaceAll(payload, "\n", " "), 40)
+			taskStr := payloadSummary(payload, 40)
 
 			var line string
 			switch {
@@ -82,7 +96,13 @@ func RunCommandCenter(db *sql.DB) {
 					retryStr = fmt.Sprintf(" [retry %d/%d]", retryCount, agents.MaxRetries)
 				}
 				ownerStr := truncate(owner, 15)
-				line = fmt.Sprintf(" [ID: %02d] %s | %s | %s%s", id, ownerStr, repoStr, taskStr, retryStr)
+				elapsedStr := ""
+				if lockedAt != "" && (status == "Locked" || status == "UnderCaptainReview" || status == "UnderReview") {
+					if t, parseErr := time.Parse("2006-01-02 15:04:05", lockedAt); parseErr == nil {
+						elapsedStr = fmt.Sprintf(" | %v", time.Since(t).Round(time.Second))
+					}
+				}
+				line = fmt.Sprintf(" [ID: %02d] %s%s | %s | %s%s", id, ownerStr, elapsedStr, repoStr, taskStr, retryStr)
 			}
 
 			switch status {

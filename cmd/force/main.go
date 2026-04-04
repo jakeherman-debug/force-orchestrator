@@ -202,6 +202,13 @@ func main() {
 	case "logs-fleet":
 		cmdLogsFleet(db, os.Args[2:])
 
+	case "tail":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: force tail <task-id>")
+			os.Exit(1)
+		}
+		cmdTailTask(db, mustParseID(os.Args[2]))
+
 	case "holonet":
 		cmdHolonet(db, os.Args[2:])
 
@@ -250,6 +257,9 @@ func main() {
 				}
 			case "--dry-run":
 				dryRun = true
+			default:
+				fmt.Fprintf(os.Stderr, "prune: unknown flag %q\nUsage: force prune [--keep-days N] [--dry-run]\n", os.Args[i])
+				os.Exit(1)
 			}
 		}
 		cmdPrune(db, keepDays, dryRun)

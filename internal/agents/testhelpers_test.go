@@ -70,7 +70,7 @@ func withStubCLIRunner(t *testing.T, output string, err error) {
 	claude.SetCLIRunner(func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		return output, err
 	})
-	t.Cleanup(func() { claude.SetCLIRunner(claude.DefaultCLIRunner) })
+	t.Cleanup(claude.ResetCLIRunner)
 }
 
 // setupBranchWithCommit creates a branch with a file change on it, leaving the

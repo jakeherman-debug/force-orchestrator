@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"force-orchestrator/internal/agents"
 	"force-orchestrator/internal/store"
@@ -264,12 +265,7 @@ func cmdSearch(db *sql.DB, query string) {
 		var id int
 		var repo, taskType, status, payload string
 		rows.Scan(&id, &repo, &taskType, &status, &payload)
-		// Show first line of payload for readability
-		firstLine := payload
-		if nl := strings.Index(payload, "\n"); nl != -1 {
-			firstLine = payload[:nl]
-		}
-		fmt.Printf("[#%d] %s | %s | %s | %s\n", id, status, taskType, repo, truncate(firstLine, 80))
+		fmt.Printf("[#%d] %s | %s | %s | %s\n", id, status, taskType, repo, payloadSummary(payload, 80))
 	}
 	if !found {
 		fmt.Println("No tasks match your query.")
@@ -370,6 +366,59 @@ func cmdCosts(db *sql.DB) {
 
 func cmdDashboard(db *sql.DB, port int) {
 	RunDashboard(db, port)
+}
+
+// cmdTailTask streams the live Claude output for an actively running task.
+// The daemon writes fleet-task-<id>.log while Claude runs; this command tails it.
+func cmdTailTask(db *sql.DB, taskID int) {
+	b, err := store.GetBounty(db, taskID)
+	if err != nil {
+		fmt.Printf("Task %d not found.\n", taskID)
+		os.Exit(1)
+	}
+
+	activeStatuses := map[string]bool{
+		"Locked": true, "UnderCaptainReview": true, "UnderReview": true,
+	}
+	if !activeStatuses[b.Status] {
+		fmt.Printf("Task #%d is not currently running (status: %s).\n", taskID, b.Status)
+		fmt.Printf("  force logs %d      — see its error log\n", taskID)
+		fmt.Printf("  force history %d   — see attempt history\n", taskID)
+		os.Exit(1)
+	}
+
+	taskLogPath := fmt.Sprintf("fleet-task-%d.log", taskID)
+
+	// Poll until the file appears — Claude may still be starting up (worktree
+	// setup, branch creation, prompt assembly all happen before RunCLIStreaming).
+	for i := 0; i < 20; i++ {
+		if _, statErr := os.Stat(taskLogPath); statErr == nil {
+			break
+		}
+		var currentStatus string
+		db.QueryRow(`SELECT IFNULL(status,'') FROM BountyBoard WHERE id = ?`, taskID).Scan(&currentStatus)
+		if !activeStatuses[currentStatus] {
+			fmt.Printf("Task #%d finished before output became available (status: %s).\n", taskID, currentStatus)
+			os.Exit(0)
+		}
+		if i == 0 {
+			fmt.Printf("Task #%d is running (owner: %s) — waiting for Claude to start...\n", taskID, b.Owner)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if _, statErr := os.Stat(taskLogPath); statErr != nil {
+		fmt.Printf("Task #%d is running but %s does not exist.\n", taskID, taskLogPath)
+		fmt.Printf("The daemon may be running from a different working directory.\n")
+		fmt.Printf("Try: force logs-fleet --task %d\n", taskID)
+		os.Exit(1)
+	}
+
+	fmt.Printf("=== force tail: task #%d (owner: %s) ===\n\n", taskID, b.Owner)
+	tailCmd := exec.Command("tail", "-f", taskLogPath)
+	tailCmd.Stdout = os.Stdout
+	tailCmd.Stderr = os.Stderr
+	tailCmd.Run()
 }
 
 func cmdWatch(db *sql.DB) {

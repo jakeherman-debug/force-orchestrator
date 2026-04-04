@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -54,9 +55,27 @@ func ParseTokenUsage(output string) (int, int) {
 	return in, out
 }
 
-// claudeCLITimeout is the default timeout for Commander and Council Claude calls.
-// Astromech uses its own longer timeout (astromechTimeout) since it does real coding work.
+// claudeCLITimeout is the default timeout for simple reasoning calls (Council, etc.).
 const claudeCLITimeout = 5 * time.Minute
+
+const commanderBaseTimeout = 15 * time.Minute
+const commanderMaxTimeout = 60 * time.Minute
+
+// CommanderTimeoutForAttempt returns the timeout for a Commander decomposition run.
+// infraFailures is the number of prior failures for the task (bounty.InfraFailures).
+// Each prior failure increases the timeout by 50%, capped at 60 minutes:
+//
+//	0 failures → 15m, 1 → 22m30s, 2 → 33m45s, 3 → 50m37s, 4+ → 60m
+func CommanderTimeoutForAttempt(infraFailures int) time.Duration {
+	timeout := float64(commanderBaseTimeout)
+	for i := 0; i < infraFailures; i++ {
+		timeout *= 1.5
+		if time.Duration(timeout) >= commanderMaxTimeout {
+			return commanderMaxTimeout
+		}
+	}
+	return time.Duration(timeout)
+}
 
 // Read-only Atlassian tools — look up Jira tickets and Confluence pages.
 // Write tools (createJiraIssue, editJiraIssue, addCommentToJiraIssue, transitionJiraIssue,
@@ -120,6 +139,10 @@ type CLIRunner func(prompt, tools, dir string, maxTurns int, timeout time.Durati
 // cliRunner is the active runner used by all agents. Override in tests to inject a stub.
 var cliRunner CLIRunner = defaultCLIRunner
 
+// cliRunnerIsDefault tracks whether cliRunner is the real default or a test stub.
+// RunCLIStreaming uses this to decide whether to stream or fall back to buffered output.
+var cliRunnerIsDefault = true
+
 func defaultCLIRunner(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -145,6 +168,13 @@ func defaultCLIRunner(prompt, tools, dir string, maxTurns int, timeout time.Dura
 // SetCLIRunner replaces the active CLI runner. Used by tests to inject stubs.
 func SetCLIRunner(r CLIRunner) {
 	cliRunner = r
+	cliRunnerIsDefault = (r == nil) // nil resets to false; tests pass non-nil stubs
+}
+
+// ResetCLIRunner restores the default runner. Called by test cleanup.
+func ResetCLIRunner() {
+	cliRunner = defaultCLIRunner
+	cliRunnerIsDefault = true
 }
 
 // DefaultCLIRunner is the real CLI runner; exposed for test cleanup.
@@ -154,6 +184,47 @@ var DefaultCLIRunner CLIRunner = defaultCLIRunner
 // custom directories and timeouts, e.g. Astromech running in a worktree).
 func RunCLI(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 	return cliRunner(prompt, tools, dir, maxTurns, timeout)
+}
+
+// RunCLIStreaming is like RunCLI but also writes Claude's live output to w as
+// it arrives, so the caller can tail or display progress in real-time. The full
+// combined output is still returned as a string on completion.
+//
+// When a test stub is installed via SetCLIRunner, streaming is not meaningful
+// (the stub returns immediately), so this falls back to the stub and writes
+// the stub's output to w after it returns.
+func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+	if !cliRunnerIsDefault {
+		// Stub installed — call it and write its output to w for consistency.
+		out, err := cliRunner(prompt, tools, dir, maxTurns, timeout)
+		if w != nil && out != "" {
+			w.Write([]byte(out)) //nolint:errcheck
+		}
+		return out, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns)}
+	if tools != "" {
+		args = append(args, "--allowedTools", tools)
+	}
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	var buf strings.Builder
+	cmd.Stdout = io.MultiWriter(&buf, w)
+	cmd.Stderr = io.MultiWriter(&buf, w)
+	err := cmd.Run()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return buf.String(), fmt.Errorf("claude CLI timed out after %v", timeout)
+		}
+		return buf.String(), fmt.Errorf("claude CLI failed: %v", err)
+	}
+	return buf.String(), nil
 }
 
 // AskClaudeCLI is a convenience wrapper for simple (non-worktree) Claude calls.

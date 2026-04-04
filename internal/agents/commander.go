@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -207,13 +208,41 @@ EXAMPLE:
 ]`, directiveSection, repoContext)
 
 	userPrompt := bounty.Payload + inboxContext
-	response, err := claude.AskClaudeCLI(systemPrompt, userPrompt, claude.CommanderTools, 10)
+	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
+	cmdTimeout := claude.CommanderTimeoutForAttempt(bounty.InfraFailures)
+	logger.Printf("[%s] Task %d: timeout %v (infra_failures=%d)", sessionID, bounty.ID, cmdTimeout, bounty.InfraFailures)
+	taskLogPath := fmt.Sprintf("fleet-task-%d.log", bounty.ID)
+	taskLogFile, _ := os.Create(taskLogPath)
+	var taskWriter io.Writer = io.Discard
+	if taskLogFile != nil {
+		taskWriter = taskLogFile
+	}
+
+	rawOut, err := claude.RunCLIStreaming(fullPrompt, claude.CommanderTools, "", 10, cmdTimeout, taskWriter)
+
+	if taskLogFile != nil {
+		taskLogFile.Close()
+		os.Remove(taskLogPath)
+	}
+
 	if err != nil {
 		msg := fmt.Sprintf("Claude CLI Err: %v", err)
+		// On timeout, check if Claude produced partial output — if so, it was making progress.
+		// Log the preview so the operator can see what was happening before the retry.
+		if strings.Contains(err.Error(), "timed out") && len(strings.TrimSpace(rawOut)) > 200 {
+			logger.Printf("Task %d: timed out but Claude was making progress (%d chars of output)", bounty.ID, len(rawOut))
+			logger.Printf("Task %d: partial output preview: %.400s", bounty.ID, rawOut)
+		}
+		// Record history even on failure so token costs (if any) appear in force costs.
+		histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, rawOut, "Failed")
+		if tokIn, tokOut := claude.ParseTokenUsage(rawOut); tokIn > 0 || tokOut > 0 {
+			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+		}
 		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
 		handleInfraFailure(db, agentName, "commander", bounty, sessionID, msg, "Pending", false, logger)
 		return
 	}
+	response := rawOut
 
 	cleanJSON := claude.ExtractJSON(response)
 
@@ -334,6 +363,10 @@ EXAMPLE:
 	}
 	if !insertFailed {
 		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "Completed")
+		if tokIn, tokOut := claude.ParseTokenUsage(response); tokIn > 0 || tokOut > 0 {
+			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+		}
 		logger.Printf("Task %d: decomposed into %d subtask(s), convoy %d", bounty.ID, len(tasks), convoyID)
 		telemetry.EmitEvent(telemetry.TelemetryEvent{
 			SessionID: sessionID, Agent: agentName, TaskID: bounty.ID,

@@ -132,6 +132,32 @@ After fixing, run: force reset %d`,
 		bounty.ID, store.MailTypeAlert)
 }
 
+// conflictBranchFromPayload returns the branch name embedded in a [CONFLICT_BRANCH: name]
+// prefix, or empty string if the payload is not a conflict resolution task.
+func conflictBranchFromPayload(payload string) string {
+	const prefix = "[CONFLICT_BRANCH: "
+	if strings.HasPrefix(payload, prefix) {
+		if end := strings.Index(payload, "]\n\n"); end != -1 {
+			return payload[len(prefix):end]
+		}
+	}
+	return ""
+}
+
+// directiveText returns the task-specific part of a payload, stripping any leading
+// [GOAL: ...] block that Commander prefixes onto subtask payloads. The goal is already
+// injected into the prompt as a separate # BROADER GOAL section via buildAstromechContext,
+// so including it again in YOUR CURRENT DIRECTIVE causes Claude to treat the original
+// feature request as an instruction set rather than context.
+func directiveText(payload string) string {
+	if strings.HasPrefix(payload, "[GOAL: ") {
+		if end := strings.Index(payload, "]\n\n"); end != -1 {
+			return payload[end+3:]
+		}
+	}
+	return payload
+}
+
 // buildAstromechContext assembles the variable context sections injected into every
 // Astromech prompt: parent goal, fleet memory, checkpoint resume, prior attempts (seance),
 // and inbox mail. The directive is excluded — callers add it to the system prompt.
@@ -282,22 +308,47 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		return
 	}
 
-	branchName, branchErr := igit.PrepareAgentBranch(worktreeDir, repoPath, bounty.ID, name)
-	if branchErr != nil {
-		msg := fmt.Sprintf("Branch Err: %v", branchErr)
-		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
-		count := store.IncrementInfraFailures(db, bounty.ID)
-		telemetry.EmitEvent(telemetry.EventInfraFailure(sessionID, name, bounty.ID, count, msg))
-		if count >= MaxInfraFailures {
-			store.RecordTaskHistory(db, bounty.ID, name, sessionID, "", "Failed")
-			permanentInfraFail(db, logger, sessionID, name, bounty, msg)
-		} else {
-			store.UpdateBountyStatus(db, bounty.ID, "Pending")
-			backoff := InfraBackoff(count)
-			logger.Printf("Task %d: infra failure %d/%d, backing off %v", bounty.ID, count, MaxInfraFailures, backoff)
-			time.Sleep(backoff)
+	var branchName string
+	if cb := conflictBranchFromPayload(bounty.Payload); cb != "" {
+		// Conflict resolution task — check out the existing branch and start the merge
+		// so Claude sees the conflict markers and can resolve them.
+		logger.Printf("Task %d: conflict resolution for branch %s", bounty.ID, cb)
+		if cbErr := igit.PrepareConflictBranch(worktreeDir, repoPath, cb); cbErr != nil {
+			msg := fmt.Sprintf("Conflict Branch Err: %v", cbErr)
+			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
+			count := store.IncrementInfraFailures(db, bounty.ID)
+			telemetry.EmitEvent(telemetry.EventInfraFailure(sessionID, name, bounty.ID, count, msg))
+			if count >= MaxInfraFailures {
+				store.RecordTaskHistory(db, bounty.ID, name, sessionID, "", "Failed")
+				permanentInfraFail(db, logger, sessionID, name, bounty, msg)
+			} else {
+				store.UpdateBountyStatus(db, bounty.ID, "Pending")
+				backoff := InfraBackoff(count)
+				logger.Printf("Task %d: infra failure %d/%d, backing off %v", bounty.ID, count, MaxInfraFailures, backoff)
+				time.Sleep(backoff)
+			}
+			return
 		}
-		return
+		branchName = cb
+	} else {
+		var branchErr error
+		branchName, branchErr = igit.PrepareAgentBranch(worktreeDir, repoPath, bounty.ID, name)
+		if branchErr != nil {
+			msg := fmt.Sprintf("Branch Err: %v", branchErr)
+			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
+			count := store.IncrementInfraFailures(db, bounty.ID)
+			telemetry.EmitEvent(telemetry.EventInfraFailure(sessionID, name, bounty.ID, count, msg))
+			if count >= MaxInfraFailures {
+				store.RecordTaskHistory(db, bounty.ID, name, sessionID, "", "Failed")
+				permanentInfraFail(db, logger, sessionID, name, bounty, msg)
+			} else {
+				store.UpdateBountyStatus(db, bounty.ID, "Pending")
+				backoff := InfraBackoff(count)
+				logger.Printf("Task %d: infra failure %d/%d, backing off %v", bounty.ID, count, MaxInfraFailures, backoff)
+				time.Sleep(backoff)
+			}
+			return
+		}
 	}
 	store.SetBranchName(db, bounty.ID, branchName)
 	logger.Printf("Task %d: branch %s ready in %s", bounty.ID, branchName, worktreeDir)
@@ -313,9 +364,28 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		directiveSection = fmt.Sprintf("\n\n# OPERATOR DIRECTIVE\n%s", directive)
 	}
 
+	conflictResolutionCtx := ""
+	if conflictBranchFromPayload(bounty.Payload) != "" {
+		conflictResolutionCtx = `
+
+# CONFLICT RESOLUTION TASK
+Your worktree has been set up with the feature branch checked out and a merge of the default branch already started.
+There are merge conflict markers (<<<<<<< HEAD, =======, >>>>>>> ) in one or more files.
+
+Your job:
+1. Run: git status — to see which files have conflicts
+2. Open each conflicted file and resolve the conflict markers by choosing the correct final content
+3. Stage the resolved files: git add <file>
+4. Complete the merge: git commit (use the default merge commit message or a descriptive one)
+5. Do NOT use git merge --abort. Resolve and commit.
+
+The original task directive (what the code should accomplish) is shown below.`
+	}
+
 	systemPrompt := AstromechSystemPrompt + directiveSection
-	fullPrompt := fmt.Sprintf("%s%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s",
-		systemPrompt, goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext, bounty.Payload)
+	fullPrompt := fmt.Sprintf("%s%s%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s",
+		systemPrompt, goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext,
+		conflictResolutionCtx, directiveText(bounty.Payload))
 
 	maxTurns := store.GetConfig(db, "max_turns", fmt.Sprintf("%d", defaultMaxTurns))
 
@@ -327,7 +397,42 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 
 	maxTurnsInt, _ := strconv.Atoi(maxTurns)
 	logger.Printf("Task %d: running claude CLI (timeout: %v)", bounty.ID, sessionTimeout)
-	rawOut, err := claude.RunCLI(fullPrompt, "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools, worktreeDir, maxTurnsInt, sessionTimeout)
+
+	// Heartbeat goroutine — logs every 2 minutes so fleet.log confirms Claude is alive
+	// during long silent runs. Stops as soon as RunCLIStreaming returns.
+	heartbeatDone := make(chan struct{})
+	heartbeatStart := time.Now()
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				logger.Printf("Task %d: claude still running (%v elapsed)", bounty.ID, time.Since(heartbeatStart).Round(time.Second))
+			}
+		}
+	}()
+
+	// Per-task streaming log — written to fleet-task-<id>.log while Claude runs.
+	// The file is removed on completion so it only exists for in-progress tasks.
+	// `force tail <id>` tails this file to show live output.
+	taskLogPath := fmt.Sprintf("fleet-task-%d.log", bounty.ID)
+	taskLogFile, _ := os.Create(taskLogPath)
+	var taskWriter io.Writer = io.Discard
+	if taskLogFile != nil {
+		taskWriter = taskLogFile
+	}
+
+	rawOut, err := claude.RunCLIStreaming(fullPrompt, "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools, worktreeDir, maxTurnsInt, sessionTimeout, taskWriter)
+
+	close(heartbeatDone)
+	if taskLogFile != nil {
+		taskLogFile.Close()
+		os.Remove(taskLogPath)
+	}
+
 	outputStr := strings.TrimSpace(rawOut)
 	outputPreview := outputStr
 	if len(outputPreview) > 500 {
@@ -597,7 +702,7 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 
 	systemPrompt := AstromechSystemPrompt + directiveSection
 	fullPrompt := fmt.Sprintf("%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s",
-		systemPrompt, goalCtx, fleetMemCtx, seanceCtx, inboxCtx, b.Payload)
+		systemPrompt, goalCtx, fleetMemCtx, seanceCtx, inboxCtx, directiveText(b.Payload))
 
 	maxTurns := store.GetConfig(db, "max_turns", fmt.Sprintf("%d", defaultMaxTurns))
 
