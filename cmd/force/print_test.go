@@ -17,7 +17,7 @@ func TestPrintList_NoFilter(t *testing.T) {
 	store.AddBounty(db, 0, "CodeEdit", "task one")
 	store.AddBounty(db, 0, "Feature", "task two")
 
-	out := captureOutput(func() { printList(db, "", 0) })
+	out := captureOutput(func() { printList(db, "", "", "", 0) })
 	if !strings.Contains(out, "ID") {
 		t.Error("expected header in printList output")
 	}
@@ -27,7 +27,7 @@ func TestPrintList_Empty(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	out := captureOutput(func() { printList(db, "Locked", 10) })
+	out := captureOutput(func() { printList(db, "Locked", "", "", 10) })
 	if !strings.Contains(out, "no tasks") {
 		t.Errorf("expected 'no tasks' for empty filtered list, got: %s", out)
 	}
@@ -42,7 +42,7 @@ func TestPrintList_WithBlockedAndRetriedTasks(t *testing.T) {
 	store.AddDependency(db, id2, id1)
 	store.IncrementRetryCount(db, id2)
 
-	out := captureOutput(func() { printList(db, "", 0) })
+	out := captureOutput(func() { printList(db, "", "", "", 0) })
 	if !strings.Contains(out, "Blocked") {
 		t.Errorf("expected 'Blocked' label for blocked task, got: %s", out)
 	}
@@ -56,7 +56,7 @@ func TestPrintList_WithLimit(t *testing.T) {
 		store.AddBounty(db, 0, "CodeEdit", "task")
 	}
 
-	out := captureOutput(func() { printList(db, "", 3) })
+	out := captureOutput(func() { printList(db, "", "", "", 3) })
 	// Should show header + 3 tasks (limit=3)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	taskLines := 0
@@ -79,7 +79,7 @@ func TestPrintList_MultiStatusFilter(t *testing.T) {
 	db.Exec(`UPDATE BountyBoard SET status = 'Completed' WHERE id = ?`, id2)
 	_ = id1
 
-	out := captureOutput(func() { printList(db, "Pending,Completed", 0) })
+	out := captureOutput(func() { printList(db, "Pending,Completed", "", "", 0) })
 	if !strings.Contains(out, "pending") {
 		t.Errorf("expected pending task in output, got: %s", out)
 	}

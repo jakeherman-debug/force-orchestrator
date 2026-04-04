@@ -163,19 +163,41 @@ func main() {
 		cmdRetryAllFailed(db)
 
 	case "list":
-		// Usage: force list [status[,status2...]] [--limit N]
+		// Usage: force list [status[,status2...]] [--status <s>] [--repo <name>] [--type <type>] [--limit N]
 		statusFilter := ""
+		repoFilter := ""
+		typeFilter := ""
 		limit := 0
 		listArgs := os.Args[2:]
 		for i := 0; i < len(listArgs); i++ {
-			if listArgs[i] == "--limit" && i+1 < len(listArgs) {
-				limit = mustParseID(listArgs[i+1])
-				i++
-			} else if !strings.HasPrefix(listArgs[i], "--") {
-				statusFilter = listArgs[i]
+			switch listArgs[i] {
+			case "--limit":
+				if i+1 < len(listArgs) {
+					limit = mustParseID(listArgs[i+1])
+					i++
+				}
+			case "--repo":
+				if i+1 < len(listArgs) {
+					repoFilter = listArgs[i+1]
+					i++
+				}
+			case "--type":
+				if i+1 < len(listArgs) {
+					typeFilter = listArgs[i+1]
+					i++
+				}
+			case "--status":
+				if i+1 < len(listArgs) {
+					statusFilter = listArgs[i+1]
+					i++
+				}
+			default:
+				if !strings.HasPrefix(listArgs[i], "--") {
+					statusFilter = listArgs[i]
+				}
 			}
 		}
-		printList(db, statusFilter, limit)
+		printList(db, statusFilter, repoFilter, typeFilter, limit)
 
 	case "logs":
 		if len(os.Args) < 3 {
