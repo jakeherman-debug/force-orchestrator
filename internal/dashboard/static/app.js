@@ -125,6 +125,7 @@ function renderStats() {
   $('st-esc').textContent      = s.open_escalations || 0;
   $('st-convoys').textContent  = s.active_convoys   || 0;
   $('st-mail').textContent     = s.unread_mail      || 0;
+  $('st-spend').textContent    = '$' + (s.total_spend_dollars || 0).toFixed(2);
 
   // Tab badges
   const escEl = $('tbadge-escalations');
