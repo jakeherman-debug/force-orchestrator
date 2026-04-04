@@ -90,6 +90,128 @@ func readFilePreview(path string, maxLines int) string {
 	return strings.Join(lines, "\n")
 }
 
+// loadRepoContext queries registered repositories, builds formatted context entries
+// with description and README preview, and returns them as a list.
+// Returns an error if the DB query fails or no repositories are registered.
+func loadRepoContext(db *sql.DB, logger *log.Logger) ([]string, error) {
+	rows, err := db.Query(`SELECT name, local_path, description FROM Repositories`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query repositories: %v", err)
+	}
+	defer rows.Close()
+	var repoList []string
+	for rows.Next() {
+		var name, localPath, desc string
+		if scanErr := rows.Scan(&name, &localPath, &desc); scanErr != nil {
+			logger.Printf("loadRepoContext: scan error: %v", scanErr)
+			continue
+		}
+		entry := fmt.Sprintf("### %s\n%s", name, desc)
+		for _, candidate := range []string{"README.md", "readme.md", "README"} {
+			preview := readFilePreview(filepath.Join(localPath, candidate), 60)
+			if preview != "" {
+				entry += fmt.Sprintf("\nREADME (first 60 lines):\n%s", preview)
+				break
+			}
+		}
+		repoList = append(repoList, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repository scan error: %v", err)
+	}
+	if len(repoList) == 0 {
+		return nil, fmt.Errorf("no repositories registered. Run: force add-repo <name> <path> <desc>")
+	}
+	return repoList, nil
+}
+
+// validateTaskPlan checks structural validity of a decoded task plan: non-empty repo,
+// known repo, valid blocked_by references, and absence of dependency cycles.
+// Returns a descriptive error on the first violation found.
+func validateTaskPlan(tasks []store.TaskPlan, knownRepos map[string]bool) error {
+	tempIDs := make(map[int]bool, len(tasks))
+	for _, t := range tasks {
+		tempIDs[t.TempID] = true
+	}
+	for _, t := range tasks {
+		if t.Repo == "" {
+			return fmt.Errorf("task %d has no repo assigned", t.TempID)
+		}
+		if !knownRepos[t.Repo] {
+			return fmt.Errorf("task %d references unknown repo '%s' — register it with: force add-repo", t.TempID, t.Repo)
+		}
+		for _, depID := range t.BlockedBy {
+			if depID != 0 && !tempIDs[depID] {
+				return fmt.Errorf("task %d has invalid blocked_by=%v (no such task in plan)", t.TempID, t.BlockedBy)
+			}
+		}
+	}
+	if cycleID := findPlanCycle(tasks); cycleID != 0 {
+		return fmt.Errorf("circular dependency detected at task %d — tasks cannot block each other in a cycle", cycleID)
+	}
+	return nil
+}
+
+// insertConvoyAndTasks removes stale subtasks from a prior decomposition attempt, then
+// inserts the new task set and their dependency edges in a single database transaction.
+// Any failure rolls back entirely, preventing partial state.
+// Returns the mapping of plan tempID → real DB task ID.
+func insertConvoyAndTasks(db *sql.DB, tasks []store.TaskPlan, bounty *store.Bounty, convoyID int) (map[int]int, error) {
+	// Parse [PLAN_ONLY] prefix and extract the goal context from the payload.
+	rawGoal := bounty.Payload
+	planOnly := strings.HasPrefix(rawGoal, "[PLAN_ONLY]\n")
+	if planOnly {
+		rawGoal = strings.TrimPrefix(rawGoal, "[PLAN_ONLY]\n")
+	}
+	if strings.HasPrefix(rawGoal, "[GOAL: ") {
+		if end := strings.Index(rawGoal, "]\n\n"); end != -1 {
+			rawGoal = rawGoal[len("[GOAL: "):end]
+		}
+	}
+	goalPrefix := fmt.Sprintf("[GOAL: %s]\n\n", rawGoal)
+	initialStatus := "Pending"
+	if planOnly {
+		initialStatus = "Planned"
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %v", err)
+	}
+
+	if _, err := tx.Exec(`DELETE FROM BountyBoard WHERE parent_id = ? AND status IN ('Pending', 'Planned')`, bounty.ID); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to delete stale subtasks: %v", err)
+	}
+
+	idMapping := make(map[int]int, len(tasks))
+	for _, t := range tasks {
+		realID, err := store.AddConvoyTaskTx(tx, bounty.ID, t.Repo, goalPrefix+t.Task, convoyID, bounty.Priority, initialStatus)
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("failed to insert task %d: %v", t.TempID, err)
+		}
+		idMapping[t.TempID] = realID
+	}
+
+	for _, t := range tasks {
+		realTaskID := idMapping[t.TempID]
+		for _, depTempID := range t.BlockedBy {
+			if realDepID, ok := idMapping[depTempID]; ok && realDepID > 0 {
+				if err := store.AddDependencyTx(tx, realTaskID, realDepID); err != nil {
+					tx.Rollback()
+					return nil, fmt.Errorf("failed to add dependency: %v", err)
+				}
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit task insertion: %v", err)
+	}
+	return idMapping, nil
+}
+
 func SpawnCommander(db *sql.DB) {
 	agentName := "Commander-Cody"
 	logger := NewLogger("Commander")
@@ -126,36 +248,13 @@ func runCommanderTask(db *sql.DB, agentName string, bounty *store.Bounty, logger
 		Payload:   map[string]any{"type": bounty.Type, "payload_preview": util.TruncateStr(bounty.Payload, 120)},
 	})
 
-	// Build repo context — include name, description, and README preview for smarter decomposition
-	rows, err := db.Query(`SELECT name, local_path, description FROM Repositories`)
+	// Load repo context — fail fast if no repos are registered.
+	repoList, err := loadRepoContext(db, logger)
 	if err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("DB Err: failed to query repositories: %v", err))
+		store.FailBounty(db, bounty.ID, "Commander Err: "+err.Error())
+		logger.Printf("Task %d FAILED: %v", bounty.ID, err)
 		return
 	}
-	var repoList []string
-	for rows.Next() {
-		var name, localPath, desc string
-		if scanErr := rows.Scan(&name, &localPath, &desc); scanErr != nil {
-			continue
-		}
-		entry := fmt.Sprintf("### %s\n%s", name, desc)
-		for _, candidate := range []string{"README.md", "readme.md", "README"} {
-			preview := readFilePreview(filepath.Join(localPath, candidate), 60)
-			if preview != "" {
-				entry += fmt.Sprintf("\nREADME (first 60 lines):\n%s", preview)
-				break
-			}
-		}
-		repoList = append(repoList, entry)
-	}
-	rows.Close()
-
-	if len(repoList) == 0 {
-		store.FailBounty(db, bounty.ID, "Commander Err: no repositories registered. Run: force add-repo <name> <path> <desc>")
-		logger.Printf("Task %d FAILED: no repositories registered", bounty.ID)
-		return
-	}
-
 	repoContext := strings.Join(repoList, "\n\n")
 
 	directive := LoadDirective("commander")
@@ -231,7 +330,6 @@ EXAMPLE:
 	if err != nil {
 		msg := fmt.Sprintf("Claude CLI Err: %v", err)
 		// On timeout, check if Claude produced partial output — if so, it was making progress.
-		// Log the preview so the operator can see what was happening before the retry.
 		if strings.Contains(err.Error(), "timed out") && len(strings.TrimSpace(rawOut)) > 200 {
 			logger.Printf("Task %d: timed out but Claude was making progress (%d chars of output)", bounty.ID, len(rawOut))
 			logger.Printf("Task %d: partial output preview: %.400s", bounty.ID, rawOut)
@@ -262,49 +360,14 @@ EXAMPLE:
 		return
 	}
 
-	// Validate task plan before inserting anything
+	// Validate the plan structure before any database writes.
 	knownRepos := loadKnownRepos(db)
-	tempIDs := make(map[int]bool)
-	for _, t := range tasks {
-		tempIDs[t.TempID] = true
-	}
-	valid := true
-	for _, t := range tasks {
-		if t.Repo == "" {
-			store.FailBounty(db, bounty.ID, fmt.Sprintf("Commander Err: task %d has no repo assigned", t.TempID))
-			valid = false
-			break
-		}
-		if !knownRepos[t.Repo] {
-			store.FailBounty(db, bounty.ID, fmt.Sprintf("Commander Err: task %d references unknown repo '%s' — register it with: force add-repo", t.TempID, t.Repo))
-			valid = false
-			break
-		}
-		for _, depID := range t.BlockedBy {
-			if depID != 0 && !tempIDs[depID] {
-				store.FailBounty(db, bounty.ID, fmt.Sprintf("Commander Err: task %d has invalid blocked_by=%v (no such task in plan)", t.TempID, t.BlockedBy))
-				valid = false
-				break
-			}
-		}
-		if !valid {
-			break
-		}
-	}
-	if valid {
-		if cycleID := findPlanCycle(tasks); cycleID != 0 {
-			store.FailBounty(db, bounty.ID, fmt.Sprintf("Commander Err: circular dependency detected at task %d — tasks cannot block each other in a cycle", cycleID))
-			valid = false
-		}
-	}
-	if !valid {
+	if err := validateTaskPlan(tasks, knownRepos); err != nil {
+		store.FailBounty(db, bounty.ID, "Commander Err: "+err.Error())
 		return
 	}
 
-	// Remove any subtasks from a prior failed attempt before re-inserting.
-	db.Exec(`DELETE FROM BountyBoard WHERE parent_id = ? AND status IN ('Pending', 'Planned')`, bounty.ID)
-
-	// Create a convoy to track this feature's subtasks as a group
+	// Create a convoy to track this feature's subtasks as a group.
 	convoyPreview := strings.ReplaceAll(bounty.Payload, "\n", " ")
 	if len(convoyPreview) > 50 {
 		convoyPreview = convoyPreview[:50]
@@ -326,78 +389,45 @@ EXAMPLE:
 	}
 	store.SetConvoyCoordinated(db, convoyID)
 
-	// Insert subtasks
-	rawGoal := bounty.Payload
-	planOnly := strings.HasPrefix(rawGoal, "[PLAN_ONLY]\n")
-	if planOnly {
-		rawGoal = strings.TrimPrefix(rawGoal, "[PLAN_ONLY]\n")
+	// Insert subtasks and dependencies in a single atomic transaction.
+	idMapping, err := insertConvoyAndTasks(db, tasks, bounty, convoyID)
+	if err != nil {
+		store.FailBounty(db, bounty.ID, "DB Err: "+err.Error())
+		return
 	}
-	if strings.HasPrefix(rawGoal, "[GOAL: ") {
-		if end := strings.Index(rawGoal, "]\n\n"); end != -1 {
-			rawGoal = rawGoal[len("[GOAL: "):end]
-		}
-	}
-	goalPrefix := fmt.Sprintf("[GOAL: %s]\n\n", rawGoal)
-	initialStatus := "Pending"
-	if planOnly {
-		initialStatus = "Planned"
-	}
-	idMapping := make(map[int]int)
-	insertFailed := false
-	for _, t := range tasks {
-		enrichedPayload := goalPrefix + t.Task
-		realID, err := store.AddConvoyTask(db, bounty.ID, t.Repo, enrichedPayload, convoyID, bounty.Priority, initialStatus)
-		if err != nil {
-			store.FailBounty(db, bounty.ID, fmt.Sprintf("DB Err: failed to insert task %d: %v", t.TempID, err))
-			insertFailed = true
-			break
-		}
-		idMapping[t.TempID] = realID
-	}
-	if !insertFailed {
-		for _, t := range tasks {
-			realTaskID := idMapping[t.TempID]
-			for _, depTempID := range t.BlockedBy {
-				if realDepID, ok := idMapping[depTempID]; ok && realDepID > 0 {
-					store.AddDependency(db, realTaskID, realDepID)
-				}
-			}
-		}
-	}
-	if !insertFailed {
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
-		histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "Completed")
-		if tokIn, tokOut := claude.ParseTokenUsage(response); tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
-		logger.Printf("Task %d: decomposed into %d subtask(s), convoy %d", bounty.ID, len(tasks), convoyID)
-		telemetry.EmitEvent(telemetry.TelemetryEvent{
-			SessionID: sessionID, Agent: agentName, TaskID: bounty.ID,
-			EventType: "task_decomposed",
-			Payload:   map[string]any{"subtask_count": len(tasks), "convoy_id": convoyID},
-		})
 
-		// Notify operator
-		var taskLines []string
-		for _, t := range tasks {
-			line := fmt.Sprintf("  #%d [%s] %s", idMapping[t.TempID], t.Repo, util.TruncateStr(t.Task, 80))
-			if len(t.BlockedBy) > 0 {
-				var afterIDs []string
-				for _, depTempID := range t.BlockedBy {
-					if realID, ok := idMapping[depTempID]; ok {
-						afterIDs = append(afterIDs, fmt.Sprintf("#%d", realID))
-					}
-				}
-				if len(afterIDs) > 0 {
-					line += fmt.Sprintf(" (after %s)", strings.Join(afterIDs, ", "))
+	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "Completed")
+	if tokIn, tokOut := claude.ParseTokenUsage(response); tokIn > 0 || tokOut > 0 {
+		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+	}
+	logger.Printf("Task %d: decomposed into %d subtask(s), convoy %d", bounty.ID, len(tasks), convoyID)
+	telemetry.EmitEvent(telemetry.TelemetryEvent{
+		SessionID: sessionID, Agent: agentName, TaskID: bounty.ID,
+		EventType: "task_decomposed",
+		Payload:   map[string]any{"subtask_count": len(tasks), "convoy_id": convoyID},
+	})
+
+	// Notify operator
+	var taskLines []string
+	for _, t := range tasks {
+		line := fmt.Sprintf("  #%d [%s] %s", idMapping[t.TempID], t.Repo, util.TruncateStr(t.Task, 80))
+		if len(t.BlockedBy) > 0 {
+			var afterIDs []string
+			for _, depTempID := range t.BlockedBy {
+				if realID, ok := idMapping[depTempID]; ok {
+					afterIDs = append(afterIDs, fmt.Sprintf("#%d", realID))
 				}
 			}
-			taskLines = append(taskLines, line)
+			if len(afterIDs) > 0 {
+				line += fmt.Sprintf(" (after %s)", strings.Join(afterIDs, ", "))
+			}
 		}
-		store.SendMail(db, agentName, "operator",
-			fmt.Sprintf("[DECOMPOSED] Feature #%d → %d task(s)", bounty.ID, len(tasks)),
-			fmt.Sprintf("Feature request #%d has been broken into %d task(s) in convoy #%d:\n\n%s\n\nOriginal request:\n%s",
-				bounty.ID, len(tasks), convoyID, strings.Join(taskLines, "\n"), util.TruncateStr(bounty.Payload, 500)),
-			bounty.ID, store.MailTypeInfo)
+		taskLines = append(taskLines, line)
 	}
+	store.SendMail(db, agentName, "operator",
+		fmt.Sprintf("[DECOMPOSED] Feature #%d → %d task(s)", bounty.ID, len(tasks)),
+		fmt.Sprintf("Feature request #%d has been broken into %d task(s) in convoy #%d:\n\n%s\n\nOriginal request:\n%s",
+			bounty.ID, len(tasks), convoyID, strings.Join(taskLines, "\n"), util.TruncateStr(bounty.Payload, 500)),
+		bounty.ID, store.MailTypeInfo)
 }
