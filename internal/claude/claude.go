@@ -77,6 +77,25 @@ func CommanderTimeoutForAttempt(infraFailures int) time.Duration {
 	return time.Duration(timeout)
 }
 
+const astromechBaseTimeout = 15 * time.Minute
+const astromechMaxTimeout = 45 * time.Minute
+
+// AstromechTimeoutForAttempt returns the timeout for an Astromech task run.
+// infraFailures is the number of prior failures for the task (bounty.InfraFailures).
+// Each prior failure increases the timeout by 50%, capped at 45 minutes:
+//
+//	0 failures → 15m, 1 → 22m30s, 2 → 33m45s, 3+ → 45m
+func AstromechTimeoutForAttempt(infraFailures int) time.Duration {
+	timeout := float64(astromechBaseTimeout)
+	for i := 0; i < infraFailures; i++ {
+		timeout *= 1.5
+		if time.Duration(timeout) >= astromechMaxTimeout {
+			return astromechMaxTimeout
+		}
+	}
+	return time.Duration(timeout)
+}
+
 // Read-only Atlassian tools — look up Jira tickets and Confluence pages.
 // Write tools (createJiraIssue, editJiraIssue, addCommentToJiraIssue, transitionJiraIssue,
 // createConfluencePage, updateConfluencePage, etc.) are intentionally excluded.
