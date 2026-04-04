@@ -228,15 +228,34 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 	}
 
 	// Second pass: wire up dependencies between findings.
+	// Combines two sources:
+	//   a) Claude-declared blocked_by (semantic dependencies the LLM identified)
+	//   b) Automatic same-file detection — if two findings share a primary file in Location,
+	//      sequence them so agents never concurrently modify the same file.
+	//
+	// For same-file sequencing we pick the lower-finding-ID as the blocker (higher severity
+	// findings tend to come first in the JSON; sequencing earlier→later is safe).
+	fileFirstFinding := make(map[string]int) // primary file → first finding ID that touched it
 	for _, f := range report.Findings {
 		findingNum := f.ID
-		if findingNum == 0 {
+		if findingNum == 0 || idMapping[findingNum] == 0 {
 			continue
 		}
-		taskID, ok := idMapping[findingNum]
-		if !ok {
+		primaryFile := primaryFileFromLocation(f.Location)
+		if primaryFile == "" {
 			continue
 		}
+		if first, seen := fileFirstFinding[primaryFile]; seen {
+			// This finding touches a file already claimed by an earlier finding — add dependency.
+			if _, alreadyDep := findingHasDep(f.BlockedBy, first); !alreadyDep {
+				f.BlockedBy = append(f.BlockedBy, first)
+				logger.Printf("Task %d: auto-sequencing finding #%d after #%d (same file: %s)",
+					bounty.ID, findingNum, first, primaryFile)
+			}
+		} else {
+			fileFirstFinding[primaryFile] = findingNum
+		}
+		taskID := idMapping[findingNum]
 		for _, depFindingID := range f.BlockedBy {
 			if depTaskID, ok := idMapping[depFindingID]; ok && depTaskID > 0 {
 				store.AddDependency(db, taskID, depTaskID)
@@ -245,6 +264,11 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 			}
 		}
 	}
+
+	store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "success",
+		fmt.Sprintf("Audit completed: %d finding(s) queued in convoy #%d.\nSummary: %s",
+			len(queued), convoyID, util.TruncateStr(report.Summary, 400)),
+		"")
 
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
 
@@ -268,6 +292,33 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 	store.LogAudit(db, name, "audit-complete", bounty.ID,
 		fmt.Sprintf("%d finding(s) → convoy #%d", len(queued), convoyID))
 	logger.Printf("Task %d: audit complete — %d finding(s) queued in convoy #%d", bounty.ID, len(queued), convoyID)
+}
+
+// primaryFileFromLocation extracts the file path from a location string like
+// "internal/agents/astromech.go:42" or "internal/agents/astromech.go". Returns
+// empty string if the location looks like a package path (no file extension).
+func primaryFileFromLocation(location string) string {
+	// Strip line number suffix
+	if colon := strings.LastIndex(location, ":"); colon != -1 {
+		candidate := location[:colon]
+		if strings.Contains(candidate, ".") {
+			return candidate
+		}
+	}
+	if strings.Contains(location, ".") {
+		return location
+	}
+	return ""
+}
+
+// findingHasDep returns true if depID is already in the blocked_by slice.
+func findingHasDep(blockedBy []int, depID int) (int, bool) {
+	for _, id := range blockedBy {
+		if id == depID {
+			return id, true
+		}
+	}
+	return 0, false
 }
 
 // buildFindingPayload formats one audit finding as a CodeEdit task payload.
