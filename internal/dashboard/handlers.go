@@ -1,9 +1,11 @@
 package dashboard
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -12,7 +14,6 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
-	"force-orchestrator/internal/claude"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -772,6 +773,15 @@ func insertTypedTask(db *sql.DB, taskType, repo, payload string, priority int) (
 	return int(id), nil
 }
 
+// newUUID generates a random UUID v4.
+func newUUID() string {
+	b := make([]byte, 16)
+	io.ReadFull(rand.Reader, b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
 // ── Add task ──────────────────────────────────────────────────────────────────
 
 func handleAdd(db *sql.DB) http.HandlerFunc {
@@ -791,22 +801,41 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Auto-classify if no type specified.
-		var classifiedType, classifyReason string
-		resolvedType := body.Type
-		if body.Type == "" || strings.EqualFold(body.Type, "auto") {
-			t, reason, err := claude.ClassifyTaskType(body.Payload)
-			if err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":"classification failed: %s"}`, err.Error()), http.StatusInternalServerError)
+		// Idempotency check: if this key was used within the last 60 seconds, return the existing task.
+		if body.IdempotencyKey != "" {
+			var existingID int
+			err := db.QueryRow(
+				`SELECT id FROM BountyBoard WHERE idempotency_key = ? AND created_at > datetime('now', '-60 seconds') LIMIT 1`,
+				body.IdempotencyKey,
+			).Scan(&existingID)
+			if err == nil {
+				fmt.Fprintf(w, `{"ok":true,"id":%d,"duplicate":true}`, existingID)
 				return
 			}
-			resolvedType = t
-			classifiedType = t
-			classifyReason = reason
+		}
+
+		// Auto type: insert immediately as Classifying so the UI is not blocked.
+		if body.Type == "" || strings.EqualFold(body.Type, "auto") {
+			key := body.IdempotencyKey
+			if key == "" {
+				key = newUUID()
+			}
+			res, err := db.Exec(
+				`INSERT INTO BountyBoard (type, status, payload, idempotency_key, created_at) VALUES ('Auto', 'Classifying', ?, ?, datetime('now'))`,
+				body.Payload, key,
+			)
+			if err != nil {
+				http.Error(w, `{"error":"failed to queue task"}`, http.StatusInternalServerError)
+				return
+			}
+			newID, _ := res.LastInsertId()
+			store.LogAudit(db, "dashboard", "add-task", int(newID), "queued Auto (Classifying) via dashboard")
+			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
+			return
 		}
 
 		var newID int
-		switch resolvedType {
+		switch body.Type {
 		case "Feature":
 			newID = store.AddBounty(db, 0, "Feature", body.Payload)
 			if body.Priority != 0 {
@@ -840,18 +869,12 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"error":"type must be Feature, CodeEdit, Investigate, or Audit"}`, http.StatusBadRequest)
 			return
 		}
-		store.LogAudit(db, "dashboard", "add-task", newID,
-			fmt.Sprintf("queued %s via dashboard", resolvedType))
-		if classifiedType != "" {
-			resp, _ := json.Marshal(map[string]any{
-				"ok":              true,
-				"id":              newID,
-				"classified_type": classifiedType,
-				"reason":          classifyReason,
-			})
-			w.Write(resp)
-		} else {
-			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
+		// Stamp idempotency key so future duplicate submits are caught.
+		if body.IdempotencyKey != "" {
+			db.Exec(`UPDATE BountyBoard SET idempotency_key = ? WHERE id = ?`, body.IdempotencyKey, newID)
 		}
+		store.LogAudit(db, "dashboard", "add-task", newID,
+			fmt.Sprintf("queued %s via dashboard", body.Type))
+		fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
 	}
 }

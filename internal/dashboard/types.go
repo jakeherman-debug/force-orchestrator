@@ -121,10 +121,11 @@ type DashboardAgent struct {
 
 // addTaskBody is the POST /api/add request body
 type addTaskBody struct {
-	Type     string `json:"type"`
-	Payload  string `json:"payload"`
-	Repo     string `json:"repo"`
-	Priority int    `json:"priority"`
+	Type           string `json:"type"`
+	Payload        string `json:"payload"`
+	Repo           string `json:"repo"`
+	Priority       int    `json:"priority"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // rejectBody is the POST /api/tasks/{id}/reject request body

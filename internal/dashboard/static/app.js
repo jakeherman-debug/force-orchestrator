@@ -2,18 +2,19 @@
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
-  status:       null,
-  tasks:        [],
-  taskFilter:   'active',
-  convoyFilter: 0,
-  repos:        [],
-  escFilter:    'Open',
-  logMode:      'fleet',   // 'fleet' | 'holonet'
-  logSource:    null,
-  selectedID:   null,
-  detail:       null,
-  rejectID:     null,
-  activeTab:    'tasks',
+  status:             null,
+  tasks:              [],
+  taskFilter:         'active',
+  convoyFilter:       0,
+  repos:              [],
+  escFilter:          'Open',
+  logMode:            'fleet',   // 'fleet' | 'holonet'
+  logSource:          null,
+  selectedID:         null,
+  detail:             null,
+  rejectID:           null,
+  activeTab:          'tasks',
+  addIdempotencyKey:  '',
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -174,7 +175,7 @@ function switchTab(name) {
 const FILTER_STATUS = {
   active:    'Locked',
   review:    'AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
-  pending:   'Pending,Blocked,Planned',
+  pending:   'Pending,Classifying,Blocked,Planned',
   failed:    'Failed,Escalated,ConflictPending',
   done:      'Completed',
   cancelled: 'Cancelled',
@@ -853,6 +854,7 @@ async function showAddModal() {
   $('add-payload').value  = '';
   $('add-priority').value = '0';
   $('add-type').value     = '';
+  S.addIdempotencyKey = crypto.randomUUID();
   onAddTypeChange();
   $('add-modal').classList.remove('hidden');
   setTimeout(() => $('add-payload').focus(), 50);
@@ -880,10 +882,10 @@ async function submitAddTask() {
     const r = await api('/api/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, payload, repo, priority }),
+      body: JSON.stringify({ type, payload, repo, priority, idempotency_key: S.addIdempotencyKey }),
     });
-    if (r.classified_type) {
-      showToast(`Queued as ${r.classified_type} — ${r.reason} (task #${r.id})`, 'ok');
+    if (r.duplicate) {
+      showToast(`Already queued as task #${r.id}`, 'ok');
     } else {
       showToast(`Task #${r.id} queued`, 'ok');
     }

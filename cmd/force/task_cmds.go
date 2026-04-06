@@ -1,17 +1,27 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
-	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/agents"
 	"force-orchestrator/internal/claude"
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
+
+func cliUUID() string {
+	b := make([]byte, 16)
+	io.ReadFull(rand.Reader, b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
 
 func cmdAdd(db *sql.DB, args []string) {
 	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] <task description>"
@@ -66,6 +76,7 @@ func cmdAdd(db *sql.DB, args []string) {
 	if priority != 0 {
 		store.SetBountyPriority(db, id, priority)
 	}
+	db.Exec(`UPDATE BountyBoard SET idempotency_key = ? WHERE id = ?`, cliUUID(), id)
 	planSuffix := ""
 	if planOnly {
 		planSuffix = " — Commander will plan only; approve with: force convoy approve <convoy-id>"
