@@ -204,7 +204,18 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 
 	diff := igit.GetDiff(repoPath, branchName)
 	if diff == "" {
-		msg := "Git Err: diff is empty — worktree may have no commits or branch does not exist"
+		if igit.CommitsAhead(repoPath, branchName) == "" {
+			// No diff and no unique commits — work was already merged into main.
+			// Auto-complete rather than failing; unblock dependents and recover convoy.
+			store.UpdateBountyStatus(db, b.ID, "Completed")
+			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "auto-completed: work already merged into main", "Completed")
+			store.LogAudit(db, agentName, "captain-auto-complete", b.ID, "diff empty, commits already in main")
+			store.UnblockDependentsOf(db, b.ID)
+			store.AutoRecoverConvoy(db, b.ConvoyID, logger)
+			logger.Printf("Task %d: captain auto-completed (work already merged into main)", b.ID)
+			return
+		}
+		msg := "Git Err: diff is empty — branch has commits but no net changes vs main"
 		store.FailBounty(db, b.ID, msg)
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		return
