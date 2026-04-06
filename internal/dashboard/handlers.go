@@ -790,10 +790,10 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Auto-classify: insert immediately as Classifying; Inquisitor will resolve type.
+		// Auto type: insert immediately as Classifying so the UI is not blocked.
 		if body.Type == "" || strings.EqualFold(body.Type, "auto") {
 			newID := store.AddBountyClassifying(db, body.Repo, body.Payload, body.Priority)
-			store.LogAudit(db, "dashboard", "add-task", newID, "queued Auto via dashboard (classifying)")
+			store.LogAudit(db, "dashboard", "add-task", newID, "queued Auto (Classifying) via dashboard")
 			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
 			return
 		}

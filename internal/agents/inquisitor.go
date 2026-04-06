@@ -100,6 +100,36 @@ func SpawnInquisitor(db *sql.DB) {
 	}
 }
 
+// classifyPendingTasks finds tasks with status='Classifying', calls ClassifyTaskType
+// for each, updates the task type to the result, and transitions the task to Pending.
+func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) {
+	rows, err := db.Query(`SELECT id, payload FROM BountyBoard WHERE status = 'Classifying'`)
+	if err != nil {
+		return
+	}
+	type classTask struct {
+		id      int
+		payload string
+	}
+	var tasks []classTask
+	for rows.Next() {
+		var t classTask
+		rows.Scan(&t.id, &t.payload)
+		tasks = append(tasks, t)
+	}
+	rows.Close()
+
+	for _, t := range tasks {
+		taskType, reason, err := claude.ClassifyTaskType(t.payload)
+		if err != nil {
+			logger.Printf("Task #%d: classification error — %v", t.id, err)
+			continue
+		}
+		db.Exec(`UPDATE BountyBoard SET type = ?, status = 'Pending' WHERE id = ?`, taskType, t.id)
+		logger.Printf("Task #%d classified as %s — %s", t.id, taskType, reason)
+	}
+}
+
 // detectStalledTasks finds tasks that are Locked/UnderReview for too long with
 // no new commits in their worktree.
 func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) {
@@ -226,36 +256,6 @@ func validateWorktrees(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 	}
 	if len(stale) == 0 {
 		logger.Printf("Worktree validation: all %d worktree(s) present", total)
-	}
-}
-
-// classifyPendingTasks resolves tasks inserted with status='Classifying' by calling
-// ClassifyTaskType and transitioning them to Pending with the classified type.
-func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) {
-	rows, err := db.Query(`SELECT id, payload FROM BountyBoard WHERE status = 'Classifying'`)
-	if err != nil {
-		return
-	}
-	type classifyTask struct {
-		id      int
-		payload string
-	}
-	var tasks []classifyTask
-	for rows.Next() {
-		var t classifyTask
-		rows.Scan(&t.id, &t.payload)
-		tasks = append(tasks, t)
-	}
-	rows.Close()
-
-	for _, t := range tasks {
-		taskType, reason, err := claude.ClassifyTaskType(t.payload)
-		if err != nil {
-			logger.Printf("Task #%d: classification error — %v", t.id, err)
-			continue
-		}
-		db.Exec(`UPDATE BountyBoard SET type = ?, status = 'Pending' WHERE id = ?`, taskType, t.id)
-		logger.Printf("Task #%d classified as %s — %s", t.id, taskType, reason)
 	}
 }
 

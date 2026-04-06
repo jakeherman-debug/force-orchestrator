@@ -281,8 +281,8 @@ td.dim  { color: var(--text2); }
   letter-spacing: 0.3px;
   white-space: nowrap;
 }
+.s-Classifying      { background: rgba(210,153,34,.08);  color: var(--yellow); border: 1px solid rgba(210,153,34,.2); }
 .s-Pending          { background: rgba(210,153,34,.15);  color: var(--yellow); border: 1px solid rgba(210,153,34,.3); }
-.s-Classifying      { background: rgba(210,153,34,.15);  color: var(--yellow); border: 1px solid rgba(210,153,34,.3); }
 .s-Locked           { background: rgba(88,166,255,.15);  color: var(--accent); border: 1px solid rgba(88,166,255,.3); }
 .s-Completed        { background: rgba(63,185,80,.15);   color: var(--green);  border: 1px solid rgba(63,185,80,.3); }
 .s-Failed           { background: rgba(248,81,73,.15);   color: var(--red);    border: 1px solid rgba(248,81,73,.3); }

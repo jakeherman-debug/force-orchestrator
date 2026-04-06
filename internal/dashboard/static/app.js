@@ -174,7 +174,7 @@ function switchTab(name) {
 const FILTER_STATUS = {
   active:    'Locked',
   review:    'AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
-  pending:   'Pending,Blocked,Planned,Classifying',
+  pending:   'Pending,Classifying,Blocked,Planned',
   failed:    'Failed,Escalated,ConflictPending',
   done:      'Completed',
   cancelled: 'Cancelled',
@@ -882,11 +882,7 @@ async function submitAddTask() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type, payload, repo, priority }),
     });
-    if (r.classified_type) {
-      showToast(`Queued as ${r.classified_type} — ${r.reason} (task #${r.id})`, 'ok');
-    } else {
-      showToast(`Task #${r.id} queued`, 'ok');
-    }
+    showToast(`Task #${r.id} queued`, 'ok');
     closeModal('add-modal');
     loadTasks();
     pollStatus();
