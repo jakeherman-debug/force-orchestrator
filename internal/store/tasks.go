@@ -127,6 +127,17 @@ func AddBounty(db *sql.DB, parentID int, taskType, payload string) int {
 	return int(id)
 }
 
+// AddBountyClassifying inserts a task with type='Auto' and status='Classifying'.
+// The Inquisitor will classify it and transition it to Pending.
+func AddBountyClassifying(db *sql.DB, repo, payload string, priority int) int {
+	res, _ := db.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+		 VALUES (0, ?, 'Auto', 'Classifying', ?, ?, datetime('now'))`,
+		repo, payload, priority)
+	id, _ := res.LastInsertId()
+	return int(id)
+}
+
 func FailBounty(db *sql.DB, id int, errorMsg string) {
 	db.Exec(`UPDATE BountyBoard SET status = 'Failed', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
 		errorMsg, id)
