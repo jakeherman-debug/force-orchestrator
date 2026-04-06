@@ -174,7 +174,7 @@ function switchTab(name) {
 const FILTER_STATUS = {
   active:    'Locked',
   review:    'AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
-  pending:   'Pending,Blocked,Planned',
+  pending:   'Pending,Blocked,Planned,Classifying',
   failed:    'Failed,Escalated,ConflictPending',
   done:      'Completed',
   cancelled: 'Cancelled',
