@@ -177,11 +177,11 @@ func TestRunCouncilTask_Approved(t *testing.T) {
 		t.Error("expected TaskHistory entry with outcome=Completed after approval")
 	}
 
-	// Fleet memory must have a success entry
+	// Council queues a WriteMemory task for the Librarian to synthesize the memory
 	var memCount int
-	db.QueryRow(`SELECT COUNT(*) FROM FleetMemory WHERE task_id = ? AND outcome = 'success'`, id).Scan(&memCount)
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = ? AND type = 'WriteMemory'`, id).Scan(&memCount)
 	if memCount == 0 {
-		t.Error("expected FleetMemory success entry after approval")
+		t.Error("expected WriteMemory task queued in BountyBoard after approval")
 	}
 
 	// AuditLog must record the council-approve action

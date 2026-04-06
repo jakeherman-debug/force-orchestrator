@@ -162,10 +162,15 @@ func CancelTask(db *sql.DB, id int, reason string) bool {
 }
 
 // ResetTask resets a single task to Pending, clearing all error and lock state.
+// If the task belongs to a Failed convoy and no other problem tasks remain after
+// the reset, the convoy is automatically recovered to Active.
 func ResetTask(db *sql.DB, id int) {
+	var convoyID int
+	db.QueryRow(`SELECT convoy_id FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID)
 	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
 		retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = '', branch_name = ''
 		WHERE id = ?`, id)
+	AutoRecoverConvoy(db, convoyID, nil)
 }
 
 // ResetAllFailed resets all Failed tasks to Pending. Returns the number of tasks reset.

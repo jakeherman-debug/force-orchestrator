@@ -14,15 +14,6 @@ import (
 	"force-orchestrator/internal/util"
 )
 
-// writeMemoryPayload is the structured payload for WriteMemory tasks.
-type writeMemoryPayload struct {
-	Description    string   `json:"description"`     // task description, truncated to 800 chars
-	FilesChanged   []string `json:"files_changed"`   // list of files modified
-	CouncilFeedback string  `json:"council_feedback"` // approval feedback from council
-	Diff           string   `json:"diff"`             // diff of changes, truncated to 4000 chars
-	ParentTaskID   int64    `json:"parent_task_id"`  // ID of the task that was completed
-}
-
 const librarianSystemPrompt = `You are the Fleet Librarian — a specialist knowledge-curation agent in the Galactic Fleet.
 
 Your job is to write a concise, high-quality memory nugget about a completed task so that future agents can learn from it.
@@ -40,9 +31,18 @@ Write exactly 2-4 sentences that cover:
 - Write in plain prose — no bullet points, no headings, no markdown.
 - Be specific enough that a future agent reading this can act on it without looking at the code.`
 
+// writeMemoryPayload is the JSON structure placed in WriteMemory bounty payloads by jedi_council.
+type writeMemoryPayload struct {
+	Task     string `json:"task"`
+	Files    string `json:"files"`
+	Feedback string `json:"feedback"`
+	Diff     string `json:"diff"`
+	Repo     string `json:"repo"`
+}
+
 func SpawnLibrarian(db *sql.DB, name string) {
 	logger := NewLogger(name)
-	logger.Printf("Librarian %s starting up", name)
+	logger.Printf("Librarian %s coming online", name)
 
 	for {
 		if IsEstopped(db) {
@@ -52,7 +52,7 @@ func SpawnLibrarian(db *sql.DB, name string) {
 
 		bounty, claimed := store.ClaimBounty(db, "WriteMemory", name)
 		if !claimed {
-			time.Sleep(time.Duration(2000+rand.Intn(1000)) * time.Millisecond)
+			time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
 			continue
 		}
 
@@ -61,61 +61,51 @@ func SpawnLibrarian(db *sql.DB, name string) {
 }
 
 func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
-	logger.Printf("Claimed WriteMemory #%d: %s", bounty.ID, util.TruncateStr(bounty.Payload, 80))
+	logger.Printf("Librarian claimed WriteMemory #%d", bounty.ID)
 
-	// Parse the structured payload.
+	// Parse the structured payload from jedi_council.
 	var payload writeMemoryPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		// Fallback: treat the raw payload as the description.
-		payload.Description = util.TruncateStr(bounty.Payload, 800)
+		// Fallback: treat raw payload as task description.
+		payload.Task = bounty.Payload
 	}
 
-	parentTaskID := int(payload.ParentTaskID)
-
-	// Collect rejection history for this parent task.
-	mails := store.ReadInboxForAgent(db, name, "librarian", parentTaskID)
-	priorAttemptsSection := formatLibrarianMailContext(mails)
-
-	// Build the user prompt with all available context.
-	var userParts []string
-
-	userParts = append(userParts, fmt.Sprintf("TASK DESCRIPTION:\n%s", payload.Description))
-
-	if len(payload.FilesChanged) > 0 {
-		userParts = append(userParts, fmt.Sprintf("FILES CHANGED:\n%s", strings.Join(payload.FilesChanged, "\n")))
+	// parentID is the original task (CodeEdit) that this WriteMemory was spawned from.
+	parentID := bounty.ParentID
+	if parentID == 0 {
+		parentID = bounty.ID
 	}
 
-	if payload.CouncilFeedback != "" {
-		userParts = append(userParts, fmt.Sprintf("COUNCIL APPROVAL FEEDBACK:\n%s", payload.CouncilFeedback))
+	// Collect any rejection feedback mailed to "librarian" for the original task.
+	priorMail := store.ReadInboxForAgent(db, name, "librarian", parentID)
+	priorContext := formatLibrarianMailContext(priorMail)
+
+	userPrompt := fmt.Sprintf(
+		"TASK DESCRIPTION:\n%s\n\nFILES CHANGED:\n%s\n\nCOUNCIL FEEDBACK:\n%s\n\nDIFF:\n%s",
+		payload.Task,
+		payload.Files,
+		payload.Feedback,
+		payload.Diff,
+	)
+	if priorContext != "" {
+		userPrompt += "\n\n" + priorContext
 	}
 
-	if payload.Diff != "" {
-		userParts = append(userParts, fmt.Sprintf("DIFF:\n%s", payload.Diff))
-	}
-
-	if priorAttemptsSection != "" {
-		userParts = append(userParts, priorAttemptsSection)
-	}
-
-	userPrompt := strings.Join(userParts, "\n\n")
-
-	// Call Claude to generate the memory nugget (no tools, 1 turn).
 	rawOut, err := claude.AskClaudeCLI(librarianSystemPrompt, userPrompt, "", 1)
-
 	var summary string
-	if err != nil || strings.TrimSpace(rawOut) == "" {
-		logger.Printf("Task #%d: Claude error (%v), using fallback summary", bounty.ID, err)
-		summary = fmt.Sprintf("Task: %s", payload.Description)
+	if err != nil {
+		logger.Printf("WriteMemory #%d: Claude failed (%v) — using fallback summary", bounty.ID, err)
+		summary = fmt.Sprintf("Task: %s", util.TruncateStr(directiveText(payload.Task), 400))
 	} else {
 		summary = strings.TrimSpace(rawOut)
+		if summary == "" {
+			summary = fmt.Sprintf("Task: %s", util.TruncateStr(directiveText(payload.Task), 400))
+		}
 	}
 
-	// Store the memory, attributed to the parent task.
-	filesChanged := strings.Join(payload.FilesChanged, ", ")
-	store.StoreFleetMemory(db, bounty.TargetRepo, parentTaskID, "success", summary, filesChanged)
-
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
-	logger.Printf("Task #%d: memory written for parent task #%d (%d chars)", bounty.ID, parentTaskID, len(summary))
+	store.StoreFleetMemory(db, payload.Repo, parentID, "success", summary, payload.Files)
+	logger.Printf("WriteMemory #%d: memory stored for parent task #%d (repo: %s)", bounty.ID, parentID, payload.Repo)
 }
 
 // formatLibrarianMailContext formats rejection-history mail into a prompt section.

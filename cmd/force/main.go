@@ -336,8 +336,9 @@ func main() {
 		scaleCaptain := fs.Int("captain", -1, "number of captains")
 		scaleInvestigators := fs.Int("investigators", -1, "number of investigators")
 		scaleAuditors := fs.Int("auditors", -1, "number of auditors")
+		scaleLibrarians := fs.Int("librarians", -1, "number of librarians")
 		fs.Parse(os.Args[2:])
-		cmdScale(db, *scaleAstromechs, *scaleCouncil, *scaleCaptain, *scaleInvestigators, *scaleAuditors)
+		cmdScale(db, *scaleAstromechs, *scaleCouncil, *scaleCaptain, *scaleInvestigators, *scaleAuditors, *scaleLibrarians)
 
 	case "estop":
 		cmdEstop(db)

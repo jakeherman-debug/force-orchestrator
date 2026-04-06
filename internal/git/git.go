@@ -190,6 +190,16 @@ func GetDiff(repoPath string, branchName string) string {
 	return string(out)
 }
 
+// CommitsAhead returns the one-line log of commits on branchName that are not
+// yet in the default branch (git log base..branch --oneline). An empty string
+// means the branch has no unique commits — its work is already merged into base.
+func CommitsAhead(repoPath string, branchName string) string {
+	base := GetDefaultBranch(repoPath)
+	cmd := exec.Command("git", "-C", repoPath, "log", base+".."+branchName, "--oneline")
+	out, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out))
+}
+
 // MergeAndCleanup merges the branch into the default branch of the repo, then resets
 // the agent worktree to detached HEAD. Serialized with a mutex to prevent concurrent
 // council members from racing on the same main worktree. Returns error if merge fails.

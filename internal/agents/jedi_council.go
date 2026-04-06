@@ -94,9 +94,29 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 	diff := igit.GetDiff(repoPath, branchName)
 	if diff == "" {
-		msg := "Git Err: diff is empty — worktree may have no commits or branch does not exist"
-		store.FailBounty(db, b.ID, msg)
-		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		// Check whether the branch's commits are already in main — this happens when
+		// multiple convoy tasks touch overlapping files and one agent merges first,
+		// making subsequent agents' three-dot diffs empty.
+		if igit.CommitsAhead(repoPath, branchName) == "" {
+			// All commits already in main — auto-complete rather than fail.
+			logger.Printf("Task %d: diff empty and no unique commits — work already merged, auto-completing", b.ID)
+			store.UpdateBountyStatus(db, b.ID, "Completed")
+			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "auto-completed: work already merged into main", "Completed")
+			store.LogAudit(db, agentName, "council-auto-complete", b.ID, "diff empty, commits already in main")
+			if n := store.UnblockDependentsOf(db, b.ID); n > 0 {
+				logger.Printf("Task %d: unblocked %d dependent(s)", b.ID, n)
+			}
+			store.AutoRecoverConvoy(db, b.ConvoyID, logger)
+			telemetry.EmitEvent(telemetry.TelemetryEvent{
+				SessionID: sessionID, Agent: agentName, TaskID: b.ID,
+				EventType: "task_completed",
+				Payload:   map[string]any{"reason": "already_merged"},
+			})
+		} else {
+			msg := "Git Err: diff is empty — branch has commits but no net changes; may need manual inspection"
+			store.FailBounty(db, b.ID, msg)
+			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		}
 		return
 	}
 
@@ -195,11 +215,14 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 				memPayload = strings.TrimLeft(memPayload[nl:], "\n")
 			}
 		}
-		memorySummary := fmt.Sprintf("Task: %s", util.TruncateStr(directiveText(memPayload), 400))
-		if ruling.Feedback != "" {
-			memorySummary += fmt.Sprintf("\nCouncil note: %s", ruling.Feedback)
-		}
-		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "success", memorySummary, filesStr)
+		writeMemJSON, _ := json.Marshal(map[string]string{
+			"task":     util.TruncateStr(directiveText(memPayload), 800),
+			"files":    filesStr,
+			"feedback": ruling.Feedback,
+			"diff":     util.TruncateStr(diff, 4000),
+			"repo":     b.TargetRepo,
+		})
+		store.AddBounty(db, b.ID, "WriteMemory", string(writeMemJSON))
 		logger.Printf("Task %d: COMPLETED and merged", b.ID)
 
 		if b.ParentID > 0 {
@@ -268,6 +291,11 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d", b.ID, retryCount, MaxRetries),
 			fmt.Sprintf("The Jedi Council reviewed your work on task #%d and rejected it.\n\nReason: %s\n\nPlease address this feedback in your next attempt.",
 				b.ID, ruling.Feedback),
+			b.ID, store.MailTypeFeedback)
+		store.SendMail(db, agentName, "librarian",
+			fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d", b.ID, retryCount, MaxRetries),
+			fmt.Sprintf("The Jedi Council rejected task #%d (attempt %d/%d).\n\nReason: %s",
+				b.ID, retryCount, MaxRetries, ruling.Feedback),
 			b.ID, store.MailTypeFeedback)
 	}
 }
