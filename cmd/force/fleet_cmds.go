@@ -77,15 +77,20 @@ func cmdDaemon(db *sql.DB) {
 	if n := store.GetConfig(db, "num_auditors", ""); n != "" {
 		fmt.Sscanf(n, "%d", &numAuditors)
 	}
+	numLibrarians := 1
+	if n := store.GetConfig(db, "num_librarians", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numLibrarians)
+	}
 
-	astromechRoster    := []string{"R2-D2", "BB-8", "R5-D4", "K-2SO", "BD-1", "R7-A7", "R4-P17", "D-O", "C1-10P", "R3-S6"}
-	councilRoster      := []string{"Council-Yoda", "Council-Mace", "Council-Ki-Adi", "Council-Kit-Fisto", "Council-Shaak-Ti"}
-	captainRoster      := []string{"Captain-Rex", "Captain-Wolffe", "Captain-Bly", "Captain-Gree", "Captain-Ponds"}
+	astromechRoster   := []string{"R2-D2", "BB-8", "R5-D4", "K-2SO", "BD-1", "R7-A7", "R4-P17", "D-O", "C1-10P", "R3-S6"}
+	councilRoster     := []string{"Council-Yoda", "Council-Mace", "Council-Ki-Adi", "Council-Kit-Fisto", "Council-Shaak-Ti"}
+	captainRoster     := []string{"Captain-Rex", "Captain-Wolffe", "Captain-Bly", "Captain-Gree", "Captain-Ponds"}
 	investigatorRoster := []string{"Ahsoka-Tano", "Kanan-Jarrus", "Ezra-Bridger", "Hera-Syndulla"}
-	auditorRoster      := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
+	auditorRoster     := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
+	librarianRoster   := []string{"Jocasta-Nu", "Huyang", "Dexter-Jettster"}
 
-	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d investigator(s), %d auditor(s))...\n",
-		numAgents, numCaptain, numCouncil, numInvestigators, numAuditors)
+	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d investigator(s), %d auditor(s), %d librarian(s))...\n",
+		numAgents, numCaptain, numCouncil, numInvestigators, numAuditors, numLibrarians)
 	go agents.SpawnCommander(db)
 	for i := 0; i < numAgents; i++ {
 		name := fmt.Sprintf("Astromech-%d", i+1)
@@ -122,6 +127,13 @@ func cmdDaemon(db *sql.DB) {
 		}
 		go agents.SpawnAuditor(db, name)
 	}
+	for i := 0; i < numLibrarians; i++ {
+		name := fmt.Sprintf("Librarian-%d", i+1)
+		if i < len(librarianRoster) {
+			name = librarianRoster[i]
+		}
+		go agents.SpawnLibrarian(db, name)
+	}
 	go agents.SpawnInquisitor(db)
 
 	sigChan := make(chan os.Signal, 1)
@@ -131,6 +143,7 @@ func cmdDaemon(db *sql.DB) {
 	spawnedCouncil := numCouncil
 	spawnedInvestigators := numInvestigators
 	spawnedAuditors := numAuditors
+	spawnedLibrarians := numLibrarians
 
 	for {
 		sig := <-sigChan
@@ -243,6 +256,27 @@ func cmdDaemon(db *sql.DB) {
 				fmt.Printf("Scale-down to %d auditor(s) requested (currently %d running) — takes effect on restart.\n", newAuditors, spawnedAuditors)
 			}
 
+			// Librarians
+			newLibrarians := spawnedLibrarians
+			if n := store.GetConfig(db, "num_librarians", ""); n != "" {
+				fmt.Sscanf(n, "%d", &newLibrarians)
+			}
+			if newLibrarians < 1 {
+				newLibrarians = 1
+			}
+			for spawnedLibrarians < newLibrarians {
+				name := fmt.Sprintf("Librarian-%d", spawnedLibrarians+1)
+				if spawnedLibrarians < len(librarianRoster) {
+					name = librarianRoster[spawnedLibrarians]
+				}
+				fmt.Printf("Scaling: spawning %s (librarians: %d → %d)\n", name, spawnedLibrarians, newLibrarians)
+				go agents.SpawnLibrarian(db, name)
+				spawnedLibrarians++
+			}
+			if newLibrarians < spawnedLibrarians {
+				fmt.Printf("Scale-down to %d librarian(s) requested (currently %d running) — takes effect on restart.\n", newLibrarians, spawnedLibrarians)
+			}
+
 		default:
 			// SIGINT / SIGTERM — graceful drain then exit.
 			fmt.Printf("\nReceived %v — draining in-flight tasks (up to 30s)...\n", sig)
@@ -266,7 +300,7 @@ func cmdDaemon(db *sql.DB) {
 	}
 }
 
-func cmdScale(db *sql.DB, astromechs, council, captain, investigators, auditors int) {
+func cmdScale(db *sql.DB, astromechs, council, captain, investigators, auditors, librarians int) {
 	type update struct {
 		key   string
 		label string
@@ -278,6 +312,7 @@ func cmdScale(db *sql.DB, astromechs, council, captain, investigators, auditors 
 		{"num_captain", "captain", captain},
 		{"num_investigators", "investigators", investigators},
 		{"num_auditors", "auditors", auditors},
+		{"num_librarians", "librarians", librarians},
 	}
 
 	var updated []string

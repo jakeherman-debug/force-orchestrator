@@ -195,11 +195,14 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 				memPayload = strings.TrimLeft(memPayload[nl:], "\n")
 			}
 		}
-		memorySummary := fmt.Sprintf("Task: %s", util.TruncateStr(directiveText(memPayload), 400))
-		if ruling.Feedback != "" {
-			memorySummary += fmt.Sprintf("\nCouncil note: %s", ruling.Feedback)
-		}
-		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "success", memorySummary, filesStr)
+		writeMemJSON, _ := json.Marshal(map[string]string{
+			"task":     util.TruncateStr(directiveText(memPayload), 800),
+			"files":    filesStr,
+			"feedback": ruling.Feedback,
+			"diff":     util.TruncateStr(diff, 4000),
+			"repo":     b.TargetRepo,
+		})
+		store.AddBounty(db, b.ID, "WriteMemory", string(writeMemJSON))
 		logger.Printf("Task %d: COMPLETED and merged", b.ID)
 
 		if b.ParentID > 0 {
@@ -268,6 +271,11 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d", b.ID, retryCount, MaxRetries),
 			fmt.Sprintf("The Jedi Council reviewed your work on task #%d and rejected it.\n\nReason: %s\n\nPlease address this feedback in your next attempt.",
 				b.ID, ruling.Feedback),
+			b.ID, store.MailTypeFeedback)
+		store.SendMail(db, agentName, "librarian",
+			fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d", b.ID, retryCount, MaxRetries),
+			fmt.Sprintf("The Jedi Council rejected task #%d (attempt %d/%d).\n\nReason: %s",
+				b.ID, retryCount, MaxRetries, ruling.Feedback),
 			b.ID, store.MailTypeFeedback)
 	}
 }

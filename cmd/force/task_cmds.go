@@ -22,7 +22,7 @@ func cmdAdd(db *sql.DB, args []string) {
 	priority := 0
 	planOnly := false
 	taskType := ""
-	validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true}
+	validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true, "WriteMemory": true}
 	addArgs := args
 	for i := 0; i < len(addArgs); i++ {
 		switch {
@@ -297,7 +297,7 @@ func cmdCancel(db *sql.DB, args []string) {
 	id := mustParseID(cancelArgs[0])
 
 	if requeueType != "" {
-		validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true}
+		validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true, "WriteMemory": true}
 		if !validTypes[requeueType] {
 			fmt.Printf("Invalid requeue type %q — must be one of: Feature, CodeEdit, Investigate, Audit\n", requeueType)
 			os.Exit(1)
