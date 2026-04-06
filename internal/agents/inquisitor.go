@@ -80,6 +80,7 @@ func SpawnInquisitor(db *sql.DB) {
 		classifyPendingTasks(db, logger)
 		CheckStaleEscalations(db)
 		CheckConvoyCompletions(db, logger)
+		store.RecoverStaleConvoys(db)
 		cleanOrphanedBranches(db, logger)
 		detectStalledTasks(db, logger)
 
