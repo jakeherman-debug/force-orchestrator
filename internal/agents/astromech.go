@@ -100,34 +100,11 @@ func permanentInfraFail(db *sql.DB, logger interface{ Printf(string, ...any) },
 	telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, bounty.ID, msg))
 	store.LogAudit(db, agentName, "infra-fail", bounty.ID, msg)
 
-	// Spawn a CodeEdit remediation task so an agent can investigate and fix the infra issue.
-	remPayload := fmt.Sprintf(
-		`Infra failure on task #%d (repo: %s).
-
-Error: %s
-
-Investigate and fix the underlying infrastructure issue so the original task can be retried.
-Common causes:
-- Repository path is not a git repo → run 'git init' or verify the registered path with 'force repos'
-- Worktree directory is corrupted → run 'force cleanup' or manually remove the stale worktree
-- Disk full or permission denied → check disk space and file permissions
-
-After fixing, run: force reset %d`,
-		bounty.ID, bounty.TargetRepo, msg, bounty.ID)
-	remID, _ := store.AddConvoyTask(db, bounty.ID, bounty.TargetRepo, remPayload, bounty.ConvoyID, bounty.Priority, "Pending")
-	logger.Printf("Task %d: permanently failed — spawned remediation CodeEdit task #%d", bounty.ID, remID)
-
-	// Store failure memory so future agents know this infra issue occurred
-	store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "failure",
-		fmt.Sprintf("Task: %s\nInfra failure (permanent): %s", util.TruncateStr(directiveText(bounty.Payload), 300), msg),
-		"")
-
-	// Notify operator via mail
-	store.SendMail(db, agentName, "operator",
-		fmt.Sprintf("[INFRA FAIL] Task #%d — %s", bounty.ID, bounty.TargetRepo),
-		fmt.Sprintf("Task #%d permanently failed after %d infra errors.\n\nRepo: %s\nError: %s\n\nRemediation task #%d has been queued to investigate.\nOnce fixed, run: force reset %d",
-			bounty.ID, MaxInfraFailures, bounty.TargetRepo, msg, remID, bounty.ID),
-		bounty.ID, store.MailTypeAlert)
+	// Queue a MedicReview task — the Medic will analyze the failure and decide whether to
+	// requeue, shard, or escalate. No operator mail here; if human attention is needed
+	// the Medic sends one quality escalation rather than a raw error alert.
+	remID := store.QueueMedicReview(db, bounty, "infra", msg)
+	logger.Printf("Task %d: permanently failed (infra) — MedicReview #%d queued", bounty.ID, remID)
 }
 
 // conflictBranchFromPayload returns the branch name embedded in a [CONFLICT_BRANCH: name]

@@ -89,12 +89,18 @@ func cmdDaemon(db *sql.DB) {
 	auditorRoster     := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
 	librarianRoster   := []string{"Jocasta-Nu", "Huyang", "Dexter-Jettster"}
 
+	numMedics := 1
+	if n := store.GetConfig(db, "num_medics", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numMedics)
+	}
+	medicRoster := []string{"Bacta", "Kolto", "Stim"}
+
 	// Recover any Failed convoys whose tasks were manually reset (e.g. via `force reset` or
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
 
-	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d investigator(s), %d auditor(s), %d librarian(s))...\n",
-		numAgents, numCaptain, numCouncil, numInvestigators, numAuditors, numLibrarians)
+	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s))...\n",
+		numAgents, numCaptain, numCouncil, numInvestigators, numAuditors, numLibrarians, numMedics)
 	go agents.SpawnCommander(db)
 	for i := 0; i < numAgents; i++ {
 		name := fmt.Sprintf("Astromech-%d", i+1)
@@ -138,6 +144,13 @@ func cmdDaemon(db *sql.DB) {
 		}
 		go agents.SpawnLibrarian(db, name)
 	}
+	for i := 0; i < numMedics; i++ {
+		name := fmt.Sprintf("Medic-%d", i+1)
+		if i < len(medicRoster) {
+			name = medicRoster[i]
+		}
+		go agents.SpawnMedic(db, name)
+	}
 	go agents.SpawnInquisitor(db)
 
 	sigChan := make(chan os.Signal, 1)
@@ -148,6 +161,7 @@ func cmdDaemon(db *sql.DB) {
 	spawnedInvestigators := numInvestigators
 	spawnedAuditors := numAuditors
 	spawnedLibrarians := numLibrarians
+	spawnedMedics := numMedics
 
 	for {
 		sig := <-sigChan
@@ -279,6 +293,27 @@ func cmdDaemon(db *sql.DB) {
 			}
 			if newLibrarians < spawnedLibrarians {
 				fmt.Printf("Scale-down to %d librarian(s) requested (currently %d running) — takes effect on restart.\n", newLibrarians, spawnedLibrarians)
+			}
+
+			// Medics
+			newMedics := spawnedMedics
+			if n := store.GetConfig(db, "num_medics", ""); n != "" {
+				fmt.Sscanf(n, "%d", &newMedics)
+			}
+			if newMedics < 1 {
+				newMedics = 1
+			}
+			for spawnedMedics < newMedics {
+				name := fmt.Sprintf("Medic-%d", spawnedMedics+1)
+				if spawnedMedics < len(medicRoster) {
+					name = medicRoster[spawnedMedics]
+				}
+				fmt.Printf("Scaling: spawning %s (medics: %d → %d)\n", name, spawnedMedics, newMedics)
+				go agents.SpawnMedic(db, name)
+				spawnedMedics++
+			}
+			if newMedics < spawnedMedics {
+				fmt.Printf("Scale-down to %d medic(s) requested (currently %d running) — takes effect on restart.\n", newMedics, spawnedMedics)
 			}
 
 		default:
