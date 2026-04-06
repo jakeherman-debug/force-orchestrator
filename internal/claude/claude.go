@@ -433,8 +433,13 @@ func ClassifyTaskType(prompt string) (string, string, error) {
 	return "", "", fmt.Errorf("could not parse classification from response: %q", strings.TrimSpace(out))
 }
 
-// ExtractJSON safely pulls JSON out of Claude's markdown wrappers
+// ExtractJSON safely pulls JSON out of Claude's markdown wrappers and strips
+// any trailing [claude_usage: ...] annotation appended by the CLI runner.
 func ExtractJSON(response string) string {
+	// Strip trailing usage annotation before any other processing.
+	if idx := strings.Index(response, "\n[claude_usage:"); idx != -1 {
+		response = response[:idx]
+	}
 	start := strings.Index(response, "```json")
 	if start != -1 {
 		response = response[start+7:]
