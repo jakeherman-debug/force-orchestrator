@@ -267,32 +267,18 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			store.FailBounty(db, b.ID, msg)
 			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 
-			if b.ParentID > 0 {
-				var parentStatus string
-				db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, b.ParentID).Scan(&parentStatus)
-				if parentStatus == "ConflictPending" || parentStatus == "Failed" {
-					subject := fmt.Sprintf("[REMEDIATION FAILED] Task #%d could not fix task #%d — manual intervention needed", b.ID, b.ParentID)
-					body := fmt.Sprintf("Remediation task #%d has permanently failed after %d attempts.\n\nOriginal task #%d (%s) requires manual intervention.\n\nFinal rejection reason: %s\n\nTask payload:\n%s",
-						b.ID, MaxRetries, b.ParentID, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500))
-					store.SendMail(db, agentName, "operator", subject, body, b.ID, store.MailTypeAlert)
-					store.SendMail(db, agentName, "librarian",
-						fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d (final)", b.ID, retryCount, MaxRetries),
-						fmt.Sprintf("The Jedi Council permanently rejected task #%d (attempt %d/%d).\n\nReason: %s",
-							b.ID, retryCount, MaxRetries, ruling.Feedback),
-						b.ID, store.MailTypeFeedback)
-					return
-				}
-			}
-			store.SendMail(db, agentName, "operator",
-				fmt.Sprintf("Task #%d permanently failed — %s", b.ID, b.TargetRepo),
-				fmt.Sprintf("Task #%d has been rejected %d times and is now permanently failed.\n\nRepo: %s\nFinal rejection: %s\n\nTask payload:\n%s",
-					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
-				b.ID, store.MailTypeAlert)
+			// Send rejection history to librarian for memory synthesis.
 			store.SendMail(db, agentName, "librarian",
 				fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d (final)", b.ID, retryCount, MaxRetries),
 				fmt.Sprintf("The Jedi Council permanently rejected task #%d (attempt %d/%d).\n\nReason: %s",
 					b.ID, retryCount, MaxRetries, ruling.Feedback),
 				b.ID, store.MailTypeFeedback)
+
+			// Queue a MedicReview — the Medic decides whether to requeue, shard, or escalate.
+			// No operator mail here; noisy raw-failure alerts are replaced by Medic escalations
+			// which include root-cause analysis and a concrete recommendation.
+			medicID := store.QueueMedicReview(db, b, "council_rejection", msg)
+			logger.Printf("Task %d: permanently failed — MedicReview #%d queued", b.ID, medicID)
 			return
 		}
 		newPayload := fmt.Sprintf("%s\n\nFEEDBACK (attempt %d/%d): %s", b.Payload, retryCount, MaxRetries, ruling.Feedback)

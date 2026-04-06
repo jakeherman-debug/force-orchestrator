@@ -81,6 +81,22 @@ func CancelConvoyPendingTasks(db *sql.DB, convoyID int) int {
 	return int(n)
 }
 
+// RecoverStaleConvoys scans all Failed convoys and auto-recovers those that have no
+// remaining problem tasks. Call at daemon startup to fix up convoys that were manually
+// reset via CLI or DB without going through the normal task-completion path.
+func RecoverStaleConvoys(db *sql.DB) {
+	rows, err := db.Query(`SELECT id FROM Convoys WHERE status = 'Failed'`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		rows.Scan(&id)
+		AutoRecoverConvoy(db, id, nil)
+	}
+}
+
 // ListConvoys returns all convoys ordered by creation date.
 func ListConvoys(db *sql.DB) []Convoy {
 	rows, err := db.Query(`SELECT id, name, status, created_at FROM Convoys ORDER BY created_at DESC`)

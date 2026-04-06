@@ -155,6 +155,26 @@ func ExtractDiffFiles(diff string) []string {
 	return files
 }
 
+// detachWorktreesHoldingBranch scans all worktrees for the repo and force-detaches any
+// that have branchName checked out (excluding the calling worktree itself).
+// This frees the branch so it can be checked out in a different worktree.
+func detachWorktreesHoldingBranch(repoPath, currentWorktreeDir, branchName string) {
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").CombinedOutput()
+	if err != nil {
+		return
+	}
+	var candidate string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			candidate = strings.TrimPrefix(line, "worktree ")
+		} else if line == "branch refs/heads/"+branchName {
+			if candidate != "" && filepath.Clean(candidate) != filepath.Clean(currentWorktreeDir) {
+				exec.Command("git", "-C", candidate, "checkout", "--detach", "HEAD").Run()
+			}
+		}
+	}
+}
+
 // PrepareConflictBranch sets up the agent worktree to resolve merge conflicts on an
 // existing branch. It checks out the conflicting branch and merges the default branch
 // into it, intentionally leaving conflict markers in files for Claude to resolve.
@@ -167,6 +187,9 @@ func PrepareConflictBranch(worktreeDir, repoPath, conflictBranch string) error {
 	exec.Command("git", "-C", worktreeDir, "rebase", "--abort").Run()
 	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
 	exec.Command("git", "-C", worktreeDir, "clean", "-fd").Run()
+
+	// Free the branch from any other worktree that may be holding it (e.g. from a prior attempt).
+	detachWorktreesHoldingBranch(repoPath, worktreeDir, conflictBranch)
 
 	if out, err := exec.Command("git", "-C", worktreeDir, "checkout", conflictBranch).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to checkout conflict branch %s: %s", conflictBranch, strings.TrimSpace(string(out)))

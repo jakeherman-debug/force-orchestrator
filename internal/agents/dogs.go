@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	igit "force-orchestrator/internal/git"
@@ -92,6 +94,47 @@ func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error
 			logger.Printf("Dog git-hygiene: fetched %s", name)
 		}
 		igit.RunCmd(path, "gc", "--auto", "--quiet")
+		igit.RunCmd(path, "worktree", "prune")
+	}
+
+	// Detach agent worktrees that are on branches no longer referenced by any live task,
+	// and delete those orphaned branches. This happens when a task retries with a different
+	// agent — the new agent creates a fresh branch, updating branch_name in the DB, but
+	// the old agent's worktree stays on the old branch until we clean it up here.
+	agentRows, agentErr := db.Query(`SELECT agent_name, repo, worktree_path FROM Agents`)
+	if agentErr != nil {
+		return nil // non-fatal — skip orphan cleanup this cycle
+	}
+	defer agentRows.Close()
+	var detached int
+	for agentRows.Next() {
+		var agentName, repoPath, worktreePath string
+		agentRows.Scan(&agentName, &repoPath, &worktreePath)
+		if _, statErr := os.Stat(worktreePath); statErr != nil {
+			continue
+		}
+		out, gitErr := exec.Command("git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		if gitErr != nil {
+			continue
+		}
+		branch := strings.TrimSpace(string(out))
+		if branch == "HEAD" {
+			continue // already detached
+		}
+		// Keep the branch if any non-terminal task still references it.
+		// Failed/Escalated are included as "live" so operators can inspect the branch.
+		var count int
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE branch_name = ? AND status NOT IN ('Completed','Cancelled')`, branch).Scan(&count)
+		if count > 0 {
+			continue
+		}
+		exec.Command("git", "-C", worktreePath, "checkout", "--detach", "HEAD").Run()
+		exec.Command("git", "-C", repoPath, "branch", "-D", branch).Run()
+		detached++
+		logger.Printf("Dog git-hygiene: detached worktree %s from orphaned branch %s", agentName, branch)
+	}
+	if detached > 0 {
+		logger.Printf("Dog git-hygiene: cleaned up %d orphaned worktree branch(es)", detached)
 	}
 	return nil
 }

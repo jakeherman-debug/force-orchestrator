@@ -171,17 +171,17 @@ func TestPermanentInfraFail(t *testing.T) {
 		t.Errorf("expected task to be Failed, got %q", b.Status)
 	}
 
-	// A remediation Feature task should be spawned
+	// A MedicReview task should be queued (replaces the old CodeEdit remediation),
+	// inheriting the source task's target_repo. No direct operator mail — the Medic
+	// sends a quality escalation only if it determines human attention is needed.
 	var remCount int
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'CodeEdit' AND parent_id = ?`, id).Scan(&remCount)
+	var remRepo string
+	db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(target_repo),'') FROM BountyBoard WHERE type = 'MedicReview' AND parent_id = ?`, id).Scan(&remCount, &remRepo)
 	if remCount != 1 {
-		t.Errorf("expected 1 remediation task, got %d", remCount)
+		t.Errorf("expected 1 MedicReview task, got %d", remCount)
 	}
-
-	// Operator should get mail
-	mails := store.ListMail(db, "operator")
-	if len(mails) == 0 {
-		t.Error("expected mail to operator about infra failure")
+	if remRepo != "api" {
+		t.Errorf("expected MedicReview task to inherit target_repo 'api', got %q", remRepo)
 	}
 
 	// Audit log should have an entry

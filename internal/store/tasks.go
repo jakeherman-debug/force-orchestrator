@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 )
 
@@ -188,6 +189,19 @@ func ResetAllFailed(db *sql.DB) int {
 func ReturnTaskForRework(db *sql.DB, id int, newPayload string) {
 	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '', payload = ?, checkpoint = ''
 		WHERE id = ?`, newPayload, id)
+}
+
+// QueueMedicReview spawns a MedicReview task for a permanently-failed bounty.
+// The Medic will analyze the failure and decide whether to requeue, shard, or escalate.
+// Inherits target_repo, convoy_id, and priority from the source bounty.
+func QueueMedicReview(db *sql.DB, b *Bounty, failureType, errorDetail string) int {
+	payload := fmt.Sprintf(`{"failure_type":%q,"error":%q}`, failureType, errorDetail)
+	res, _ := db.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		 VALUES (?, ?, 'MedicReview', 'Pending', ?, ?, ?, datetime('now'))`,
+		b.ID, b.TargetRepo, payload, b.ConvoyID, b.Priority)
+	id, _ := res.LastInsertId()
+	return int(id)
 }
 
 // AddConvoyTask creates a CodeEdit subtask within a convoy. status should be

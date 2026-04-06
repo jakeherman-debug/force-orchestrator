@@ -329,19 +329,17 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		if retryCount >= MaxRetries {
 			msg := fmt.Sprintf("Captain: max retries (%d) exceeded. Final rejection: %s", MaxRetries, ruling.Feedback)
 			store.FailBounty(db, b.ID, msg)
-			store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
-				fmt.Sprintf("Task: %s\nCaptain permanently rejected (attempt %d/%d): %s",
-					util.TruncateStr(directiveText(b.Payload), 300), retryCount, MaxRetries, ruling.Feedback), "")
-			store.SendMail(db, agentName, "operator",
-				fmt.Sprintf("Task #%d permanently failed (captain) — %s", b.ID, b.TargetRepo),
-				fmt.Sprintf("Task #%d has been rejected by the captain %d times and is now permanently failed.\n\nRepo: %s\nFinal rejection: %s\n\nTask payload:\n%s",
-					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
-				b.ID, store.MailTypeAlert)
+
+			// Send rejection history to librarian for memory synthesis.
 			store.SendMail(db, agentName, "librarian",
 				fmt.Sprintf("[CAPTAIN REJECTED] Task #%d — attempt %d/%d (final)", b.ID, retryCount, MaxRetries),
 				fmt.Sprintf("Fleet Captain %s permanently rejected task #%d (attempt %d/%d).\n\nReason: %s",
 					agentName, b.ID, retryCount, MaxRetries, ruling.Feedback),
 				b.ID, store.MailTypeFeedback)
+
+			// Queue a MedicReview — the Medic decides whether to requeue, shard, or escalate.
+			medicID := store.QueueMedicReview(db, b, "captain_rejection", msg)
+			logger.Printf("Task %d: permanently failed (captain) — MedicReview #%d queued", b.ID, medicID)
 			return
 		}
 
