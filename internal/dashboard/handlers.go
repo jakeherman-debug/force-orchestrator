@@ -792,16 +792,8 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 
 		// Auto type: insert immediately as Classifying so the UI is not blocked.
 		if body.Type == "" || strings.EqualFold(body.Type, "auto") {
-			res, err := db.Exec(
-				`INSERT INTO BountyBoard (type, status, payload, created_at) VALUES ('Auto', 'Classifying', ?, datetime('now'))`,
-				body.Payload,
-			)
-			if err != nil {
-				http.Error(w, `{"error":"failed to queue task"}`, http.StatusInternalServerError)
-				return
-			}
-			newID, _ := res.LastInsertId()
-			store.LogAudit(db, "dashboard", "add-task", int(newID), "queued Auto (Classifying) via dashboard")
+			newID := store.AddBountyClassifying(db, body.Repo, body.Payload, body.Priority)
+			store.LogAudit(db, "dashboard", "add-task", newID, "queued Auto (Classifying) via dashboard")
 			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
 			return
 		}
