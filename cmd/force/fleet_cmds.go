@@ -89,6 +89,10 @@ func cmdDaemon(db *sql.DB) {
 	auditorRoster     := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
 	librarianRoster   := []string{"Jocasta-Nu", "Huyang", "Dexter-Jettster"}
 
+	// Recover any Failed convoys whose tasks were manually reset (e.g. via `force reset` or
+	// direct DB edits) without going through the normal task-completion path.
+	store.RecoverStaleConvoys(db)
+
 	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d investigator(s), %d auditor(s), %d librarian(s))...\n",
 		numAgents, numCaptain, numCouncil, numInvestigators, numAuditors, numLibrarians)
 	go agents.SpawnCommander(db)

@@ -171,11 +171,15 @@ func TestPermanentInfraFail(t *testing.T) {
 		t.Errorf("expected task to be Failed, got %q", b.Status)
 	}
 
-	// A remediation Feature task should be spawned
+	// A remediation CodeEdit task should be spawned, inheriting the source task's target_repo
 	var remCount int
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'CodeEdit' AND parent_id = ?`, id).Scan(&remCount)
+	var remRepo string
+	db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(target_repo),'') FROM BountyBoard WHERE type = 'CodeEdit' AND parent_id = ?`, id).Scan(&remCount, &remRepo)
 	if remCount != 1 {
 		t.Errorf("expected 1 remediation task, got %d", remCount)
+	}
+	if remRepo != "api" {
+		t.Errorf("expected remediation task to inherit target_repo 'api', got %q", remRepo)
 	}
 
 	// Operator should get mail

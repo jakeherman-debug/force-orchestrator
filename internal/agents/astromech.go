@@ -114,7 +114,7 @@ Common causes:
 
 After fixing, run: force reset %d`,
 		bounty.ID, bounty.TargetRepo, msg, bounty.ID)
-	remID := store.AddBounty(db, bounty.ID, "CodeEdit", remPayload)
+	remID, _ := store.AddConvoyTask(db, bounty.ID, bounty.TargetRepo, remPayload, bounty.ConvoyID, bounty.Priority, "Pending")
 	logger.Printf("Task %d: permanently failed — spawned remediation CodeEdit task #%d", bounty.ID, remID)
 
 	// Store failure memory so future agents know this infra issue occurred
