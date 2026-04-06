@@ -38,6 +38,27 @@ func ApproveConvoyTasks(db *sql.DB, convoyID int) int {
 	return int(n)
 }
 
+// AutoRecoverConvoy resets a Failed convoy back to Active if no problem tasks remain.
+// Called automatically after a task is completed or reset. Safe to call with convoyID=0.
+func AutoRecoverConvoy(db *sql.DB, convoyID int, logger interface{ Printf(string, ...any) }) {
+	if convoyID == 0 {
+		return
+	}
+	var convoyStatus string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&convoyStatus)
+	if convoyStatus != "Failed" {
+		return
+	}
+	var problemCount int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND status IN ('Failed','Escalated')`, convoyID).Scan(&problemCount)
+	if problemCount == 0 {
+		db.Exec(`UPDATE Convoys SET status = 'Active' WHERE id = ?`, convoyID)
+		if logger != nil {
+			logger.Printf("Convoy #%d auto-recovered to Active (no remaining problem tasks)", convoyID)
+		}
+	}
+}
+
 // ResetConvoyTasks resets all Failed/Escalated tasks in a convoy back to Pending.
 // Returns the number of tasks reset.
 func ResetConvoyTasks(db *sql.DB, convoyID int) int {

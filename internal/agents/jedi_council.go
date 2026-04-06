@@ -94,9 +94,29 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 	diff := igit.GetDiff(repoPath, branchName)
 	if diff == "" {
-		msg := "Git Err: diff is empty — worktree may have no commits or branch does not exist"
-		store.FailBounty(db, b.ID, msg)
-		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		// Check whether the branch's commits are already in main — this happens when
+		// multiple convoy tasks touch overlapping files and one agent merges first,
+		// making subsequent agents' three-dot diffs empty.
+		if igit.CommitsAhead(repoPath, branchName) == "" {
+			// All commits already in main — auto-complete rather than fail.
+			logger.Printf("Task %d: diff empty and no unique commits — work already merged, auto-completing", b.ID)
+			store.UpdateBountyStatus(db, b.ID, "Completed")
+			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "auto-completed: work already merged into main", "Completed")
+			store.LogAudit(db, agentName, "council-auto-complete", b.ID, "diff empty, commits already in main")
+			if n := store.UnblockDependentsOf(db, b.ID); n > 0 {
+				logger.Printf("Task %d: unblocked %d dependent(s)", b.ID, n)
+			}
+			store.AutoRecoverConvoy(db, b.ConvoyID, logger)
+			telemetry.EmitEvent(telemetry.TelemetryEvent{
+				SessionID: sessionID, Agent: agentName, TaskID: b.ID,
+				EventType: "task_completed",
+				Payload:   map[string]any{"reason": "already_merged"},
+			})
+		} else {
+			msg := "Git Err: diff is empty — branch has commits but no net changes; may need manual inspection"
+			store.FailBounty(db, b.ID, msg)
+			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		}
 		return
 	}
 
