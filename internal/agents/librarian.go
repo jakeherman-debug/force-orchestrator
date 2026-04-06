@@ -14,23 +14,22 @@ import (
 	"force-orchestrator/internal/util"
 )
 
-const librarianSystemPrompt = `You are the Librarian — a specialist agent in the Galactic Fleet responsible for writing high-quality knowledge entries for FleetMemory.
+const librarianSystemPrompt = `You are the Fleet Librarian — a specialist knowledge-curation agent in the Galactic Fleet.
 
-FleetMemory is a RAG knowledge store that other agents read before starting work. Your entries must be useful, specific, and non-obvious.
+Your job is to write a concise, high-quality memory nugget about a completed task so that future agents can learn from it.
 
-You will receive a completed task description, the files changed, council feedback, and the diff of what was built.
-
-Write a 2-4 sentence knowledge nugget that covers:
-1. What was built or fixed (specific — name the mechanism, function, or pattern)
+# OUTPUT REQUIREMENTS
+Write exactly 2-4 sentences that cover:
+1. What was built or fixed (be specific — name the function, file, or system component)
 2. What was non-obvious or tricky about the implementation
-3. Any patterns, gotchas, or lessons that would not be obvious from reading the code alone
+3. Any patterns, gotchas, or pitfalls that are NOT obvious from reading the code alone
 
-RULES:
-- Do NOT mention infrastructure failures (timeouts, worktree errors, network issues) when assessing difficulty — only technical/design complexity counts
-- Be specific: name files, functions, patterns, and mechanisms when relevant
-- Avoid generic summaries like "the task was completed successfully"
-- Write in past tense, third person (e.g., "The implementation added...", "The fix required...")
-- Output ONLY the knowledge nugget — no preamble, no metadata, no markdown`
+# IMPORTANT
+- Do NOT describe infrastructure failures (timeouts, worktree errors, network issues) as "tricky" — focus on the code logic.
+- Do NOT mention attempt counts or rejection history — only the final solution.
+- Do NOT include meta-commentary about the task process.
+- Write in plain prose — no bullet points, no headings, no markdown.
+- Be specific enough that a future agent reading this can act on it without looking at the code.`
 
 // writeMemoryPayload is the JSON structure placed in WriteMemory bounty payloads by jedi_council.
 type writeMemoryPayload struct {
@@ -79,23 +78,18 @@ func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 
 	// Collect any rejection feedback mailed to "librarian" for the original task.
 	priorMail := store.ReadInboxForAgent(db, name, "librarian", parentID)
-	priorContext := ""
-	if len(priorMail) > 0 {
-		var priorLines []string
-		for _, m := range priorMail {
-			priorLines = append(priorLines, fmt.Sprintf("- %s: %s", m.Subject, m.Body))
-		}
-		priorContext = fmt.Sprintf("\n\nPRIOR ATTEMPT HISTORY:\n%s", strings.Join(priorLines, "\n"))
-	}
+	priorContext := formatLibrarianMailContext(priorMail)
 
 	userPrompt := fmt.Sprintf(
-		"TASK DESCRIPTION:\n%s\n\nFILES CHANGED:\n%s\n\nCOUNCIL FEEDBACK:\n%s\n\nDIFF:\n%s%s",
+		"TASK DESCRIPTION:\n%s\n\nFILES CHANGED:\n%s\n\nCOUNCIL FEEDBACK:\n%s\n\nDIFF:\n%s",
 		payload.Task,
 		payload.Files,
 		payload.Feedback,
 		payload.Diff,
-		priorContext,
 	)
+	if priorContext != "" {
+		userPrompt += "\n\n" + priorContext
+	}
 
 	rawOut, err := claude.AskClaudeCLI(librarianSystemPrompt, userPrompt, "", 1)
 	var summary string
@@ -112,4 +106,22 @@ func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
 	store.StoreFleetMemory(db, payload.Repo, parentID, "success", summary, payload.Files)
 	logger.Printf("WriteMemory #%d: memory stored for parent task #%d (repo: %s)", bounty.ID, parentID, payload.Repo)
+}
+
+// formatLibrarianMailContext formats rejection-history mail into a prompt section.
+func formatLibrarianMailContext(mails []store.FleetMail) string {
+	var feedback []store.FleetMail
+	for _, m := range mails {
+		if m.MessageType == store.MailTypeFeedback {
+			feedback = append(feedback, m)
+		}
+	}
+	if len(feedback) == 0 {
+		return ""
+	}
+	var lines []string
+	for _, m := range feedback {
+		lines = append(lines, fmt.Sprintf("- [%s] %s", m.Subject, m.Body))
+	}
+	return "PRIOR REJECTION CONTEXT (use to understand what approaches did NOT work):\n" + strings.Join(lines, "\n")
 }

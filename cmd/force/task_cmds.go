@@ -299,7 +299,7 @@ func cmdCancel(db *sql.DB, args []string) {
 	if requeueType != "" {
 		validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true, "WriteMemory": true}
 		if !validTypes[requeueType] {
-			fmt.Printf("Invalid requeue type %q — must be one of: Feature, CodeEdit, Investigate, Audit\n", requeueType)
+			fmt.Printf("Invalid requeue type %q — must be one of: Feature, CodeEdit, Investigate, Audit, WriteMemory\n", requeueType)
 			os.Exit(1)
 		}
 	}
