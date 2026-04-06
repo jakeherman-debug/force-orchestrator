@@ -13,14 +13,15 @@ import (
 
 // dogCooldowns defines how often each built-in dog may run.
 var dogCooldowns = map[string]time.Duration{
-	"git-hygiene":    30 * time.Minute,
-	"db-vacuum":      6 * time.Hour,
-	"holonet-rotate": 24 * time.Hour,
-	"mail-cleanup":   12 * time.Hour,
+	"git-hygiene":     30 * time.Minute,
+	"db-vacuum":       6 * time.Hour,
+	"holonet-rotate":  24 * time.Hour,
+	"mail-cleanup":    12 * time.Hour,
+	"memory-hygiene":  24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
-var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup"}
+var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene"}
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
 // Called by SpawnInquisitor on every inquisitor cycle.
@@ -65,6 +66,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogHolonetRotate(logger)
 	case "mail-cleanup":
 		return dogMailCleanup(db, logger)
+	case "memory-hygiene":
+		return dogMemoryHygiene(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
@@ -159,6 +162,49 @@ func dogMailCleanup(db *sql.DB, logger interface{ Printf(string, ...any) }) erro
 
 	if stale > 0 || old > 0 {
 		logger.Printf("Dog mail-cleanup: removed %d stale unread + %d old read messages", stale, old)
+	}
+	return nil
+}
+
+func dogMemoryHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	// Pass 1: delete failure memories where a success memory exists for the same task_id.
+	res1, err := db.Exec(`
+		DELETE FROM FleetMemory
+		WHERE outcome = 'failure'
+		  AND task_id IN (
+		      SELECT task_id FROM FleetMemory WHERE outcome = 'success' AND task_id != 0
+		  )`)
+	if err != nil {
+		return fmt.Errorf("memory-hygiene pass 1: %w", err)
+	}
+	removed1, _ := res1.RowsAffected()
+	if removed1 > 0 {
+		if _, err := db.Exec(`DELETE FROM FleetMemory_fts WHERE rowid NOT IN (SELECT id FROM FleetMemory)`); err != nil {
+			return fmt.Errorf("memory-hygiene pass 1 fts sync: %w", err)
+		}
+		logger.Printf("Dog memory-hygiene: pass 1 removed %d stale failure memories", removed1)
+	}
+
+	// Pass 2: delete stale audit-finding memories whose underlying task is Completed.
+	res2, err := db.Exec(`
+		DELETE FROM FleetMemory
+		WHERE summary LIKE '[AUDIT FINDING%'
+		  AND task_id IN (
+		      SELECT id FROM BountyBoard WHERE status = 'Completed'
+		  )`)
+	if err != nil {
+		return fmt.Errorf("memory-hygiene pass 2: %w", err)
+	}
+	removed2, _ := res2.RowsAffected()
+	if removed2 > 0 {
+		if _, err := db.Exec(`DELETE FROM FleetMemory_fts WHERE rowid NOT IN (SELECT id FROM FleetMemory)`); err != nil {
+			return fmt.Errorf("memory-hygiene pass 2 fts sync: %w", err)
+		}
+		logger.Printf("Dog memory-hygiene: pass 2 removed %d stale audit-finding memories", removed2)
+	}
+
+	if removed1 == 0 && removed2 == 0 {
+		logger.Printf("Dog memory-hygiene: nothing to clean up")
 	}
 	return nil
 }
