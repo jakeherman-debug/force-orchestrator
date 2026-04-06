@@ -348,6 +348,11 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			fmt.Sprintf("Fleet Captain %s reviewed your work on task #%d and returned it for rework.\n\nReason: %s\n\nPlease address this feedback in your next attempt.",
 				agentName, b.ID, ruling.Feedback),
 			b.ID, store.MailTypeFeedback)
+		store.SendMail(db, agentName, "librarian",
+			fmt.Sprintf("[CAPTAIN REJECTED] Task #%d — attempt %d/%d", b.ID, retryCount, MaxRetries),
+			fmt.Sprintf("Fleet Captain %s rejected task #%d (attempt %d/%d).\n\nReason: %s",
+				agentName, b.ID, retryCount, MaxRetries, ruling.Feedback),
+			b.ID, store.MailTypeFeedback)
 
 	case "escalate":
 		logger.Printf("Task %d: captain ESCALATED: %s", b.ID, ruling.Feedback)
