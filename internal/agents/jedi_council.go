@@ -275,6 +275,11 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 					body := fmt.Sprintf("Remediation task #%d has permanently failed after %d attempts.\n\nOriginal task #%d (%s) requires manual intervention.\n\nFinal rejection reason: %s\n\nTask payload:\n%s",
 						b.ID, MaxRetries, b.ParentID, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500))
 					store.SendMail(db, agentName, "operator", subject, body, b.ID, store.MailTypeAlert)
+					store.SendMail(db, agentName, "librarian",
+						fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d (final)", b.ID, retryCount, MaxRetries),
+						fmt.Sprintf("The Jedi Council permanently rejected task #%d (attempt %d/%d).\n\nReason: %s",
+							b.ID, retryCount, MaxRetries, ruling.Feedback),
+						b.ID, store.MailTypeFeedback)
 					return
 				}
 			}
@@ -283,6 +288,11 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 				fmt.Sprintf("Task #%d has been rejected %d times and is now permanently failed.\n\nRepo: %s\nFinal rejection: %s\n\nTask payload:\n%s",
 					b.ID, MaxRetries, b.TargetRepo, ruling.Feedback, util.TruncateStr(b.Payload, 500)),
 				b.ID, store.MailTypeAlert)
+			store.SendMail(db, agentName, "librarian",
+				fmt.Sprintf("[REJECTED] Task #%d — attempt %d/%d (final)", b.ID, retryCount, MaxRetries),
+				fmt.Sprintf("The Jedi Council permanently rejected task #%d (attempt %d/%d).\n\nReason: %s",
+					b.ID, retryCount, MaxRetries, ruling.Feedback),
+				b.ID, store.MailTypeFeedback)
 			return
 		}
 		newPayload := fmt.Sprintf("%s\n\nFEEDBACK (attempt %d/%d): %s", b.Payload, retryCount, MaxRetries, ruling.Feedback)
