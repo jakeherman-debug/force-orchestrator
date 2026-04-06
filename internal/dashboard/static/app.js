@@ -2,19 +2,18 @@
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
-  status:             null,
-  tasks:              [],
-  taskFilter:         'active',
-  convoyFilter:       0,
-  repos:              [],
-  escFilter:          'Open',
-  logMode:            'fleet',   // 'fleet' | 'holonet'
-  logSource:          null,
-  selectedID:         null,
-  detail:             null,
-  rejectID:           null,
-  activeTab:          'tasks',
-  addIdempotencyKey:  '',
+  status:       null,
+  tasks:        [],
+  taskFilter:   'active',
+  convoyFilter: 0,
+  repos:        [],
+  escFilter:    'Open',
+  logMode:      'fleet',   // 'fleet' | 'holonet'
+  logSource:    null,
+  selectedID:   null,
+  detail:       null,
+  rejectID:     null,
+  activeTab:    'tasks',
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -854,7 +853,6 @@ async function showAddModal() {
   $('add-payload').value  = '';
   $('add-priority').value = '0';
   $('add-type').value     = '';
-  S.addIdempotencyKey = crypto.randomUUID();
   onAddTypeChange();
   $('add-modal').classList.remove('hidden');
   setTimeout(() => $('add-payload').focus(), 50);
@@ -882,13 +880,9 @@ async function submitAddTask() {
     const r = await api('/api/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, payload, repo, priority, idempotency_key: S.addIdempotencyKey }),
+      body: JSON.stringify({ type, payload, repo, priority }),
     });
-    if (r.duplicate) {
-      showToast(`Already queued as task #${r.id}`, 'ok');
-    } else {
-      showToast(`Task #${r.id} queued`, 'ok');
-    }
+    showToast(`Task #${r.id} queued`, 'ok');
     closeModal('add-modal');
     loadTasks();
     pollStatus();
