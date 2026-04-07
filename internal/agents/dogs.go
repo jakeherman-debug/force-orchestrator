@@ -15,15 +15,16 @@ import (
 
 // dogCooldowns defines how often each built-in dog may run.
 var dogCooldowns = map[string]time.Duration{
-	"git-hygiene":     30 * time.Minute,
-	"db-vacuum":       6 * time.Hour,
-	"holonet-rotate":  24 * time.Hour,
-	"mail-cleanup":    12 * time.Hour,
-	"memory-hygiene":  24 * time.Hour,
+	"git-hygiene":      30 * time.Minute,
+	"db-vacuum":        6 * time.Hour,
+	"holonet-rotate":   24 * time.Hour,
+	"mail-cleanup":     12 * time.Hour,
+	"memory-hygiene":   24 * time.Hour,
+	"stalled-reviews":  6 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
-var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene"}
+var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews"}
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
 // Called by SpawnInquisitor on every inquisitor cycle.
@@ -70,6 +71,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogMailCleanup(db, logger)
 	case "memory-hygiene":
 		return dogMemoryHygiene(db, logger)
+	case "stalled-reviews":
+		return dogStalledReviews(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
@@ -262,6 +265,51 @@ func dogMemoryHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) er
 	if removed1 == 0 && removed2 == 0 {
 		logger.Printf("Dog memory-hygiene: nothing to clean up")
 	}
+	return nil
+}
+
+func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	rows, err := db.Query(`
+		SELECT id, status,
+		       ROUND((julianday('now') - julianday(locked_at)) * 24, 1) AS hours_waiting
+		FROM BountyBoard
+		WHERE status IN ('AwaitingCaptainReview', 'AwaitingCouncilReview')
+		  AND locked_at < datetime('now', '-4 hours')
+		ORDER BY locked_at ASC`)
+	if err != nil {
+		return err
+	}
+	type stalledTask struct {
+		id           int64
+		status       string
+		hoursWaiting float64
+	}
+	var tasks []stalledTask
+	for rows.Next() {
+		var t stalledTask
+		if err := rows.Scan(&t.id, &t.status, &t.hoursWaiting); err != nil {
+			rows.Close()
+			return err
+		}
+		tasks = append(tasks, t)
+	}
+	rows.Close()
+
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	logger.Printf("Dog stalled-reviews: %d task(s) stuck in review queue", len(tasks))
+
+	var body strings.Builder
+	fmt.Fprintf(&body, "%d task(s) have been waiting in the review queue for more than 4 hours:\n\n", len(tasks))
+	for _, t := range tasks {
+		fmt.Fprintf(&body, "  Task #%d  status=%-24s  waiting=%.1fh\n", t.id, t.status, t.hoursWaiting)
+	}
+
+	store.SendMail(db, "inquisitor", "operator",
+		fmt.Sprintf("[STALLED REVIEWS] %d tasks stuck in review", len(tasks)),
+		body.String(), 0, store.MailTypeAlert)
 	return nil
 }
 
