@@ -680,6 +680,58 @@ td.mail-body-preview {
 /* Memory detail modal */
 #mem-modal .directive-box { max-height: 400px; }
 
+/* Mail modal — markdown body */
+#mail-modal .directive-box {
+  white-space: normal;
+  font-family: var(--font-sans);
+  max-height: 400px;
+}
+#mail-modal .directive-box h1,
+#mail-modal .directive-box h2,
+#mail-modal .directive-box h3,
+#mail-modal .directive-box h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 10px 0 4px;
+  color: var(--text);
+}
+#mail-modal .directive-box h1 { font-size: 15px; }
+#mail-modal .directive-box h2 { font-size: 14px; }
+#mail-modal .directive-box p  { margin: 0 0 8px; }
+#mail-modal .directive-box ul,
+#mail-modal .directive-box ol { margin: 0 0 8px; padding-left: 18px; }
+#mail-modal .directive-box li { margin: 2px 0; }
+#mail-modal .directive-box code {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+#mail-modal .directive-box pre {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  overflow-x: auto;
+  margin: 0 0 8px;
+}
+#mail-modal .directive-box pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+}
+#mail-modal .directive-box hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+#mail-modal .directive-box a { color: var(--blue); }
+#mail-modal .directive-box strong { font-weight: 600; }
+#mail-modal .directive-box em { font-style: italic; }
+
 /* scrollbars */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

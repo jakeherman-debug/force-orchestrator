@@ -781,7 +781,9 @@ function openMail(id) {
     <span class="meta-key">Task</span>  <span class="meta-val">${m.task_id || '—'}</span>
     <span class="meta-key">Date</span>  <span class="meta-val">${fmtTS(m.created_at)}</span>
   `;
-  $('mail-modal-body').textContent = m.body || '';
+  $('mail-modal-body').innerHTML = typeof marked !== 'undefined'
+    ? marked.parse(m.body || '')
+    : escHtml(m.body || '');
   $('mail-modal').classList.remove('hidden');
 
   if (!m.read_at) {
