@@ -109,6 +109,7 @@ func cmdDaemon(db *sql.DB) {
 
 	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d commander(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s))...\n",
 		numAgents, numCaptain, numCouncil, numCommanders, numInvestigators, numAuditors, numLibrarians, numMedics)
+	go agents.SpawnChancellor(db)
 	for i := 0; i < numCommanders; i++ {
 		name := fmt.Sprintf("Commander-%d", i+1)
 		if i < len(commanderRoster) {

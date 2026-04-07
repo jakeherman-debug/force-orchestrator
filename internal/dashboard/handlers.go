@@ -856,24 +856,8 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			id, _ := res.LastInsertId()
 			newID = int(id)
 		case "CodeEdit":
-			if body.Repo == "" {
-				http.Error(w, `{"error":"repo is required for CodeEdit tasks"}`, http.StatusBadRequest)
-				return
-			}
-			if store.GetRepoPath(db, body.Repo) == "" {
-				http.Error(w, fmt.Sprintf(`{"error":"unknown repo: %s"}`, body.Repo), http.StatusUnprocessableEntity)
-				return
-			}
-			res, err := db.Exec(
-				`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, task_timeout, idempotency_key, created_at)
-				 VALUES (0, ?, 'CodeEdit', 'Pending', ?, 0, ?, 0, ?, datetime('now'))`,
-				body.Repo, body.Payload, body.Priority, body.IdempotencyKey)
-			if err != nil {
-				http.Error(w, `{"error":"failed to insert task"}`, http.StatusInternalServerError)
-				return
-			}
-			id, _ := res.LastInsertId()
-			newID = int(id)
+			http.Error(w, `{"error":"CodeEdit is no longer a valid direct task type. Use Feature instead — all code changes flow through Commander and Chancellor for conflict review."}`, http.StatusBadRequest)
+			return
 		case "Investigate":
 			var err error
 			newID, err = insertTypedTask(db, "Investigate", body.Repo, body.Payload, body.Priority, body.IdempotencyKey)
@@ -889,7 +873,7 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 				return
 			}
 		default:
-			http.Error(w, `{"error":"type must be Feature, CodeEdit, Investigate, or Audit"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"type must be Feature, Investigate, or Audit"}`, http.StatusBadRequest)
 			return
 		}
 		store.LogAudit(db, "dashboard", "add-task", newID,

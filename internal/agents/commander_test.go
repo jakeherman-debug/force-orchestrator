@@ -297,14 +297,14 @@ func TestRunCommanderTask_Success(t *testing.T) {
 	runCommanderTask(db, "Commander-Cody", b, logger)
 
 	b, _ = store.GetBounty(db, id)
-	if b.Status != "Completed" {
-		t.Errorf("expected Completed after successful decomposition, got %q", b.Status)
+	if b.Status != "AwaitingChancellorReview" {
+		t.Errorf("expected AwaitingChancellorReview after successful decomposition, got %q", b.Status)
 	}
-	// Verify subtasks were created
-	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = ? AND type = 'CodeEdit'`, id).Scan(&count)
-	if count != 2 {
-		t.Errorf("expected 2 subtasks, got %d", count)
+	// Verify a ProposedConvoy was stored for Chancellor review
+	var planJSON string
+	db.QueryRow(`SELECT plan_json FROM ProposedConvoys WHERE feature_id = ?`, id).Scan(&planJSON)
+	if planJSON == "" {
+		t.Error("expected ProposedConvoy record to exist after Commander runs")
 	}
 }
 
@@ -459,10 +459,14 @@ func TestRunCommanderTask_PlanOnly(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	runCommanderTask(db, "Commander-Cody", b, logger)
 
-	// Subtask should be Planned, not Pending
-	var status string
-	db.QueryRow(`SELECT status FROM BountyBoard WHERE parent_id = ? AND type = 'CodeEdit'`, id).Scan(&status)
-	if status != "Planned" {
-		t.Errorf("expected subtask Planned for [PLAN_ONLY], got %q", status)
+	// Commander should have stored a ProposedConvoy for Chancellor to create subtasks
+	var planJSON string
+	db.QueryRow(`SELECT plan_json FROM ProposedConvoys WHERE feature_id = ?`, id).Scan(&planJSON)
+	if planJSON == "" {
+		t.Error("expected ProposedConvoy record for [PLAN_ONLY] task")
+	}
+	b, _ = store.GetBounty(db, id)
+	if b.Status != "AwaitingChancellorReview" {
+		t.Errorf("expected AwaitingChancellorReview for [PLAN_ONLY], got %q", b.Status)
 	}
 }

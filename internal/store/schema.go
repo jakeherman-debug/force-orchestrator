@@ -147,6 +147,15 @@ func createSchema(db *sql.DB) {
 		note       TEXT    NOT NULL,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
+
+	// Proposed convoys — Commander stores plans here for Chancellor review.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedConvoys (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		feature_id  INTEGER NOT NULL UNIQUE,
+		plan_json   TEXT    NOT NULL,
+		status      TEXT    NOT NULL DEFAULT 'pending',
+		created_at  DATETIME DEFAULT (datetime('now'))
+	)`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -193,5 +202,14 @@ func runMigrations(db *sql.DB) {
 		task_id    INTEGER NOT NULL REFERENCES BountyBoard(id),
 		note       TEXT    NOT NULL,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+
+	// ProposedConvoys — Commander submits plans here; Chancellor gates convoy creation.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedConvoys (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		feature_id  INTEGER NOT NULL UNIQUE,
+		plan_json   TEXT    NOT NULL,
+		status      TEXT    NOT NULL DEFAULT 'pending',
+		created_at  DATETIME DEFAULT (datetime('now'))
 	)`)
 }

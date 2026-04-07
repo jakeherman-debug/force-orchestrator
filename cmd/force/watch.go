@@ -67,7 +67,7 @@ func RunCommandCenter(db *sql.DB) {
 			continue
 		}
 
-		var pending, planned, active, coordinating, reviewing, completed, failed, escalated []string
+		var pending, planned, active, chancellor, coordinating, reviewing, completed, failed, escalated []string
 
 		for rows.Next() {
 			var id, activeDep, retryCount int
@@ -112,6 +112,8 @@ func RunCommandCenter(db *sql.DB) {
 				planned = append(planned, line)
 			case "Locked", "UnderReview":
 				active = append(active, line)
+			case "AwaitingChancellorReview":
+				chancellor = append(chancellor, line)
 			case "AwaitingCaptainReview", "UnderCaptainReview":
 				coordinating = append(coordinating, line)
 			case "AwaitingCouncilReview":
@@ -135,6 +137,12 @@ func RunCommandCenter(db *sql.DB) {
 		fmt.Println("\n--- ACTIVE OPERATIONS ---")
 		for _, a := range active {
 			fmt.Println(a)
+		}
+		if len(chancellor) > 0 {
+			fmt.Println("\n--- CHANCELLOR REVIEW ---")
+			for _, c := range chancellor {
+				fmt.Println(c)
+			}
 		}
 		if len(coordinating) > 0 {
 			fmt.Println("\n--- CAPTAIN REVIEW ---")
@@ -220,14 +228,15 @@ func RunCommandCenter(db *sql.DB) {
 
 // statusAbbrev converts long status names to short display forms.
 var statusAbbrev = map[string]string{
-	"Pending":               "Pending",
-	"Locked":                "Active",
-	"AwaitingCaptainReview": "AwaitCapt",
-	"UnderCaptainReview":    "InCapt",
-	"AwaitingCouncilReview": "AwaitReview",
-	"UnderReview":           "InReview",
-	"Completed":             "Completed",
-	"Failed":                "Failed",
-	"Escalated":             "Escalated",
+	"Pending":                    "Pending",
+	"Locked":                     "Active",
+	"AwaitingChancellorReview":   "AwaitChancellor",
+	"AwaitingCaptainReview":      "AwaitCapt",
+	"UnderCaptainReview":         "InCapt",
+	"AwaitingCouncilReview":      "AwaitReview",
+	"UnderReview":                "InReview",
+	"Completed":                  "Completed",
+	"Failed":                     "Failed",
+	"Escalated":                  "Escalated",
 }
 

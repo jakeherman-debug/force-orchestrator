@@ -367,67 +367,33 @@ EXAMPLE:
 		return
 	}
 
-	// Create a convoy to track this feature's subtasks as a group.
-	convoyPreview := strings.ReplaceAll(bounty.Payload, "\n", " ")
-	if len(convoyPreview) > 50 {
-		convoyPreview = convoyPreview[:50]
-	}
-	convoyName := fmt.Sprintf("[%d] %s", bounty.ID, convoyPreview)
-	convoyID, convoyErr := store.CreateConvoy(db, convoyName)
-	if convoyErr != nil {
-		// Name collision on re-plan (UNIQUE constraint) — retry with a versioned suffix.
-		for i := 2; i <= 10; i++ {
-			convoyID, convoyErr = store.CreateConvoy(db, fmt.Sprintf("%s (re-plan %d)", convoyName, i))
-			if convoyErr == nil {
-				break
-			}
-		}
-		if convoyErr != nil {
-			store.FailBounty(db, bounty.ID, fmt.Sprintf("DB Err: could not create convoy after retries: %v", convoyErr))
-			return
-		}
-	}
-	store.SetConvoyCoordinated(db, convoyID)
-
-	// Insert subtasks and dependencies in a single atomic transaction.
-	idMapping, err := insertConvoyAndTasks(db, tasks, bounty, convoyID)
-	if err != nil {
-		store.FailBounty(db, bounty.ID, "DB Err: "+err.Error())
+	// Submit plan to the Supreme Chancellor for conflict review before creating a convoy.
+	if _, storeErr := store.StoreProposedConvoy(db, bounty.ID, tasks); storeErr != nil {
+		store.FailBounty(db, bounty.ID, "DB Err: could not store proposed convoy: "+storeErr.Error())
 		return
 	}
+	store.UpdateBountyStatus(db, bounty.ID, "AwaitingChancellorReview")
 
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
-	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "Completed")
+	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "AwaitingChancellorReview")
 	if tokIn, tokOut := claude.ParseTokenUsage(response); tokIn > 0 || tokOut > 0 {
 		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 	}
-	logger.Printf("Task %d: decomposed into %d subtask(s), convoy %d", bounty.ID, len(tasks), convoyID)
+	logger.Printf("Task %d: plan (%d task(s)) submitted to Chancellor for review", bounty.ID, len(tasks))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
 		SessionID: sessionID, Agent: agentName, TaskID: bounty.ID,
-		EventType: "task_decomposed",
-		Payload:   map[string]any{"subtask_count": len(tasks), "convoy_id": convoyID},
+		EventType: "task_proposed",
+		Payload:   map[string]any{"subtask_count": len(tasks)},
 	})
 
-	// Notify operator
+	// Preview task list for the notification mail.
 	var taskLines []string
 	for _, t := range tasks {
-		line := fmt.Sprintf("  #%d [%s] %s", idMapping[t.TempID], t.Repo, util.TruncateStr(t.Task, 80))
-		if len(t.BlockedBy) > 0 {
-			var afterIDs []string
-			for _, depTempID := range t.BlockedBy {
-				if realID, ok := idMapping[depTempID]; ok {
-					afterIDs = append(afterIDs, fmt.Sprintf("#%d", realID))
-				}
-			}
-			if len(afterIDs) > 0 {
-				line += fmt.Sprintf(" (after %s)", strings.Join(afterIDs, ", "))
-			}
-		}
+		line := fmt.Sprintf("  [%s] %s", t.Repo, util.TruncateStr(t.Task, 80))
 		taskLines = append(taskLines, line)
 	}
 	store.SendMail(db, agentName, "operator",
-		fmt.Sprintf("[DECOMPOSED] Feature #%d → %d task(s)", bounty.ID, len(tasks)),
-		fmt.Sprintf("Feature request #%d has been broken into %d task(s) in convoy #%d:\n\n%s\n\nOriginal request:\n%s",
-			bounty.ID, len(tasks), convoyID, strings.Join(taskLines, "\n"), util.TruncateStr(bounty.Payload, 500)),
+		fmt.Sprintf("[PLANNED] Feature #%d → %d task(s) awaiting Chancellor review", bounty.ID, len(tasks)),
+		fmt.Sprintf("Commander has planned Feature #%d into %d task(s).\nAwaiting Supreme Chancellor conflict review.\n\nProposed tasks:\n%s\n\nOriginal request:\n%s",
+			bounty.ID, len(tasks), strings.Join(taskLines, "\n"), util.TruncateStr(bounty.Payload, 500)),
 		bounty.ID, store.MailTypeInfo)
 }

@@ -178,8 +178,8 @@ function switchTab(name) {
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 const FILTER_STATUS = {
-  active:    'Pending,Classifying,Locked,Planned,AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
-  pending:   'Pending,Classifying,Blocked,Planned',
+  active:    'Pending,Classifying,Locked,Planned,AwaitingChancellorReview,AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
+  pending:   'Pending,Classifying,Blocked,Planned,AwaitingChancellorReview',
   failed:    'Failed,Escalated,ConflictPending',
   done:      'Completed',
   cancelled: 'Cancelled',
@@ -299,7 +299,7 @@ function closePanel() {
 }
 
 const REVIEWABLE = ['AwaitingCouncilReview','UnderReview','AwaitingCaptainReview','UnderCaptainReview'];
-const CANCELLABLE = ['Pending','Locked','Blocked','Escalated','AwaitingCouncilReview','UnderReview','AwaitingCaptainReview','UnderCaptainReview'];
+const CANCELLABLE = ['Pending','Locked','Blocked','Escalated','AwaitingChancellorReview','AwaitingCouncilReview','UnderReview','AwaitingCaptainReview','UnderCaptainReview'];
 const RETRYABLE  = ['Failed','Escalated'];
 
 function renderPanel(d) {
@@ -879,10 +879,10 @@ async function showAddModal() {
 
 function onAddTypeChange() {
   const type = $('add-type').value;
-  $('add-repo-row').style.display = (type === '' || type === 'CodeEdit' || type === 'Investigate' || type === 'Audit') ? '' : 'none';
+  $('add-repo-row').style.display = (type === '' || type === 'Investigate' || type === 'Audit') ? '' : 'none';
   const repoLabel = $('add-repo-label');
   if (repoLabel) {
-    repoLabel.textContent = type === 'CodeEdit' ? 'Repo (required)' : 'Repo (optional — leave blank for fleet-wide)';
+    repoLabel.textContent = 'Repo (optional — leave blank for fleet-wide)';
   }
 }
 
@@ -893,7 +893,6 @@ async function submitAddTask() {
   const priority = parseInt($('add-priority').value || '0', 10);
 
   if (!payload) { showToast('Payload is required', 'err'); return; }
-  if (type === 'CodeEdit' && !repo) { showToast('Repo is required for CodeEdit', 'err'); return; }
 
   try {
     const r = await api('/api/add', {

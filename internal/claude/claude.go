@@ -385,9 +385,10 @@ func AskClaudeCLI(systemPrompt, userPrompt, tools string, maxTurns int) (string,
 }
 
 // validTaskTypes is the set of accepted classification outputs.
+// CodeEdit is intentionally excluded — all code changes must flow through
+// Commander → Chancellor to prevent clobbering and ensure conflict review.
 var validTaskTypes = map[string]bool{
 	"Feature":     true,
-	"CodeEdit":    true,
 	"Investigate": true,
 	"Audit":       true,
 }
@@ -396,8 +397,7 @@ const classifySystemPrompt = `You are a task classifier. Given a task prompt, re
 TypeName — one-sentence reason
 
 Choose TypeName from exactly one of:
-- Feature: large or multi-system change that benefits from decomposition into subtasks
-- CodeEdit: targeted, well-defined code change in known files
+- Feature: any code change, bug fix, or feature — even small targeted ones. All code changes go through Commander for decomposition and conflict review.
 - Investigate: open-ended research question with no clear code change yet
 - Audit: broad codebase scan looking for issues to fix
 

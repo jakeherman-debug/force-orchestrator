@@ -184,3 +184,15 @@ CREATE TABLE IF NOT EXISTS TaskNotes (
     note       TEXT    NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ── Proposed convoys ──────────────────────────────────────────────────────────
+-- Commander stores its plan here instead of creating a convoy directly.
+-- The Supreme Chancellor reviews and approves, sequences, or merges proposals.
+
+CREATE TABLE IF NOT EXISTS ProposedConvoys (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature_id  INTEGER NOT NULL UNIQUE,              -- references BountyBoard.id (Feature task)
+    plan_json   TEXT    NOT NULL,                     -- JSON array of TaskPlan from Commander
+    status      TEXT    NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | merged
+    created_at  DATETIME DEFAULT (datetime('now'))
+);

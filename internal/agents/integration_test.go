@@ -228,7 +228,7 @@ func TestIntegration_ClassifyPendingTasks_UpdatesType(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	withStubCLIRunner(t, "CodeEdit — targeted fix to the login handler", nil)
+	withStubCLIRunner(t, "Feature — targeted fix to the login handler", nil)
 
 	id, _ := store.AddBountyClassifying(db, "", "fix the login bug in auth.go", 0, "key-1")
 
@@ -240,8 +240,8 @@ func TestIntegration_ClassifyPendingTasks_UpdatesType(t *testing.T) {
 	if status != "Pending" {
 		t.Errorf("want status 'Pending' after classification, got %q", status)
 	}
-	if taskType != "CodeEdit" {
-		t.Errorf("want type 'CodeEdit', got %q", taskType)
+	if taskType != "Feature" {
+		t.Errorf("want type 'Feature', got %q", taskType)
 	}
 }
 

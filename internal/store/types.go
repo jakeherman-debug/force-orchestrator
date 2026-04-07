@@ -163,6 +163,31 @@ type TaskNote struct {
 	CreatedAt string
 }
 
+// ── Proposed convoys ──────────────────────────────────────────────────────────
+
+// ProposedConvoy is a Commander's decomposition plan awaiting Chancellor review.
+type ProposedConvoy struct {
+	ID        int
+	FeatureID int
+	PlanJSON  string
+	Status    string // pending | approved | rejected | merged
+	CreatedAt string
+}
+
+// ActiveConvoyInfo is a summary of an active convoy for Chancellor context.
+type ActiveConvoyInfo struct {
+	ID    int
+	Name  string
+	Tasks []string
+}
+
+// PendingProposalInfo is a summary of another pending ProposedConvoy for Chancellor context.
+type PendingProposalInfo struct {
+	FeatureID int
+	Payload   string
+	PlanJSON  string
+}
+
 type FleetMail struct {
 	ID          int
 	FromAgent   string

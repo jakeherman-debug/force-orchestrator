@@ -291,6 +291,7 @@ td.dim  { color: var(--text2); }
 .s-ConflictPending  { background: rgba(227,101,42,.15);  color: var(--orange); border: 1px solid rgba(227,101,42,.3); }
 .s-Planned          { background: rgba(139,148,158,.1);  color: var(--text2);  border: 1px solid var(--border); }
 .s-Blocked          { background: rgba(227,101,42,.12);  color: var(--orange); border: 1px solid rgba(227,101,42,.25); }
+.s-AwaitingChancellorReview { background: rgba(255,140,0,.12); color: #ff8c00; border: 1px solid rgba(255,140,0,.3); }
 .s-AwaitingCouncilReview { background: rgba(188,140,255,.15); color: var(--purple); border: 1px solid rgba(188,140,255,.3); }
 .s-UnderReview       { background: rgba(188,140,255,.12); color: var(--purple); border: 1px solid rgba(188,140,255,.25); }
 .s-AwaitingCaptainReview { background: rgba(57,197,207,.12); color: var(--teal); border: 1px solid rgba(57,197,207,.25); }

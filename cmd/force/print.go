@@ -583,11 +583,10 @@ Agent control:
 Logs written to fleet.log | Telemetry written to holonet.jsonl
 
 Task management:
-  add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] <description>
+  add [--priority N] [--plan-only] [--type Feature|Investigate|Audit] <description>
                                         Queue a task (type auto-classified if omitted)
+                                        All code changes use Feature — Commander plans, Chancellor reviews
                                         --plan-only: subtasks created as Planned, approve with convoy approve
-  add-task [--blocked-by <id>] [--convoy <id>] [--priority N] [--timeout <secs>] <repo> <desc>
-                                        Queue a direct CodeEdit task (skips Commander)
   add-jira [--priority N] [--plan-only] <TICKET-ID>
                                         Fetch a Jira ticket and queue it as a feature task
   investigate [--priority N] [--repo <name>] <question>
@@ -595,7 +594,7 @@ Task management:
                                         delivers a written report via fleet mail
   scan [--priority N] [--repo <name>] <scope/question>
                                         Scan codebase for issues — findings become Planned
-                                        CodeEdit tasks; approve with: force convoy approve <id>
+                                        tasks; approve with: force convoy approve <id>
   add-repo <name> <path> <desc>         Register a repository
   repos                                 List registered repositories
   repos remove <name>                   Remove a registered repository
@@ -611,7 +610,7 @@ Task management:
   reset <id>                            Reset a task to Pending (clears all error counts)
   retry <id>                            Alias for reset
   cancel <id> [--requeue <type>]        Permanently cancel a task (marks Failed, no retry)
-                                        --requeue: re-queue with same payload as Feature|CodeEdit|Investigate|Audit
+                                        --requeue: re-queue with same payload as Feature|Investigate|Audit
   retry-all-failed                      Reset all failed tasks to Pending
   prioritize <id> <N>                   Set task priority (higher = claimed first)
   block <task-id> <blocker-id>          Add a dependency: task-id waits for blocker-id

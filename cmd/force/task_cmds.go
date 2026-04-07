@@ -24,7 +24,7 @@ func newUUID() string {
 }
 
 func cmdAdd(db *sql.DB, args []string) {
-	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] [--repo <name>] [--idempotency-key KEY] <task description>"
+	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|Investigate|Audit] [--repo <name>] [--idempotency-key KEY] <task description>"
 	if len(args) == 0 {
 		fmt.Println(usageMsg)
 		os.Exit(1)
@@ -34,7 +34,7 @@ func cmdAdd(db *sql.DB, args []string) {
 	taskType := ""
 	repo := ""
 	idempotencyKey := ""
-	validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true, "WriteMemory": true, "MedicReview": true}
+	validTypes := map[string]bool{"Feature": true, "Investigate": true, "Audit": true, "WriteMemory": true, "MedicReview": true}
 	addArgs := args
 	for i := 0; i < len(addArgs); i++ {
 		switch {
@@ -48,8 +48,12 @@ func cmdAdd(db *sql.DB, args []string) {
 			i--
 		case addArgs[i] == "--type" && i+1 < len(addArgs):
 			taskType = addArgs[i+1]
+			if taskType == "CodeEdit" {
+				fmt.Fprintf(os.Stderr, "error: CodeEdit is no longer a valid direct task type.\nAll code changes flow through Commander → Chancellor for conflict review.\nUse: force add --type Feature <description>\n  Or omit --type to auto-classify.\n")
+				os.Exit(1)
+			}
 			if !validTypes[taskType] {
-				fmt.Printf("Invalid type '%s'. Valid values: Feature, CodeEdit, Investigate, Audit\n", taskType)
+				fmt.Printf("Invalid type '%s'. Valid values: Feature, Investigate, Audit\n", taskType)
 				os.Exit(1)
 			}
 			addArgs = append(addArgs[:i], addArgs[i+2:]...)
@@ -66,11 +70,6 @@ func cmdAdd(db *sql.DB, args []string) {
 	}
 	if len(addArgs) == 0 {
 		fmt.Println(usageMsg)
-		os.Exit(1)
-	}
-	// CodeEdit tasks go directly to an astromech and require a known repo.
-	if taskType == "CodeEdit" && repo == "" {
-		fmt.Fprintf(os.Stderr, "error: --type CodeEdit requires --repo <name>\n  Usage: force add --type CodeEdit --repo <name> <description>\n  Or omit --type to let the classifier route it automatically.\n")
 		os.Exit(1)
 	}
 	if repo != "" && store.GetRepoPath(db, repo) == "" {

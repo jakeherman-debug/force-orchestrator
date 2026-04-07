@@ -51,7 +51,8 @@ func main() {
 		cmdAdd(db, os.Args[2:])
 
 	case "add-task":
-		cmdAddTask(db, os.Args[2:])
+		fmt.Fprintf(os.Stderr, "error: 'force add-task' has been removed.\nAll code changes now flow through Commander → Chancellor for conflict review.\nUse: force add --type Feature <description>\n  Or omit --type to auto-classify.\n")
+		os.Exit(1)
 
 	case "investigate", "add-investigate":
 		if len(os.Args) < 3 {
