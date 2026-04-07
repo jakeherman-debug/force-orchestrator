@@ -154,10 +154,10 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN branch_name    TEXT    DEFAULT ''`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN priority       INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN task_timeout   INTEGER DEFAULT 0`)
-	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN created_at     TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN created_at      TEXT    DEFAULT ''`)
 	// Backfill existing rows that have no created_at so they don't get pruned immediately.
 	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now') WHERE created_at = ''`)
-	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN idempotency_key TEXT   DEFAULT ''`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN idempotency_key TEXT    DEFAULT ''`)
 
 	// TaskHistory column additions
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_in  INTEGER DEFAULT 0`)
