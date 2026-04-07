@@ -245,6 +245,66 @@ func printStats(db *sql.DB) {
 	}
 }
 
+func printBountyStats(db *sql.DB) {
+	fmt.Println("=== Bounty Board Statistics ===")
+	fmt.Println()
+
+	// Tasks by status
+	fmt.Println("Tasks by status:")
+	fmt.Printf("  %-25s %s\n", "Status", "Count")
+	fmt.Println("  " + strings.Repeat("-", 35))
+	rows, err := db.Query(`SELECT status, COUNT(*) FROM BountyBoard GROUP BY status ORDER BY COUNT(*) DESC`)
+	if err == nil {
+		for rows.Next() {
+			var status string
+			var count int
+			rows.Scan(&status, &count)
+			fmt.Printf("  %-25s %d\n", status, count)
+		}
+		rows.Close()
+	}
+
+	// Avg time-to-complete (last 7 days)
+	fmt.Println()
+	fmt.Println("Avg time-to-complete (last 7 days):")
+	var avgSecs sql.NullFloat64
+	db.QueryRow(`
+		SELECT AVG(strftime('%s', th.created_at) - strftime('%s', bb.created_at))
+		FROM TaskHistory th
+		JOIN BountyBoard bb ON bb.id = th.task_id
+		WHERE th.outcome = 'Completed' AND th.created_at >= datetime('now', '-7 days')`).Scan(&avgSecs)
+	if avgSecs.Valid {
+		total := int(avgSecs.Float64)
+		h := total / 3600
+		m := (total % 3600) / 60
+		s := total % 60
+		fmt.Printf("  %dh %dm %ds\n", h, m, s)
+	} else {
+		fmt.Println("  no completions in last 7 days")
+	}
+
+	// Top 3 agents by tasks completed
+	fmt.Println()
+	fmt.Println("Top 3 agents by tasks completed:")
+	rows, err = db.Query(`SELECT agent, COUNT(*) FROM TaskHistory WHERE outcome='Completed' GROUP BY agent ORDER BY COUNT(*) DESC LIMIT 3`)
+	if err == nil {
+		fmt.Printf("  %-25s %s\n", "Agent", "Completed")
+		fmt.Println("  " + strings.Repeat("-", 35))
+		n := 0
+		for rows.Next() {
+			n++
+			var agent string
+			var count int
+			rows.Scan(&agent, &count)
+			fmt.Printf("  %-25s %d\n", agent, count)
+		}
+		rows.Close()
+		if n == 0 {
+			fmt.Println("  no data")
+		}
+	}
+}
+
 func printCosts(db *sql.DB) {
 	fmt.Println("=== Fleet Token Usage ===")
 	fmt.Println()
