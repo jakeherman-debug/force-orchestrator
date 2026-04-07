@@ -27,6 +27,10 @@ func cmdStats(db *sql.DB) {
 	printStats(db)
 }
 
+func cmdBountyStats(db *sql.DB) {
+	printBountyStats(db)
+}
+
 func cmdLogsFleet(db *sql.DB, args []string) {
 	// Flags: --no-follow, --filter <pattern>, --agent <name>, --task <id>, --convoy <id>
 	noFollow := false
