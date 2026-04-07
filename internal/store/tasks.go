@@ -321,32 +321,6 @@ func UnblockDependentsOf(db *sql.DB, id int) int {
 	return int(n)
 }
 
-// ── Task notes ────────────────────────────────────────────────────────────────
-
-// AddTaskNote appends an operator note to a task. Returns an error if the task does not exist.
-func AddTaskNote(db *sql.DB, taskID int, note string) error {
-	_, err := db.Exec(`INSERT INTO TaskNotes (task_id, note) VALUES (?, ?)`, taskID, note)
-	return err
-}
-
-// GetTaskNotes returns all notes for a task in chronological order.
-func GetTaskNotes(db *sql.DB, taskID int) []TaskNote {
-	rows, err := db.Query(
-		`SELECT id, task_id, note, created_at FROM TaskNotes WHERE task_id = ? ORDER BY id ASC`,
-		taskID)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var notes []TaskNote
-	for rows.Next() {
-		var n TaskNote
-		rows.Scan(&n.ID, &n.TaskID, &n.Note, &n.CreatedAt)
-		notes = append(notes, n)
-	}
-	return notes
-}
-
 // ── Cost computation ──────────────────────────────────────────────────────────
 
 // Pricing constants for Claude Sonnet (per million tokens).
