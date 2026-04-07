@@ -814,6 +814,9 @@ function renderConvoys(convoys) {
     const approveBtn = c.has_planned
       ? `<button class="action-btn approve-btn" onclick="approveConvoy(${c.id})">Activate Planned Tasks</button>`
       : '';
+    const cancelBtn = c.status === 'Active'
+      ? `<button class="action-btn cancel-btn" onclick="cancelConvoy(${c.id})">Cancel Convoy</button>`
+      : '';
     return `
       <div class="convoy-card">
         <div class="convoy-header">
@@ -829,6 +832,7 @@ function renderConvoys(convoys) {
           <span class="convoy-counts">${c.completed} / ${c.total} tasks complete (${pct}%)</span>
           <div style="flex:1"></div>
           ${approveBtn}
+          ${cancelBtn}
         </div>
       </div>`;
   }).join('');
@@ -844,6 +848,24 @@ function setConvoyTimeFilter(f) {
   S.convoyTimeFilter = f;
   syncURL();
   renderConvoys(S.convoys);
+}
+
+function cancelConvoy(id) {
+  S.cancelConvoyID = id;
+  $('convoy-cancel-id').textContent = `#${id}`;
+  $('convoy-cancel-modal').classList.remove('hidden');
+}
+
+async function confirmCancelConvoy() {
+  const id = S.cancelConvoyID;
+  try {
+    const r = await api(`/api/convoys/${id}/cancel`, { method: 'POST' });
+    showToast(`Convoy #${id} cancelled (${r.cancelled} task(s) stopped)`, 'ok');
+    closeModal('convoy-cancel-modal');
+    loadConvoys();
+  } catch(e) {
+    showToast('Cancel failed: ' + e.message, 'err');
+  }
 }
 
 async function approveConvoy(id) {

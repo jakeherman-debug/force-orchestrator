@@ -598,6 +598,12 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 			store.LogAudit(db, "dashboard", "convoy-approve", id,
 				fmt.Sprintf("activated %d planned task(s) via dashboard", n))
 			fmt.Fprintf(w, `{"ok":true,"id":%d,"activated":%d}`, id, n)
+		case "cancel":
+			n := store.CancelConvoyPendingTasks(db, id)
+			db.Exec(`UPDATE Convoys SET status = 'Cancelled' WHERE id = ?`, id)
+			store.LogAudit(db, "dashboard", "convoy-cancel", id,
+				fmt.Sprintf("cancelled convoy #%d (%d pending task(s) stopped)", id, n))
+			fmt.Fprintf(w, `{"ok":true,"id":%d,"cancelled":%d}`, id, n)
 		default:
 			http.NotFound(w, r)
 		}

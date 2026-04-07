@@ -311,6 +311,23 @@
   </div>
 </div>
 
+<!-- ── Convoy cancel modal ───────────────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="convoy-cancel-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>Cancel Convoy <span id="convoy-cancel-id"></span></h2>
+      <button class="modal-close" onclick="closeModal('convoy-cancel-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p>This will cancel all pending and planned tasks in this convoy. Tasks currently being worked on by agents will run to completion but no new work will start.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('convoy-cancel-modal')">Back</button>
+      <button class="btn btn-danger" onclick="confirmCancelConvoy()">Cancel Convoy</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Reject modal ──────────────────────────────────────────────────────────── -->
 <div class="modal-backdrop hidden" id="reject-modal">
   <div class="modal-box">
