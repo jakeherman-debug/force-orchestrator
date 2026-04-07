@@ -229,16 +229,31 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			var parentStatus string
 			db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, b.ParentID).Scan(&parentStatus)
 			if parentStatus == "ConflictPending" {
-				// This was a conflict resolution task — mark the original task Completed
-				// since its code is now in main, and unblock any of its dependents.
-				store.UpdateBountyStatus(db, b.ParentID, "Completed")
-				if n := store.UnblockDependentsOf(db, b.ParentID); n > 0 {
-					logger.Printf("Task %d: unblocked %d dependent(s) of parent #%d after conflict resolution", b.ID, n, b.ParentID)
+				// Walk up the full ConflictPending chain — a conflict resolution task can itself
+				// hit a conflict and spawn another resolution task, leaving multiple ancestors
+				// stuck in ConflictPending. Mark all of them Completed and unblock their dependents.
+				chain := []int{b.ParentID}
+				for {
+					var grandParentID int
+					var grandParentStatus string
+					db.QueryRow(`SELECT parent_id, status FROM BountyBoard WHERE id = ?`, chain[len(chain)-1]).
+						Scan(&grandParentID, &grandParentStatus)
+					if grandParentID == 0 || grandParentStatus != "ConflictPending" {
+						break
+					}
+					chain = append(chain, grandParentID)
 				}
+				for _, ancestorID := range chain {
+					store.UpdateBountyStatus(db, ancestorID, "Completed")
+					if n := store.UnblockDependentsOf(db, ancestorID); n > 0 {
+						logger.Printf("Task %d: unblocked %d dependent(s) of #%d after conflict chain resolution", b.ID, n, ancestorID)
+					}
+				}
+				rootID := chain[len(chain)-1]
 				store.SendMail(db, agentName, "operator",
-					fmt.Sprintf("[CONFLICT RESOLVED] Task #%d is complete — merged via #%d", b.ParentID, b.ID),
+					fmt.Sprintf("[CONFLICT RESOLVED] Task #%d is complete — merged via #%d", rootID, b.ID),
 					fmt.Sprintf("Conflict resolution task #%d has been approved and merged.\n\nTask #%d (%s) is now complete — the feature is in main. No further action needed.\n\nCouncil feedback: %s",
-						b.ID, b.ParentID, b.TargetRepo, ruling.Feedback),
+						b.ID, rootID, b.TargetRepo, ruling.Feedback),
 					b.ID, store.MailTypeInfo)
 			} else if parentStatus == "Failed" {
 				store.SendMail(db, agentName, "operator",
