@@ -46,124 +46,19 @@ func cmdConvoy(db *sql.DB, args []string) {
 		fmt.Printf("Convoy '%s' created (id: %d).\n", name, id)
 	case "show":
 		if len(args) < 2 {
-			fmt.Println("Usage: force convoy show <id>")
+			fmt.Println("Usage: force convoy show <name>")
 			os.Exit(1)
 		}
-		id := mustParseID(args[1])
-		c, err := db.Query(`SELECT id, name, status, created_at FROM Convoys WHERE id = ?`, id)
-		if err != nil || !c.Next() {
-			fmt.Printf("Convoy %d not found.\n", id)
-			os.Exit(1)
-		}
+		convoyName := strings.Join(args[1:], " ")
 		var convoy store.Convoy
-		c.Scan(&convoy.ID, &convoy.Name, &convoy.Status, &convoy.CreatedAt)
-		c.Close()
-		completed, total := store.ConvoyProgress(db, id)
-		fmt.Printf("Convoy %d: %s\nStatus:  %s\nCreated: %s\nTasks:   %d/%d complete\n\n",
-			convoy.ID, convoy.Name, convoy.Status, convoy.CreatedAt, completed, total)
-		// Load all tasks in convoy into a map for dependency tree rendering
-		type convoyTask struct {
-			id, retryCount               int
-			status, repo, owner, payload string
+		err := db.QueryRow(`SELECT id, name, status, created_at FROM Convoys WHERE name = ?`, convoyName).
+			Scan(&convoy.ID, &convoy.Name, &convoy.Status, &convoy.CreatedAt)
+		if err != nil {
+			fmt.Printf("No convoy found with name: %s\n", convoyName)
+			os.Exit(1)
 		}
-		taskMap := map[int]convoyTask{}
-		taskOrder := []int{}
-		taskRows, _ := db.Query(`
-			SELECT id, status, target_repo, payload, owner, retry_count
-			FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit' ORDER BY id ASC`, id)
-		if taskRows != nil {
-			for taskRows.Next() {
-				var ct convoyTask
-				taskRows.Scan(&ct.id, &ct.status, &ct.repo, &ct.payload, &ct.owner, &ct.retryCount)
-				taskMap[ct.id] = ct
-				taskOrder = append(taskOrder, ct.id)
-			}
-			taskRows.Close()
-		}
-		// Load dependency edges for all tasks in this convoy
-		convoyIDs := map[int]bool{}
-		for _, tid := range taskOrder {
-			convoyIDs[tid] = true
-		}
-		depMap := map[int][]int{} // task_id → []depends_on IDs
-		depRows, _ := db.Query(`
-			SELECT td.task_id, td.depends_on
-			FROM TaskDependencies td
-			WHERE td.task_id IN (SELECT id FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit')
-			ORDER BY td.task_id, td.depends_on`, id)
-		if depRows != nil {
-			for depRows.Next() {
-				var taskID, depID int
-				depRows.Scan(&taskID, &depID)
-				depMap[taskID] = append(depMap[taskID], depID)
-			}
-			depRows.Close()
-		}
-		// Print tasks — roots first, then show dependencies inline
-		printed := map[int]bool{}
-		var printConvoyTask func(tid, depth int)
-		printConvoyTask = func(tid, depth int) {
-			if printed[tid] {
-				return
-			}
-			printed[tid] = true
-			ct := taskMap[tid]
-			firstLine := ct.payload
-			if nl := strings.Index(ct.payload, "\n"); nl != -1 {
-				firstLine = ct.payload[:nl]
-			}
-			ownerSuffix := ""
-			if ct.owner != "" {
-				ownerSuffix = fmt.Sprintf(" (%s)", ct.owner)
-			}
-			retrySuffix := ""
-			if ct.retryCount > 0 {
-				retrySuffix = fmt.Sprintf(" [retry %d]", ct.retryCount)
-			}
-			indent := strings.Repeat("  ", depth)
-			fmt.Printf("%s#%d %-18s %s%s\n", indent, ct.id, ct.status+ownerSuffix, truncate(firstLine, 60), retrySuffix)
-			// Print tasks that depend on this one (children in dependency order)
-			for _, childID := range taskOrder {
-				for _, d := range depMap[childID] {
-					if d == tid {
-						printConvoyTask(childID, depth+1)
-						break
-					}
-				}
-			}
-		}
-		// Start with roots (tasks with no convoy-internal dependencies)
-		for _, tid := range taskOrder {
-			deps := depMap[tid]
-			hasConvoyDep := false
-			for _, d := range deps {
-				if convoyIDs[d] {
-					hasConvoyDep = true
-					break
-				}
-			}
-			if hasConvoyDep {
-				continue
-			}
-			// Show external dependencies as context
-			for _, d := range deps {
-				if !convoyIDs[d] {
-					var extStatus string
-					db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, d).Scan(&extStatus)
-					if extStatus == "" {
-						extStatus = "not found"
-					}
-					fmt.Printf("  [blocked by task #%d in another convoy — status: %s]\n", d, extStatus)
-				}
-			}
-			printConvoyTask(tid, 0)
-		}
-		// Catch any remaining unprinted tasks
-		for _, tid := range taskOrder {
-			if !printed[tid] {
-				printConvoyTask(tid, 0)
-			}
-		}
+		completed, total := store.ConvoyProgress(db, convoy.ID)
+		printConvoyShow(db, convoy.ID, convoy.Name, convoy.Status, completed, total)
 	case "approve":
 		// Transition all Planned tasks in a convoy to Pending so agents can claim them.
 		if len(args) < 2 {
@@ -294,7 +189,7 @@ func cmdConvoy(db *sql.DB, args []string) {
 		fmt.Printf("Feedback sent to Commander: %s\n", rejectFeedback)
 	default:
 		fmt.Printf("Unknown convoy subcommand: %s\n", subCmd)
-		fmt.Println("Usage: force convoy [list|create <name>|show <id>|approve <id>|reset <id>|reject <id> <feedback>]")
+		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>]")
 		os.Exit(1)
 	}
 }
