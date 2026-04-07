@@ -21,10 +21,11 @@ var dogCooldowns = map[string]time.Duration{
 	"mail-cleanup":     12 * time.Hour,
 	"memory-hygiene":   24 * time.Hour,
 	"stalled-reviews":  6 * time.Hour,
+	"priority-aging":   6 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
-var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews"}
+var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews", "priority-aging"}
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
 // Called by SpawnInquisitor on every inquisitor cycle.
@@ -73,6 +74,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogMemoryHygiene(db, logger)
 	case "stalled-reviews":
 		return dogStalledReviews(db, logger)
+	case "priority-aging":
+		return dogPriorityAging(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
@@ -310,6 +313,33 @@ func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 	store.SendMail(db, "inquisitor", "operator",
 		fmt.Sprintf("[STALLED REVIEWS] %d tasks stuck in review", len(tasks)),
 		body.String(), 0, store.MailTypeAlert)
+	return nil
+}
+
+func dogPriorityAging(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	res1, err := db.Exec(`
+		UPDATE BountyBoard
+		SET priority = 1
+		WHERE status = 'Pending'
+		  AND priority = 0
+		  AND created_at < datetime('now', '-12 hours')`)
+	if err != nil {
+		return err
+	}
+	bumped1, _ := res1.RowsAffected()
+
+	res2, err := db.Exec(`
+		UPDATE BountyBoard
+		SET priority = 2
+		WHERE status = 'Pending'
+		  AND priority < 2
+		  AND created_at < datetime('now', '-24 hours')`)
+	if err != nil {
+		return err
+	}
+	bumped2, _ := res2.RowsAffected()
+
+	logger.Printf("Dog priority-aging: bumped %d task(s) to priority 1, %d task(s) to priority 2", bumped1, bumped2)
 	return nil
 }
 
