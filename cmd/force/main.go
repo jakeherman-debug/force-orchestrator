@@ -392,6 +392,19 @@ func main() {
 		}
 		agents.RunTaskForeground(db, mustParseID(os.Args[2]))
 
+	case "bounty":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: force bounty <subcommand>\n  stats   — print bounty board statistics\n")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "stats":
+			cmdBountyStats(db)
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown bounty subcommand: %s\nUsage: force bounty stats\n", os.Args[2])
+			os.Exit(1)
+		}
+
 	case "convoy":
 		cmdConvoy(db, os.Args[2:])
 
