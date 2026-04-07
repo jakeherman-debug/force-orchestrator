@@ -212,9 +212,9 @@ func insertConvoyAndTasks(db *sql.DB, tasks []store.TaskPlan, bounty *store.Boun
 	return idMapping, nil
 }
 
-func SpawnCommander(db *sql.DB) {
-	agentName := "Commander-Cody"
-	logger := NewLogger("Commander")
+func SpawnCommander(db *sql.DB, name string) {
+	agentName := name
+	logger := NewLogger(name)
 	logger.Printf("Commander starting up")
 
 	for {

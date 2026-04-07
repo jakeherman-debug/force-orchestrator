@@ -81,13 +81,21 @@ func cmdDaemon(db *sql.DB) {
 	if n := store.GetConfig(db, "num_librarians", ""); n != "" {
 		fmt.Sscanf(n, "%d", &numLibrarians)
 	}
+	numCommanders := 1
+	if n := store.GetConfig(db, "num_commanders", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numCommanders)
+	}
+	if numCommanders < 1 {
+		numCommanders = 1
+	}
 
-	astromechRoster   := []string{"R2-D2", "BB-8", "R5-D4", "K-2SO", "BD-1", "R7-A7", "R4-P17", "D-O", "C1-10P", "R3-S6"}
-	councilRoster     := []string{"Council-Yoda", "Council-Mace", "Council-Ki-Adi", "Council-Kit-Fisto", "Council-Shaak-Ti"}
-	captainRoster     := []string{"Captain-Rex", "Captain-Wolffe", "Captain-Bly", "Captain-Gree", "Captain-Ponds"}
+	astromechRoster    := []string{"R2-D2", "BB-8", "R5-D4", "K-2SO", "BD-1", "R7-A7", "R4-P17", "D-O", "C1-10P", "R3-S6"}
+	councilRoster      := []string{"Council-Yoda", "Council-Mace", "Council-Ki-Adi", "Council-Kit-Fisto", "Council-Shaak-Ti"}
+	captainRoster      := []string{"Captain-Rex", "Captain-Wolffe", "Captain-Bly", "Captain-Gree", "Captain-Ponds"}
 	investigatorRoster := []string{"Ahsoka-Tano", "Kanan-Jarrus", "Ezra-Bridger", "Hera-Syndulla"}
-	auditorRoster     := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
-	librarianRoster   := []string{"Jocasta-Nu", "Huyang", "Dexter-Jettster"}
+	auditorRoster      := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
+	librarianRoster    := []string{"Jocasta-Nu", "Huyang", "Dexter-Jettster"}
+	commanderRoster    := []string{"Commander-Rex", "Commander-Cody", "Commander-Wolffe", "Commander-Gree", "Commander-Bly", "Commander-Fox", "Commander-Neyo", "Commander-Bacara"}
 
 	numMedics := 1
 	if n := store.GetConfig(db, "num_medics", ""); n != "" {
@@ -99,9 +107,15 @@ func cmdDaemon(db *sql.DB) {
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
 
-	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s))...\n",
-		numAgents, numCaptain, numCouncil, numInvestigators, numAuditors, numLibrarians, numMedics)
-	go agents.SpawnCommander(db)
+	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d commander(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s))...\n",
+		numAgents, numCaptain, numCouncil, numCommanders, numInvestigators, numAuditors, numLibrarians, numMedics)
+	for i := 0; i < numCommanders; i++ {
+		name := fmt.Sprintf("Commander-%d", i+1)
+		if i < len(commanderRoster) {
+			name = commanderRoster[i]
+		}
+		go agents.SpawnCommander(db, name)
+	}
 	for i := 0; i < numAgents; i++ {
 		name := fmt.Sprintf("Astromech-%d", i+1)
 		if i < len(astromechRoster) {
@@ -158,6 +172,7 @@ func cmdDaemon(db *sql.DB) {
 	spawnedAgents := numAgents
 	spawnedCaptains := numCaptain
 	spawnedCouncil := numCouncil
+	spawnedCommanders := numCommanders
 	spawnedInvestigators := numInvestigators
 	spawnedAuditors := numAuditors
 	spawnedLibrarians := numLibrarians
@@ -230,6 +245,27 @@ func cmdDaemon(db *sql.DB) {
 			}
 			if newCouncil < spawnedCouncil {
 				fmt.Printf("Scale-down to %d council member(s) requested (currently %d running) — takes effect on restart.\n", newCouncil, spawnedCouncil)
+			}
+
+			// Commanders
+			newCommanders := spawnedCommanders
+			if n := store.GetConfig(db, "num_commanders", ""); n != "" {
+				fmt.Sscanf(n, "%d", &newCommanders)
+			}
+			if newCommanders < 1 {
+				newCommanders = 1
+			}
+			for spawnedCommanders < newCommanders {
+				name := fmt.Sprintf("Commander-%d", spawnedCommanders+1)
+				if spawnedCommanders < len(commanderRoster) {
+					name = commanderRoster[spawnedCommanders]
+				}
+				fmt.Printf("Scaling: spawning %s (commanders: %d → %d)\n", name, spawnedCommanders, newCommanders)
+				go agents.SpawnCommander(db, name)
+				spawnedCommanders++
+			}
+			if newCommanders < spawnedCommanders {
+				fmt.Printf("Scale-down to %d commander(s) requested (currently %d running) — takes effect on restart.\n", newCommanders, spawnedCommanders)
 			}
 
 			// Investigators
@@ -339,7 +375,7 @@ func cmdDaemon(db *sql.DB) {
 	}
 }
 
-func cmdScale(db *sql.DB, astromechs, council, captain, investigators, auditors, librarians int) {
+func cmdScale(db *sql.DB, astromechs, council, captain, commanders, investigators, auditors, librarians int) {
 	type update struct {
 		key   string
 		label string
@@ -349,6 +385,7 @@ func cmdScale(db *sql.DB, astromechs, council, captain, investigators, auditors,
 		{"num_astromechs", "astromechs", astromechs},
 		{"num_council", "council", council},
 		{"num_captain", "captain", captain},
+		{"num_commanders", "commanders", commanders},
 		{"num_investigators", "investigators", investigators},
 		{"num_auditors", "auditors", auditors},
 		{"num_librarians", "librarians", librarians},

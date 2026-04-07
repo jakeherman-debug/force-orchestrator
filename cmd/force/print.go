@@ -567,7 +567,7 @@ Agent control:
   daemon                         Start the fleet daemon (all agents)
   estop                          Emergency stop — halt all agents immediately
   resume                         Clear e-stop and resume agents
-  scale [--astromechs N] [--council N] [--captain N] [--investigators N] [--auditors N] [--librarians N]
+  scale [--astromechs N] [--council N] [--captain N] [--commanders N] [--investigators N] [--auditors N] [--librarians N]
                                  Dynamically scale any agent type in a running daemon (SIGUSR1)
   agents                         List registered persistent agent worktrees
   cleanup                        Prune dead git worktrees and stale agent entries
@@ -578,7 +578,7 @@ Agent control:
   config get <key>               Read a system config value
   config set <key> <value>       Write a system config value
                                    Keys: num_astromechs, num_captain, num_council,
-                                         num_investigators, num_auditors,
+                                         num_commanders, num_investigators, num_auditors,
                                          max_concurrent, spawn_delay_ms, batch_size, max_turns
 Logs written to fleet.log | Telemetry written to holonet.jsonl
 
