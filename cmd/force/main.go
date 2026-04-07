@@ -365,6 +365,9 @@ func main() {
 		}
 		cmdDoctor(db, clean)
 
+	case "leaderboard":
+		cmdLeaderboard(db)
+
 	case "costs":
 		cmdCosts(db)
 
