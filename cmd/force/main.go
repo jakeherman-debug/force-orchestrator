@@ -421,6 +421,23 @@ func main() {
 	case "mail":
 		cmdMail(db, os.Args[2:])
 
+	case "task":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: force task <subcommand>\n  note <id> <text>  — append an operator note to a task\n")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "note":
+			if len(os.Args) < 5 {
+				fmt.Fprintln(os.Stderr, "Usage: force task note <id> <text>")
+				os.Exit(1)
+			}
+			cmdTaskNote(db, mustParseID(os.Args[3]), strings.Join(os.Args[4:], " "))
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown task subcommand: %s\nUsage: force task note <id> <text>\n", os.Args[2])
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\nRun 'force help' for usage.\n", command)
 		os.Exit(1)

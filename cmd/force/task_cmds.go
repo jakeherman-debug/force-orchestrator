@@ -510,3 +510,11 @@ func cmdRetryAllFailed(db *sql.DB) {
 	store.LogAudit(db, "operator", "retry-all-failed", 0, fmt.Sprintf("reset %d failed tasks", n))
 	fmt.Printf("Reset %d failed task(s) to Pending.\n", n)
 }
+
+func cmdTaskNote(db *sql.DB, id int, note string) {
+	if err := store.AppendTaskNote(db, id, note); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Note added to task #%d\n", id)
+}
