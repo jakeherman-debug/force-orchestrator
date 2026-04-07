@@ -133,6 +133,20 @@ func directiveText(payload string) string {
 	return payload
 }
 
+// buildNotesBlock returns the formatted operator-notes block for injection before a
+// task directive, or empty string if no notes exist or the query errors.
+func buildNotesBlock(db *sql.DB, taskID int, logger interface{ Printf(string, ...any) }) string {
+	notes, err := store.GetTaskNotes(db, taskID)
+	if err != nil {
+		logger.Printf("Task %d: failed to load operator notes (proceeding without): %v", taskID, err)
+		return ""
+	}
+	if len(notes) == 0 {
+		return ""
+	}
+	return "--- Operator Notes ---\n" + strings.Join(notes, "\n") + "\n--- End Notes ---\n\n"
+}
+
 // buildAstromechContext assembles the variable context sections injected into every
 // Astromech prompt: parent goal, fleet memory, checkpoint resume, prior attempts (seance),
 // and inbox mail. The directive is excluded — callers add it to the system prompt.
@@ -340,10 +354,12 @@ Read the feedback at the bottom of YOUR CURRENT DIRECTIVE, then make a NEW forwa
 Do not re-do work that is already correctly committed.`
 	}
 
+	notesBlock := buildNotesBlock(db, bounty.ID, logger)
+
 	systemPrompt := AstromechSystemPrompt + directiveSection
-	fullPrompt := fmt.Sprintf("%s%s%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s",
+	fullPrompt := fmt.Sprintf("%s%s%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s%s",
 		systemPrompt, goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext,
-		specialCtx, directiveText(bounty.Payload))
+		specialCtx, notesBlock, directiveText(bounty.Payload))
 
 	maxTurns := store.GetConfig(db, "max_turns", fmt.Sprintf("%d", defaultMaxTurns))
 
@@ -706,9 +722,11 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 		directiveSection = fmt.Sprintf("\n\n# OPERATOR DIRECTIVE\n%s", directive)
 	}
 
+	notesBlock := buildNotesBlock(db, taskID, fgLogger)
+
 	systemPrompt := AstromechSystemPrompt + directiveSection
-	fullPrompt := fmt.Sprintf("%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s",
-		systemPrompt, goalCtx, fleetMemCtx, seanceCtx, inboxCtx, directiveText(b.Payload))
+	fullPrompt := fmt.Sprintf("%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s%s",
+		systemPrompt, goalCtx, fleetMemCtx, seanceCtx, inboxCtx, notesBlock, directiveText(b.Payload))
 
 	maxTurns := store.GetConfig(db, "max_turns", fmt.Sprintf("%d", defaultMaxTurns))
 
