@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"force-orchestrator/internal/agents"
@@ -419,6 +420,29 @@ func cmdTailTask(db *sql.DB, taskID int) {
 	tailCmd.Stdout = os.Stdout
 	tailCmd.Stderr = os.Stderr
 	tailCmd.Run()
+}
+
+func cmdLeaderboard(db *sql.DB) {
+	entries := store.GetLeaderboard(db)
+	if len(entries) == 0 {
+		fmt.Println("No task history yet.")
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "AGENT\tCOMPLETED\tFAILED\tAVG TURNS\tAVG TIME")
+	for _, e := range entries {
+		avgTurns := "-"
+		if e.AvgTurns > 0 {
+			avgTurns = fmt.Sprintf("%.1f", e.AvgTurns)
+		}
+		avgTime := "-"
+		if e.AvgWallSeconds > 0 {
+			d := time.Duration(e.AvgWallSeconds) * time.Second
+			avgTime = d.String()
+		}
+		fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\n", e.Agent, e.TasksCompleted, e.TasksFailed, avgTurns, avgTime)
+	}
+	w.Flush()
 }
 
 func cmdWatch(db *sql.DB) {
