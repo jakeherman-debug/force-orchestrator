@@ -223,7 +223,7 @@ function renderTasks() {
 
   const tbody = $('tasks-tbody');
   if (!tasks.length) {
-    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
     $('tbadge-tasks').textContent = '';
     return;
   }
@@ -245,6 +245,7 @@ function renderTasks() {
     return `<tr class="task-row${sel}" onclick="openPanel(${t.id})" data-id="${t.id}">
       <td class="mono dim">${t.id}</td>
       <td>${statusPill(t.status)}</td>
+      <td class="dim" style="font-size:11px">${escHtml(t.owner || '')}</td>
       <td class="dim">${t.type || ''}</td>
       <td class="payload-cell">${escHtml(truncate(t.payload, 140))}</td>
       <td class="mono dim" style="font-size:11px">${escHtml(t.repo || '')}</td>
@@ -669,8 +670,8 @@ function renderConvoys(convoys) {
     return `
       <div class="convoy-card">
         <div class="convoy-header">
-          <span class="convoy-name" style="cursor:pointer;text-decoration:underline" onclick="showConvoyTasks(${c.id}, ${JSON.stringify(escHtml(c.name || 'Convoy'))})">${escHtml(c.name || 'Convoy')}</span>
-          <span class="convoy-id" style="cursor:pointer" onclick="showConvoyTasks(${c.id}, ${JSON.stringify(escHtml(c.name || 'Convoy'))})">#${c.id}</span>
+          <span class="convoy-name" style="cursor:pointer;text-decoration:underline" onclick="showConvoyTasks(${c.id}, ${escHtml(JSON.stringify(c.name || 'Convoy'))})">${escHtml(c.name || 'Convoy')}</span>
+          <span class="convoy-id" style="cursor:pointer" onclick="showConvoyTasks(${c.id}, ${escHtml(JSON.stringify(c.name || 'Convoy'))})">#${c.id}</span>
           ${statusPill(c.status)}
           <span class="convoy-ts">${fmtTS(c.created_at)}</span>
         </div>
