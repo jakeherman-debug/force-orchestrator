@@ -101,9 +101,30 @@ func SpawnInquisitor(db *sql.DB) {
 	}
 }
 
+// staleClassifyingTimeout is how long a task may remain in status='Classifying'
+// before the Inquisitor gives up and fails it. Two classification failures in a
+// row within a single poll cycle leaves the task untouched; repeated failures
+// across multiple cycles (totalling this duration) indicate a persistent problem.
+const staleClassifyingTimeout = 30 * time.Minute
+
 // classifyPendingTasks finds tasks with status='Classifying', calls ClassifyTaskType
 // for each, updates the task type to the result, and transitions the task to Pending.
+// It also fails tasks that have been stuck in Classifying beyond staleClassifyingTimeout.
 func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) {
+	// Fail tasks that have been stuck in Classifying too long — repeated Claude errors.
+	staleRes, staleErr := db.Exec(`
+		UPDATE BountyBoard
+		SET status    = 'Failed',
+		    error_log = 'Inquisitor: classification timed out after 30 minutes'
+		WHERE status = 'Classifying'
+		  AND created_at < datetime('now', ?)
+	`, fmt.Sprintf("-%d seconds", int(staleClassifyingTimeout.Seconds())))
+	if staleErr != nil {
+		logger.Printf("classifyPendingTasks: stale-reset error — %v", staleErr)
+	} else if n, _ := staleRes.RowsAffected(); n > 0 {
+		logger.Printf("classifyPendingTasks: failed %d task(s) stuck in Classifying beyond timeout", n)
+	}
+
 	rows, err := db.Query(`SELECT id, payload FROM BountyBoard WHERE status = 'Classifying'`)
 	if err != nil {
 		return
@@ -126,7 +147,10 @@ func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }
 			logger.Printf("Task #%d: classification error — %v", t.id, err)
 			continue
 		}
-		db.Exec(`UPDATE BountyBoard SET type = ?, status = 'Pending' WHERE id = ?`, taskType, t.id)
+		if _, err = db.Exec(`UPDATE BountyBoard SET type = ?, status = 'Pending' WHERE id = ?`, taskType, t.id); err != nil {
+			logger.Printf("Task #%d: failed to persist classification — %v", t.id, err)
+			continue
+		}
 		logger.Printf("Task #%d classified as %s — %s", t.id, taskType, reason)
 	}
 }

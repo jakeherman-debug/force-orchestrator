@@ -819,7 +819,11 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			if key == "" {
 				key = newUUID()
 			}
-			newID := store.AddBountyClassifying(db, body.Repo, body.Payload, body.Priority, key)
+			newID, err := store.AddBountyClassifying(db, body.Repo, body.Payload, body.Priority, key)
+			if err != nil {
+				http.Error(w, `{"error":"failed to insert task"}`, http.StatusInternalServerError)
+				return
+			}
 			store.LogAudit(db, "dashboard", "add-task", newID, "queued Auto (Classifying) via dashboard")
 			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
 			return

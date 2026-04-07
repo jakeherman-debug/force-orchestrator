@@ -131,13 +131,16 @@ func AddBounty(db *sql.DB, parentID int, taskType, payload string) int {
 // AddBountyClassifying inserts a task with type='Auto' and status='Classifying'.
 // The Inquisitor will classify it and transition it to Pending.
 // idempotencyKey is stored immediately so duplicate-check queries can find the row.
-func AddBountyClassifying(db *sql.DB, repo, payload string, priority int, idempotencyKey string) int {
-	res, _ := db.Exec(
+func AddBountyClassifying(db *sql.DB, repo, payload string, priority int, idempotencyKey string) (int, error) {
+	res, err := db.Exec(
 		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, idempotency_key, created_at)
 		 VALUES (0, ?, 'Auto', 'Classifying', ?, ?, ?, datetime('now'))`,
 		repo, payload, priority, idempotencyKey)
+	if err != nil {
+		return 0, err
+	}
 	id, _ := res.LastInsertId()
-	return int(id)
+	return int(id), nil
 }
 
 func FailBounty(db *sql.DB, id int, errorMsg string) {

@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     branch_name    TEXT    DEFAULT '',   -- 'agent/<name>/task-<id>' persistent branch
     priority       INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
     task_timeout   INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
-    idempotency_key TEXT    DEFAULT ''  -- client-supplied dedup key; checked within 60 s
+    idempotency_key TEXT    DEFAULT ''  -- client-supplied UUID; duplicate submissions within 60s return the existing task
 );
 
 -- Status lifecycle:
