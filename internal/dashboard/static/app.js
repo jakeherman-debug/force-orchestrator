@@ -740,6 +740,16 @@ async function loadMail() {
   }
 }
 
+async function markAllMailRead() {
+  try {
+    const r = await api('/api/mail/read-all', { method: 'POST' });
+    showToast(`Marked ${r.marked} message${r.marked === 1 ? '' : 's'} as read`, 'ok');
+    loadMail();
+  } catch(e) {
+    showToast('Failed: ' + e.message, 'err');
+  }
+}
+
 function renderMail(mail) {
   const tbody = $('mail-tbody');
   if (!mail || !mail.length) {

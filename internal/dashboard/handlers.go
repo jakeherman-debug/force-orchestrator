@@ -653,10 +653,22 @@ func handleMailList(db *sql.DB) http.HandlerFunc {
 }
 
 // POST /api/mail/{id}/read
+// POST /api/mail/read-all
 func handleMailSubroutes(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jsonCORS(w)
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		// POST /api/mail/read-all
+		if len(parts) == 3 && parts[2] == "read-all" && r.Method == http.MethodPost {
+			res, err := db.Exec(`UPDATE Fleet_Mail SET read_at = datetime('now') WHERE read_at = ''`)
+			if err != nil {
+				http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+				return
+			}
+			n, _ := res.RowsAffected()
+			fmt.Fprintf(w, `{"ok":true,"marked":%d}`, n)
+			return
+		}
 		if len(parts) != 4 || parts[3] != "read" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
