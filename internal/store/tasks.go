@@ -119,6 +119,9 @@ func SetConvoyCoordinated(db *sql.DB, convoyID int) {
 
 func UpdateBountyStatus(db *sql.DB, id int, newStatus string) {
 	db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = '' WHERE id = ?`, newStatus, id)
+	if newStatus == "Completed" || newStatus == "Failed" || newStatus == "Escalated" {
+		FireWebhook(db, id, newStatus)
+	}
 }
 
 func AddBounty(db *sql.DB, parentID int, taskType, payload string) int {
@@ -146,6 +149,7 @@ func AddBountyClassifying(db *sql.DB, repo, payload string, priority int, idempo
 func FailBounty(db *sql.DB, id int, errorMsg string) {
 	db.Exec(`UPDATE BountyBoard SET status = 'Failed', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
 		errorMsg, id)
+	FireWebhook(db, id, "Failed")
 }
 
 // MarkConflictPending transitions a task to ConflictPending, indicating it was
