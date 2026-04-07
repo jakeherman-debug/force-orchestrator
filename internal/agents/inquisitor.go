@@ -115,7 +115,10 @@ func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }
 	staleRes, staleErr := db.Exec(`
 		UPDATE BountyBoard
 		SET status    = 'Failed',
-		    error_log = 'Inquisitor: classification timed out after 30 minutes'
+		    error_log = CASE WHEN IFNULL(error_log, '') != ''
+		                THEN 'Inquisitor: classification timed out after 30 minutes — last error: ' || error_log
+		                ELSE 'Inquisitor: classification timed out after 30 minutes'
+		                END
 		WHERE status = 'Classifying'
 		  AND created_at < datetime('now', ?)
 	`, fmt.Sprintf("-%d seconds", int(staleClassifyingTimeout.Seconds())))
@@ -145,6 +148,8 @@ func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }
 		taskType, reason, err := claude.ClassifyTaskType(t.payload)
 		if err != nil {
 			logger.Printf("Task #%d: classification error — %v", t.id, err)
+			db.Exec(`UPDATE BountyBoard SET error_log = ? WHERE id = ?`,
+				fmt.Sprintf("classification error: %v", err), t.id)
 			continue
 		}
 		if _, err = db.Exec(`UPDATE BountyBoard SET type = ?, status = 'Pending' WHERE id = ?`, taskType, t.id); err != nil {
