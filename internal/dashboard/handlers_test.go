@@ -563,3 +563,96 @@ func TestHandleAdd_EmptyTypeInsertsClassifying(t *testing.T) {
 		t.Errorf("expected status=Classifying for empty type, got %q", status)
 	}
 }
+
+// ── handleAdd — idempotency key deduplication ─────────────────────────────────
+
+func TestHandleAdd_IdempotencyDuplicateReturns200(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	key := "test-idem-key-001"
+	body := `{"type":"Feature","payload":"idempotent task","repo":"","priority":0,"idempotency_key":"` + key + `"}`
+
+	// First POST — should create the task.
+	r1 := httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body))
+	r1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	handleAdd(db)(w1, r1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first POST: expected 200, got %d: %s", w1.Code, w1.Body.String())
+	}
+	var resp1 map[string]any
+	if err := json.Unmarshal(w1.Body.Bytes(), &resp1); err != nil {
+		t.Fatalf("first POST: invalid JSON: %v", err)
+	}
+	originalID := int(resp1["id"].(float64))
+
+	// Second POST with the same key — should be a duplicate.
+	r2 := httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body))
+	r2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handleAdd(db)(w2, r2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second POST: expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+	var resp2 map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("second POST: invalid JSON: %v", err)
+	}
+	if resp2["duplicate"] != true {
+		t.Errorf("expected duplicate:true in second response, got %v", resp2["duplicate"])
+	}
+	returnedID := int(resp2["id"].(float64))
+	if returnedID != originalID {
+		t.Errorf("expected returned id=%d (original), got %d", originalID, returnedID)
+	}
+
+	// Only one row should exist in BountyBoard.
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE idempotency_key = ?`, key).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row with idempotency_key=%q, got %d", key, count)
+	}
+}
+
+func TestHandleAdd_IdempotencyDistinctKeysInsertSeparateTasks(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	body1 := `{"type":"Feature","payload":"first task","repo":"","priority":0,"idempotency_key":"key-aaa"}`
+	body2 := `{"type":"Feature","payload":"second task","repo":"","priority":0,"idempotency_key":"key-bbb"}`
+
+	r1 := httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body1))
+	r1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	handleAdd(db)(w1, r1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first POST: expected 200, got %d: %s", w1.Code, w1.Body.String())
+	}
+
+	r2 := httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body2))
+	r2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handleAdd(db)(w2, r2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second POST: expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	var resp2 map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("second POST: invalid JSON: %v", err)
+	}
+	if resp2["duplicate"] == true {
+		t.Error("expected no duplicate flag for distinct idempotency keys")
+	}
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard`).Scan(&count)
+	if count != 2 {
+		t.Errorf("expected 2 separate tasks in BountyBoard, got %d", count)
+	}
+}
