@@ -876,9 +876,6 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"error":"type must be Feature, CodeEdit, Investigate, or Audit"}`, http.StatusBadRequest)
 			return
 		}
-		if body.IdempotencyKey != "" {
-			db.Exec(`UPDATE BountyBoard SET idempotency_key = ? WHERE id = ?`, body.IdempotencyKey, newID)
-		}
 		store.LogAudit(db, "dashboard", "add-task", newID,
 			fmt.Sprintf("queued %s via dashboard", body.Type))
 		fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
