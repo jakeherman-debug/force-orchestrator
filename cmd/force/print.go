@@ -466,6 +466,40 @@ func printAgents(db *sql.DB) {
 	}
 }
 
+// printConvoyShow renders the header block and task table for `force convoy show <name>`.
+func printConvoyShow(db *sql.DB, convoyID int, name, status string, completed, total int) {
+	fmt.Printf("Convoy:   %s\n", name)
+	fmt.Printf("Status:   %s\n", status)
+	fmt.Printf("Progress: %d/%d tasks complete\n\n", completed, total)
+
+	rows, err := db.Query(`
+		SELECT id, status, COALESCE(owner,''), COALESCE(payload,'')
+		FROM BountyBoard WHERE convoy_id = ? ORDER BY id ASC`, convoyID)
+	if err != nil {
+		fmt.Printf("DB error: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	fmt.Printf("%-6s %-18s %-20s %s\n", "ID", "STATUS", "OWNER", "PAYLOAD")
+	fmt.Println(strings.Repeat("-", 110))
+	n := 0
+	for rows.Next() {
+		n++
+		var id int
+		var taskStatus, owner, payload string
+		rows.Scan(&id, &taskStatus, &owner, &payload)
+		abbrev := taskStatus
+		if a, ok := statusAbbrev[taskStatus]; ok {
+			abbrev = a
+		}
+		fmt.Printf("%-6d %-18s %-20s %s\n", id, truncate(abbrev, 18), truncate(owner, 20), payloadSummary(payload, 60))
+	}
+	if n == 0 {
+		fmt.Println("(no tasks)")
+	}
+}
+
 func printUsage() {
 	fmt.Println(`Usage: force <command> [args]
 
@@ -554,7 +588,7 @@ Escalations:
 Convoys:
   convoy list                    List all convoys with progress
   convoy create <name>           Create a named convoy
-  convoy show <id>               Show convoy details and dependency tree
+  convoy show <name>             Show convoy details and task table
   convoy approve <id>            Approve a plan-only convoy (Planned → Pending)
   convoy reset <id>              Reset all failed/escalated tasks in a convoy to Pending
   convoy reject <id> <feedback>  Reject Commander's plan, cancel tasks, and re-queue for re-planning
