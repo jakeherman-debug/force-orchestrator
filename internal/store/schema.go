@@ -139,6 +139,14 @@ func createSchema(db *sql.DB) {
 		summary,
 		files_changed
 	)`)
+
+	// Operator notes on tasks — injected into agent context at claim time.
+	db.Exec(`CREATE TABLE IF NOT EXISTS TaskNotes (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id    INTEGER NOT NULL REFERENCES BountyBoard(id),
+		note       TEXT    NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -178,4 +186,12 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`INSERT OR IGNORE INTO TaskDependencies (task_id, depends_on)
 		SELECT id, blocked_by FROM BountyBoard WHERE blocked_by > 0`)
 	db.Exec(`ALTER TABLE BountyBoard DROP COLUMN blocked_by`)
+
+	// TaskNotes — operator notes injected into agent context at claim time.
+	db.Exec(`CREATE TABLE IF NOT EXISTS TaskNotes (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id    INTEGER NOT NULL REFERENCES BountyBoard(id),
+		note       TEXT    NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
 }

@@ -174,3 +174,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS FleetMemory_fts USING fts5(
     summary,
     files_changed
 );
+
+-- ── Task notes ────────────────────────────────────────────────────────────────
+-- Operator notes on a task, injected into the agent's context at claim time.
+
+CREATE TABLE IF NOT EXISTS TaskNotes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL REFERENCES BountyBoard(id),
+    note       TEXT    NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);

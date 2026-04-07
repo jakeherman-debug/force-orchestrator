@@ -153,6 +153,16 @@ type FleetMemoryEntry struct {
 	CreatedAt    string
 }
 
+// ── Task notes ────────────────────────────────────────────────────────────────
+
+// TaskNote is an operator note attached to a task, injected into agent context at claim time.
+type TaskNote struct {
+	ID        int
+	TaskID    int
+	Note      string
+	CreatedAt string
+}
+
 type FleetMail struct {
 	ID          int
 	FromAgent   string
