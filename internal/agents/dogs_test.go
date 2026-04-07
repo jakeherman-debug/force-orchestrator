@@ -456,3 +456,125 @@ func TestDogMarkAndLastRun(t *testing.T) {
 		t.Error("expected non-empty last_run_at after store.DogMarkRun")
 	}
 }
+
+// ── dogPriorityAging ──────────────────────────────────────────────────────────
+
+func TestDogPriorityAging_12HoursOldPriority0BumpedTo1(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Task 13 hours old, priority 0 — should be bumped to 1 (not yet old enough for tier 2).
+	res, err := db.Exec(`INSERT INTO BountyBoard (type, status, payload, priority, created_at)
+		VALUES ('CodeEdit', 'Pending', 'aging task', 0, datetime('now', '-13 hours'))`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	id, _ := res.LastInsertId()
+
+	logger := log.New(io.Discard, "", 0)
+	if err := dogPriorityAging(db, logger); err != nil {
+		t.Fatalf("dogPriorityAging: %v", err)
+	}
+
+	var priority int
+	db.QueryRow(`SELECT priority FROM BountyBoard WHERE id = ?`, id).Scan(&priority)
+	if priority != 1 {
+		t.Errorf("expected priority=1 after 13h aging, got %d", priority)
+	}
+}
+
+func TestDogPriorityAging_24HoursOldPriority0BumpedTo2(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Task 25 hours old, priority 0 — hits both tiers; final priority must be 2.
+	res, err := db.Exec(`INSERT INTO BountyBoard (type, status, payload, priority, created_at)
+		VALUES ('CodeEdit', 'Pending', 'very old task', 0, datetime('now', '-25 hours'))`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	id, _ := res.LastInsertId()
+
+	logger := log.New(io.Discard, "", 0)
+	if err := dogPriorityAging(db, logger); err != nil {
+		t.Fatalf("dogPriorityAging: %v", err)
+	}
+
+	var priority int
+	db.QueryRow(`SELECT priority FROM BountyBoard WHERE id = ?`, id).Scan(&priority)
+	if priority != 2 {
+		t.Errorf("expected priority=2 (both tiers hit), got %d", priority)
+	}
+}
+
+func TestDogPriorityAging_24HoursOldPriority1BumpedTo2(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Task 25 hours old, already at priority 1 — only tier-2 query applies.
+	res, err := db.Exec(`INSERT INTO BountyBoard (type, status, payload, priority, created_at)
+		VALUES ('CodeEdit', 'Pending', 'tier2 task', 1, datetime('now', '-25 hours'))`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	id, _ := res.LastInsertId()
+
+	logger := log.New(io.Discard, "", 0)
+	if err := dogPriorityAging(db, logger); err != nil {
+		t.Fatalf("dogPriorityAging: %v", err)
+	}
+
+	var priority int
+	db.QueryRow(`SELECT priority FROM BountyBoard WHERE id = ?`, id).Scan(&priority)
+	if priority != 2 {
+		t.Errorf("expected priority=2 for 25h/priority-1 task, got %d", priority)
+	}
+}
+
+func TestDogPriorityAging_6HoursOldNotBumped(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Task only 6 hours old — below both thresholds, must not be bumped.
+	res, err := db.Exec(`INSERT INTO BountyBoard (type, status, payload, priority, created_at)
+		VALUES ('CodeEdit', 'Pending', 'young task', 0, datetime('now', '-6 hours'))`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	id, _ := res.LastInsertId()
+
+	logger := log.New(io.Discard, "", 0)
+	if err := dogPriorityAging(db, logger); err != nil {
+		t.Fatalf("dogPriorityAging: %v", err)
+	}
+
+	var priority int
+	db.QueryRow(`SELECT priority FROM BountyBoard WHERE id = ?`, id).Scan(&priority)
+	if priority != 0 {
+		t.Errorf("expected priority=0 for 6h task (below threshold), got %d", priority)
+	}
+}
+
+func TestDogPriorityAging_NonPendingNotBumped(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Completed task older than 24 hours — status guard must prevent any bump.
+	res, err := db.Exec(`INSERT INTO BountyBoard (type, status, payload, priority, created_at)
+		VALUES ('CodeEdit', 'Completed', 'done task', 0, datetime('now', '-25 hours'))`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	id, _ := res.LastInsertId()
+
+	logger := log.New(io.Discard, "", 0)
+	if err := dogPriorityAging(db, logger); err != nil {
+		t.Fatalf("dogPriorityAging: %v", err)
+	}
+
+	var priority int
+	db.QueryRow(`SELECT priority FROM BountyBoard WHERE id = ?`, id).Scan(&priority)
+	if priority != 0 {
+		t.Errorf("expected priority=0 for non-Pending task, got %d", priority)
+	}
+}
