@@ -65,6 +65,12 @@ function showToast(msg, type = 'ok') {
   setTimeout(() => el.remove(), 3000);
 }
 
+function genUUID() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+}
+
 async function api(url, opts = {}) {
   const r = await fetch(url, opts);
   if (!r.ok) {
@@ -853,6 +859,7 @@ async function showAddModal() {
   $('add-payload').value  = '';
   $('add-priority').value = '0';
   $('add-type').value     = '';
+  S.addIdempotencyKey = genUUID();
   onAddTypeChange();
   $('add-modal').classList.remove('hidden');
   setTimeout(() => $('add-payload').focus(), 50);
@@ -880,9 +887,13 @@ async function submitAddTask() {
     const r = await api('/api/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, payload, repo, priority }),
+      body: JSON.stringify({ type, payload, repo, priority, idempotency_key: S.addIdempotencyKey || '' }),
     });
-    showToast(`Task #${r.id} queued`, 'ok');
+    if (r.duplicate) {
+      showToast(`Already queued as task #${r.id}`, 'ok');
+    } else {
+      showToast(`Task #${r.id} queued`, 'ok');
+    }
     closeModal('add-modal');
     loadTasks();
     pollStatus();
