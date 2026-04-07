@@ -21,10 +21,11 @@ var dogCooldowns = map[string]time.Duration{
 	"mail-cleanup":     12 * time.Hour,
 	"memory-hygiene":   24 * time.Hour,
 	"stalled-reviews":  6 * time.Hour,
+	"daily-digest":     24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
-var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews"}
+var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews", "daily-digest"}
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
 // Called by SpawnInquisitor on every inquisitor cycle.
@@ -73,6 +74,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogMemoryHygiene(db, logger)
 	case "stalled-reviews":
 		return dogStalledReviews(db, logger)
+	case "daily-digest":
+		return runDailyDigest(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
@@ -310,6 +313,48 @@ func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 	store.SendMail(db, "inquisitor", "operator",
 		fmt.Sprintf("[STALLED REVIEWS] %d tasks stuck in review", len(tasks)),
 		body.String(), 0, store.MailTypeAlert)
+	return nil
+}
+
+func runDailyDigest(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	stats, err := store.FetchDigestStats(db)
+	if err != nil {
+		return fmt.Errorf("daily-digest: fetch stats: %w", err)
+	}
+
+	var body strings.Builder
+
+	fmt.Fprintf(&body, "## Tasks (Last 24h)\n\n")
+	fmt.Fprintf(&body, "- Completed: %d\n", stats.Completed)
+	fmt.Fprintf(&body, "- Failed: %d\n", stats.Failed)
+	fmt.Fprintf(&body, "- Escalated: %d\n\n", stats.Escalated)
+
+	fmt.Fprintf(&body, "## Current Queue\n\n")
+	fmt.Fprintf(&body, "- Pending: %d\n", stats.Pending)
+	fmt.Fprintf(&body, "- Locked: %d\n\n", stats.Locked)
+
+	fmt.Fprintf(&body, "## Top Agents\n\n")
+	if len(stats.TopAgents) == 0 {
+		fmt.Fprintf(&body, "None\n\n")
+	} else {
+		for _, a := range stats.TopAgents {
+			fmt.Fprintf(&body, "- %s: %d\n", a.Agent, a.Count)
+		}
+		fmt.Fprintf(&body, "\n")
+	}
+
+	fmt.Fprintf(&body, "## Stale Convoys\n\n")
+	if len(stats.StaleConvoys) == 0 {
+		fmt.Fprintf(&body, "None\n")
+	} else {
+		for _, c := range stats.StaleConvoys {
+			fmt.Fprintf(&body, "- #%d %s\n", c.ID, c.Name)
+		}
+	}
+
+	store.SendMail(db, "inquisitor", "operator", "[DAILY DIGEST] Fleet Health Summary", body.String(), 0, store.MailTypeInfo)
+	logger.Printf("Dog daily-digest: digest sent (completed=%d failed=%d escalated=%d pending=%d locked=%d stale_convoys=%d)",
+		stats.Completed, stats.Failed, stats.Escalated, stats.Pending, stats.Locked, len(stats.StaleConvoys))
 	return nil
 }
 
