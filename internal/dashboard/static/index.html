@@ -97,14 +97,15 @@
           <thead>
             <tr>
               <th style="width:50px">ID</th>
-              <th style="width:90px">Status</th>
+              <th class="th-sortable" data-sort-col="status" style="width:90px" onclick="setSortBy('status')">Status<span class="sort-icon"> ⇅</span></th>
               <th style="width:90px">Owner</th>
-              <th style="width:80px">Type</th>
+              <th class="th-sortable" data-sort-col="type" style="width:80px" onclick="setSortBy('type')">Type<span class="sort-icon"> ⇅</span></th>
               <th>Payload</th>
               <th style="width:90px">Repo</th>
-              <th style="width:55px">Priority</th>
+              <th class="th-sortable" data-sort-col="priority" style="width:55px" onclick="setSortBy('priority')">Priority<span class="sort-icon"> ⇅</span></th>
               <th style="width:60px">Retry</th>
               <th style="width:130px">Runtime / Blocked</th>
+              <th class="th-sortable" data-sort-col="created_at" style="width:100px" onclick="setSortBy('created_at')">Created<span class="sort-icon"> ⇅</span></th>
               <th style="width:70px">Cost</th>
             </tr>
           </thead>
