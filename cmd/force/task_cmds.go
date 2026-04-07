@@ -73,7 +73,11 @@ func cmdAdd(db *sql.DB, args []string) {
 	// When no type is specified, submit as Auto/Classifying so the UI is not blocked.
 	// The Inquisitor will classify it asynchronously and transition it to Pending.
 	if taskType == "" {
-		id := store.AddBountyClassifying(db, "", taskPayload, priority, idempotencyKey)
+		id, err := store.AddBountyClassifying(db, "", taskPayload, priority, idempotencyKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to add task: %v\n", err)
+			os.Exit(1)
+		}
 		planSuffix := ""
 		if planOnly {
 			planSuffix = " — Commander will plan only; approve with: force convoy approve <convoy-id>"
