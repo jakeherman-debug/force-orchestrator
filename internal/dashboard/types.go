@@ -14,6 +14,12 @@ type DashboardStatus struct {
 	TotalSpendDollars float64        `json:"total_spend_dollars"`
 }
 
+// TasksResponse is the payload for GET /api/tasks
+type TasksResponse struct {
+	Tasks []DashboardTask `json:"tasks"`
+	Total int             `json:"total"`
+}
+
 // DashboardTask is one row in GET /api/tasks
 type DashboardTask struct {
 	ID             int     `json:"id"`

@@ -90,16 +90,20 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			sortDir = "desc"
 		}
 
-		query := `SELECT id, type, status, target_repo, owner, retry_count, convoy_id,
-			payload, IFNULL(error_log,''), IFNULL(locked_at,''), COALESCE(priority,0),
-			COALESCE(CAST((julianday('now') - julianday(NULLIF(locked_at,''))) * 86400 AS INTEGER), 0),
-			(SELECT GROUP_CONCAT(td.depends_on) FROM TaskDependencies td
-			 JOIN BountyBoard dep ON dep.id = td.depends_on
-			 WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed'),
-			(SELECT COALESCE(SUM(tokens_in),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
-			(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
-			IFNULL(BountyBoard.created_at,'')
-			FROM BountyBoard`
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		offset := 0
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		baseQuery := `FROM BountyBoard`
 		args := []any{}
 		var conditions []string
 		if statusFilter != "" {
@@ -119,11 +123,28 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if len(conditions) > 0 {
-			query += ` WHERE ` + strings.Join(conditions, ` AND `)
+			baseQuery += ` WHERE ` + strings.Join(conditions, ` AND `)
 		}
-		query += ` ORDER BY ` + sortBy + ` ` + sortDir + ` LIMIT 500`
 
-		rows, err := db.Query(query, args...)
+		var total int
+		if err := db.QueryRow(`SELECT COUNT(*) `+baseQuery, args...).Scan(&total); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		query := `SELECT id, type, status, target_repo, owner, retry_count, convoy_id,
+			payload, IFNULL(error_log,''), IFNULL(locked_at,''), COALESCE(priority,0),
+			COALESCE(CAST((julianday('now') - julianday(NULLIF(locked_at,''))) * 86400 AS INTEGER), 0),
+			(SELECT GROUP_CONCAT(td.depends_on) FROM TaskDependencies td
+			 JOIN BountyBoard dep ON dep.id = td.depends_on
+			 WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed'),
+			(SELECT COALESCE(SUM(tokens_in),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
+			(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
+			IFNULL(BountyBoard.created_at,'')
+			` + baseQuery + ` ORDER BY ` + sortBy + ` ` + sortDir + ` LIMIT ? OFFSET ?`
+		queryArgs := append(args, limit, offset)
+
+		rows, err := db.Query(query, queryArgs...)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -147,7 +168,7 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		if tasks == nil {
 			tasks = []DashboardTask{}
 		}
-		json.NewEncoder(w).Encode(tasks)
+		json.NewEncoder(w).Encode(TasksResponse{Tasks: tasks, Total: total})
 	}
 }
 

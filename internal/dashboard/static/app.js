@@ -2,20 +2,23 @@
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
-  status:       null,
-  tasks:        [],
-  taskFilter:   'active',
-  convoyFilter: 0,
-  repos:        [],
-  escFilter:    'Open',
-  logMode:      'fleet',   // 'fleet' | 'holonet'
-  logSource:    null,
-  selectedID:   null,
-  detail:       null,
-  rejectID:     null,
-  activeTab:    'tasks',
-  sortBy:       '',
-  sortDir:      'asc',
+  status:             null,
+  tasks:              [],
+  taskFilter:         'active',
+  convoyFilter:       0,
+  convoys:            [],
+  convoyStatusFilter: 'all',
+  convoyTimeFilter:   'all',
+  repos:              [],
+  escFilter:          'Open',
+  logMode:            'fleet',   // 'fleet' | 'holonet'
+  logSource:          null,
+  selectedID:         null,
+  detail:             null,
+  rejectID:           null,
+  activeTab:          'tasks',
+  sortBy:             '',
+  sortDir:            'asc',
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -696,6 +699,7 @@ function hideConvoyBanner() {
 async function loadConvoys() {
   try {
     const convoys = await api('/api/convoys');
+    S.convoys = convoys;
     renderConvoys(convoys);
     $('tbadge-convoys').textContent = convoys.length || '';
   } catch(e) {
@@ -704,12 +708,44 @@ async function loadConvoys() {
 }
 
 function renderConvoys(convoys) {
+  // Sync filter UI state
+  document.querySelectorAll('#tab-convoys .filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.cstatus === S.convoyStatusFilter);
+  });
+  const timeSel = $('convoy-time-filter');
+  if (timeSel) timeSel.value = S.convoyTimeFilter;
+
+  let list = convoys || [];
+
+  // Status filter: 'active' matches Active and Failed; 'completed' matches only Completed
+  if (S.convoyStatusFilter !== 'all') {
+    list = list.filter(c => {
+      const st = (c.status || '').toLowerCase();
+      if (S.convoyStatusFilter === 'active') return st === 'active' || st === 'failed';
+      return st === S.convoyStatusFilter;
+    });
+  }
+
+  // Time filter: compare created_at against cutoff
+  if (S.convoyTimeFilter !== 'all') {
+    const msMap = { '1h': 3600000, '8h': 28800000, '24h': 86400000 };
+    const ms = msMap[S.convoyTimeFilter];
+    if (ms) {
+      const cutoff = Date.now() - ms;
+      list = list.filter(c => new Date(c.created_at).getTime() >= cutoff);
+    }
+  }
+
   const el = $('convoy-list');
-  if (!convoys || !convoys.length) {
-    el.innerHTML = `<div class="empty-state"><span class="icon">🚀</span>No convoys yet.</div>`;
+  if (!list.length) {
+    const hasFilter = S.convoyStatusFilter !== 'all' || S.convoyTimeFilter !== 'all';
+    el.innerHTML = hasFilter
+      ? `<div class="empty-state"><span class="icon">🔍</span>No convoys match the current filters.</div>`
+      : `<div class="empty-state"><span class="icon">🚀</span>No convoys yet.</div>`;
     return;
   }
-  el.innerHTML = convoys.map(c => {
+
+  el.innerHTML = list.map(c => {
     const pct = c.total > 0 ? Math.round(100 * c.completed / c.total) : 0;
     const approveBtn = c.has_planned
       ? `<button class="action-btn approve-btn" onclick="approveConvoy(${c.id})">Activate Planned Tasks</button>`
@@ -732,6 +768,26 @@ function renderConvoys(convoys) {
         </div>
       </div>`;
   }).join('');
+}
+
+function setConvoyStatusFilter(f) {
+  S.convoyStatusFilter = f;
+  syncConvoyFilterURL();
+  renderConvoys(S.convoys);
+}
+
+function setConvoyTimeFilter(f) {
+  S.convoyTimeFilter = f;
+  syncConvoyFilterURL();
+  renderConvoys(S.convoys);
+}
+
+function syncConvoyFilterURL() {
+  const params = new URLSearchParams(window.location.search);
+  S.convoyStatusFilter === 'all' ? params.delete('convoy_status') : params.set('convoy_status', S.convoyStatusFilter);
+  S.convoyTimeFilter === 'all'   ? params.delete('convoy_since')  : params.set('convoy_since',  S.convoyTimeFilter);
+  const qs = params.toString();
+  history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
 }
 
 async function approveConvoy(id) {
@@ -1099,8 +1155,12 @@ function startPolling() {
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-(function() {
+(function initFromURL() {
   const p = new URLSearchParams(window.location.search);
+  const cs = p.get('convoy_status');
+  const ct = p.get('convoy_since');
+  if (['all', 'active', 'completed'].includes(cs)) S.convoyStatusFilter = cs;
+  if (['all', '1h', '8h', '24h'].includes(ct))     S.convoyTimeFilter   = ct;
   const sb = p.get('sort_by');
   const sd = p.get('sort_dir');
   if (sb) S.sortBy  = sb;
