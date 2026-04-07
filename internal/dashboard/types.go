@@ -30,6 +30,7 @@ type DashboardTask struct {
 	RuntimeSeconds int     `json:"runtime_seconds"`
 	BlockedBy      []int   `json:"blocked_by"`
 	CostDollars    float64 `json:"cost_dollars"`
+	CreatedAt      string  `json:"created_at"`
 }
 
 // DashboardMail is a single fleet mail message

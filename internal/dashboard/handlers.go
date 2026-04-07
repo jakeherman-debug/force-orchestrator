@@ -79,6 +79,17 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		jsonCORS(w)
 		statusFilter := r.URL.Query().Get("status")
 		convoyIDStr := r.URL.Query().Get("convoy_id")
+
+		allowedSortBy := map[string]bool{"status": true, "type": true, "created_at": true, "priority": true, "id": true}
+		sortBy := r.URL.Query().Get("sort_by")
+		if !allowedSortBy[sortBy] {
+			sortBy = "id"
+		}
+		sortDir := r.URL.Query().Get("sort_dir")
+		if sortDir != "asc" && sortDir != "desc" {
+			sortDir = "desc"
+		}
+
 		query := `SELECT id, type, status, target_repo, owner, retry_count, convoy_id,
 			payload, IFNULL(error_log,''), IFNULL(locked_at,''), COALESCE(priority,0),
 			COALESCE(CAST((julianday('now') - julianday(NULLIF(locked_at,''))) * 86400 AS INTEGER), 0),
@@ -86,7 +97,8 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			 JOIN BountyBoard dep ON dep.id = td.depends_on
 			 WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed'),
 			(SELECT COALESCE(SUM(tokens_in),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
-			(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id)
+			(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
+			IFNULL(BountyBoard.created_at,'')
 			FROM BountyBoard`
 		args := []any{}
 		var conditions []string
@@ -109,7 +121,7 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		if len(conditions) > 0 {
 			query += ` WHERE ` + strings.Join(conditions, ` AND `)
 		}
-		query += ` ORDER BY id DESC LIMIT 500`
+		query += ` ORDER BY ` + sortBy + ` ` + sortDir + ` LIMIT 500`
 
 		rows, err := db.Query(query, args...)
 		if err != nil {
@@ -124,7 +136,7 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			var tokensIn, tokensOut int
 			rows.Scan(&t.ID, &t.Type, &t.Status, &t.Repo, &t.Owner, &t.RetryCount,
 				&t.ConvoyID, &t.Payload, &t.ErrorLog, &t.LockedAt, &t.Priority,
-				&t.RuntimeSeconds, &activeBlockersStr, &tokensIn, &tokensOut)
+				&t.RuntimeSeconds, &activeBlockersStr, &tokensIn, &tokensOut, &t.CreatedAt)
 			t.BlockedBy = parseBlockers(activeBlockersStr.String)
 			t.CostDollars = store.TaskCostDollars(tokensIn, tokensOut)
 			if len(t.Payload) > 300 {
