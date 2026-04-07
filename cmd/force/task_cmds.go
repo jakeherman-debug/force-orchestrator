@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"os"
@@ -13,8 +14,17 @@ import (
 	"force-orchestrator/internal/telemetry"
 )
 
+// newUUID returns a random UUID v4 string.
+func newUUID() string {
+	var b [16]byte
+	rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func cmdAdd(db *sql.DB, args []string) {
-	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] <task description>"
+	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] [--idempotency-key KEY] <task description>"
 	if len(args) == 0 {
 		fmt.Println(usageMsg)
 		os.Exit(1)
@@ -22,6 +32,7 @@ func cmdAdd(db *sql.DB, args []string) {
 	priority := 0
 	planOnly := false
 	taskType := ""
+	idempotencyKey := ""
 	validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true, "WriteMemory": true, "MedicReview": true}
 	addArgs := args
 	for i := 0; i < len(addArgs); i++ {
@@ -42,6 +53,10 @@ func cmdAdd(db *sql.DB, args []string) {
 			}
 			addArgs = append(addArgs[:i], addArgs[i+2:]...)
 			i--
+		case addArgs[i] == "--idempotency-key" && i+1 < len(addArgs):
+			idempotencyKey = addArgs[i+1]
+			addArgs = append(addArgs[:i], addArgs[i+2:]...)
+			i--
 		}
 	}
 	if len(addArgs) == 0 {
@@ -52,15 +67,19 @@ func cmdAdd(db *sql.DB, args []string) {
 	if planOnly {
 		taskPayload = "[PLAN_ONLY]\n" + taskPayload
 	}
+	if idempotencyKey == "" {
+		idempotencyKey = newUUID()
+	}
+	// When no type is specified, submit as Auto/Classifying so the UI is not blocked.
+	// The Inquisitor will classify it asynchronously and transition it to Pending.
 	if taskType == "" {
-		classified, reason, err := claude.ClassifyTaskType(taskPayload)
-		if err != nil {
-			fmt.Printf("Auto-classification failed: %v — defaulting to Feature\n", err)
-			taskType = "Feature"
-		} else {
-			taskType = classified
-			fmt.Printf("Classified as %s — %s\n", taskType, reason)
+		id := store.AddBountyClassifying(db, "", taskPayload, priority, idempotencyKey)
+		planSuffix := ""
+		if planOnly {
+			planSuffix = " — Commander will plan only; approve with: force convoy approve <convoy-id>"
 		}
+		fmt.Printf("Queued as task #%d (classifying): '%s'%s\n", id, strings.Join(addArgs, " "), planSuffix)
+		return
 	}
 	id := store.AddBounty(db, 0, taskType, taskPayload)
 	if priority != 0 {
