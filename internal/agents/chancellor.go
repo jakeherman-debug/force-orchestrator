@@ -22,24 +22,30 @@ Your job is to prevent clobbering, reduce rework, and maximize fleet efficiency.
 
 For each proposed plan, decide one of:
 - APPROVE: The plan is safe to execute as-is. No meaningful conflicts with active work.
-- REJECT: The plan conflicts with active convoy work. Explain precisely what conflicts and what
-  the Commander should wait for or plan around. The Commander will replan with your feedback.
+- SEQUENCE: The plan is correct but depends on work in one or more active convoys finishing first.
+  Approve it as a blocked convoy — the new tasks will not start until the specified convoy's tail
+  tasks complete. Use this instead of REJECT when the only issue is "wait for X to finish first."
+  Specify which convoy IDs to sequence after in sequence_after_convoy_ids.
+- REJECT: The plan has a fundamental design conflict that requires Commander to replan. Use only
+  when the plan itself is wrong — not merely when it needs to wait for other work to finish.
 - MERGE: This plan and another pending proposal are closely related and should be combined into
   a single convoy. Specify the feature_id to merge with.
 
 Respond with ONLY a JSON object in exactly this format — no preamble, no markdown:
-{"action":"APPROVE"|"REJECT"|"MERGE","reason":"...","merge_with_feature_id":0}
+{"action":"APPROVE"|"SEQUENCE"|"REJECT"|"MERGE","reason":"...","merge_with_feature_id":0,"sequence_after_convoy_ids":[]}
 
-Set merge_with_feature_id to the feature ID to merge with (only for MERGE action), 0 otherwise.
+Set merge_with_feature_id to the feature ID to merge with (only for MERGE), 0 otherwise.
+Set sequence_after_convoy_ids to the convoy IDs to block on (only for SEQUENCE), empty otherwise.
 
-Be decisive. Prefer APPROVE for independent work. Use REJECT only for genuine conflicts where
-parallel execution would cause clobbering or wasted rework. Use MERGE when two proposals clearly
-address the same subsystem and combining them would produce a better, more coherent convoy.`
+Be decisive. Prefer APPROVE for independent work. Use SEQUENCE when a plan is correct but must
+wait on active convoys — do not waste a Commander replan cycle just to say "wait first."
+Use REJECT only for genuine design conflicts. Use MERGE when combining produces a better convoy.`
 
 type chancellorRuling struct {
-	Action            string `json:"action"`
-	Reason            string `json:"reason"`
-	MergeWithFeatureID int   `json:"merge_with_feature_id"`
+	Action                string `json:"action"`
+	Reason                string `json:"reason"`
+	MergeWithFeatureID    int    `json:"merge_with_feature_id"`
+	SequenceAfterConvoyIDs []int `json:"sequence_after_convoy_ids"`
 }
 
 // SpawnChancellor runs the Supreme Chancellor agent loop.
@@ -94,6 +100,15 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 	case "APPROVE":
 		logger.Printf("Feature #%d: APPROVED — %s", feature.ID, ruling.Reason)
 		approveProposal(db, feature, tasks, logger)
+
+	case "SEQUENCE":
+		if len(ruling.SequenceAfterConvoyIDs) == 0 {
+			logger.Printf("Feature #%d: SEQUENCE with no convoy IDs — auto-approving", feature.ID)
+			approveProposal(db, feature, tasks, logger)
+			return
+		}
+		logger.Printf("Feature #%d: SEQUENCE after convoy(s) %v — %s", feature.ID, ruling.SequenceAfterConvoyIDs, ruling.Reason)
+		sequenceProposal(db, feature, tasks, ruling.SequenceAfterConvoyIDs, ruling.Reason, logger)
 
 	case "REJECT":
 		logger.Printf("Feature #%d: REJECTED — %s", feature.ID, ruling.Reason)
@@ -174,6 +189,74 @@ func rejectProposal(db *sql.DB, feature *store.Bounty, reason string, logger int
 		fmt.Sprintf("Supreme Chancellor rejected the plan for Feature #%d.\n\nReason:\n%s\n\nTask reset to Pending — Commander will replan.",
 			feature.ID, reason),
 		feature.ID, store.MailTypeAlert)
+}
+
+// sequenceProposal creates the convoy immediately but wires cross-convoy blocking dependencies
+// so the new convoy's root tasks cannot start until the tail tasks of each specified convoy complete.
+func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, blockingConvoyIDs []int, reason string, logger interface{ Printf(string, ...any) }) {
+	convoyPreview := strings.ReplaceAll(feature.Payload, "\n", " ")
+	if len(convoyPreview) > 50 {
+		convoyPreview = convoyPreview[:50]
+	}
+	convoyName := fmt.Sprintf("[%d] %s", feature.ID, convoyPreview)
+	convoyID, convoyErr := store.CreateConvoy(db, convoyName)
+	if convoyErr != nil {
+		for i := 2; i <= 10; i++ {
+			convoyID, convoyErr = store.CreateConvoy(db, fmt.Sprintf("%s (re-plan %d)", convoyName, i))
+			if convoyErr == nil {
+				break
+			}
+		}
+		if convoyErr != nil {
+			store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr))
+			return
+		}
+	}
+	store.SetConvoyCoordinated(db, convoyID)
+
+	idMapping, err := insertConvoyAndTasks(db, tasks, feature, convoyID)
+	if err != nil {
+		store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error())
+		return
+	}
+
+	// Find root tasks in the new plan (those with no blocked_by in the plan).
+	rootTaskIDs := []int{}
+	for _, t := range tasks {
+		if len(t.BlockedBy) == 0 {
+			if realID, ok := idMapping[t.TempID]; ok {
+				rootTaskIDs = append(rootTaskIDs, realID)
+			}
+		}
+	}
+
+	// For each blocking convoy, inject its tail task IDs as dependencies on every root task.
+	injected := 0
+	for _, blockingConvoyID := range blockingConvoyIDs {
+		tailIDs := store.GetConvoyTailTaskIDs(db, blockingConvoyID)
+		for _, rootID := range rootTaskIDs {
+			for _, tailID := range tailIDs {
+				store.AddDependency(db, rootID, tailID)
+				injected++
+			}
+		}
+	}
+
+	store.SetProposedConvoyStatus(db, feature.ID, "approved")
+	store.UpdateBountyStatus(db, feature.ID, "Completed")
+	logger.Printf("Feature #%d: convoy #%d created (sequenced after convoy(s) %v, %d cross-convoy dep(s) injected, %d task(s))",
+		feature.ID, convoyID, blockingConvoyIDs, injected, len(tasks))
+
+	var taskLines []string
+	for _, t := range tasks {
+		line := fmt.Sprintf("  #%d [%s] %s", idMapping[t.TempID], t.Repo, util.TruncateStr(t.Task, 80))
+		taskLines = append(taskLines, line)
+	}
+	store.SendMail(db, chancellorName, "operator",
+		fmt.Sprintf("[SEQUENCED] Feature #%d → convoy #%d (blocked on convoy(s) %v)", feature.ID, convoyID, blockingConvoyIDs),
+		fmt.Sprintf("Supreme Chancellor sequenced Feature #%d after convoy(s) %v.\nConvoy #%d created with %d task(s) — root tasks blocked until upstream work completes.\n\nReason: %s\n\nTasks:\n%s\n\nOriginal request:\n%s",
+			feature.ID, blockingConvoyIDs, convoyID, len(tasks), reason, strings.Join(taskLines, "\n"), util.TruncateStr(feature.Payload, 500)),
+		feature.ID, store.MailTypeInfo)
 }
 
 // mergeProposals synthesizes two proposed plans into a single convoy.
@@ -301,6 +384,7 @@ func buildChancellorPrompt(feature *store.Bounty, tasks []store.TaskPlan, active
 			for _, task := range c.Tasks {
 				fmt.Fprintf(&b, "  - %s\n", task)
 			}
+			fmt.Fprintf(&b, "  (Use convoy_id=%d in sequence_after_convoy_ids to block on this convoy)\n", c.ID)
 		}
 	} else {
 		fmt.Fprintf(&b, "\n## Active Convoys\n\nNone.\n")

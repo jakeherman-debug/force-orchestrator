@@ -172,12 +172,12 @@ func TestHandleTasks_EmptyDB(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var tasks []DashboardTask
-	if err := json.Unmarshal(w.Body.Bytes(), &tasks); err != nil {
+	var resp TasksResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if len(tasks) != 0 {
-		t.Errorf("expected empty slice, got %d tasks", len(tasks))
+	if len(resp.Tasks) != 0 {
+		t.Errorf("expected empty slice, got %d tasks", len(resp.Tasks))
 	}
 }
 
@@ -193,12 +193,12 @@ func TestHandleTasks_ReturnsAllTasks(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleTasks(db)(w, r)
 
-	var tasks []DashboardTask
-	if err := json.Unmarshal(w.Body.Bytes(), &tasks); err != nil {
+	var resp TasksResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if len(tasks) != 2 {
-		t.Errorf("expected 2 tasks, got %d", len(tasks))
+	if len(resp.Tasks) != 2 {
+		t.Errorf("expected 2 tasks, got %d", len(resp.Tasks))
 	}
 }
 
@@ -214,15 +214,15 @@ func TestHandleTasks_StatusFilter(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleTasks(db)(w, r)
 
-	var tasks []DashboardTask
-	if err := json.Unmarshal(w.Body.Bytes(), &tasks); err != nil {
+	var resp TasksResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if len(tasks) != 1 {
-		t.Errorf("expected 1 Pending task, got %d", len(tasks))
+	if len(resp.Tasks) != 1 {
+		t.Errorf("expected 1 Pending task, got %d", len(resp.Tasks))
 	}
-	if tasks[0].Status != "Pending" {
-		t.Errorf("unexpected status: %s", tasks[0].Status)
+	if resp.Tasks[0].Status != "Pending" {
+		t.Errorf("unexpected status: %s", resp.Tasks[0].Status)
 	}
 }
 
@@ -237,17 +237,17 @@ func TestHandleTasks_PayloadTruncation(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleTasks(db)(w, r)
 
-	var tasks []DashboardTask
-	if err := json.Unmarshal(w.Body.Bytes(), &tasks); err != nil {
+	var resp TasksResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if len(tasks) == 0 {
+	if len(resp.Tasks) == 0 {
 		t.Fatal("expected a task")
 	}
-	if len(tasks[0].Payload) >= 400 {
-		t.Errorf("expected payload to be truncated, got length %d", len(tasks[0].Payload))
+	if len(resp.Tasks[0].Payload) >= 400 {
+		t.Errorf("expected payload to be truncated, got length %d", len(resp.Tasks[0].Payload))
 	}
-	if !strings.HasSuffix(tasks[0].Payload, "…") {
+	if !strings.HasSuffix(resp.Tasks[0].Payload, "…") {
 		t.Error("expected truncated payload to end with ellipsis")
 	}
 }

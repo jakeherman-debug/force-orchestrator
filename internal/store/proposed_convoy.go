@@ -155,3 +155,29 @@ func GetPendingProposals(db *sql.DB, excludeFeatureID int) []PendingProposalInfo
 func SetProposedConvoyStatus(db *sql.DB, featureID int, status string) {
 	db.Exec(`UPDATE ProposedConvoys SET status = ? WHERE feature_id = ?`, status, featureID)
 }
+
+// GetConvoyTailTaskIDs returns the IDs of tasks in the given convoy that no other
+// task in the same convoy depends on — i.e., the last tasks in the execution graph.
+// These are used as blocking dependencies when sequencing a new convoy after this one.
+func GetConvoyTailTaskIDs(db *sql.DB, convoyID int) []int {
+	rows, err := db.Query(`
+		SELECT id FROM BountyBoard
+		WHERE convoy_id = ?
+		  AND status NOT IN ('Completed', 'Cancelled', 'Failed')
+		  AND id NOT IN (
+		      SELECT td.depends_on
+		      FROM TaskDependencies td
+		      INNER JOIN BountyBoard bb2 ON bb2.id = td.task_id AND bb2.convoy_id = ?
+		  )`, convoyID, convoyID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	return ids
+}
