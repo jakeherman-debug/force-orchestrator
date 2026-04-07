@@ -24,7 +24,7 @@ func newUUID() string {
 }
 
 func cmdAdd(db *sql.DB, args []string) {
-	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] [--idempotency-key KEY] <task description>"
+	const usageMsg = "Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] [--repo <name>] [--idempotency-key KEY] <task description>"
 	if len(args) == 0 {
 		fmt.Println(usageMsg)
 		os.Exit(1)
@@ -32,6 +32,7 @@ func cmdAdd(db *sql.DB, args []string) {
 	priority := 0
 	planOnly := false
 	taskType := ""
+	repo := ""
 	idempotencyKey := ""
 	validTypes := map[string]bool{"Feature": true, "CodeEdit": true, "Investigate": true, "Audit": true, "WriteMemory": true, "MedicReview": true}
 	addArgs := args
@@ -53,6 +54,10 @@ func cmdAdd(db *sql.DB, args []string) {
 			}
 			addArgs = append(addArgs[:i], addArgs[i+2:]...)
 			i--
+		case addArgs[i] == "--repo" && i+1 < len(addArgs):
+			repo = addArgs[i+1]
+			addArgs = append(addArgs[:i], addArgs[i+2:]...)
+			i--
 		case addArgs[i] == "--idempotency-key" && i+1 < len(addArgs):
 			idempotencyKey = addArgs[i+1]
 			addArgs = append(addArgs[:i], addArgs[i+2:]...)
@@ -61,6 +66,15 @@ func cmdAdd(db *sql.DB, args []string) {
 	}
 	if len(addArgs) == 0 {
 		fmt.Println(usageMsg)
+		os.Exit(1)
+	}
+	// CodeEdit tasks go directly to an astromech and require a known repo.
+	if taskType == "CodeEdit" && repo == "" {
+		fmt.Fprintf(os.Stderr, "error: --type CodeEdit requires --repo <name>\n  Usage: force add --type CodeEdit --repo <name> <description>\n  Or omit --type to let the classifier route it automatically.\n")
+		os.Exit(1)
+	}
+	if repo != "" && store.GetRepoPath(db, repo) == "" {
+		fmt.Fprintf(os.Stderr, "error: unknown repo '%s'. Register it first with: force add-repo\n", repo)
 		os.Exit(1)
 	}
 	taskPayload := strings.Join(addArgs, " ")
@@ -73,7 +87,7 @@ func cmdAdd(db *sql.DB, args []string) {
 	// When no type is specified, submit as Auto/Classifying so the UI is not blocked.
 	// The Inquisitor will classify it asynchronously and transition it to Pending.
 	if taskType == "" {
-		id, err := store.AddBountyClassifying(db, "", taskPayload, priority, idempotencyKey)
+		id, err := store.AddBountyClassifying(db, repo, taskPayload, priority, idempotencyKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: failed to add task: %v\n", err)
 			os.Exit(1)
@@ -86,6 +100,9 @@ func cmdAdd(db *sql.DB, args []string) {
 		return
 	}
 	id := store.AddBounty(db, 0, taskType, taskPayload)
+	if repo != "" {
+		db.Exec(`UPDATE BountyBoard SET target_repo = ? WHERE id = ?`, repo, id)
+	}
 	if priority != 0 {
 		store.SetBountyPriority(db, id, priority)
 	}
