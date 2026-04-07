@@ -5,6 +5,8 @@ const S = {
   status:       null,
   tasks:        [],
   taskFilter:   'active',
+  taskOffset:   0,
+  taskTotal:    0,
   convoyFilter: 0,
   repos:        [],
   escFilter:    'Open',
@@ -199,6 +201,8 @@ const FILTER_STATUS = {
   all:       '',
 };
 
+const TASK_PAGE_SIZE = 50;
+
 async function loadTasks() {
   const status = FILTER_STATUS[S.taskFilter] || '';
   const params = [];
@@ -206,17 +210,23 @@ async function loadTasks() {
   if (S.convoyFilter > 0) params.push(`convoy_id=${S.convoyFilter}`);
   if (S.sortBy)  params.push(`sort_by=${encodeURIComponent(S.sortBy)}`);
   if (S.sortDir) params.push(`sort_dir=${encodeURIComponent(S.sortDir)}`);
-  const qs = params.length ? `?${params.join('&')}` : '';
+  params.push(`offset=${S.taskOffset}`);
+  params.push(`limit=${TASK_PAGE_SIZE}`);
+  const qs = `?${params.join('&')}`;
   try {
-    S.tasks = await api(`/api/tasks${qs}`);
+    const data = await api(`/api/tasks${qs}`);
+    S.tasks     = data.tasks  || [];
+    S.taskTotal = data.total  || 0;
     renderTasks();
+    renderPagination();
   } catch(e) {
     showToast('Failed to load tasks: ' + e.message, 'err');
   }
 }
 
 function setTaskFilter(f) {
-  S.taskFilter = f;
+  S.taskFilter  = f;
+  S.taskOffset  = 0;
   document.querySelectorAll('#tab-tasks .filter-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.filter === f);
   });
@@ -230,6 +240,7 @@ function setSortBy(col) {
     S.sortBy  = col;
     S.sortDir = 'asc';
   }
+  S.taskOffset = 0;
   const p = new URLSearchParams(window.location.search);
   p.set('sort_by',  S.sortBy);
   p.set('sort_dir', S.sortDir);
@@ -683,7 +694,43 @@ function showConvoyTasks(convoyID, convoyName) {
 
 function clearConvoyFilter() {
   S.convoyFilter = 0;
+  S.taskOffset   = 0;
   hideConvoyBanner();
+  loadTasks();
+}
+
+function renderPagination() {
+  const el = $('task-pagination');
+  if (!el) return;
+  const total  = S.taskTotal;
+  const offset = S.taskOffset;
+  const limit  = TASK_PAGE_SIZE;
+  if (total <= limit) {
+    el.innerHTML = '';
+    return;
+  }
+  const page      = Math.floor(offset / limit) + 1;
+  const totalPages = Math.ceil(total / limit);
+  const from      = offset + 1;
+  const to        = Math.min(offset + limit, total);
+  const prevDis   = offset === 0 ? ' disabled' : '';
+  const nextDis   = offset + limit >= total ? ' disabled' : '';
+  el.innerHTML = `
+    <button class="page-btn"${prevDis} onclick="prevTaskPage()">&#8592; Prev</button>
+    <span class="page-info">Page ${page} of ${totalPages} &nbsp;·&nbsp; ${from}–${to} of ${total}</span>
+    <button class="page-btn"${nextDis} onclick="nextTaskPage()">Next &#8594;</button>
+  `;
+}
+
+function prevTaskPage() {
+  if (S.taskOffset === 0) return;
+  S.taskOffset = Math.max(0, S.taskOffset - TASK_PAGE_SIZE);
+  loadTasks();
+}
+
+function nextTaskPage() {
+  if (S.taskOffset + TASK_PAGE_SIZE >= S.taskTotal) return;
+  S.taskOffset += TASK_PAGE_SIZE;
   loadTasks();
 }
 
