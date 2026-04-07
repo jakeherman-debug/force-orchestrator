@@ -790,9 +790,30 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Idempotency check: if a non-empty key was supplied and we find a task
+		// with the same key created within the last 60 seconds, return the
+		// existing task ID instead of inserting a duplicate.
+		if body.IdempotencyKey != "" {
+			var existingID int
+			err := db.QueryRow(
+				`SELECT id FROM BountyBoard
+				  WHERE idempotency_key = ?
+				    AND created_at >= datetime('now', '-60 seconds')
+				  LIMIT 1`,
+				body.IdempotencyKey,
+			).Scan(&existingID)
+			if err == nil {
+				fmt.Fprintf(w, `{"ok":true,"id":%d,"duplicate":true}`, existingID)
+				return
+			}
+		}
+
 		// Auto type: insert immediately as Classifying so the UI is not blocked.
 		if body.Type == "" || strings.EqualFold(body.Type, "auto") {
 			newID := store.AddBountyClassifying(db, body.Repo, body.Payload, body.Priority)
+			if body.IdempotencyKey != "" {
+				db.Exec(`UPDATE BountyBoard SET idempotency_key = ? WHERE id = ?`, body.IdempotencyKey, newID)
+			}
 			store.LogAudit(db, "dashboard", "add-task", newID, "queued Auto (Classifying) via dashboard")
 			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
 			return
@@ -832,6 +853,9 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 		default:
 			http.Error(w, `{"error":"type must be Feature, CodeEdit, Investigate, or Audit"}`, http.StatusBadRequest)
 			return
+		}
+		if body.IdempotencyKey != "" {
+			db.Exec(`UPDATE BountyBoard SET idempotency_key = ? WHERE id = ?`, body.IdempotencyKey, newID)
 		}
 		store.LogAudit(db, "dashboard", "add-task", newID,
 			fmt.Sprintf("queued %s via dashboard", body.Type))
