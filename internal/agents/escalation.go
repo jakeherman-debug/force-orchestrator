@@ -35,8 +35,9 @@ func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity,
 	)
 	id, _ := res.LastInsertId()
 
-	// Mark the task as Escalated so it doesn't get retried automatically
-	db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '' WHERE id = ?`, taskID)
+	// Mark the task as Escalated so it doesn't get retried automatically.
+	// Use UpdateBountyStatus so the webhook fires for this transition.
+	store.UpdateBountyStatus(db, taskID, "Escalated")
 
 	return int(id)
 }

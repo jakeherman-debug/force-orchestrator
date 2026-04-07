@@ -59,6 +59,7 @@ func cmdConfig(db *sql.DB, args []string) {
 			"max_turns":      "integer (max claude CLI turns per task, default 40)",
 			"estop":          "true/false (emergency stop — use 'force estop'/'force resume' instead)",
 			"rl_hits_*":      "integer (persisted rate-limit hit count per agent — managed automatically)",
+			"webhook_url":    "string (URL to POST task status notifications to on Completed/Failed/Escalated)",
 		}
 		if _, ok := knownKeys[cfgKey]; !ok {
 			fmt.Printf("Warning: '%s' is not a known config key.\nKnown keys:\n", cfgKey)
