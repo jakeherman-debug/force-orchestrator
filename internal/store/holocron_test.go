@@ -464,15 +464,18 @@ func TestReadInboxForAgent_RoleAddressing(t *testing.T) {
 		t.Errorf("expected 3 messages (role + all + personal), got %d", len(mails))
 	}
 
-	// All should now be marked read
-	unread, _ := MailStats(db, "R2-D2", "astromech")
-	// MailStats now uses the same addressing logic as ReadInboxForAgent; verify via DB too
+	// All should now be marked consumed (read_at is the operator display flag and is unaffected)
+	var unconsumedTotal int
+	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE consumed_at = '' AND (to_agent = 'R2-D2' OR to_agent = 'astromech' OR to_agent = 'all')`).Scan(&unconsumedTotal)
+	if unconsumedTotal != 0 {
+		t.Errorf("expected 0 unconsumed after ReadInboxForAgent, got %d", unconsumedTotal)
+	}
+	// read_at should be untouched — operator can still see the messages
 	var unreadTotal int
 	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE read_at = '' AND (to_agent = 'R2-D2' OR to_agent = 'astromech' OR to_agent = 'all')`).Scan(&unreadTotal)
-	if unreadTotal != 0 {
-		t.Errorf("expected 0 unread after ReadInboxForAgent, got %d", unreadTotal)
+	if unreadTotal != 3 {
+		t.Errorf("expected 3 operator-unread messages (read_at untouched by agent consumption), got %d", unreadTotal)
 	}
-	_ = unread
 }
 
 func TestReadInboxForAgent_TaskScoped(t *testing.T) {

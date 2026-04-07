@@ -121,7 +121,8 @@ CREATE TABLE IF NOT EXISTS Fleet_Mail (
     body         TEXT    NOT NULL DEFAULT '',
     task_id      INTEGER DEFAULT 0,      -- 0 = standing order; >0 = task-specific
     message_type TEXT    NOT NULL DEFAULT 'info',  -- 'directive' | 'feedback' | 'alert' | 'remediation' | 'info'
-    read_at      TEXT    DEFAULT '',     -- '' = unread
+    read_at      TEXT    DEFAULT '',     -- '' = operator-unread (UI display only)
+    consumed_at  TEXT    DEFAULT '',     -- '' = not yet consumed by an agent
     created_at   TEXT    DEFAULT (datetime('now'))
 );
 

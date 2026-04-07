@@ -161,6 +161,7 @@ type FleetMail struct {
 	Body        string
 	TaskID      int      // optional — links mail to a specific task
 	MessageType MailType // how the agent should treat this message
-	ReadAt      string   // empty = unread
+	ReadAt      string   // empty = operator-unread (UI display only)
+	ConsumedAt  string   // empty = not yet consumed by an agent
 	CreatedAt   string
 }

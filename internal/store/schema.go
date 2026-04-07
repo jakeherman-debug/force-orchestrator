@@ -165,6 +165,7 @@ func runMigrations(db *sql.DB) {
 
 	// Fleet_Mail column additions
 	db.Exec(`ALTER TABLE Fleet_Mail ADD COLUMN message_type TEXT NOT NULL DEFAULT 'info'`)
+	db.Exec(`ALTER TABLE Fleet_Mail ADD COLUMN consumed_at  TEXT         DEFAULT ''`)
 
 	// Convoys column additions
 	db.Exec(`ALTER TABLE Convoys ADD COLUMN coordinated INTEGER DEFAULT 0`)

@@ -25,11 +25,11 @@ func ListMail(db *sql.DB, toAgent string) []FleetMail {
 	)
 	if toAgent != "" {
 		sqlRows, err = db.Query(
-			`SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, created_at
+			`SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, consumed_at, created_at
 			 FROM Fleet_Mail WHERE to_agent = ? ORDER BY created_at DESC`, toAgent)
 	} else {
 		sqlRows, err = db.Query(
-			`SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, created_at
+			`SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, consumed_at, created_at
 			 FROM Fleet_Mail ORDER BY created_at DESC`)
 	}
 	if err != nil {
@@ -40,7 +40,7 @@ func ListMail(db *sql.DB, toAgent string) []FleetMail {
 	for sqlRows.Next() {
 		var m FleetMail
 		var mt string
-		sqlRows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.CreatedAt)
+		sqlRows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.ConsumedAt, &m.CreatedAt)
 		m.MessageType = MailType(mt)
 		mails = append(mails, m)
 	}
@@ -51,9 +51,9 @@ func GetMail(db *sql.DB, id int) *FleetMail {
 	var m FleetMail
 	var mt string
 	err := db.QueryRow(
-		`SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, created_at
+		`SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, consumed_at, created_at
 		 FROM Fleet_Mail WHERE id = ?`, id).
-		Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.CreatedAt)
+		Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.ConsumedAt, &m.CreatedAt)
 	if err != nil {
 		return nil
 	}
@@ -61,15 +61,15 @@ func GetMail(db *sql.DB, id int) *FleetMail {
 	return &m
 }
 
-// ReadInboxForAgent fetches all unread mail for an agent based on role addressing.
+// ReadInboxForAgent fetches all unconsumed mail for an agent based on role addressing.
 // Matches: to_agent = agentName, OR to_agent = role (e.g. "astromech"), OR to_agent = "all"
 // Scoped to: task_id = 0 (standing) OR task_id = taskID (task-specific).
-// Marks all returned messages as read.
+// Marks all returned messages as consumed. Does NOT touch read_at (operator display flag).
 func ReadInboxForAgent(db *sql.DB, agentName, role string, taskID int) []FleetMail {
 	rows, err := db.Query(`
-		SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, created_at
+		SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, consumed_at, created_at
 		FROM Fleet_Mail
-		WHERE read_at = ''
+		WHERE consumed_at = ''
 		  AND (to_agent = ? OR to_agent = ? OR to_agent = 'all')
 		  AND (task_id = 0 OR task_id = ?)
 		ORDER BY created_at ASC`,
@@ -82,21 +82,30 @@ func ReadInboxForAgent(db *sql.DB, agentName, role string, taskID int) []FleetMa
 	for rows.Next() {
 		var m FleetMail
 		var mt string
-		rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.CreatedAt)
+		rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.ConsumedAt, &m.CreatedAt)
 		m.MessageType = MailType(mt)
 		mails = append(mails, m)
 	}
-	rows.Close() // explicit close required before mark-read writes on single-connection pool
+	rows.Close() // explicit close required before consume writes on single-connection pool
 
-	// Mark all as read now that the agent has consumed them
+	// Mark all as consumed now that the agent has processed them.
 	for _, m := range mails {
-		MarkMailRead(db, m.ID)
+		MarkMailConsumed(db, m.ID)
 	}
 	return mails
 }
 
+// MarkMailRead marks a message as read by a human operator (UI display flag only).
+// Does not affect agent consumption — use MarkMailConsumed for that.
 func MarkMailRead(db *sql.DB, id int) {
 	db.Exec(`UPDATE Fleet_Mail SET read_at = datetime('now') WHERE id = ? AND read_at = ''`, id)
+}
+
+// MarkMailConsumed marks a message as consumed by an agent.
+// This is separate from read_at so operators reading mail in the dashboard
+// cannot silently drop messages before the target agent processes them.
+func MarkMailConsumed(db *sql.DB, id int) {
+	db.Exec(`UPDATE Fleet_Mail SET consumed_at = datetime('now') WHERE id = ? AND consumed_at = ''`, id)
 }
 
 // MailStats returns (unread, total) counts for a given recipient (or fleet-wide if agentName="").

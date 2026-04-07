@@ -202,7 +202,7 @@ func dogHolonetRotate(logger interface{ Printf(string, ...any) }) error {
 func dogMailCleanup(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 	res, err := db.Exec(`
 		DELETE FROM Fleet_Mail
-		WHERE read_at = ''
+		WHERE consumed_at = ''
 		  AND task_id != 0
 		  AND created_at < datetime('now', '-48 hours')
 		  AND task_id IN (
