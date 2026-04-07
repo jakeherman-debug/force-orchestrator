@@ -39,7 +39,7 @@ func SpawnInquisitor(db *sql.DB) {
 			WHERE status IN ('Locked', 'UnderReview', 'UnderCaptainReview')
 			  AND locked_at != ''
 			  AND locked_at < datetime('now', ?)
-		`, "-"+staleLockTimeout.String())
+		`, fmt.Sprintf("-%d seconds", int(staleLockTimeout.Seconds())))
 
 		var staleIDs []int
 		if err == nil {
@@ -64,7 +64,7 @@ func SpawnInquisitor(db *sql.DB) {
 				WHERE status IN ('Locked', 'UnderReview', 'UnderCaptainReview')
 				  AND locked_at != ''
 				  AND locked_at < datetime('now', ?)
-			`, "-"+staleLockTimeout.String())
+			`, fmt.Sprintf("-%d seconds", int(staleLockTimeout.Seconds())))
 
 			if resetErr != nil {
 				logger.Printf("ERROR resetting stale tasks: %v", resetErr)

@@ -89,10 +89,14 @@ func RecoverStaleConvoys(db *sql.DB) {
 	if err != nil {
 		return
 	}
-	defer rows.Close()
+	var ids []int
 	for rows.Next() {
 		var id int
 		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	for _, id := range ids {
 		AutoRecoverConvoy(db, id, nil)
 	}
 }
