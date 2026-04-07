@@ -749,3 +749,39 @@ td.mail-body-preview {
 ::-webkit-scrollbar-thumb:hover { background: var(--text2); }
 
 select option { background: var(--bg2); color: var(--text); }
+
+/* ── Pagination ───────────────────────────────────────────────────────────── */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.page-btn {
+  padding: 4px 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.page-btn:hover:not(:disabled) {
+  background: var(--surface3, var(--border));
+}
+
+.page-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.page-info {
+  font-size: 12px;
+  color: var(--text2);
+}
