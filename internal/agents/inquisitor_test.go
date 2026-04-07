@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -11,6 +12,48 @@ import (
 
 	"force-orchestrator/internal/store"
 )
+
+// ── classifyPendingTasks — stale timeout ─────────────────────────────────────
+
+func TestClassifyPendingTasks_StaleClassifyingTimesOut(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Insert a task that has been stuck in Classifying for longer than staleClassifyingTimeout.
+	store.AddBountyClassifying(db, "", "old classifying task", 0, "key-1")
+	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now', '-31 minutes') WHERE id = 1`)
+
+	logger := log.New(io.Discard, "", 0)
+	classifyPendingTasks(db, logger)
+
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 1`).Scan(&status)
+	if status != "Failed" {
+		t.Errorf("expected stale Classifying task to be Failed, got %q", status)
+	}
+}
+
+func TestClassifyPendingTasks_RecentClassifyingNotTimedOut(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Stub the CLI runner so ClassifyTaskType fails fast without calling real Claude.
+	withStubCLIRunner(t, "", fmt.Errorf("stub: no claude in test"))
+
+	// Insert a task that has been in Classifying for only a short time — should not be timed out.
+	store.AddBountyClassifying(db, "", "recent classifying task", 0, "key-2")
+
+	logger := log.New(io.Discard, "", 0)
+	classifyPendingTasks(db, logger)
+
+	// Task should still be Classifying — stale-timeout did not fire (task is fresh),
+	// and the classification error only sets error_log, not status.
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 1`).Scan(&status)
+	if status == "Failed" {
+		t.Errorf("expected recent Classifying task to NOT be Failed by timeout, got Failed")
+	}
+}
 
 // ── detectStalledTasks ────────────────────────────────────────────────────────
 
