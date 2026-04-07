@@ -567,7 +567,8 @@ Agent control:
   daemon                         Start the fleet daemon (all agents)
   estop                          Emergency stop — halt all agents immediately
   resume                         Clear e-stop and resume agents
-  scale <n>                      Dynamically add astromechs to a running daemon (SIGUSR1)
+  scale [--astromechs N] [--council N] [--captain N] [--investigators N] [--auditors N] [--librarians N]
+                                 Dynamically scale any agent type in a running daemon (SIGUSR1)
   agents                         List registered persistent agent worktrees
   cleanup                        Prune dead git worktrees and stale agent entries
   doctor [--clean]               Pre-flight check: git, claude CLI, repos, DB health
