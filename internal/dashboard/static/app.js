@@ -264,6 +264,7 @@ function renderTasks() {
       String(t.id).includes(query) ||
       (t.payload || '').toLowerCase().includes(query) ||
       (t.repo    || '').toLowerCase().includes(query) ||
+      (t.type    || '').toLowerCase().includes(query) ||
       (t.status  || '').toLowerCase().includes(query) ||
       (t.owner   || '').toLowerCase().includes(query)
     );
@@ -1166,7 +1167,7 @@ function startPolling() {
   if (sd) S.sortDir = sd;
 })();
 
-
+$('task-search').addEventListener('input', renderTasks);
 startPolling();
 switchTab('tasks');
 renderSortHeaders();

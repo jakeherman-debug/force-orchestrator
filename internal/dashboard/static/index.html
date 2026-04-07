@@ -89,7 +89,7 @@
       <button class="filter-btn"        data-filter="done"      onclick="setTaskFilter('done')">Completed</button>
       <button class="filter-btn"        data-filter="all"       onclick="setTaskFilter('all')">All</button>
       <div class="filter-spacer"></div>
-      <input class="search-input" id="task-search" type="text" placeholder="Search tasks…" oninput="renderTasks()">
+      <input class="search-input" id="task-search" type="text" placeholder="Search tasks..." aria-label="Search tasks by keyword">
     </div>
     <div style="display:flex;flex:1;overflow:hidden">
       <div class="table-wrap" id="tasks-table-wrap">
