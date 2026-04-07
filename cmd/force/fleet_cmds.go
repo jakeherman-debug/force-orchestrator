@@ -81,7 +81,7 @@ func cmdDaemon(db *sql.DB) {
 	if n := store.GetConfig(db, "num_librarians", ""); n != "" {
 		fmt.Sscanf(n, "%d", &numLibrarians)
 	}
-	numCommanders := 1
+	numCommanders := 3
 	if n := store.GetConfig(db, "num_commanders", ""); n != "" {
 		fmt.Sscanf(n, "%d", &numCommanders)
 	}
