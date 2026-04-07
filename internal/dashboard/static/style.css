@@ -247,6 +247,15 @@ thead th {
   z-index: 1;
 }
 
+thead th.th-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+thead th.th-sortable:hover { color: var(--text); }
+thead th.th-sort-active { color: var(--text); }
+.sort-icon { color: var(--text2); font-size: 10px; }
+thead th.th-sort-active .sort-icon { color: var(--accent); }
+
 tbody tr {
   border-bottom: 1px solid var(--border);
   cursor: pointer;

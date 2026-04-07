@@ -17,6 +17,8 @@ const S = {
   detail:             null,
   rejectID:           null,
   activeTab:          'tasks',
+  sortBy:             '',
+  sortDir:            'asc',
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -28,6 +30,17 @@ function fmtTS(ts) {
   if (isNaN(d)) return ts;
   return d.toLocaleString(undefined, { month:'short', day:'numeric',
     hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+}
+
+function fmtShortDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d)) return ts;
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dy = String(d.getDate()).padStart(2, '0');
+  const hr = String(d.getHours()).padStart(2, '0');
+  const mn = String(d.getMinutes()).padStart(2, '0');
+  return `${mo}/${dy} ${hr}:${mn}`;
 }
 
 function truncate(s, n) {
@@ -194,6 +207,8 @@ async function loadTasks() {
   const params = [];
   if (status) params.push(`status=${encodeURIComponent(status)}`);
   if (S.convoyFilter > 0) params.push(`convoy_id=${S.convoyFilter}`);
+  if (S.sortBy)  params.push(`sort_by=${encodeURIComponent(S.sortBy)}`);
+  if (S.sortDir) params.push(`sort_dir=${encodeURIComponent(S.sortDir)}`);
   const qs = params.length ? `?${params.join('&')}` : '';
   try {
     S.tasks = await api(`/api/tasks${qs}`);
@@ -211,6 +226,36 @@ function setTaskFilter(f) {
   loadTasks();
 }
 
+function setSortBy(col) {
+  if (S.sortBy === col) {
+    S.sortDir = S.sortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    S.sortBy  = col;
+    S.sortDir = 'asc';
+  }
+  const p = new URLSearchParams(window.location.search);
+  p.set('sort_by',  S.sortBy);
+  p.set('sort_dir', S.sortDir);
+  history.replaceState(null, '', '?' + p.toString());
+  renderSortHeaders();
+  loadTasks();
+}
+
+function renderSortHeaders() {
+  document.querySelectorAll('#tasks-table th[data-sort-col]').forEach(th => {
+    const col  = th.dataset.sortCol;
+    const icon = th.querySelector('.sort-icon');
+    if (!icon) return;
+    if (col === S.sortBy) {
+      icon.textContent = S.sortDir === 'asc' ? ' ↑' : ' ↓';
+      th.classList.add('th-sort-active');
+    } else {
+      icon.textContent = ' ⇅';
+      th.classList.remove('th-sort-active');
+    }
+  });
+}
+
 function renderTasks() {
   const query = ($('task-search').value || '').toLowerCase();
   let tasks = S.tasks;
@@ -226,7 +271,7 @@ function renderTasks() {
 
   const tbody = $('tasks-tbody');
   if (!tasks.length) {
-    tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11"><div class="empty-state"><span class="icon">📭</span>No tasks match this filter.</div></td></tr>`;
     $('tbadge-tasks').textContent = '';
     return;
   }
@@ -255,6 +300,7 @@ function renderTasks() {
       <td style="text-align:center">${prio}</td>
       <td style="text-align:center">${retry}</td>
       <td class="dim" style="font-size:11px;white-space:nowrap">${infoCell}</td>
+      <td class="mono dim" style="font-size:11px">${fmtShortDate(t.created_at)}</td>
       <td class="mono dim" style="font-size:11px;text-align:right">${fmtCost(t.cost_dollars)}</td>
     </tr>`;
   }).join('');
@@ -1114,6 +1160,13 @@ function startPolling() {
   const ct = p.get('convoy_since');
   if (['all', 'active', 'completed'].includes(cs)) S.convoyStatusFilter = cs;
   if (['all', '1h', '8h', '24h'].includes(ct))     S.convoyTimeFilter   = ct;
+  const sb = p.get('sort_by');
+  const sd = p.get('sort_dir');
+  if (sb) S.sortBy  = sb;
+  if (sd) S.sortDir = sd;
 })();
+
+
 startPolling();
 switchTab('tasks');
+renderSortHeaders();
