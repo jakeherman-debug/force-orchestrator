@@ -519,3 +519,47 @@ func TestHandleHolonetStream_SSEHeaders(t *testing.T) {
 		t.Error("missing CORS header")
 	}
 }
+
+// ── handleAdd — auto-classification ──────────────────────────────────────────
+
+func TestHandleAdd_AutoTypeInsertsClassifying(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	body := `{"type":"auto","payload":"classify this task","repo":"","priority":0}`
+	r := httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleAdd(db)(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 1`).Scan(&status)
+	if status != "Classifying" {
+		t.Errorf("expected status=Classifying for auto type, got %q", status)
+	}
+}
+
+func TestHandleAdd_EmptyTypeInsertsClassifying(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	body := `{"type":"","payload":"no type specified","repo":"","priority":0}`
+	r := httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleAdd(db)(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 1`).Scan(&status)
+	if status != "Classifying" {
+		t.Errorf("expected status=Classifying for empty type, got %q", status)
+	}
+}
