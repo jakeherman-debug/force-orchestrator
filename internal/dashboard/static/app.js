@@ -166,9 +166,27 @@ function renderStats() {
   $('tbadge-mail').className = 'tab-badge' + (s.unread_mail > 0 ? ' hot' : '');
 }
 
+// ── URL sync ──────────────────────────────────────────────────────────────────
+function syncURL() {
+  const p = new URLSearchParams();
+  if (S.activeTab          !== 'tasks')   p.set('tab',           S.activeTab);
+  if (S.taskFilter         !== 'active')  p.set('status',        S.taskFilter);
+  const search = ($('task-search') && $('task-search').value) || '';
+  if (search)                             p.set('search',        search);
+  if (S.sortBy)                           p.set('sort_by',       S.sortBy);
+  if (S.sortDir            !== 'asc')     p.set('sort_dir',      S.sortDir);
+  if (S.escFilter          !== 'Open')    p.set('esc_status',    S.escFilter);
+  if (S.convoyStatusFilter !== 'all')     p.set('convoy_status', S.convoyStatusFilter);
+  if (S.convoyTimeFilter   !== 'all')     p.set('convoy_since',  S.convoyTimeFilter);
+  if (S.logMode            !== 'fleet')   p.set('log_mode',      S.logMode);
+  const qs = p.toString();
+  history.pushState(null, '', qs ? '?' + qs : window.location.pathname);
+}
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 function switchTab(name) {
   S.activeTab = name;
+  syncURL();
 
   if (name !== 'tasks') {
     S.convoyFilter = 0;
@@ -230,6 +248,7 @@ async function loadTasks() {
 function setTaskFilter(f) {
   S.taskFilter  = f;
   S.taskOffset  = 0;
+  syncURL();
   document.querySelectorAll('#tab-tasks .filter-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.filter === f);
   });
@@ -244,10 +263,7 @@ function setSortBy(col) {
     S.sortDir = 'asc';
   }
   S.taskOffset = 0;
-  const p = new URLSearchParams(window.location.search);
-  p.set('sort_by',  S.sortBy);
-  p.set('sort_dir', S.sortDir);
-  history.replaceState(null, '', '?' + p.toString());
+  syncURL();
   renderSortHeaders();
   loadTasks();
 }
@@ -614,6 +630,7 @@ async function loadEscalations() {
 
 function setEscFilter(f) {
   S.escFilter = f;
+  syncURL();
   document.querySelectorAll('#tab-escalations .filter-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.filter === f);
   });
@@ -819,22 +836,14 @@ function renderConvoys(convoys) {
 
 function setConvoyStatusFilter(f) {
   S.convoyStatusFilter = f;
-  syncConvoyFilterURL();
+  syncURL();
   renderConvoys(S.convoys);
 }
 
 function setConvoyTimeFilter(f) {
   S.convoyTimeFilter = f;
-  syncConvoyFilterURL();
+  syncURL();
   renderConvoys(S.convoys);
-}
-
-function syncConvoyFilterURL() {
-  const params = new URLSearchParams(window.location.search);
-  S.convoyStatusFilter === 'all' ? params.delete('convoy_status') : params.set('convoy_status', S.convoyStatusFilter);
-  S.convoyTimeFilter === 'all'   ? params.delete('convoy_since')  : params.set('convoy_since',  S.convoyTimeFilter);
-  const qs = params.toString();
-  history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
 }
 
 async function approveConvoy(id) {
@@ -1000,6 +1009,7 @@ function stopLogStream() {
 
 function switchLog(mode) {
   S.logMode = mode;
+  syncURL();
   document.querySelectorAll('#tab-logs .filter-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.log === mode);
   });
@@ -1202,19 +1212,74 @@ function startPolling() {
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-(function initFromURL() {
+function initFromURL() {
   const p = new URLSearchParams(window.location.search);
-  const cs = p.get('convoy_status');
-  const ct = p.get('convoy_since');
-  if (['all', 'active', 'completed'].includes(cs)) S.convoyStatusFilter = cs;
-  if (['all', '1h', '8h', '24h'].includes(ct))     S.convoyTimeFilter   = ct;
+
+  const tab = p.get('tab');
+  if (['tasks','escalations','convoys','agents','mail','knowledge','logs'].includes(tab)) S.activeTab = tab;
+
+  const status = p.get('status');
+  if (status && Object.prototype.hasOwnProperty.call(FILTER_STATUS, status)) S.taskFilter = status;
+
+  const search = p.get('search');
+  if (search !== null) { const el = $('task-search'); if (el) el.value = search; }
+
   const sb = p.get('sort_by');
   const sd = p.get('sort_dir');
   if (sb) S.sortBy  = sb;
   if (sd) S.sortDir = sd;
-})();
 
-$('task-search').addEventListener('input', renderTasks);
+  const es = p.get('esc_status');
+  if (['Open','Acknowledged','Closed'].includes(es)) S.escFilter = es;
+
+  const cs = p.get('convoy_status');
+  const ct = p.get('convoy_since');
+  if (['all', 'active', 'completed'].includes(cs)) S.convoyStatusFilter = cs;
+  if (['all', '1h', '8h', '24h'].includes(ct))     S.convoyTimeFilter   = ct;
+
+  const lm = p.get('log_mode');
+  if (['fleet', 'holonet'].includes(lm)) S.logMode = lm;
+}
+
+window.addEventListener('popstate', () => {
+  initFromURL();
+  // Sync tab and filter button UI without pushing another history entry
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === S.activeTab);
+  });
+  document.querySelectorAll('.tab-pane').forEach(p => {
+    p.classList.toggle('active', p.id === 'tab-' + S.activeTab);
+  });
+  document.querySelectorAll('#tab-tasks .filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === S.taskFilter);
+  });
+  document.querySelectorAll('#tab-escalations .filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === S.escFilter);
+  });
+  document.querySelectorAll('#tab-logs .filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.log === S.logMode);
+  });
+  renderSortHeaders();
+  if (S.activeTab !== 'logs') stopLogStream();
+  switch (S.activeTab) {
+    case 'tasks':       loadTasks(); break;
+    case 'escalations': loadEscalations(); break;
+    case 'convoys':     loadConvoys(); break;
+    case 'agents':      loadAgents(); break;
+    case 'mail':        loadMail(); break;
+    case 'knowledge':   loadMemoryRepos().then(() => loadMemories()); break;
+    case 'logs':        startLogStream(); break;
+  }
+});
+
+let _searchDebounce = null;
+$('task-search').addEventListener('input', () => {
+  renderTasks();
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(syncURL, 300);
+});
+
+initFromURL();
 startPolling();
-switchTab('tasks');
+switchTab(S.activeTab);
 renderSortHeaders();
