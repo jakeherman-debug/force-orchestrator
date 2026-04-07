@@ -178,8 +178,7 @@ function switchTab(name) {
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 const FILTER_STATUS = {
-  active:    'Locked',
-  review:    'AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
+  active:    'Pending,Classifying,Locked,Planned,AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
   pending:   'Pending,Classifying,Blocked,Planned',
   failed:    'Failed,Escalated,ConflictPending',
   done:      'Completed',
