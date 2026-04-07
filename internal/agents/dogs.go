@@ -76,25 +76,32 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 }
 
 func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	// Collect repos first, then close rows before doing any further DB work.
 	rows, err := db.Query(`SELECT name, local_path FROM Repositories`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type repo struct{ name, path string }
+	var repos []repo
 	for rows.Next() {
-		var name, path string
-		rows.Scan(&name, &path)
-		if _, statErr := os.Stat(path); statErr != nil {
-			logger.Printf("ERROR: Dog git-hygiene: repo '%s' path not accessible (%s) — check registration with: force repos", name, path)
+		var r repo
+		rows.Scan(&r.name, &r.path)
+		repos = append(repos, r)
+	}
+	rows.Close()
+
+	for _, r := range repos {
+		if _, statErr := os.Stat(r.path); statErr != nil {
+			logger.Printf("ERROR: Dog git-hygiene: repo '%s' path not accessible (%s) — check registration with: force repos", r.name, r.path)
 			continue
 		}
-		if out, gitErr := igit.RunCmd(path, "fetch", "--prune", "--quiet"); gitErr != nil {
-			logger.Printf("Dog git-hygiene: fetch failed for %s: %s", name, out)
+		if out, gitErr := igit.RunCmd(r.path, "fetch", "--prune", "--quiet"); gitErr != nil {
+			logger.Printf("Dog git-hygiene: fetch failed for %s: %s", r.name, out)
 		} else {
-			logger.Printf("Dog git-hygiene: fetched %s", name)
+			logger.Printf("Dog git-hygiene: fetched %s", r.name)
 		}
-		igit.RunCmd(path, "gc", "--auto", "--quiet")
-		igit.RunCmd(path, "worktree", "prune")
+		igit.RunCmd(r.path, "gc", "--auto", "--quiet")
+		igit.RunCmd(r.path, "worktree", "prune")
 	}
 
 	// Detach agent worktrees that are on branches no longer referenced by any live task,
@@ -105,15 +112,21 @@ func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error
 	if agentErr != nil {
 		return nil // non-fatal — skip orphan cleanup this cycle
 	}
-	defer agentRows.Close()
-	var detached int
+	type agentEntry struct{ name, repo, path string }
+	var agents []agentEntry
 	for agentRows.Next() {
-		var agentName, repoPath, worktreePath string
-		agentRows.Scan(&agentName, &repoPath, &worktreePath)
-		if _, statErr := os.Stat(worktreePath); statErr != nil {
+		var a agentEntry
+		agentRows.Scan(&a.name, &a.repo, &a.path)
+		agents = append(agents, a)
+	}
+	agentRows.Close()
+
+	var detached int
+	for _, a := range agents {
+		if _, statErr := os.Stat(a.path); statErr != nil {
 			continue
 		}
-		out, gitErr := exec.Command("git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		out, gitErr := exec.Command("git", "-C", a.path, "rev-parse", "--abbrev-ref", "HEAD").Output()
 		if gitErr != nil {
 			continue
 		}
@@ -128,10 +141,10 @@ func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error
 		if count > 0 {
 			continue
 		}
-		exec.Command("git", "-C", worktreePath, "checkout", "--detach", "HEAD").Run()
-		exec.Command("git", "-C", repoPath, "branch", "-D", branch).Run()
+		exec.Command("git", "-C", a.path, "checkout", "--detach", "HEAD").Run()
+		exec.Command("git", "-C", a.repo, "branch", "-D", branch).Run()
 		detached++
-		logger.Printf("Dog git-hygiene: detached worktree %s from orphaned branch %s", agentName, branch)
+		logger.Printf("Dog git-hygiene: detached worktree %s from orphaned branch %s", a.name, branch)
 	}
 	if detached > 0 {
 		logger.Printf("Dog git-hygiene: cleaned up %d orphaned worktree branch(es)", detached)
