@@ -371,8 +371,8 @@ func TestListDogs(t *testing.T) {
 	defer db.Close()
 
 	dogs := ListDogs(db)
-	if len(dogs) != 6 {
-		t.Errorf("expected 6 built-in dogs, got %d", len(dogs))
+	if len(dogs) != 9 {
+		t.Errorf("expected 9 built-in dogs, got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -576,5 +576,112 @@ func TestDogPriorityAging_NonPendingNotBumped(t *testing.T) {
 	db.QueryRow(`SELECT priority FROM BountyBoard WHERE id = ?`, id).Scan(&priority)
 	if priority != 0 {
 		t.Errorf("expected priority=0 for non-Pending task, got %d", priority)
+	}
+}
+
+// ── runStaleConvoysReport ─────────────────────────────────────────────────────
+
+func TestStaleConvoysReport_AllCompletedTasksFixed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "convoy-all-completed")
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Completed', 'done', ?)`, convoyID)
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Completed', 'done2', ?)`, convoyID)
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport: %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Completed" {
+		t.Errorf("expected convoy status=Completed, got %q", status)
+	}
+}
+
+func TestStaleConvoysReport_AllCancelledTasksFixed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "convoy-all-cancelled")
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Cancelled', 'nope', ?)`, convoyID)
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport: %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Completed" {
+		t.Errorf("expected convoy status=Completed, got %q", status)
+	}
+}
+
+func TestStaleConvoysReport_ZeroTasksFixed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "convoy-empty")
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport: %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Completed" {
+		t.Errorf("expected convoy status=Completed, got %q", status)
+	}
+}
+
+func TestStaleConvoysReport_ActiveTaskLeftAlone(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "convoy-has-active")
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Completed', 'done', ?)`, convoyID)
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Pending', 'still going', ?)`, convoyID)
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport: %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Active" {
+		t.Errorf("expected convoy to remain Active, got %q", status)
+	}
+}
+
+func TestStaleConvoysReport_CompletedConvoyIgnored(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Insert a Completed convoy directly
+	res, _ := db.Exec(`INSERT INTO Convoys (name, status) VALUES ('already-done', 'Completed')`)
+	convoyID, _ := res.LastInsertId()
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport: %v", err)
+	}
+
+	// Should still be Completed (not touched a second time — effectively a no-op check)
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Completed" {
+		t.Errorf("expected already-Completed convoy to remain Completed, got %q", status)
+	}
+
+	// No mail should have been sent for this convoy
+	var mailCount int
+	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE subject LIKE '%already-done%'`).Scan(&mailCount)
+	if mailCount != 0 {
+		t.Errorf("expected no mail for already-Completed convoy, got %d", mailCount)
 	}
 }

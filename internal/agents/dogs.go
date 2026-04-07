@@ -15,18 +15,19 @@ import (
 
 // dogCooldowns defines how often each built-in dog may run.
 var dogCooldowns = map[string]time.Duration{
-	"git-hygiene":      30 * time.Minute,
-	"db-vacuum":        6 * time.Hour,
-	"holonet-rotate":   24 * time.Hour,
-	"mail-cleanup":     12 * time.Hour,
-	"memory-hygiene":   24 * time.Hour,
-	"stalled-reviews":  6 * time.Hour,
-	"priority-aging":   6 * time.Hour,
-	"daily-digest":     24 * time.Hour,
+	"git-hygiene":           30 * time.Minute,
+	"db-vacuum":             6 * time.Hour,
+	"holonet-rotate":        24 * time.Hour,
+	"mail-cleanup":          12 * time.Hour,
+	"memory-hygiene":        24 * time.Hour,
+	"stalled-reviews":       6 * time.Hour,
+	"priority-aging":        6 * time.Hour,
+	"daily-digest":          24 * time.Hour,
+	"stale-convoys-report":  12 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
-var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews", "priority-aging", "daily-digest"}
+var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews", "priority-aging", "daily-digest", "stale-convoys-report"}
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
 // Called by SpawnInquisitor on every inquisitor cycle.
@@ -79,6 +80,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogPriorityAging(db, logger)
 	case "daily-digest":
 		return runDailyDigest(db, logger)
+	case "stale-convoys-report":
+		return runStaleConvoysReport(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
@@ -385,6 +388,70 @@ func runDailyDigest(db *sql.DB, logger interface{ Printf(string, ...any) }) erro
 	store.SendMail(db, "inquisitor", "operator", "[DAILY DIGEST] Fleet Health Summary", body.String(), 0, store.MailTypeInfo)
 	logger.Printf("Dog daily-digest: digest sent (completed=%d failed=%d escalated=%d pending=%d locked=%d stale_convoys=%d)",
 		stats.Completed, stats.Failed, stats.Escalated, stats.Pending, stats.Locked, len(stats.StaleConvoys))
+	return nil
+}
+
+func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	rows, err := db.Query(`SELECT id, name FROM Convoys WHERE status = 'Active'`)
+	if err != nil {
+		return err
+	}
+	type convoy struct {
+		id   int64
+		name string
+	}
+	var convoys []convoy
+	for rows.Next() {
+		var c convoy
+		rows.Scan(&c.id, &c.name)
+		convoys = append(convoys, c)
+	}
+	rows.Close()
+
+	var fixedEmpty, fixedStale int
+	for _, c := range convoys {
+		var total int
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ?`, c.id).Scan(&total)
+
+		var shouldComplete bool
+		var reason string
+		if total == 0 {
+			shouldComplete = true
+			reason = "no tasks"
+		} else {
+			var nonTerminal int
+			db.QueryRow(`
+				SELECT COUNT(*) FROM BountyBoard
+				WHERE convoy_id = ?
+				  AND status NOT IN ('Completed', 'Cancelled')`, c.id).Scan(&nonTerminal)
+			if nonTerminal == 0 {
+				shouldComplete = true
+				reason = "all tasks terminal"
+			}
+		}
+
+		if !shouldComplete {
+			continue
+		}
+
+		db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ?`, c.id)
+		store.SendMail(db, "inquisitor", "operator",
+			fmt.Sprintf("[CONVOY COMPLETE] %s", c.name),
+			fmt.Sprintf("Convoy '%s' was auto-completed by the stale-convoys-report dog (%s).", c.name, reason),
+			0, store.MailTypeInfo)
+
+		if total == 0 {
+			fixedEmpty++
+		} else {
+			fixedStale++
+		}
+	}
+
+	if fixedEmpty == 0 && fixedStale == 0 {
+		logger.Printf("Dog stale-convoys-report: no stale convoys found")
+	} else {
+		logger.Printf("Dog stale-convoys-report: completed %d empty convoy(s) and %d stale convoy(s) where all tasks were terminal", fixedEmpty, fixedStale)
+	}
 	return nil
 }
 
