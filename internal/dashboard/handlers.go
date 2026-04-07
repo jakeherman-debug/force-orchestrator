@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -755,15 +756,25 @@ func handleMemories(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// newUUID returns a random UUID v4 string.
+func newUUID() string {
+	var b [16]byte
+	rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 // insertTypedTask inserts an Investigate or Audit task, optionally scoped to a repo.
-func insertTypedTask(db *sql.DB, taskType, repo, payload string, priority int) (int, error) {
+// idempotencyKey is stored at insert time so duplicate-check queries can find the row.
+func insertTypedTask(db *sql.DB, taskType, repo, payload string, priority int, idempotencyKey string) (int, error) {
 	if repo != "" && store.GetRepoPath(db, repo) == "" {
 		return 0, fmt.Errorf("unknown repo: %s", repo)
 	}
 	res, err := db.Exec(
-		`INSERT INTO BountyBoard (target_repo, type, status, payload, priority, created_at)
-		 VALUES (?, ?, 'Pending', ?, ?, datetime('now'))`,
-		repo, taskType, payload, priority)
+		`INSERT INTO BountyBoard (target_repo, type, status, payload, priority, idempotency_key, created_at)
+		 VALUES (?, ?, 'Pending', ?, ?, ?, datetime('now'))`,
+		repo, taskType, payload, priority, idempotencyKey)
 	if err != nil {
 		return 0, err
 	}
@@ -790,21 +801,44 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// Idempotency check — if a task with the same key was created within 60 s, return it.
+		if body.IdempotencyKey != "" {
+			var existingID int
+			err := db.QueryRow(
+				`SELECT id FROM BountyBoard WHERE idempotency_key = ? AND created_at > datetime('now', '-60 seconds') LIMIT 1`,
+				body.IdempotencyKey).Scan(&existingID)
+			if err == nil {
+				fmt.Fprintf(w, `{"ok":true,"id":%d,"duplicate":true}`, existingID)
+				return
+			}
+		}
+
 		// Auto type: insert immediately as Classifying so the UI is not blocked.
 		if body.Type == "" || strings.EqualFold(body.Type, "auto") {
-			newID := store.AddBountyClassifying(db, body.Repo, body.Payload, body.Priority)
+			key := body.IdempotencyKey
+			if key == "" {
+				key = newUUID()
+			}
+			newID := store.AddBountyClassifying(db, body.Repo, body.Payload, body.Priority, key)
 			store.LogAudit(db, "dashboard", "add-task", newID, "queued Auto (Classifying) via dashboard")
 			fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
 			return
 		}
 
+		// Typed tasks — include idempotency_key in the INSERT so the dedup check is meaningful.
 		var newID int
 		switch body.Type {
 		case "Feature":
-			newID = store.AddBounty(db, 0, "Feature", body.Payload)
-			if body.Priority != 0 {
-				store.SetBountyPriority(db, newID, body.Priority)
+			res, err := db.Exec(
+				`INSERT INTO BountyBoard (parent_id, type, status, payload, priority, idempotency_key, created_at)
+				 VALUES (0, 'Feature', 'Pending', ?, ?, ?, datetime('now'))`,
+				body.Payload, body.Priority, body.IdempotencyKey)
+			if err != nil {
+				http.Error(w, `{"error":"failed to insert task"}`, http.StatusInternalServerError)
+				return
 			}
+			id, _ := res.LastInsertId()
+			newID = int(id)
 		case "CodeEdit":
 			if body.Repo == "" {
 				http.Error(w, `{"error":"repo is required for CodeEdit tasks"}`, http.StatusBadRequest)
@@ -814,17 +848,26 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 				http.Error(w, fmt.Sprintf(`{"error":"unknown repo: %s"}`, body.Repo), http.StatusUnprocessableEntity)
 				return
 			}
-			newID = store.AddCodeEditTask(db, body.Repo, body.Payload, 0, body.Priority, 0)
+			res, err := db.Exec(
+				`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, task_timeout, idempotency_key, created_at)
+				 VALUES (0, ?, 'CodeEdit', 'Pending', ?, 0, ?, 0, ?, datetime('now'))`,
+				body.Repo, body.Payload, body.Priority, body.IdempotencyKey)
+			if err != nil {
+				http.Error(w, `{"error":"failed to insert task"}`, http.StatusInternalServerError)
+				return
+			}
+			id, _ := res.LastInsertId()
+			newID = int(id)
 		case "Investigate":
 			var err error
-			newID, err = insertTypedTask(db, "Investigate", body.Repo, body.Payload, body.Priority)
+			newID, err = insertTypedTask(db, "Investigate", body.Repo, body.Payload, body.Priority, body.IdempotencyKey)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusUnprocessableEntity)
 				return
 			}
 		case "Audit":
 			var err error
-			newID, err = insertTypedTask(db, "Audit", body.Repo, body.Payload, body.Priority)
+			newID, err = insertTypedTask(db, "Audit", body.Repo, body.Payload, body.Priority, body.IdempotencyKey)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusUnprocessableEntity)
 				return

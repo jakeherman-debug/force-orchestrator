@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     checkpoint     TEXT    DEFAULT '',   -- mid-task resume state written by Astromechs
     branch_name    TEXT    DEFAULT '',   -- 'agent/<name>/task-<id>' persistent branch
     priority       INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
-    task_timeout   INTEGER DEFAULT 0    -- per-task override in seconds (0 = default)
+    task_timeout   INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
+    idempotency_key TEXT    DEFAULT ''  -- client-supplied dedup key; checked within 60 s
 );
 
 -- Status lifecycle:
