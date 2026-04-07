@@ -187,24 +187,29 @@ func RunCommandCenter(db *sql.DB) {
 		// Active convoy summary
 		convoyRows, convoyErr := db.Query(`SELECT id, name FROM Convoys WHERE status = 'Active' ORDER BY created_at DESC LIMIT 5`)
 		if convoyErr == nil {
-			var hasConvoys bool
+			type convoyInfo struct {
+				id   int
+				name string
+			}
+			var convoys []convoyInfo
 			for convoyRows.Next() {
-				if !hasConvoys {
-					fmt.Println("\n--- ACTIVE CONVOYS ---")
-					hasConvoys = true
-				}
-				var id int
-				var name string
-				convoyRows.Scan(&id, &name)
-				completed, total := store.ConvoyProgress(db, id)
-				pct := 0
-				if total > 0 {
-					pct = completed * 100 / total
-				}
-				bar := strings.Repeat("#", pct/5) + strings.Repeat(".", 20-pct/5)
-				fmt.Printf(" [%d] [%s] %d%% %s\n", id, bar, pct, truncate(name, 40))
+				var c convoyInfo
+				convoyRows.Scan(&c.id, &c.name)
+				convoys = append(convoys, c)
 			}
 			convoyRows.Close()
+			if len(convoys) > 0 {
+				fmt.Println("\n--- ACTIVE CONVOYS ---")
+				for _, c := range convoys {
+					completed, total := store.ConvoyProgress(db, c.id)
+					pct := 0
+					if total > 0 {
+						pct = completed * 100 / total
+					}
+					bar := strings.Repeat("#", pct/5) + strings.Repeat(".", 20-pct/5)
+					fmt.Printf(" [%d] [%s] %d%% %s\n", c.id, bar, pct, truncate(c.name, 40))
+				}
+			}
 		}
 
 		fmt.Println("\n=========================================================================================")
