@@ -2,10 +2,13 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,8 +27,59 @@ func cmdWho(db *sql.DB) {
 	printWho(db)
 }
 
-func cmdStats(db *sql.DB) {
-	printStats(db)
+func cmdStats(db *sql.DB, args []string) {
+	port := store.GetConfig(db, "dashboard_port", "8080")
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--port" {
+			port = args[i+1]
+			break
+		}
+	}
+
+	url := fmt.Sprintf("http://localhost:%s/api/stats", port)
+	resp, err := http.Get(url) //nolint:noctx
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: daemon not reachable at %s\n  Start with: force daemon\n", url)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	var stats struct {
+		Tasks         map[string]int `json:"tasks"`
+		ActiveAgents  int            `json:"active_agents"`
+		ActiveConvoys int            `json:"active_convoys"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to parse /api/stats response: %v\n", err)
+		os.Exit(1)
+	}
+	if stats.Tasks == nil {
+		stats.Tasks = map[string]int{}
+	}
+
+	// Section 1: Tasks by Status
+	fmt.Println("Tasks by Status")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "STATUS\tCOUNT")
+	fmt.Fprintln(w, "------\t-----")
+	statuses := make([]string, 0, len(stats.Tasks))
+	for s := range stats.Tasks {
+		statuses = append(statuses, s)
+	}
+	sort.Strings(statuses)
+	for _, s := range statuses {
+		fmt.Fprintf(w, "%s\t%d\n", s, stats.Tasks[s])
+	}
+	w.Flush()
+
+	// Section 2: Summary
+	fmt.Println()
+	fmt.Println("Fleet Summary")
+	w2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w2, "ACTIVE AGENTS\tACTIVE CONVOYS")
+	fmt.Fprintln(w2, "-------------\t--------------")
+	fmt.Fprintf(w2, "%d\t%d\n", stats.ActiveAgents, stats.ActiveConvoys)
+	w2.Flush()
 }
 
 func cmdBountyStats(db *sql.DB) {

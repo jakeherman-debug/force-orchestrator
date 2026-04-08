@@ -600,7 +600,7 @@ Task management:
   repos remove <name>                   Remove a registered repository
   run <id>                              One-shot foreground run — stream Claude to stdout
   status                                Quick summary of task counts and daemon state
-  stats                                 Task throughput, agent performance, and failure rate
+  stats [--port N]                      Task counts by status, active agents, and active convoys (calls daemon)
   who                                   Show which agents are active and what they're working on
   list [status[,status2]] [--status <s>] [--repo <name>] [--type <type>] [--limit N]
                                         List tasks; filters are optional and combinable

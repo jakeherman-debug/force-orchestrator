@@ -238,7 +238,7 @@ func main() {
 		cmdWho(db)
 
 	case "stats":
-		cmdStats(db)
+		cmdStats(db, os.Args[2:])
 
 	case "logs-fleet":
 		cmdLogsFleet(db, os.Args[2:])
