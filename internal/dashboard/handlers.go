@@ -72,6 +72,37 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// ── Stats ─────────────────────────────────────────────────────────────────────
+
+func handleStats(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jsonCORS(w)
+		s := StatsResponse{Tasks: map[string]int{}}
+
+		rows, _ := db.Query(`SELECT status, COUNT(*) FROM BountyBoard GROUP BY status`)
+		if rows != nil {
+			for rows.Next() {
+				var status string
+				var n int
+				rows.Scan(&status, &n)
+				s.Tasks[status] = n
+			}
+			rows.Close()
+		}
+
+		db.QueryRow(`
+			SELECT COUNT(DISTINCT a.agent_name)
+			FROM Agents a
+			JOIN BountyBoard b ON b.owner = a.agent_name
+			    AND b.status IN ('Locked','UnderReview','UnderCaptainReview')
+		`).Scan(&s.ActiveAgents)
+
+		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoys)
+
+		json.NewEncoder(w).Encode(s)
+	}
+}
+
 // ── Tasks list ────────────────────────────────────────────────────────────────
 
 func handleTasks(db *sql.DB) http.HandlerFunc {
