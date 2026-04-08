@@ -32,20 +32,27 @@ For each proposed plan, decide one of:
   a single convoy. Specify the feature_id to merge with.
 
 Respond with ONLY a JSON object in exactly this format — no preamble, no markdown:
-{"action":"APPROVE"|"SEQUENCE"|"REJECT"|"MERGE","reason":"...","merge_with_feature_id":0,"sequence_after_convoy_ids":[]}
+{"action":"APPROVE"|"SEQUENCE"|"REJECT"|"MERGE","reason":"...","merge_with_feature_id":0,"sequence_after_convoy_ids":[],"sequence_after_feature_ids":[],"hold_convoy_ids":[]}
 
 Set merge_with_feature_id to the feature ID to merge with (only for MERGE), 0 otherwise.
-Set sequence_after_convoy_ids to the convoy IDs to block on (only for SEQUENCE), empty otherwise.
+Set sequence_after_convoy_ids to active convoy IDs this proposal must wait on (SEQUENCE only).
+Set sequence_after_feature_ids to pending Feature IDs (not yet planned) this proposal depends on.
+  Use this when a pending Feature in the queue is a prerequisite — the system will block this
+  convoy until that Feature's convoy is created and completes.
+Set hold_convoy_ids to active convoy IDs that depend on THIS proposal's work and should be
+  blocked immediately. Use when you detect a running convoy that built against work this
+  proposal introduces — it needs to be held and replanned once this convoy lands.
 
-Be decisive. Prefer APPROVE for independent work. Use SEQUENCE when a plan is correct but must
-wait on active convoys — do not waste a Commander replan cycle just to say "wait first."
-Use REJECT only for genuine design conflicts. Use MERGE when combining produces a better convoy.`
+sequence_after_feature_ids and hold_convoy_ids are independent of the main action — set them
+alongside APPROVE/SEQUENCE/REJECT/MERGE whenever the dependency situation warrants it.`
 
 type chancellorRuling struct {
-	Action                string `json:"action"`
-	Reason                string `json:"reason"`
-	MergeWithFeatureID    int    `json:"merge_with_feature_id"`
-	SequenceAfterConvoyIDs []int `json:"sequence_after_convoy_ids"`
+	Action                  string `json:"action"`
+	Reason                  string `json:"reason"`
+	MergeWithFeatureID      int    `json:"merge_with_feature_id"`
+	SequenceAfterConvoyIDs  []int  `json:"sequence_after_convoy_ids"`
+	SequenceAfterFeatureIDs []int  `json:"sequence_after_feature_ids"`
+	HoldConvoyIDs           []int  `json:"hold_convoy_ids"`
 }
 
 // SpawnChancellor runs the Supreme Chancellor agent loop.
@@ -74,17 +81,18 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 	logger.Printf("Reviewing Feature #%d (%d proposed task(s)): %s",
 		feature.ID, len(tasks), util.TruncateStr(feature.Payload, 80))
 
-	// Build context: active convoys + other pending proposals.
+	// Build context: active convoys + other pending proposals + pending Features.
 	activeConvoys := store.GetActiveConvoyContext(db)
 	pendingProposals := store.GetPendingProposals(db, feature.ID)
+	pendingFeatures := store.GetPendingFeatures(db, feature.ID)
 
-	userPrompt := buildChancellorPrompt(feature, tasks, activeConvoys, pendingProposals)
+	userPrompt := buildChancellorPrompt(feature, tasks, activeConvoys, pendingProposals, pendingFeatures)
 
 	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, userPrompt, "", 1)
 	if err != nil {
 		// On Claude failure, approve to avoid blocking the pipeline.
 		logger.Printf("Feature #%d: Chancellor Claude call failed (%v) — auto-approving", feature.ID, err)
-		approveProposal(db, feature, tasks, logger)
+		approveProposal(db, feature, tasks, chancellorRuling{}, logger)
 		return
 	}
 
@@ -92,45 +100,47 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 	var ruling chancellorRuling
 	if err := json.Unmarshal([]byte(jsonStr), &ruling); err != nil {
 		logger.Printf("Feature #%d: could not parse Chancellor ruling (%v) — auto-approving", feature.ID, err)
-		approveProposal(db, feature, tasks, logger)
+		approveProposal(db, feature, tasks, chancellorRuling{}, logger)
 		return
 	}
 
 	switch ruling.Action {
 	case "APPROVE":
 		logger.Printf("Feature #%d: APPROVED — %s", feature.ID, ruling.Reason)
-		approveProposal(db, feature, tasks, logger)
+		approveProposal(db, feature, tasks, ruling, logger)
 
 	case "SEQUENCE":
 		if len(ruling.SequenceAfterConvoyIDs) == 0 {
 			logger.Printf("Feature #%d: SEQUENCE with no convoy IDs — auto-approving", feature.ID)
-			approveProposal(db, feature, tasks, logger)
+			approveProposal(db, feature, tasks, ruling, logger)
 			return
 		}
 		logger.Printf("Feature #%d: SEQUENCE after convoy(s) %v — %s", feature.ID, ruling.SequenceAfterConvoyIDs, ruling.Reason)
-		sequenceProposal(db, feature, tasks, ruling.SequenceAfterConvoyIDs, ruling.Reason, logger)
+		sequenceProposal(db, feature, tasks, ruling, logger)
 
 	case "REJECT":
 		logger.Printf("Feature #%d: REJECTED — %s", feature.ID, ruling.Reason)
+		// Still enforce holds even on reject — hold_convoy_ids may be set.
+		enforceHolds(db, 0, ruling, feature, logger)
 		rejectProposal(db, feature, ruling.Reason, logger)
 
 	case "MERGE":
 		if ruling.MergeWithFeatureID <= 0 {
 			logger.Printf("Feature #%d: MERGE with no target feature_id — auto-approving", feature.ID)
-			approveProposal(db, feature, tasks, logger)
+			approveProposal(db, feature, tasks, ruling, logger)
 			return
 		}
 		logger.Printf("Feature #%d: MERGE with Feature #%d — %s", feature.ID, ruling.MergeWithFeatureID, ruling.Reason)
-		mergeProposals(db, feature, tasks, ruling.MergeWithFeatureID, ruling.Reason, logger)
+		mergeProposals(db, feature, tasks, ruling, logger)
 
 	default:
 		logger.Printf("Feature #%d: unknown action %q — auto-approving", feature.ID, ruling.Action)
-		approveProposal(db, feature, tasks, logger)
+		approveProposal(db, feature, tasks, chancellorRuling{}, logger)
 	}
 }
 
 // approveProposal creates the convoy and subtasks from an approved plan.
-func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, logger interface{ Printf(string, ...any) }) {
+func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) {
 	convoyPreview := strings.ReplaceAll(feature.Payload, "\n", " ")
 	if len(convoyPreview) > 50 {
 		convoyPreview = convoyPreview[:50]
@@ -160,6 +170,14 @@ func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, 
 	store.SetProposedConvoyStatus(db, feature.ID, "approved")
 	store.UpdateBountyStatus(db, feature.ID, "Completed")
 	logger.Printf("Feature #%d: convoy #%d created with %d task(s)", feature.ID, convoyID, len(tasks))
+
+	// Resolve any FeatureBlockers that were waiting on this Feature to get a convoy.
+	if n := store.ResolveFeatureBlockers(db, feature.ID, convoyID); n > 0 {
+		logger.Printf("Feature #%d: resolved FeatureBlockers — %d cross-convoy dep(s) wired", feature.ID, n)
+	}
+
+	// Apply hold enforcement from the ruling.
+	enforceHolds(db, convoyID, ruling, feature, logger)
 
 	var taskLines []string
 	for _, t := range tasks {
@@ -191,9 +209,69 @@ func rejectProposal(db *sql.DB, feature *store.Bounty, reason string, logger int
 		feature.ID, store.MailTypeAlert)
 }
 
+// enforceHolds applies FeatureBlockers and ConvoyHolds from a Chancellor ruling.
+// Called after any approval path (approve, sequence, merge) that creates a convoy.
+// newConvoyID is the convoy just created (0 if the proposal was rejected/not yet a convoy).
+func enforceHolds(db *sql.DB, newConvoyID int, ruling chancellorRuling, feature *store.Bounty, logger interface{ Printf(string, ...any) }) {
+	// sequence_after_feature_ids: block the new convoy on pending Features with no convoy yet.
+	for _, featureID := range ruling.SequenceAfterFeatureIDs {
+		if newConvoyID == 0 {
+			break
+		}
+		reason := fmt.Sprintf("Convoy #%d blocked — depends on Feature #%d completing first (Chancellor directive)", newConvoyID, featureID)
+		store.CreateFeatureBlocker(db, newConvoyID, featureID, reason)
+		logger.Printf("Feature #%d: convoy #%d blocked on Feature #%d (FeatureBlocker created)", feature.ID, newConvoyID, featureID)
+	}
+
+	// hold_convoy_ids: retroactively block active convoys that depend on this proposal's work.
+	for _, holdConvoyID := range ruling.HoldConvoyIDs {
+		reason := fmt.Sprintf("Held by Chancellor — convoy depends on Feature #%d's work (convoy #%d). Replanning required once Feature #%d lands.", feature.ID, newConvoyID, feature.ID)
+		if newConvoyID > 0 {
+			// Wire real TaskDependencies immediately: held convoy's Pending tasks → new convoy's tail tasks.
+			tailIDs := store.GetConvoyTailTaskIDs(db, newConvoyID)
+			heldRootRows, err := db.Query(`
+				SELECT id FROM BountyBoard
+				WHERE convoy_id = ? AND status IN ('Pending','Planned')
+				  AND id NOT IN (SELECT task_id FROM TaskDependencies)`, holdConvoyID)
+			if err == nil {
+				var rootIDs []int
+				for heldRootRows.Next() {
+					var id int
+					heldRootRows.Scan(&id)
+					rootIDs = append(rootIDs, id)
+				}
+				heldRootRows.Close()
+				for _, rootID := range rootIDs {
+					for _, tailID := range tailIDs {
+						store.AddDependency(db, rootID, tailID)
+					}
+				}
+			}
+		}
+		store.SetConvoyHold(db, holdConvoyID, reason)
+		logger.Printf("Feature #%d: convoy #%d placed on hold (depends on this work)", feature.ID, holdConvoyID)
+
+		store.SendMail(db, chancellorName, "operator",
+			fmt.Sprintf("[CHANCELLOR HOLD] Convoy #%d held — depends on Feature #%d", holdConvoyID, feature.ID),
+			fmt.Sprintf("Supreme Chancellor has placed convoy #%d on hold.\n\nReason: convoy #%d was started before Feature #%d's work was available. Any in-flight tasks will be rejected by the Captain and Council. Pending tasks are blocked.\n\nConvoy #%d will be unblocked automatically once Feature #%d's convoy completes.",
+				holdConvoyID, holdConvoyID, feature.ID, holdConvoyID, feature.ID),
+			feature.ID, store.MailTypeAlert)
+	}
+
+	if len(ruling.SequenceAfterFeatureIDs) > 0 || len(ruling.HoldConvoyIDs) > 0 {
+		store.SendMail(db, chancellorName, "operator",
+			fmt.Sprintf("[CHANCELLOR ORDERING] Feature #%d convoy dependency enforcement applied", feature.ID),
+			fmt.Sprintf("Chancellor applied convoy ordering for Feature #%d:\n- Blocked on features: %v\n- Held convoys: %v",
+				feature.ID, ruling.SequenceAfterFeatureIDs, ruling.HoldConvoyIDs),
+			feature.ID, store.MailTypeInfo)
+	}
+}
+
 // sequenceProposal creates the convoy immediately but wires cross-convoy blocking dependencies
 // so the new convoy's root tasks cannot start until the tail tasks of each specified convoy complete.
-func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, blockingConvoyIDs []int, reason string, logger interface{ Printf(string, ...any) }) {
+func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) {
+	blockingConvoyIDs := ruling.SequenceAfterConvoyIDs
+	reason := ruling.Reason
 	convoyPreview := strings.ReplaceAll(feature.Payload, "\n", " ")
 	if len(convoyPreview) > 50 {
 		convoyPreview = convoyPreview[:50]
@@ -247,6 +325,11 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 	logger.Printf("Feature #%d: convoy #%d created (sequenced after convoy(s) %v, %d cross-convoy dep(s) injected, %d task(s))",
 		feature.ID, convoyID, blockingConvoyIDs, injected, len(tasks))
 
+	if n := store.ResolveFeatureBlockers(db, feature.ID, convoyID); n > 0 {
+		logger.Printf("Feature #%d: resolved FeatureBlockers — %d cross-convoy dep(s) wired", feature.ID, n)
+	}
+	enforceHolds(db, convoyID, ruling, feature, logger)
+
 	var taskLines []string
 	for _, t := range tasks {
 		line := fmt.Sprintf("  #%d [%s] %s", idMapping[t.TempID], t.Repo, util.TruncateStr(t.Task, 80))
@@ -260,12 +343,14 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 }
 
 // mergeProposals synthesizes two proposed plans into a single convoy.
-func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, featureBID int, reason string, logger interface{ Printf(string, ...any) }) {
+func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) {
+	featureBID := ruling.MergeWithFeatureID
+	reason := ruling.Reason
 	featureB, tasksB, ok := store.ClaimMergeTarget(db, featureBID, chancellorName)
 	if !ok {
 		// Target already gone or claimed — approve A independently.
 		logger.Printf("Feature #%d: merge target #%d unavailable — approving independently", featureA.ID, featureBID)
-		approveProposal(db, featureA, tasksA, logger)
+		approveProposal(db, featureA, tasksA, ruling, logger)
 		return
 	}
 
@@ -275,8 +360,8 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 	if mergedTasks == nil {
 		// Synthesis failed — approve both independently.
 		logger.Printf("Merge synthesis failed — approving Feature #%d and #%d independently", featureA.ID, featureB.ID)
-		approveProposal(db, featureA, tasksA, logger)
-		approveProposal(db, featureB, tasksB, logger)
+		approveProposal(db, featureA, tasksA, ruling, logger)
+		approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
 		return
 	}
 
@@ -284,8 +369,8 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 	convoyID, convoyErr := store.CreateConvoy(db, convoyName)
 	if convoyErr != nil {
 		logger.Printf("Merge convoy creation failed — approving independently")
-		approveProposal(db, featureA, tasksA, logger)
-		approveProposal(db, featureB, tasksB, logger)
+		approveProposal(db, featureA, tasksA, ruling, logger)
+		approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
 		return
 	}
 	store.SetConvoyCoordinated(db, convoyID)
@@ -301,6 +386,10 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 	store.SetProposedConvoyStatus(db, featureB.ID, "merged")
 	store.UpdateBountyStatus(db, featureA.ID, "Completed")
 	store.UpdateBountyStatus(db, featureB.ID, "Completed")
+
+	store.ResolveFeatureBlockers(db, featureA.ID, convoyID)
+	store.ResolveFeatureBlockers(db, featureB.ID, convoyID)
+	enforceHolds(db, convoyID, ruling, featureA, logger)
 
 	logger.Printf("Merged convoy #%d: %d task(s) from Feature #%d + #%d",
 		convoyID, len(mergedTasks), featureA.ID, featureB.ID)
@@ -363,7 +452,7 @@ Respond with ONLY the raw JSON array — no explanation, no markdown, no code fe
 }
 
 // buildChancellorPrompt constructs the user prompt with full context.
-func buildChancellorPrompt(feature *store.Bounty, tasks []store.TaskPlan, activeConvoys []store.ActiveConvoyInfo, pendingProposals []store.PendingProposalInfo) string {
+func buildChancellorPrompt(feature *store.Bounty, tasks []store.TaskPlan, activeConvoys []store.ActiveConvoyInfo, pendingProposals []store.PendingProposalInfo, pendingFeatures []store.PendingFeatureInfo) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Proposed Plan\n\n")
@@ -403,6 +492,19 @@ func buildChancellorPrompt(feature *store.Bounty, tasks []store.TaskPlan, active
 		}
 	} else {
 		fmt.Fprintf(&b, "\n## Other Pending Proposals\n\nNone.\n")
+	}
+
+	if len(pendingFeatures) > 0 {
+		fmt.Fprintf(&b, "\n## Queued Features (not yet planned by Commander)\n\n")
+		fmt.Fprintf(&b, "These Features are in the queue but have no convoy yet. If this proposal\n")
+		fmt.Fprintf(&b, "depends on any of them, use sequence_after_feature_ids to block on that Feature ID.\n")
+		fmt.Fprintf(&b, "If any of them appear to depend on THIS proposal's work, use hold_convoy_ids\n")
+		fmt.Fprintf(&b, "when that convoy is eventually created — or flag it now with a note in reason.\n\n")
+		for _, f := range pendingFeatures {
+			fmt.Fprintf(&b, "**Feature #%d:** %s\n", f.FeatureID, util.TruncateStr(f.Payload, 150))
+		}
+	} else {
+		fmt.Fprintf(&b, "\n## Queued Features\n\nNone.\n")
 	}
 
 	return b.String()

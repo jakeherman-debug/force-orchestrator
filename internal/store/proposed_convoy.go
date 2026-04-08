@@ -156,6 +156,27 @@ func SetProposedConvoyStatus(db *sql.DB, featureID int, status string) {
 	db.Exec(`UPDATE ProposedConvoys SET status = ? WHERE feature_id = ?`, status, featureID)
 }
 
+// GetPendingFeatures returns Feature tasks not yet planned by Commander so the
+// Chancellor can reason about upcoming work when reviewing a proposal.
+func GetPendingFeatures(db *sql.DB, excludeFeatureID int) []PendingFeatureInfo {
+	rows, err := db.Query(`
+		SELECT id, payload FROM BountyBoard
+		WHERE type = 'Feature' AND status IN ('Pending', 'Classifying')
+		  AND id != ?
+		ORDER BY id ASC LIMIT 20`, excludeFeatureID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var features []PendingFeatureInfo
+	for rows.Next() {
+		var f PendingFeatureInfo
+		rows.Scan(&f.FeatureID, &f.Payload)
+		features = append(features, f)
+	}
+	return features
+}
+
 // GetConvoyTailTaskIDs returns the IDs of tasks in the given convoy that no other
 // task in the same convoy depends on — i.e., the last tasks in the execution graph.
 // These are used as blocking dependencies when sequencing a new convoy after this one.

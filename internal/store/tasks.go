@@ -36,6 +36,10 @@ func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) 
 		    JOIN BountyBoard dep ON dep.id = td.depends_on
 		    WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed'
 		  )
+		  AND (convoy_id = 0 OR NOT EXISTS (
+		    SELECT 1 FROM FeatureBlockers fb
+		    WHERE fb.blocked_convoy_id = BountyBoard.convoy_id AND fb.resolved_at IS NULL
+		  ))
 		ORDER BY priority DESC, id ASC
 		LIMIT 1`, taskType).
 		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Type, &b.Status,

@@ -188,6 +188,13 @@ type PendingProposalInfo struct {
 	PlanJSON  string
 }
 
+// PendingFeatureInfo is a Feature task not yet planned by Commander.
+// Shown to the Chancellor so it can reason about upcoming work dependencies.
+type PendingFeatureInfo struct {
+	FeatureID int
+	Payload   string
+}
+
 type FleetMail struct {
 	ID          int
 	FromAgent   string

@@ -185,6 +185,32 @@ CREATE TABLE IF NOT EXISTS TaskNotes (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ── Chancellor convoy ordering ───────────────────────────────────────────────
+-- FeatureBlockers: a convoy is blocked until a Feature (not yet a convoy) completes.
+-- Created by Chancellor when approving a convoy that depends on an unplanned Feature.
+-- Resolved (and real TaskDependencies wired) when the blocking Feature's convoy is approved.
+
+CREATE TABLE IF NOT EXISTS FeatureBlockers (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    blocked_convoy_id   INTEGER NOT NULL,  -- convoy whose tasks cannot be claimed
+    blocking_feature_id INTEGER NOT NULL,  -- Feature that must land first (BountyBoard.id)
+    resolved_at         DATETIME,          -- NULL until resolved
+    created_at          DATETIME DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_feature_blockers_convoy   ON FeatureBlockers (blocked_convoy_id);
+CREATE INDEX IF NOT EXISTS idx_feature_blockers_feature  ON FeatureBlockers (blocking_feature_id);
+
+-- ConvoyHolds: hard stop for Captain and Council — reject any task from a held convoy.
+-- Set alongside FeatureBlockers (or standalone for retroactive holds).
+-- Cleared when all FeatureBlockers for a convoy are resolved.
+
+CREATE TABLE IF NOT EXISTS ConvoyHolds (
+    convoy_id   INTEGER PRIMARY KEY,
+    reason      TEXT    NOT NULL,
+    created_at  DATETIME DEFAULT (datetime('now'))
+);
+
 -- ── Proposed convoys ──────────────────────────────────────────────────────────
 -- Commander stores its plan here instead of creating a convoy directly.
 -- The Supreme Chancellor reviews and approves, sequences, or merges proposals.

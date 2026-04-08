@@ -183,6 +183,20 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		Payload:   map[string]any{"convoy_id": b.ConvoyID},
 	})
 
+	// Hard-reject if the Chancellor has placed a hold on this convoy.
+	if reason, held := store.GetConvoyHold(db, b.ConvoyID); held {
+		retryCount := store.IncrementRetryCount(db, b.ID)
+		holdMsg := fmt.Sprintf("CONVOY HOLD: %s", reason)
+		newPayload := fmt.Sprintf("%s\n\nCAPTAIN FEEDBACK (attempt %d/%d): %s", b.Payload, retryCount, MaxRetries, holdMsg)
+		store.ReturnTaskForRework(db, b.ID, newPayload)
+		store.SendMail(db, agentName, "astromech",
+			fmt.Sprintf("[CAPTAIN REJECTED] Task #%d — convoy on hold", b.ID),
+			fmt.Sprintf("Task #%d returned — its convoy is on hold by Chancellor directive.\n\nReason: %s\n\nDo not retry until the hold is lifted.", b.ID, reason),
+			b.ID, store.MailTypeFeedback)
+		logger.Printf("Task %d: hard-rejected — convoy #%d on Chancellor hold", b.ID, b.ConvoyID)
+		return
+	}
+
 	directive := LoadDirective("captain", b.TargetRepo)
 	directiveSection := ""
 	if directive != "" {

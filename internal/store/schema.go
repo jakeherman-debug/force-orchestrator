@@ -148,6 +148,24 @@ func createSchema(db *sql.DB) {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 
+	// FeatureBlockers — convoy blocked until an unplanned Feature's convoy lands.
+	db.Exec(`CREATE TABLE IF NOT EXISTS FeatureBlockers (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		blocked_convoy_id   INTEGER NOT NULL,
+		blocking_feature_id INTEGER NOT NULL,
+		resolved_at         DATETIME,
+		created_at          DATETIME DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_convoy  ON FeatureBlockers (blocked_convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_feature ON FeatureBlockers (blocking_feature_id)`)
+
+	// ConvoyHolds — hard rejection signal for Captain and Council.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyHolds (
+		convoy_id  INTEGER PRIMARY KEY,
+		reason     TEXT    NOT NULL,
+		created_at DATETIME DEFAULT (datetime('now'))
+	)`)
+
 	// Proposed convoys — Commander stores plans here for Chancellor review.
 	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedConvoys (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,5 +229,21 @@ func runMigrations(db *sql.DB) {
 		plan_json   TEXT    NOT NULL,
 		status      TEXT    NOT NULL DEFAULT 'pending',
 		created_at  DATETIME DEFAULT (datetime('now'))
+	)`)
+
+	// FeatureBlockers and ConvoyHolds — Chancellor convoy ordering (idempotent on fresh DBs).
+	db.Exec(`CREATE TABLE IF NOT EXISTS FeatureBlockers (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		blocked_convoy_id   INTEGER NOT NULL,
+		blocking_feature_id INTEGER NOT NULL,
+		resolved_at         DATETIME,
+		created_at          DATETIME DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_convoy  ON FeatureBlockers (blocked_convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_feature ON FeatureBlockers (blocking_feature_id)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyHolds (
+		convoy_id  INTEGER PRIMARY KEY,
+		reason     TEXT    NOT NULL,
+		created_at DATETIME DEFAULT (datetime('now'))
 	)`)
 }
