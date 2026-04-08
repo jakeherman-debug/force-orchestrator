@@ -129,9 +129,13 @@ type DashboardAgent struct {
 
 // StatsResponse is the payload for GET /api/stats
 type StatsResponse struct {
-	Tasks        map[string]int `json:"tasks"`
-	ActiveAgents int            `json:"active_agents"`
-	ActiveConvoys int           `json:"active_convoys"`
+	Tasks              map[string]int `json:"tasks"`
+	ActiveAgents       int            `json:"active_agents"`
+	ActiveConvoys      int            `json:"active_convoys"`
+	PendingCount       int            `json:"pending_count"`
+	ActiveCount        int            `json:"active_count"`
+	CompletedTodayCount int           `json:"completed_today_count"`
+	ActiveConvoyCount  int            `json:"active_convoy_count"`
 }
 
 // addTaskBody is the POST /api/add request body
