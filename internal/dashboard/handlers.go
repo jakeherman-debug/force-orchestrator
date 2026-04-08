@@ -99,6 +99,11 @@ func handleStats(db *sql.DB) http.HandlerFunc {
 
 		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoys)
 
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status = 'Pending'`).Scan(&s.PendingCount)
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status IN ('Locked','AwaitingCaptainReview','UnderCaptainReview','AwaitingCouncilReview','UnderReview')`).Scan(&s.ActiveCount)
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status = 'Completed' AND date(created_at) = date('now')`).Scan(&s.CompletedTodayCount)
+		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoyCount)
+
 		json.NewEncoder(w).Encode(s)
 	}
 }
