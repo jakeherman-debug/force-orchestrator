@@ -616,18 +616,57 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// deriveAgentRole maps an agent name to its fleet role.
+func deriveAgentRole(name string) string {
+	switch {
+	case strings.HasPrefix(name, "Commander-"):
+		return "Commander"
+	case name == "Supreme-Chancellor":
+		return "Chancellor"
+	case strings.HasPrefix(name, "Council-"):
+		return "Council"
+	case strings.HasPrefix(name, "Captain-"):
+		return "Captain"
+	case strings.HasPrefix(name, "Inquisitor-"):
+		return "Investigator"
+	case strings.HasPrefix(name, "Auditor-"):
+		return "Auditor"
+	case strings.HasPrefix(name, "R2-"),
+		strings.HasPrefix(name, "BB-"),
+		strings.HasPrefix(name, "C3-"),
+		strings.HasPrefix(name, "R4-"),
+		strings.HasPrefix(name, "R5-"),
+		strings.HasPrefix(name, "BD-"):
+		return "Astromech"
+	default:
+		return "Unknown"
+	}
+}
+
 // ── Agents ────────────────────────────────────────────────────────────────────
 
 func handleAgents(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jsonCORS(w)
+		// First query: registered agents with their current task (if any).
+		// Second query: agents active on BountyBoard but not in the Agents table.
+		// NOT IN deduplicates — Agents table rows take priority.
 		rows, err := db.Query(`
 			SELECT a.agent_name, a.repo,
 			       IFNULL(b.id, 0), IFNULL(b.status,''), IFNULL(b.locked_at,'')
 			FROM Agents a
 			LEFT JOIN BountyBoard b ON b.owner = a.agent_name
 			    AND b.status IN ('Locked','UnderReview','UnderCaptainReview')
-			ORDER BY a.agent_name`)
+
+			UNION
+
+			SELECT b2.owner, '',
+			       b2.id, b2.status, IFNULL(b2.locked_at,'')
+			FROM BountyBoard b2
+			WHERE b2.status IN ('Locked','UnderReview','UnderCaptainReview')
+			  AND b2.owner NOT IN (SELECT agent_name FROM Agents)
+
+			ORDER BY agent_name`)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -637,6 +676,7 @@ func handleAgents(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var ag DashboardAgent
 			rows.Scan(&ag.AgentName, &ag.Repo, &ag.CurrentTaskID, &ag.TaskStatus, &ag.LockedAt)
+			ag.Role = deriveAgentRole(ag.AgentName)
 			out = append(out, ag)
 		}
 		if out == nil {
