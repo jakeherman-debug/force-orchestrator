@@ -121,6 +121,7 @@ type DashboardConvoy struct {
 type DashboardAgent struct {
 	AgentName     string `json:"agent_name"`
 	Repo          string `json:"repo"`
+	Role          string `json:"role"`
 	CurrentTaskID int    `json:"current_task_id,omitempty"`
 	TaskStatus    string `json:"task_status,omitempty"`
 	LockedAt      string `json:"locked_at,omitempty"`
