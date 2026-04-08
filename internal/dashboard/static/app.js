@@ -19,8 +19,8 @@ const S = {
   detail:             null,
   rejectID:           null,
   activeTab:          'tasks',
-  sortBy:             '',
-  sortDir:            'asc',
+  sortBy:             'id',
+  sortDir:            'desc',
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────

@@ -96,7 +96,7 @@
         <table id="tasks-table">
           <thead>
             <tr>
-              <th style="width:50px">ID</th>
+              <th class="th-sortable" data-sort-col="id" style="width:50px" onclick="setSortBy('id')">ID<span class="sort-icon"> ⇅</span></th>
               <th class="th-sortable" data-sort-col="status" style="width:90px" onclick="setSortBy('status')">Status<span class="sort-icon"> ⇅</span></th>
               <th style="width:90px">Owner</th>
               <th class="th-sortable" data-sort-col="type" style="width:80px" onclick="setSortBy('type')">Type<span class="sort-icon"> ⇅</span></th>
@@ -106,7 +106,7 @@
               <th style="width:60px">Retry</th>
               <th style="width:130px">Runtime / Blocked</th>
               <th class="th-sortable" data-sort-col="created_at" style="width:100px" onclick="setSortBy('created_at')">Created<span class="sort-icon"> ⇅</span></th>
-              <th style="width:70px">Cost</th>
+              <th class="th-sortable" data-sort-col="cost" style="width:70px" onclick="setSortBy('cost')">Cost<span class="sort-icon"> ⇅</span></th>
             </tr>
           </thead>
           <tbody id="tasks-tbody"></tbody>

@@ -80,7 +80,7 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		statusFilter := r.URL.Query().Get("status")
 		convoyIDStr := r.URL.Query().Get("convoy_id")
 
-		allowedSortBy := map[string]bool{"status": true, "type": true, "created_at": true, "priority": true, "id": true}
+		allowedSortBy := map[string]bool{"status": true, "type": true, "created_at": true, "priority": true, "id": true, "cost": true}
 		sortBy := r.URL.Query().Get("sort_by")
 		if !allowedSortBy[sortBy] {
 			sortBy = "id"
@@ -88,6 +88,12 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 		sortDir := r.URL.Query().Get("sort_dir")
 		if sortDir != "asc" && sortDir != "desc" {
 			sortDir = "desc"
+		}
+		// cost is a computed expression, not a column name — expand it here to avoid SQL injection.
+		sortExpr := sortBy
+		if sortBy == "cost" {
+			sortExpr = `((SELECT COALESCE(SUM(tokens_in),0) FROM TaskHistory WHERE task_id = BountyBoard.id) * 3 +
+				(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id) * 15)`
 		}
 
 		limit := 50
@@ -141,7 +147,7 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			(SELECT COALESCE(SUM(tokens_in),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
 			(SELECT COALESCE(SUM(tokens_out),0) FROM TaskHistory WHERE task_id = BountyBoard.id),
 			IFNULL(BountyBoard.created_at,'')
-			` + baseQuery + ` ORDER BY ` + sortBy + ` ` + sortDir + ` LIMIT ? OFFSET ?`
+			` + baseQuery + ` ORDER BY ` + sortExpr + ` ` + sortDir + ` LIMIT ? OFFSET ?`
 		queryArgs := append(args, limit, offset)
 
 		rows, err := db.Query(query, queryArgs...)
