@@ -27,6 +27,7 @@ func RunDashboard(db *sql.DB, port int) {
 
 	// ── API ──────────────────────────────────────────────────────────────────
 	mux.HandleFunc("/api/status", handleStatus(db))
+	mux.HandleFunc("/api/stats", handleStats(db))
 	mux.HandleFunc("/api/tasks", handleTasks(db))
 	mux.HandleFunc("/api/tasks/", handleTasksSubroutes(db))
 	mux.HandleFunc("/api/control/estop", handleEstop(db))

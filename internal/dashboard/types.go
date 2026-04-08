@@ -126,6 +126,13 @@ type DashboardAgent struct {
 	LockedAt      string `json:"locked_at,omitempty"`
 }
 
+// StatsResponse is the payload for GET /api/stats
+type StatsResponse struct {
+	Tasks        map[string]int `json:"tasks"`
+	ActiveAgents int            `json:"active_agents"`
+	ActiveConvoys int           `json:"active_convoys"`
+}
+
 // addTaskBody is the POST /api/add request body
 type addTaskBody struct {
 	Type           string `json:"type"`
