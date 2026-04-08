@@ -105,6 +105,35 @@ body {
 .stat-cell[data-color="blue"] .stat-num   { color: var(--accent); }
 .stat-cell[data-color="teal"] .stat-num   { color: var(--teal); }
 
+/* ── API stats pill bar ───────────────────────────────────────────────────── */
+#api-stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.pill-num { font-family: var(--font-mono); }
+
+.pill-yellow { background: rgba(210,153,34,.12); border-color: var(--yellow); color: var(--yellow); }
+.pill-blue   { background: rgba(88,166,255,.12); border-color: var(--accent); color: var(--accent); }
+.pill-green  { background: rgba(63,185,80,.12);  border-color: var(--green);  color: var(--green); }
+.pill-teal   { background: rgba(57,197,207,.12); border-color: var(--teal);   color: var(--teal); }
+
 /* ── Tabs ─────────────────────────────────────────────────────────────────── */
 #tab-bar {
   display: flex;

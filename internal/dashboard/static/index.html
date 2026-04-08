@@ -81,6 +81,12 @@
       <span id="convoy-filter-label"></span>
       <a style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="clearConvoyFilter()">Clear filter</a>
     </div>
+    <div id="api-stats-bar">
+      <span class="stat-pill pill-yellow"><span class="pill-num" id="pill-pending-count">0</span> Pending</span>
+      <span class="stat-pill pill-blue"><span class="pill-num" id="pill-active-count">0</span> Active</span>
+      <span class="stat-pill pill-green"><span class="pill-num" id="pill-completed-today-count">0</span> Completed Today</span>
+      <span class="stat-pill pill-teal"><span class="pill-num" id="pill-convoys-count">0</span> Active Convoys</span>
+    </div>
     <div class="filter-bar">
       <button class="filter-btn active" data-filter="active"  onclick="setTaskFilter('active')">Active</button>
       <button class="filter-btn"        data-filter="pending" onclick="setTaskFilter('pending')">Pending</button>
