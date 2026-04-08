@@ -99,6 +99,17 @@ async function api(url, opts = {}) {
   return r.json();
 }
 
+// ── Stats polling ──────────────────────────────────────────────────────────────
+async function pollStats() {
+  try {
+    const s = await api('/api/stats');
+    $('pill-pending-count').textContent         = s.pending_count         || 0;
+    $('pill-active-count').textContent          = s.active_count          || 0;
+    $('pill-completed-today-count').textContent = s.completed_today_count || 0;
+    $('pill-convoys-count').textContent         = s.active_convoy_count   || 0;
+  } catch(_) {}
+}
+
 // ── Status polling ─────────────────────────────────────────────────────────────
 async function pollStatus() {
   try {
@@ -1220,6 +1231,9 @@ async function deleteMemFromModal() {
 function startPolling() {
   pollStatus();
   setInterval(pollStatus, 5000);
+
+  pollStats();
+  setInterval(pollStats, 10000);
 
   setInterval(() => {
     switch(S.activeTab) {
