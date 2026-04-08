@@ -106,7 +106,7 @@ async function pollStats() {
     $('pill-pending-count').textContent         = s.pending_count         || 0;
     $('pill-active-count').textContent          = s.active_count          || 0;
     $('pill-completed-today-count').textContent = s.completed_today_count || 0;
-    $('pill-convoys-count').textContent         = s.active_convoy_count   || 0;
+    $('pill-convoys-count').textContent         = s.active_convoys        || 0;
   } catch(_) {}
 }
 
