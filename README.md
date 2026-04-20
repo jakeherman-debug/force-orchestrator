@@ -41,18 +41,23 @@ Inspired by Steve Yegge's **Gas Town** pattern: all coordination happens through
 │Commander│          │ Astromechs │         │   Jedi Council  │
 │(Planner)│          │  (Workers) │         │   (Reviewers)   │
 └────┬────┘          └─────┬──────┘         └────────┬────────┘
-     │                     │                         │
-     │               git worktrees              git merge
-     │               claude -p                  → main branch
-     │                     │
-     │              ┌──────▼──────┐
-     │              │  Captain    │  ← plan coherence gate
-     │              │ (per convoy)│     after each commit,
-     │              └──────┬──────┘     before council
-     │                     │
-┌────▼────┐                │
-│Inquisitor│ ← background health monitor
-└──────────┘
+     │ proposes              │                        │
+     ▼                 git worktrees            git merge + ──► Librarian
+┌───────────┐          claude -p               → main branch   (writes memory)
+│Chancellor │◄──────────────────────────────────┘
+│(Approver) │  approve/sequence/reject/merge
+└─────┬─────┘
+      │ creates convoy
+      │
+      │               ┌──────▼──────┐
+      │               │  Captain    │  ← plan coherence gate
+      │               │ (per convoy)│     after each commit,
+      │               └──────┬──────┘     before council
+      │                      │
+ ┌────▼────┐                 │        ┌──────┐
+ │Inquisitor│ ← background   │        │Medic │ ← triage on permanent failure
+ └──────────┘   health       │        └──────┘
+                monitor      │
 ```
 
 **Everything is SQLite-first.** Agents do not communicate directly with each other. They read from and write to `holocron.db`. This means:
@@ -81,17 +86,30 @@ Inspired by Steve Yegge's **Gas Town** pattern: all coordination happens through
 ### Task Lifecycle
 
 ```
-Pending → Locked → AwaitingCaptainReview → AwaitingCouncilReview → Completed
-                          ↘ → Pending (captain rejection, retry)    ↘ → Pending (council rejection, retry)
-              ↘ Failed (max retries or permanent infra failure)
-              ↘ Escalated (agent needs human input)
+Feature tasks (Commander):
+  Pending → Locked → AwaitingChancellorReview → Completed (Chancellor creates convoy + CodeEdit tasks)
+                              ↘ → Pending (Chancellor rejects plan; Commander replans)
+
+CodeEdit tasks (Astromechs):
+  Pending → Locked → AwaitingCaptainReview → AwaitingCouncilReview → Completed
+                           ↘ → Pending (captain rejection, retry)    ↘ → Pending (council rejection, retry)
+             ↘ Failed (max retries or permanent infra failure) → MedicReview spawned
+             ↘ Escalated (agent needs human input)
+
+WriteMemory tasks (Librarian):
+  Pending → Completed   [spawned by Council after each CodeEdit approval]
+
+MedicReview tasks (Medic):
+  Pending → Completed   [spawned on permanent CodeEdit failure; may requeue/shard/escalate the original]
 
 Planned → (force convoy approve) → Pending   [--plan-only flow only]
 ```
 
-Tasks in a coordinated convoy (all convoys created by Commander) pass through the Captain after each Astromech commit. The Captain checks whether the implementation fits the larger plan and updates downstream task descriptions if needed, before forwarding to the Jedi Council for code quality review.
+**Feature tasks** flow through Commander (planning) and then the Chancellor (conflict review) before any code is written. The Chancellor approves, sequences (waits on other convoys), rejects (replans), or merges the plan with another pending proposal.
 
-Direct `add-task` tasks (not in a convoy) skip the Captain and go straight to council.
+**CodeEdit tasks** in a coordinated convoy pass through the Captain after each Astromech commit, then the Jedi Council for code quality review. After approval the Council spawns a `WriteMemory` task for the Librarian.
+
+**Direct `add-task` tasks** (not in a convoy) skip the Captain and go straight to council.
 
 `Planned` tasks are created when you submit a feature with `--plan-only`. They sit inert until you inspect the plan and run `force convoy approve <id>` to activate them.
 
@@ -250,6 +268,58 @@ force mail inbox operator   # see the report arrive
 force mail read <id>        # read the full report
 ```
 
+### Supreme Chancellor — Convoy Approver
+
+**File:** `chancellor.go`  
+**Name:** Supreme-Chancellor-Palpatine (single instance — deliberate serialization point)
+
+The Chancellor is the conflict-resolution gate that sits between Commander's planning output and the actual creation of a convoy. After Commander decomposes a Feature into tasks and stores a proposed plan, the Feature task transitions to `AwaitingChancellorReview`. The Chancellor reviews the plan against all currently active work and other pending proposals.
+
+The Chancellor can rule:
+
+| Ruling | Action |
+|---|---|
+| `APPROVE` | Plan is safe to execute. Creates the convoy and tasks immediately. |
+| `SEQUENCE` | Plan is correct but depends on an active convoy finishing first. Creates the convoy with cross-convoy blocking dependencies on the specified convoy's tail tasks — new root tasks cannot start until upstream work merges. |
+| `REJECT` | Fundamental design conflict. Resets the Feature to Pending and mails Commander with the rejection reason for replanning. |
+| `MERGE` | This plan overlaps significantly with another pending proposal. The Chancellor calls Claude to synthesize a single unified task list and creates one combined convoy for both features. |
+
+The Chancellor also enforces two optional ordering directives on any ruling:
+- **`sequence_after_feature_ids`**: blocks the new convoy until a queued Feature (not yet planned) gets its own convoy and completes.
+- **`hold_convoy_ids`**: retroactively places currently active convoys on hold when the Chancellor determines they depend on work this new proposal introduces.
+
+On Claude failure, the Chancellor auto-approves to avoid blocking the pipeline.
+
+### Fleet Librarian — Memory Curator
+
+**File:** `librarian.go`  
+**Roster:** Jocasta-Nu, Huyang, Dexter-Jettster
+
+The Librarian writes high-quality memory entries after each successful task. When the Jedi Council approves a task it spawns a `WriteMemory` bounty containing the task description, files changed, council feedback, and the git diff. The Librarian claims this bounty and calls Claude with a strict prompt that produces a 2–4 sentence memory nugget covering:
+
+1. What was built or fixed (specific — named function, file, or component)
+2. What was non-obvious or tricky about the implementation
+3. Patterns, gotchas, or pitfalls not obvious from reading the code
+
+This replaces the raw task-description memories the Council wrote directly before the Librarian was introduced. The result is injected into future Astromech prompts via the Fleet Memory RAG system.
+
+On Claude failure the Librarian falls back to a truncated task description so no memory slot is lost.
+
+### Fleet Medic — Failure Triage
+
+**File:** `medic.go`  
+**Roster:** Bacta, Kolto, Stim
+
+The Medic triages tasks that have permanently failed — exhausted all retry attempts or hit an unrecoverable infra failure. Instead of immediately escalating to the operator, the Medic examines the full attempt history, all council/captain rejection feedback, and the last git diff, then renders one of three verdicts:
+
+| Verdict | Action |
+|---|---|
+| `requeue` | The task is valid but needed clearer guidance. Resets it to Pending and mails astromechs with specific corrective guidance to prevent the same failure. |
+| `shard` | The task was too broad for a single agent. Cancels the original task and inserts 2–5 focused sub-tasks into the same convoy. |
+| `escalate` | The failure reveals an architectural ambiguity, missing dependency, or problem a coding agent cannot resolve. Creates an escalation and mails the operator. |
+
+The Medic is biased toward `requeue` or `shard` — `escalate` is a last resort. On Claude failure the Medic escalates directly without looping.
+
 ---
 
 ## Fleet Memory & RAG
@@ -336,6 +406,13 @@ Agents communicate through `Fleet_Mail` — a role-addressed, typed messaging sy
 | Convoy completes | inquisitor → operator | info |
 | Remediation task approved | council → operator | remediation |
 | Dog fails | inquisitor → operator | alert |
+| Chancellor approves a plan | chancellor → operator | info |
+| Chancellor sequences a plan | chancellor → operator | info |
+| Chancellor rejects a plan | chancellor → operator + commander | alert + feedback |
+| Chancellor merges two plans | chancellor → operator | info |
+| Chancellor places a convoy on hold | chancellor → operator | alert |
+| Medic requeues a failed task | medic → astromech | feedback |
+| Medic escalates a failed task | medic → operator | alert |
 
 Mail scoped to a task (`task_id != 0`) is automatically cleaned up by the `mail-cleanup` dog after the task completes and 48 hours have passed.
 
@@ -434,7 +511,13 @@ force daemon
 This starts all agents in the background:
 - 2 Astromechs (default; configure with `force config set num_astromechs 4`)
 - 1 Council member (configure with `force config set num_council 2`)
-- 1 Commander
+- 3 Commanders (default; configure with `force config set num_commanders 1`)
+- 1 Captain (configure with `force config set num_captain 2`)
+- 1 Chancellor (single instance, always)
+- 1 Librarian (configure with `force config set num_librarians 2`)
+- 1 Medic (configure with `force config set num_medics 2`)
+- 1 Investigator (configure with `force config set num_investigators 2`)
+- 1 Auditor (configure with `force config set num_auditors 2`)
 - 1 Inquisitor
 
 The daemon writes a `fleet.pid` file and logs to `fleet.log`. It handles `SIGINT`/`SIGTERM` with a 30-second graceful drain.
@@ -646,6 +729,11 @@ Set with `force config set <key> <value>`.
 | `num_astromechs` | `2` | How many worker agents to run. Takes effect on restart or `force scale`. |
 | `num_captain` | `1` | How many captain agents to run. Takes effect on restart. |
 | `num_council` | `1` | How many review agents to run. Takes effect on restart. |
+| `num_commanders` | `3` | How many Commander planners to run. Takes effect on restart. |
+| `num_investigators` | `1` | How many Investigator research agents to run. Takes effect on restart. |
+| `num_auditors` | `1` | How many Auditor scan agents to run. Takes effect on restart. |
+| `num_librarians` | `1` | How many Librarian memory-curation agents to run. Takes effect on restart. |
+| `num_medics` | `1` | How many Medic failure-triage agents to run. Takes effect on restart. |
 | `max_concurrent` | `0` (unlimited) | Maximum tasks running simultaneously fleet-wide. |
 | `spawn_delay_ms` | `0` | Milliseconds to wait between each agent claiming a new task. Smooths thundering-herd on large backlogs. |
 | `batch_size` | `0` (unlimited) | Maximum tasks claimed fleet-wide in a 60-second window. |
@@ -697,41 +785,50 @@ Tests that require `git` or FTS5 skip themselves gracefully when those dependenc
 1. force add "Add search to the API"
    └─ BountyBoard: Feature #1 → Pending
 
-2. Commander picks up Feature #1
+2. Commander-Cody picks up Feature #1
    └─ Asks Claude to decompose into tasks
-   └─ Creates Convoy #1
-   └─ Inserts CodeEdit tasks #2, #3 into BountyBoard
-   └─ Mails operator: "Feature #1 → 2 tasks in convoy #1"
+   └─ Stores a ProposedConvoy (plan JSON) against Feature #1
+   └─ Feature #1 → status: AwaitingChancellorReview
 
-3. R2-D2 picks up CodeEdit #2 (no blocked_by)
+3. Supreme Chancellor reviews the proposed plan
+   └─ Sees: no active convoys, no pending proposals → no conflicts
+   └─ APPROVE ruling → creates Convoy #1
+   └─ Inserts CodeEdit tasks #2, #3 into BountyBoard (task #3 blocked_by #2)
+   └─ Mails operator: "[APPROVED] Feature #1 → convoy #1 (2 tasks)"
+
+4. R2-D2 picks up CodeEdit #2 (no blocked_by)
    └─ Loads FleetMemory for this repo (FTS5 search against task payload)
    └─ Reads inbox (any unread mail addressed to "astromech")
    └─ Runs claude -p in git worktree
    └─ Commits result → status: AwaitingCaptainReview
 
-4. BB-8 tries to pick up CodeEdit #3 — blocked by #2, skips it
+5. BB-8 tries to pick up CodeEdit #3 — blocked by #2, skips it
 
-5. Captain-Rex picks up #2 for plan coherence review
+6. Captain-Rex picks up #2 for plan coherence review
    └─ Sees: Convoy #1 progress, completed tasks, remaining task #3
    └─ Reviews the diff — does task #3's description still make sense?
    └─ If task #3 description needs updating → rewrites its payload
    └─ Approved → status: AwaitingCouncilReview
 
-6. Council-Yoda picks up #2 for code quality review
+7. Council-Yoda picks up #2 for code quality review
    └─ Reads inbox (directives, alerts)
    └─ Gets the git diff, asks Claude to evaluate
-   └─ Approved → merges branch, stores FleetMemory success entry
+   └─ Approved → merges branch, spawns WriteMemory task for Librarian
    └─ Unblocks #3 (sets blocked_by = 0)
 
-7. BB-8 picks up CodeEdit #3 (now unblocked, with updated payload if captain revised it)
-   └─ FleetMemory now includes #2's success — BB-8 sees what files were touched
+8. Librarian (Jocasta-Nu) picks up WriteMemory for task #2
+   └─ Calls Claude with task description, files changed, and diff
+   └─ Writes a curated 2–4 sentence memory nugget to FleetMemory
+
+9. BB-8 picks up CodeEdit #3 (now unblocked, with updated payload if captain revised it)
+   └─ FleetMemory now includes #2's curated memory — BB-8 sees what files were touched
    └─ Runs claude -p, commits → AwaitingCaptainReview
 
-8. Captain-Rex reviews #3 — convoy almost done, approves → AwaitingCouncilReview
+10. Captain-Rex reviews #3 — convoy almost done, approves → AwaitingCouncilReview
 
-9. Council-Mace reviews #3 → Approved → merges
+11. Council-Mace reviews #3 → Approved → merges → spawns WriteMemory for Librarian
 
-10. Inquisitor notices Convoy #1 is complete
-   └─ Marks Convoy #1 Completed
-   └─ Mails operator: "[CONVOY COMPLETE] [1] Add search to the API"
+12. Inquisitor notices Convoy #1 is complete
+    └─ Marks Convoy #1 Completed
+    └─ Mails operator: "[CONVOY COMPLETE] [1] Add search to the API"
 ```
