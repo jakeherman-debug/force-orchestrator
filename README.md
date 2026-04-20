@@ -9,6 +9,7 @@ Inspired by Steve Yegge's **Gas Town** pattern: all coordination happens through
 ## Table of Contents
 
 - [Architecture](#architecture)
+- [The Dashboard — Primary Interface](#the-dashboard--primary-interface)
 - [The Agents](#the-agents)
 - [Fleet Memory & RAG](#fleet-memory--rag)
 - [Mail System](#mail-system)
@@ -112,6 +113,187 @@ Planned → (force convoy approve) → Pending   [--plan-only flow only]
 **Direct `add-task` tasks** (not in a convoy) skip the Captain and go straight to council.
 
 `Planned` tasks are created when you submit a feature with `--plan-only`. They sit inert until you inspect the plan and run `force convoy approve <id>` to activate them.
+
+---
+
+## The Dashboard — Primary Interface
+
+> **The web dashboard is the intended primary way to interact with the fleet.** The CLI commands exist for scripting and power-user workflows, but day-to-day operation — submitting work, monitoring progress, handling escalations, reviewing mail — is designed around the browser UI.
+
+Start it alongside the daemon:
+
+```bash
+force daemon          # start the agent fleet
+force dashboard       # open Fleet Command Center at http://localhost:8080
+force dashboard --port 9090   # or a custom port
+```
+
+The dashboard is a single-page app served by an embedded Go HTTP server. It auto-refreshes on a live polling loop — no manual reloads needed. The URL query string stays in sync with your current tab, filter, and sort state so you can bookmark or share a specific view.
+
+### Header
+
+The header is always visible and shows the current fleet state at a glance:
+
+| Element | What it shows |
+|---|---|
+| **Daemon badge** | Green `● Daemon PID <N>` when running; red `● Daemon offline` otherwise |
+| **E-STOP badge** | Appears in red when an emergency stop is active |
+| **E-Stop / Resume buttons** | Toggle the fleet pause state — the E-Stop button turns into Resume when active |
+| **+ Queue Task button** | Opens the task submission modal |
+
+### Stats Bar
+
+A permanently visible row of live counters (refreshed every 5 seconds):
+
+| Counter | What it counts |
+|---|---|
+| Running | Tasks currently locked by an agent |
+| Pending | Tasks waiting to be claimed |
+| Review | Tasks awaiting Captain or Council review |
+| Done | All completed tasks |
+| Failed | Failed + Escalated tasks |
+| Escalations | Open escalations requiring human input |
+| Convoys | Active convoys |
+| Unread Mail | Unread fleet mail messages |
+| Total Spend | Cumulative token cost in dollars |
+
+### Tabs
+
+#### Tasks (default)
+
+The main workspace. A sortable, filterable, paginated table of tasks (50 per page).
+
+**Filter buttons:** Active · Pending · Failed · Cancelled · Completed · All
+
+**Sort columns:** ID, Status, Type, Priority, Created, Cost (click to sort; click again to reverse)
+
+**Inline search:** Filters the current page by keyword across payload, repo, type, status, and owner.
+
+**Pill bar** above the table shows: Pending / Active / Completed Today / Active Convoys — updated every 10 seconds.
+
+**Task row columns:** ID · Status pill · Owner · Type · Payload (truncated) · Repo · Priority · Retry count · Runtime or blocked-by links · Created · Cost
+
+**Clicking any row** opens a slide-in detail panel on the right with the full task context:
+
+- **Meta** — repo, owner, branch name, convoy, retry/infra-failure counts, priority, lock time, runtime, blocked-by links, token cost
+- **Broader Goal** — the parent feature description (if this is a CodeEdit subtask)
+- **Directive** — the full task payload
+- **Error Log** — if the task has failed
+- **Attempt History** — every Claude run: agent name, outcome, token counts in/out, timestamp
+- **Fleet Memories** — the top-10 RAG memories retrieved for this task's context (what has worked and failed on this repo before)
+- **Task Mail** — all fleet mail scoped to this task
+
+**Action buttons** in the panel (context-sensitive):
+
+| Button | When visible | What it does |
+|---|---|---|
+| Approve & Merge | Task awaiting Captain or Council review | Merges the branch to main and marks Completed |
+| Reject | Task awaiting review | Opens a modal to enter rejection feedback; resets task to Pending with the feedback appended |
+| Retry | Task is Failed or Escalated | Resets to Pending |
+| Reset to Pending | Any non-Completed task | Clears error log and retry count |
+| Cancel | Most active states | Marks as Cancelled; optionally re-queues as a different task type |
+
+#### Escalations
+
+Cards for every escalation the fleet has raised. Each card shows the severity (LOW/MEDIUM/HIGH), the originating task, and the agent's message.
+
+**Filter:** Open · Closed · All
+
+**Actions per card:**
+- **Acknowledge** — marks the escalation seen without restarting the task
+- **Close** — dismisses the escalation
+- **Close & Requeue** — dismisses and sends the task back to Pending for another attempt
+
+#### Convoys
+
+Progress cards for every convoy. Each card shows the convoy name, ID, status, a progress bar, and completed/total task counts.
+
+**Filters:** All / Active / Completed + time window (last 1h · 8h · 24h)
+
+**Clicking the convoy name or ID** drills into that convoy's tasks in the Tasks tab with a filter banner.
+
+**Actions per card:**
+- **Activate Planned Tasks** — visible when a `--plan-only` convoy has unstarted Planned tasks; equivalent to `force convoy approve`
+- **Cancel Convoy** — stops all pending/planned tasks in the convoy
+
+#### Agents
+
+A table of every registered agent worktree. Shows the agent name, repo, current task (linked), task status, and lock timestamp. Agents actively working are highlighted.
+
+#### Mail
+
+A full inbox of all fleet mail (last 200 messages). Unread messages are highlighted.
+
+Clicking a row opens a modal with the full message body (Markdown rendered). Reading a message marks it as read and decrements the unread counter in the header.
+
+**Mark all as read** button clears the entire unread queue.
+
+#### Knowledge
+
+The Fleet Memory browser. Shows every success and failure memory the Librarian has written, searchable and filterable.
+
+**Filters:** All / Successes / Failures + repo dropdown + full-text search
+
+Each row shows the repo, originating task (linked), outcome, memory summary, and files changed. Clicking a row opens a detail modal with the full text. Individual memories can be deleted from the table or the modal.
+
+#### Logs
+
+A live-tailing log viewer, auto-scrolling with a 1000-line cap. Two sources:
+
+| Mode | Source | Content |
+|---|---|---|
+| `fleet.log` | `fleet.log` on disk | Human-readable timestamped agent log lines |
+| `holonet events` | `holonet.jsonl` | Structured JSON telemetry events |
+
+Both streams open as Server-Sent Events connections and reconnect automatically on disconnect.
+
+### "+ Queue Task" Modal
+
+The primary entry point for submitting work. Select a task type and describe the work:
+
+| Type | Behavior |
+|---|---|
+| **Auto (recommended)** | The fleet classifies the request and routes it appropriately |
+| **Feature** | Submitted directly to Commander for planning; Chancellor reviews before convoy is created |
+| **Investigate** | A free-form research question; the Investigator delivers a prose report as mail |
+| **Audit** | A codebase scan; findings are queued as Planned tasks in a new convoy |
+
+Repo and priority are optional. Submission is idempotent — double-clicks within 60 seconds return the same task ID.
+
+### JSON API
+
+The dashboard also exposes a complete JSON API for scripting and external integrations. All endpoints return `Content-Type: application/json` with CORS headers.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/status` | Fleet health: daemon PID, e-stop state, task counts by status, open escalations, active convoys, unread mail, total spend |
+| `GET` | `/api/stats` | Simplified counts: pending, active, completed today, active convoys, active agents |
+| `GET` | `/api/tasks` | Task list — query params: `status` (comma-separated), `convoy_id`, `sort_by`, `sort_dir`, `limit`, `offset` |
+| `GET` | `/api/tasks/{id}` | Full task detail including history, memories, mail |
+| `POST` | `/api/tasks/{id}/retry` | Retry a Failed/Escalated task |
+| `POST` | `/api/tasks/{id}/reset` | Reset any task to Pending |
+| `POST` | `/api/tasks/{id}/cancel` | Cancel a task; body `{"requeue_type":"Feature"}` to re-queue |
+| `POST` | `/api/tasks/{id}/approve` | Operator-approve and merge a task awaiting review |
+| `POST` | `/api/tasks/{id}/reject` | Reject with feedback; body `{"reason":"..."}` |
+| `GET` | `/api/escalations` | Escalation list; `?status=Open\|Closed` |
+| `POST` | `/api/escalations/{id}/ack` | Acknowledge escalation |
+| `POST` | `/api/escalations/{id}/close` | Close escalation |
+| `POST` | `/api/escalations/{id}/requeue` | Close and requeue the task |
+| `GET` | `/api/convoys` | Convoy list with progress |
+| `POST` | `/api/convoys/{id}/approve` | Activate Planned tasks in a convoy |
+| `POST` | `/api/convoys/{id}/cancel` | Cancel a convoy |
+| `GET` | `/api/agents` | Agent registry with current task |
+| `GET` | `/api/mail` | Last 200 fleet mail messages |
+| `POST` | `/api/mail/{id}/read` | Mark a message read |
+| `POST` | `/api/mail/read-all` | Mark all messages read |
+| `GET` | `/api/memories` | Fleet Memory — params: `repo`, `outcome`, `q` (search), `limit` |
+| `DELETE` | `/api/memories/{id}` | Delete a memory entry |
+| `POST` | `/api/add` | Queue a new task — body: `{"type":"","payload":"","repo":"","priority":0,"idempotency_key":""}` |
+| `GET` | `/api/events` | SSE stream of `holonet.jsonl` telemetry events |
+| `GET` | `/api/fleet-log` | SSE stream of `fleet.log` (32 KB backfill on connect) |
+| `POST` | `/api/control/estop` | Trigger emergency stop |
+| `POST` | `/api/control/resume` | Clear emergency stop |
+| `GET` | `/healthz` | Health check — returns `{"status":"ok","ts":<unix>}` |
 
 ---
 
@@ -522,24 +704,25 @@ This starts all agents in the background:
 
 The daemon writes a `fleet.pid` file and logs to `fleet.log`. It handles `SIGINT`/`SIGTERM` with a 30-second graceful drain.
 
-### 3. Watch the fleet
+### 3. Open the dashboard
 
 In a separate terminal:
 
 ```bash
-force watch
+force dashboard
 ```
 
-This opens a live command center showing all tasks grouped by status, refreshing every 2 seconds.
+This opens the **Fleet Command Center** at `http://localhost:8080` — the primary interface for monitoring the fleet, submitting work, handling escalations, and reading mail. Open it in your browser and keep it visible while the fleet runs.
+
+Alternatively, `force watch` opens a terminal UI if you prefer staying in the shell.
 
 ### 4. Submit work
 
-```bash
-# High-level feature — Commander decomposes it
-force add "Add user authentication with JWT tokens and refresh token rotation"
+The easiest way is to click **+ Queue Task** in the dashboard. From the CLI:
 
-# Direct task to a specific repo (skips Commander)
-force add-task myapp "Add rate limiting middleware to the /api/v1 routes"
+```bash
+# High-level feature — Commander decomposes it, Chancellor reviews for conflicts
+force add "Add user authentication with JWT tokens and refresh token rotation"
 
 # From a Jira ticket
 force add-jira ENG-1234
@@ -548,13 +731,20 @@ force add-jira ENG-1234
 force add --plan-only "Refactor the payment service to use the new billing API"
 ```
 
-### 5. Check your mail
+### 5. Monitor and act
+
+In the dashboard:
+- **Tasks tab** — watch tasks move through the pipeline; click any task to see the full Claude output, retry count, and memory context
+- **Escalations tab** — respond to blockers the fleet can't resolve autonomously
+- **Convoys tab** — track feature-level progress; activate plan-only convoys after inspection
+- **Mail tab** — read reports from Investigators and completion summaries from the Inquisitor
+
+From the CLI:
 
 ```bash
-force mail inbox operator
+force mail inbox operator   # fleet mail delivered to you
+force mail read <id>        # read a specific message
 ```
-
-The fleet mails the `operator` role when features complete, tasks fail, escalations arise, and more. Use `force mail read <id>` to read a message.
 
 ### Plan-only workflow
 
@@ -694,7 +884,7 @@ force mail send astromech --task 42 --type directive \
 | `force costs` | Token usage breakdown by agent and time window. |
 | `force audit [--limit N]` | Show the operator/agent action audit log. |
 | `force dogs` | Show watchdog status and next scheduled run. |
-| `force dashboard [--port N]` | Start an HTTP JSON API at `localhost:8080`. Endpoints: `GET /api/status`, `GET /api/tasks?status=X`, `GET /api/events` (SSE stream). Default port: 8080. |
+| `force dashboard [--port N]` | Start the Fleet Command Center web UI at `localhost:8080` (default). The primary interface — see [The Dashboard](#the-dashboard--primary-interface) for full documentation. |
 
 ### Maintenance
 
