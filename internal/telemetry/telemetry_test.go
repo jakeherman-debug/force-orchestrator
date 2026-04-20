@@ -260,7 +260,7 @@ func TestInitTelemetry_OTLPEnabled(t *testing.T) {
 	dir := t.TempDir()
 	orig, _ := os.Getwd()
 	os.Chdir(dir)
-	t.Setenv("GT_OTEL_LOGS_URL", "http://localhost:4318/v1/logs")
+	t.Setenv("FORCE_OTEL_LOGS_URL", "http://localhost:4318/v1/logs")
 	defer func() {
 		os.Chdir(orig)
 		telemetryMu.Lock()
@@ -276,7 +276,7 @@ func TestInitTelemetry_OTLPEnabled(t *testing.T) {
 	InitTelemetry()
 
 	if otlpEndpoint == "" {
-		t.Error("expected otlpEndpoint to be set when GT_OTEL_LOGS_URL is configured")
+		t.Error("expected otlpEndpoint to be set when FORCE_OTEL_LOGS_URL is configured")
 	}
 	if otlpHTTPClient == nil {
 		t.Error("expected otlpHTTPClient to be initialized")

@@ -17,7 +17,7 @@ import (
 
 // TelemetryEvent is a structured event written to holonet.jsonl.
 // Every field is optional except Timestamp and EventType.
-// Set GT_OTEL_LOGS_URL to also ship events to an OTLP HTTP/JSON log endpoint
+// Set FORCE_OTEL_LOGS_URL to also ship events to an OTLP HTTP/JSON log endpoint
 // (e.g. http://localhost:4318/v1/logs for a local Grafana Alloy or OTel Collector).
 type TelemetryEvent struct {
 	Timestamp time.Time      `json:"timestamp"`
@@ -39,7 +39,7 @@ var (
 	telemetryFile   *os.File
 	telemetryMu     sync.Mutex
 	telemetryLog    *log.Logger
-	otlpEndpoint    string       // set from GT_OTEL_LOGS_URL at init time
+	otlpEndpoint    string       // set from FORCE_OTEL_LOGS_URL at init time
 	otlpHTTPClient  *http.Client // shared, reused across goroutines
 )
 
@@ -53,7 +53,7 @@ func InitTelemetry() {
 	}
 	telemetryLog = log.New(os.Stderr, "[telemetry] ", log.LstdFlags)
 
-	if url := os.Getenv("GT_OTEL_LOGS_URL"); url != "" {
+	if url := os.Getenv("FORCE_OTEL_LOGS_URL"); url != "" {
 		otlpEndpoint = url
 		otlpHTTPClient = &http.Client{Timeout: 5 * time.Second}
 		telemetryLog.Printf("OTLP export enabled → %s", otlpEndpoint)
@@ -61,7 +61,7 @@ func InitTelemetry() {
 }
 
 // EmitEvent writes a structured event to holonet.jsonl and optionally to an
-// OTLP HTTP endpoint if GT_OTEL_LOGS_URL is set. Thread-safe.
+// OTLP HTTP endpoint if FORCE_OTEL_LOGS_URL is set. Thread-safe.
 func EmitEvent(event TelemetryEvent) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()

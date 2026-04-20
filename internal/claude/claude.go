@@ -180,7 +180,7 @@ const atlassianReadTools = "" +
 	"mcp__plugin_dev-tools_atlassian__searchConfluenceUsingCql," +
 	"mcp__plugin_dev-tools_atlassian__searchAtlassian"
 
-// Read-only Glean tools — search and read internal company documents.
+// Read-only Glean tools — search and read documents.
 const gleanReadTools = "" +
 	"mcp__plugin_glean_glean__search," +
 	"mcp__plugin_glean_glean__read_document"
