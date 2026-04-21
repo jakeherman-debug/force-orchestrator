@@ -524,28 +524,45 @@ The fleet accumulates institutional knowledge across every task it completes or 
 
 ### How Memory is Written
 
+Success and failure memories take different paths.
+
+**Success path — via the Librarian:**
+
+When the Jedi Council approves a task it does not write the memory directly. Instead it spawns a `WriteMemory` task containing the task description, files changed (parsed from the diff), council feedback, and the full diff itself. The Librarian claims this task and calls Claude with a strict curation prompt:
+
+> Write exactly 2–4 sentences covering: (1) what was built or fixed — be specific, name the function or file; (2) what was non-obvious or tricky about the implementation; (3) patterns, gotchas, or pitfalls not obvious from reading the code alone. Plain prose, no bullet points.
+
+This design is intentional. A raw task description ("Add rate limiting middleware") is a weak retrieval signal — it's too generic to surface usefully against a different future task's vocabulary. The Librarian's output is dense with specific, concrete terms: function names, file paths, library choices, failure modes. BM25 retrieval rewards exactly this kind of term specificity.
+
+**Failure path — written directly:**
+
 | Event | What's stored |
 |---|---|
-| Council approves a task | Success memory: task description + files changed (parsed from diff) |
 | Council permanently rejects a task (max retries) | Failure memory: task description + final rejection reason |
 | Infra failure becomes permanent | Failure memory: task description + infra error |
 
+Failure memories are written by the Council and the infra-failure handler directly, without the Librarian, because the signal value is the rejection reason itself — not a curated narrative.
+
 ### How Memory is Retrieved (FTS5 RAG)
 
-When an Astromech starts a task, it calls `GetFleetMemories(repo, taskPayload, limit=10)`. The task payload is used as a search query against the `FleetMemory_fts` FTS5 index:
+When an Astromech starts a task it calls `GetFleetMemories(repo, taskPayload, limit=10)`. The task payload is used as a search query against the `FleetMemory_fts` FTS5 index:
 
 1. **Sanitize** — strip FTS5 special characters, drop single-character words
 2. **OR query** — join remaining terms with `OR` so BM25 ranks by vocabulary overlap, not strict AND matching
 3. **Two-step fetch** — query FTS for ranked rowids, then look up full records filtered by repo
 4. **Recency fallback** — if FTS returns nothing (no vocabulary overlap, or FTS5 not compiled in), fall back to the 10 most recent memories
 
-The result is split into two prompt sections:
+The OR-based BM25 query means memories that share the most terminology with the incoming task rank highest — "middleware", "JWT", "auth handler" in the task description will surface memories that used those same words, even if they came from completely unrelated prior features. The Librarian's concrete, noun-heavy prose is specifically shaped to make this matching effective.
+
+The result is split into two prompt sections injected into the Astromech's context:
 
 ```
 # FLEET MEMORY
 ## What has worked on <repo>
-- [Task #42] Added POST /users endpoint with JWT auth
-  Files: handlers/users.go, middleware/auth.go
+- [Task #42] The JWT middleware was added to middleware/auth.go using the
+  golang-jwt/jwt/v5 library. The non-obvious part was that the token expiry
+  check must happen before role validation — reversing the order causes a
+  nil-pointer panic on expired tokens. Files: middleware/auth.go, handlers/users.go
 
 ## What has failed on <repo> — do not repeat these approaches
 - [Task #38] Failed after 3 attempts. Final rejection: missing error handling on DB calls
