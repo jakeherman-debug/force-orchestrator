@@ -24,10 +24,34 @@ var dogCooldowns = map[string]time.Duration{
 	"priority-aging":        6 * time.Hour,
 	"daily-digest":          24 * time.Hour,
 	"stale-convoys-report":  12 * time.Hour,
+	// sub-pr-ci-watch polls open sub-PRs for CI state + external closure.
+	// Cooldown is 0 so it runs every inquisitor tick (5 min) — the underlying
+	// `gh pr view` calls are cheap enough that this is the right cadence to
+	// avoid blocking tasks waiting on auto-merge for more than 5 minutes.
+	"sub-pr-ci-watch":       0,
+	// main-drift-watch polls `git ls-remote` per ask-branch. The detection is
+	// cheap (~50ms per repo), so 15 min is a generous cadence — rebases fire
+	// only when main has actually moved.
+	"main-drift-watch":      15 * time.Minute,
+	// draft-pr-watch polls `gh pr view` per DraftPROpen convoy. Merged/Closed
+	// transitions are cheap to detect; 5 min cadence is a reasonable balance
+	// between timeliness for the operator and API rate-limit hygiene.
+	"draft-pr-watch":        0, // every inquisitor tick
+	// ship-it-nag sends operator reminders for aged draft PRs. Once per 6h is
+	// plenty — the internal per-threshold dedupe prevents spam.
+	"ship-it-nag":           6 * time.Hour,
+	// repo-config-check revalidates remote URL, default branch, and PR template
+	// path for every registered repo once a day.
+	"repo-config-check":     24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
-var dogOrder = []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene", "stalled-reviews", "priority-aging", "daily-digest", "stale-convoys-report"}
+var dogOrder = []string{
+	"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene",
+	"stalled-reviews", "priority-aging", "daily-digest", "stale-convoys-report",
+	"sub-pr-ci-watch", "main-drift-watch", "draft-pr-watch", "ship-it-nag",
+	"repo-config-check",
+}
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
 // Called by SpawnInquisitor on every inquisitor cycle.
@@ -82,6 +106,16 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return runDailyDigest(db, logger)
 	case "stale-convoys-report":
 		return runStaleConvoysReport(db, logger)
+	case "sub-pr-ci-watch":
+		return dogSubPRCIWatch(db, logger)
+	case "main-drift-watch":
+		return dogMainDriftWatch(db, logger)
+	case "draft-pr-watch":
+		return dogDraftPRWatch(db, logger)
+	case "ship-it-nag":
+		return dogShipItNag(db, logger)
+	case "repo-config-check":
+		return dogRepoConfigCheck(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
@@ -278,6 +312,8 @@ func dogMemoryHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) er
 }
 
 func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	// Traditional review-stall: tasks stuck in Captain/Council queues. locked_at
+	// is set when they enter review so we can measure age directly.
 	rows, err := db.Query(`
 		SELECT id, status,
 		       ROUND((julianday('now') - julianday(locked_at)) * 24, 1) AS hours_waiting
@@ -304,6 +340,30 @@ func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 	}
 	rows.Close()
 
+	// Sub-PR-CI stall: AwaitingSubPRCI tasks have owner='' (Jedi clears it when
+	// handing off to sub-pr-ci-watch). Use the AskBranchPR's created_at as the
+	// age yardstick. Threshold is longer (12h) because CI legitimately takes
+	// minutes-to-hours on some repos and Medic has up to 3 attempts to fix.
+	subPRRows, sErr := db.Query(`
+		SELECT b.id,
+		       ROUND((julianday('now') - julianday(abp.created_at)) * 24, 1) AS hours_open
+		FROM BountyBoard b
+		JOIN AskBranchPRs abp ON abp.task_id = b.id
+		WHERE b.status = 'AwaitingSubPRCI'
+		  AND abp.state = 'Open'
+		  AND abp.created_at < datetime('now', '-12 hours')
+		ORDER BY abp.created_at ASC`)
+	if sErr == nil {
+		for subPRRows.Next() {
+			var id int64
+			var hours float64
+			if err := subPRRows.Scan(&id, &hours); err == nil {
+				tasks = append(tasks, stalledTask{id: id, status: "AwaitingSubPRCI", hoursWaiting: hours})
+			}
+		}
+		subPRRows.Close()
+	}
+
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -311,7 +371,7 @@ func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 	logger.Printf("Dog stalled-reviews: %d task(s) stuck in review queue", len(tasks))
 
 	var body strings.Builder
-	fmt.Fprintf(&body, "%d task(s) have been waiting in the review queue for more than 4 hours:\n\n", len(tasks))
+	fmt.Fprintf(&body, "%d task(s) have been waiting in the review queue for extended periods:\n\n", len(tasks))
 	for _, t := range tasks {
 		fmt.Fprintf(&body, "  Task #%d  status=%-24s  waiting=%.1fh\n", t.id, t.status, t.hoursWaiting)
 	}

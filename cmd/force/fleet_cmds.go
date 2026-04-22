@@ -103,12 +103,37 @@ func cmdDaemon(db *sql.DB) {
 	}
 	medicRoster := []string{"Bacta", "Kolto", "Stim"}
 
+	numPilots := 1
+	if n := store.GetConfig(db, "num_pilots", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numPilots)
+	}
+	if numPilots < 1 {
+		numPilots = 1
+	}
+	pilotRoster := []string{"Poe-Dameron", "Wedge-Antilles", "Hera-Pilot"}
+
+	numDiplomats := 1
+	if n := store.GetConfig(db, "num_diplomats", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numDiplomats)
+	}
+	if numDiplomats < 1 {
+		numDiplomats = 1
+	}
+	diplomatRoster := []string{"Leia-Organa", "Padme-Amidala", "Bail-Organa"}
+
 	// Recover any Failed convoys whose tasks were manually reset (e.g. via `force reset` or
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
 
-	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d commander(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s))...\n",
-		numAgents, numCaptain, numCouncil, numCommanders, numInvestigators, numAuditors, numLibrarians, numMedics)
+	// PR-flow preflight + Layer B backfill. Fatal checks abort daemon startup;
+	// per-repo failures mark the repo pr_flow_enabled=0 and continue.
+	if err := runPRFlowStartup(db); err != nil {
+		fmt.Fprintf(os.Stderr, "Daemon start aborted: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d commander(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s), %d pilot(s))...\n",
+		numAgents, numCaptain, numCouncil, numCommanders, numInvestigators, numAuditors, numLibrarians, numMedics, numPilots)
 	go agents.SpawnChancellor(db)
 	for i := 0; i < numCommanders; i++ {
 		name := fmt.Sprintf("Commander-%d", i+1)
@@ -166,6 +191,20 @@ func cmdDaemon(db *sql.DB) {
 		}
 		go agents.SpawnMedic(db, name)
 	}
+	for i := 0; i < numPilots; i++ {
+		name := fmt.Sprintf("Pilot-%d", i+1)
+		if i < len(pilotRoster) {
+			name = pilotRoster[i]
+		}
+		go agents.SpawnPilot(db, name)
+	}
+	for i := 0; i < numDiplomats; i++ {
+		name := fmt.Sprintf("Diplomat-%d", i+1)
+		if i < len(diplomatRoster) {
+			name = diplomatRoster[i]
+		}
+		go agents.SpawnDiplomat(db, name)
+	}
 	go agents.SpawnInquisitor(db)
 
 	sigChan := make(chan os.Signal, 1)
@@ -178,6 +217,7 @@ func cmdDaemon(db *sql.DB) {
 	spawnedAuditors := numAuditors
 	spawnedLibrarians := numLibrarians
 	spawnedMedics := numMedics
+	spawnedPilots := numPilots
 
 	for {
 		sig := <-sigChan
@@ -353,6 +393,27 @@ func cmdDaemon(db *sql.DB) {
 				fmt.Printf("Scale-down to %d medic(s) requested (currently %d running) — takes effect on restart.\n", newMedics, spawnedMedics)
 			}
 
+			// Pilots
+			newPilots := spawnedPilots
+			if n := store.GetConfig(db, "num_pilots", ""); n != "" {
+				fmt.Sscanf(n, "%d", &newPilots)
+			}
+			if newPilots < 1 {
+				newPilots = 1
+			}
+			for spawnedPilots < newPilots {
+				name := fmt.Sprintf("Pilot-%d", spawnedPilots+1)
+				if spawnedPilots < len(pilotRoster) {
+					name = pilotRoster[spawnedPilots]
+				}
+				fmt.Printf("Scaling: spawning %s (pilots: %d → %d)\n", name, spawnedPilots, newPilots)
+				go agents.SpawnPilot(db, name)
+				spawnedPilots++
+			}
+			if newPilots < spawnedPilots {
+				fmt.Printf("Scale-down to %d pilot(s) requested (currently %d running) — takes effect on restart.\n", newPilots, spawnedPilots)
+			}
+
 		default:
 			// SIGINT / SIGTERM — graceful drain then exit.
 			fmt.Printf("\nReceived %v — draining in-flight tasks (up to 30s)...\n", sig)
@@ -481,6 +542,47 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 	}
 	store.AddRepo(db, name, repoRegPath, desc)
 	fmt.Printf("Repository '%s' registered at %s\n", name, repoRegPath)
+
+	// Eagerly populate PR-flow fields (remote_url, default_branch) and queue
+	// FindPRTemplate so the repo is ready for the PR flow immediately. This
+	// saves operators from having to remember to run `force repo sync` after
+	// every add. A failure here is non-fatal — the repo is still registered,
+	// and the daemon's startup Layer B will retry on next boot.
+	if _, statErr := os.Stat(repoRegPath); statErr == nil {
+		remote, rErr := exec.Command("git", "-C", repoRegPath, "remote", "get-url", "origin").CombinedOutput()
+		remoteURL := strings.TrimSpace(string(remote))
+		if rErr != nil || remoteURL == "" {
+			fmt.Printf("  (note) no `origin` remote configured — PR flow will fall back to legacy local-merge for this repo.\n")
+			fmt.Printf("  Fix: `git -C %s remote add origin <url>` then `force repo sync`.\n", repoRegPath)
+			_ = store.SetRepoPRFlowEnabled(db, name, false)
+		} else {
+			// Detect default branch via symbolic-ref, fall back to common names.
+			var defaultBranch string
+			if out, symErr := exec.Command("git", "-C", repoRegPath, "symbolic-ref", "refs/remotes/origin/HEAD", "--short").CombinedOutput(); symErr == nil {
+				parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
+				if len(parts) == 2 {
+					defaultBranch = parts[1]
+				}
+			}
+			if defaultBranch == "" {
+				for _, b := range []string{"main", "master", "develop"} {
+					if exec.Command("git", "-C", repoRegPath, "rev-parse", "--verify", b).Run() == nil {
+						defaultBranch = b
+						break
+					}
+				}
+			}
+			if defaultBranch == "" {
+				defaultBranch = "main"
+			}
+			if err := store.SetRepoRemoteInfo(db, name, remoteURL, defaultBranch); err == nil {
+				fmt.Printf("  remote=%s default=%s\n", remoteURL, defaultBranch)
+			}
+			if _, err := agents.QueueFindPRTemplate(db, name, repoRegPath); err == nil {
+				fmt.Printf("  queued FindPRTemplate task to locate the repo's PR template.\n")
+			}
+		}
+	}
 }
 
 func cmdEstop(db *sql.DB) {

@@ -9,6 +9,9 @@
 # as gitlink (mode 160000) entries.
 /worktrees/
 
+# Claude Code session state
+.claude/scheduled_tasks.lock
+
 # Runtime files
 holocron.db
 holocron.db-shm

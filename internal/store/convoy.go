@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 )
 
@@ -103,19 +104,147 @@ func RecoverStaleConvoys(db *sql.DB) {
 
 // ListConvoys returns all convoys ordered by creation date.
 func ListConvoys(db *sql.DB) []Convoy {
-	rows, err := db.Query(`SELECT id, name, status, created_at FROM Convoys ORDER BY created_at DESC`)
+	rows, err := db.Query(`SELECT
+		id, name, status, IFNULL(coordinated, 0),
+		IFNULL(ask_branch, ''), IFNULL(ask_branch_base_sha, ''),
+		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
+		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
+		created_at
+		FROM Convoys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 	var convoys []Convoy
 	for rows.Next() {
-		var c Convoy
-		if err := rows.Scan(&c.ID, &c.Name, &c.Status, &c.CreatedAt); err != nil {
+		var (
+			c           Convoy
+			coordinated int
+		)
+		if err := rows.Scan(&c.ID, &c.Name, &c.Status, &coordinated,
+			&c.AskBranch, &c.AskBranchBaseSHA,
+			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
+			&c.CreatedAt); err != nil {
 			log.Printf("ListConvoys: scan error: %v", err)
 			return nil
 		}
+		c.Coordinated = coordinated == 1
 		convoys = append(convoys, c)
 	}
 	return convoys
+}
+
+// GetConvoy returns the full Convoy row, or nil if not found.
+func GetConvoy(db *sql.DB, convoyID int) *Convoy {
+	var (
+		c           Convoy
+		coordinated int
+	)
+	err := db.QueryRow(`SELECT
+		id, name, status, IFNULL(coordinated, 0),
+		IFNULL(ask_branch, ''), IFNULL(ask_branch_base_sha, ''),
+		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
+		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
+		created_at
+		FROM Convoys WHERE id = ?`, convoyID).
+		Scan(&c.ID, &c.Name, &c.Status, &coordinated,
+			&c.AskBranch, &c.AskBranchBaseSHA,
+			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
+			&c.CreatedAt)
+	if err != nil {
+		return nil
+	}
+	c.Coordinated = coordinated == 1
+	return &c
+}
+
+// SetConvoyAskBranch records the ask-branch and its base SHA on main. Called by
+// Pilot after CreateAskBranch completes (branch cut and pushed). Both values
+// must be non-empty — an empty ask_branch is the signal for main-drift-watch
+// to skip the convoy, and an empty base_sha makes drift detection impossible.
+func SetConvoyAskBranch(db *sql.DB, convoyID int, branch, baseSHA string) error {
+	if branch == "" || baseSHA == "" {
+		return fmt.Errorf("SetConvoyAskBranch: branch and baseSHA must be non-empty (got %q, %q)", branch, baseSHA)
+	}
+	_, err := db.Exec(`UPDATE Convoys SET ask_branch = ?, ask_branch_base_sha = ? WHERE id = ?`,
+		branch, baseSHA, convoyID)
+	return err
+}
+
+// UpdateConvoyAskBranchBaseSHA rewrites the stored base SHA after a successful
+// rebase onto main. Called by Pilot.RebaseAskBranch when the rebase lands; the
+// branch name does not change.
+func UpdateConvoyAskBranchBaseSHA(db *sql.DB, convoyID int, newBaseSHA string) error {
+	if newBaseSHA == "" {
+		return fmt.Errorf("UpdateConvoyAskBranchBaseSHA: newBaseSHA must be non-empty")
+	}
+	_, err := db.Exec(`UPDATE Convoys SET ask_branch_base_sha = ? WHERE id = ?`,
+		newBaseSHA, convoyID)
+	return err
+}
+
+// SetConvoyDraftPR records the draft PR created by Diplomat. state should be
+// "Open" at creation time; draft-pr-watch transitions it to Merged or Closed.
+func SetConvoyDraftPR(db *sql.DB, convoyID int, url string, number int, state string) error {
+	_, err := db.Exec(`UPDATE Convoys SET draft_pr_url = ?, draft_pr_number = ?, draft_pr_state = ? WHERE id = ?`,
+		url, number, state, convoyID)
+	return err
+}
+
+// UpdateConvoyDraftPRState transitions the draft PR state (Open → Merged/Closed).
+// When state == "Merged", also stamps shipped_at.
+func UpdateConvoyDraftPRState(db *sql.DB, convoyID int, state string) error {
+	if state == "Merged" {
+		_, err := db.Exec(`UPDATE Convoys SET draft_pr_state = ?, shipped_at = datetime('now') WHERE id = ?`,
+			state, convoyID)
+		return err
+	}
+	_, err := db.Exec(`UPDATE Convoys SET draft_pr_state = ? WHERE id = ?`, state, convoyID)
+	return err
+}
+
+// SetConvoyStatus updates the convoy lifecycle status. Separate from status
+// transitions driven by individual task completions (AutoRecoverConvoy etc.) —
+// used for PR-flow state machine moves: Active → AwaitingDraftPR → DraftPROpen
+// → Shipped / Abandoned.
+func SetConvoyStatus(db *sql.DB, convoyID int, status string) error {
+	_, err := db.Exec(`UPDATE Convoys SET status = ? WHERE id = ?`, status, convoyID)
+	return err
+}
+
+// ActiveConvoysMissingAskBranch returns convoy IDs that are Active but have at
+// least one touched repo without a ConvoyAskBranch row. Correctly handles the
+// multi-repo case: a convoy with repos [api, monolith] where api has a branch
+// but monolith doesn't is still returned (monolith needs backfilling).
+//
+// Used by the Layer C lazy-backfill inquisitor check to enqueue CreateAskBranch
+// tasks. Note: CreateAskBranch itself fans out per-repo, so a single task per
+// convoy is sufficient — the query only needs to find convoys where some repo
+// is missing, not enumerate which repo.
+func ActiveConvoysMissingAskBranch(db *sql.DB) []int {
+	rows, err := db.Query(`
+		SELECT DISTINCT c.id
+		FROM Convoys c
+		JOIN BountyBoard b ON b.convoy_id = c.id
+		WHERE c.status = 'Active'
+		  AND b.type = 'CodeEdit'
+		  AND IFNULL(b.target_repo, '') != ''
+		  AND b.status != 'Cancelled'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM ConvoyAskBranches cab
+		    WHERE cab.convoy_id = c.id AND cab.repo = b.target_repo
+		  )
+		ORDER BY c.id ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

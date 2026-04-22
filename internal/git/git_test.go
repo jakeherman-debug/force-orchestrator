@@ -289,7 +289,7 @@ func TestPrepareAgentBranch(t *testing.T) {
 		t.Fatalf("GetOrCreateAgentWorktree: %v", err)
 	}
 
-	branch, isResume, err := PrepareAgentBranch(wt, dir, 42, "R5-D4", "")
+	branch, isResume, err := PrepareAgentBranch(wt, dir, 42, "R5-D4", "", "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestPrepareAgentBranch_DirtyWorktree(t *testing.T) {
 	}
 
 	// PrepareAgentBranch should succeed despite the dirty file
-	_, _, err = PrepareAgentBranch(wt, dir, 99, "K-2SO", "")
+	_, _, err = PrepareAgentBranch(wt, dir, 99, "K-2SO", "", "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch with dirty worktree: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestPrepareAgentBranch_DirtyWorktree(t *testing.T) {
 
 func TestPrepareAgentBranch_InNonGitDir(t *testing.T) {
 	dir := t.TempDir() // not a git repo
-	_, _, err := PrepareAgentBranch(dir, dir, 1, "R2-D2", "")
+	_, _, err := PrepareAgentBranch(dir, dir, 1, "R2-D2", "", "")
 	if err == nil {
 		t.Error("expected error when PrepareAgentBranch called on non-git dir")
 	}
@@ -355,7 +355,7 @@ func TestGetDiffAndMerge(t *testing.T) {
 		t.Fatalf("GetOrCreateAgentWorktree: %v", err)
 	}
 
-	branch, _, err := PrepareAgentBranch(wt, dir, 7, "BD-1", "")
+	branch, _, err := PrepareAgentBranch(wt, dir, 7, "BD-1", "", "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch: %v", err)
 	}

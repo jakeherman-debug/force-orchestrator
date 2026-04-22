@@ -371,14 +371,16 @@ func TestListDogs(t *testing.T) {
 	defer db.Close()
 
 	dogs := ListDogs(db)
-	if len(dogs) != 9 {
-		t.Errorf("expected 9 built-in dogs, got %d", len(dogs))
+	if len(dogs) != 14 {
+		t.Errorf("expected 14 built-in dogs (9 legacy + 5 PR-flow), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
 		names[d.Name] = true
 	}
-	for _, expected := range []string{"git-hygiene", "db-vacuum", "holonet-rotate"} {
+	for _, expected := range []string{"git-hygiene", "db-vacuum", "holonet-rotate",
+		"sub-pr-ci-watch", "main-drift-watch", "draft-pr-watch", "ship-it-nag",
+		"repo-config-check"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

@@ -18,12 +18,25 @@ import (
 
 const MaxDiffBytes = 80_000
 
-// BranchAgentName extracts the agent name from a persistent branch name like "agent/R2-D2/task-42".
-// Returns empty string for legacy "agent/task-N" format.
+// BranchAgentName extracts the agent name from a persistent branch name.
+// Handles both the bare format "agent/R2-D2/task-42" and the username-prefixed
+// format "<user>/agent/R2-D2/task-42". Returns "" for legacy "agent/task-N"
+// or any branch that doesn't contain an "agent" segment.
+//
+// The agent name is always the segment immediately following "agent".
 func BranchAgentName(branchName string) string {
-	parts := strings.SplitN(branchName, "/", 3)
-	if len(parts) == 3 && parts[0] == "agent" {
-		return parts[1]
+	parts := strings.Split(branchName, "/")
+	for i, seg := range parts {
+		if seg == "agent" && i+1 < len(parts)-1 {
+			// +1 must exist AND there must be a trailing task-N segment
+			// — otherwise we'd match the legacy "agent/task-N" format
+			// where there is no agent name between "agent" and "task-N".
+			candidate := parts[i+1]
+			if strings.HasPrefix(candidate, "task-") {
+				return "" // legacy format with no agent name
+			}
+			return candidate
+		}
 	}
 	return ""
 }
@@ -99,6 +112,25 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 		return
 	}
 
+	// CI circuit-breaker early-bailout: if the target repo's breaker is open,
+	// this task's sub-PR creation would fail anyway. Rather than run an
+	// expensive LLM review and THEN re-queue (which we do in the approval
+	// branch later), skip review entirely — just put the task back to
+	// AwaitingCouncilReview and release the lock. Under a 30min breaker
+	// cooldown with ~3s poll cadence this saves hundreds of Claude calls.
+	//
+	// We only check this when the repo is PR-flow-enabled; legacy repos
+	// don't interact with the breaker.
+	if repoCfg := store.GetRepo(db, b.TargetRepo); repoCfg != nil && repoCfg.PRFlowEnabled {
+		if IsCIBreakerOpen(db, b.TargetRepo) {
+			logger.Printf("Task %d: CI breaker OPEN for %s — deferring review", b.ID, b.TargetRepo)
+			if _, err := db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', owner = '', locked_at = '' WHERE id = ?`, b.ID); err != nil {
+				logger.Printf("Task %d: deferral UPDATE failed (%v); stale-lock detector will recover", b.ID, err)
+			}
+			return
+		}
+	}
+
 	branchName := b.BranchName
 	if branchName == "" {
 		branchName = fmt.Sprintf("agent/task-%d", b.ID)
@@ -172,6 +204,60 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 	tokIn, tokOut := claude.ParseTokenUsage(response)
 
 	if ruling.Approved {
+		// Split on pr_flow_enabled: if the repo is on the PR flow AND the convoy
+		// has an ask-branch for this repo, open a sub-PR instead of local-merging.
+		// For PR flow repos without an ask-branch (race with CreateAskBranch or
+		// Layer C backfill), fall through to the local-merge path — the ask-branch
+		// will be created for future tasks; this one lands on main directly, which
+		// is strictly safer than blocking.
+		repoCfg := store.GetRepo(db, b.TargetRepo)
+		usePRFlow := repoCfg != nil && repoCfg.PRFlowEnabled && b.ConvoyID > 0 &&
+			store.GetConvoyAskBranch(db, b.ConvoyID, b.TargetRepo) != nil
+
+		if usePRFlow {
+			// CI circuit-breaker gate: if the breaker is open for this repo,
+			// don't pile up more sub-PRs on a CI system that's failing. Re-queue
+			// the task back to AwaitingCouncilReview — the next council tick
+			// will retry, and by then the breaker will have closed (30min cooldown).
+			if IsCIBreakerOpen(db, b.TargetRepo) {
+				logger.Printf("Task %d: CI breaker OPEN for %s — requeuing to AwaitingCouncilReview", b.ID, b.TargetRepo)
+				if _, err := db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', owner = '', locked_at = '' WHERE id = ?`, b.ID); err != nil {
+					// Re-queue failed; Inquisitor's stale-lock detector will free the task
+					// after 45 min, but log so the operator can correlate.
+					logger.Printf("Task %d: re-queue UPDATE failed (%v); stale-lock detector will recover", b.ID, err)
+				}
+				return
+			}
+			prTitle := buildSubPRTitle(b)
+			prBody := buildSubPRBody(b, ruling)
+			errClass, prErr := openSubPRForApprovedTask(db, b, agentName, branchName, prTitle, prBody, logger)
+			if prErr != nil {
+				// Transient/rate-limit → retry via AwaitingCouncilReview (handleInfraFailure).
+				// Auth-expired / BranchProtection / Permanent → escalate immediately so the
+				// operator sees the gh problem and can fix auth or policy.
+				if errClass.ShouldRetry() {
+					handleInfraFailure(db, agentName, "council", b, sessionID, prErr.Error(), "AwaitingCouncilReview", true, logger)
+					return
+				}
+				escMsg := fmt.Sprintf("Sub-PR flow failed (class=%s): %v", errClass, prErr)
+				logger.Printf("Task %d: escalating — %s", b.ID, escMsg)
+				if _, uErr := db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '', error_log = ? WHERE id = ?`, escMsg, b.ID); uErr != nil {
+					logger.Printf("Task %d: status update failed (%v); escalation still recorded", b.ID, uErr)
+				}
+				CreateEscalation(db, b.ID, store.SeverityMedium, escMsg)
+				return
+			}
+			// Record history — the task is now AwaitingSubPRCI; sub-pr-ci-watch drives
+			// the rest. WriteMemory is spawned later when the sub-PR actually merges.
+			histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "AwaitingSubPRCI")
+			if tokIn > 0 || tokOut > 0 {
+				store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+			}
+			store.LogAudit(db, agentName, "council-approve-subpr", b.ID, ruling.Feedback)
+			logger.Printf("Task %d: APPROVED — sub-PR opened, waiting for CI", b.ID)
+			return
+		}
+
 		logger.Printf("Task %d: APPROVED — merging branch %s", b.ID, branchName)
 		if mergeErr := igit.MergeAndCleanup(repoPath, branchName, worktreeDir); mergeErr != nil {
 			msg := fmt.Sprintf("Merge Err: %v", mergeErr)

@@ -600,7 +600,7 @@ func handleConvoys(db *sql.DB) http.HandlerFunc {
 			completed, total := store.ConvoyProgress(db, c.ID)
 			var planned int
 			db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND status = 'Planned'`, c.ID).Scan(&planned)
-			out = append(out, DashboardConvoy{
+			convoy := DashboardConvoy{
 				ID:         c.ID,
 				Name:       c.Name,
 				Status:     c.Status,
@@ -608,7 +608,35 @@ func handleConvoys(db *sql.DB) http.HandlerFunc {
 				Completed:  completed,
 				Total:      total,
 				HasPlanned: planned > 0,
-			})
+			}
+			// PR-flow annotations.
+			askBranches := store.ListConvoyAskBranches(db, c.ID)
+			if len(askBranches) > 0 {
+				convoy.AskBranches = make([]DashboardAskBranch, 0, len(askBranches))
+				for _, ab := range askBranches {
+					convoy.AskBranches = append(convoy.AskBranches, DashboardAskBranch{
+						Repo:             ab.Repo,
+						AskBranch:        ab.AskBranch,
+						AskBranchBaseSHA: ab.AskBranchBaseSHA,
+						DraftPRURL:       ab.DraftPRURL,
+						DraftPRNumber:    ab.DraftPRNumber,
+						DraftPRState:     ab.DraftPRState,
+						ShippedAt:        ab.ShippedAt,
+						LastRebasedAt:    ab.LastRebasedAt,
+					})
+				}
+				rollup := store.RollupAskBranchPRs(db, c.ID)
+				convoy.SubPRRollup = &DashboardSubPRRollup{
+					Total:         rollup.Total,
+					Open:          rollup.Open,
+					Merged:        rollup.Merged,
+					Closed:        rollup.Closed,
+					ChecksPending: rollup.ChecksPending,
+					ChecksSuccess: rollup.ChecksSuccess,
+					ChecksFailure: rollup.ChecksFailure,
+				}
+			}
+			out = append(out, convoy)
 		}
 		json.NewEncoder(w).Encode(out)
 	}
@@ -645,6 +673,15 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 			store.LogAudit(db, "dashboard", "convoy-cancel", id,
 				fmt.Sprintf("cancelled convoy #%d (%d pending task(s) stopped)", id, n))
 			fmt.Fprintf(w, `{"ok":true,"id":%d,"cancelled":%d}`, id, n)
+		case "ship":
+			// Ship-it: delegate to the per-process Ship handler. Shells out to
+			// gh; errors are surfaced to the operator via the mail system.
+			n, err := dashboardShipConvoy(db, id)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, `{"ok":true,"id":%d,"promoted":%d}`, id, n)
 		default:
 			http.NotFound(w, r)
 		}

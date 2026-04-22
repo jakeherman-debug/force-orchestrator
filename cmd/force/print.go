@@ -598,6 +598,12 @@ Task management:
   add-repo <name> <path> <desc>         Register a repository
   repos                                 List registered repositories
   repos remove <name>                   Remove a registered repository
+  repo sync                             Populate remote_url/default_branch and queue FindPRTemplate
+                                        (auto-runs on add-repo — only needed after origin/config changes)
+  repo set-pr-flow <name> on|off        Enable or disable the PR-based delivery flow per repo
+                                        Affects FUTURE tasks only; in-flight work finishes on its current path
+  migrate pr-flow [--dry-run]           Run PR-flow migration (auto-snapshot; idempotent)
+  migrate pr-flow --rollback --confirm  Restore the most recent snapshot (daemon must be stopped; DESTRUCTIVE)
   run <id>                              One-shot foreground run — stream Claude to stdout
   status                                Quick summary of task counts and daemon state
   stats [--port N]                      Task counts by status, active agents, and active convoys (calls daemon)
@@ -652,6 +658,9 @@ Convoys:
   convoy approve <id>            Approve a plan-only convoy (Planned → Pending)
   convoy reset <id>              Reset all failed/escalated tasks in a convoy to Pending
   convoy reject <id> <feedback>  Reject Commander's plan, cancel tasks, and re-queue for re-planning
+  convoy pr <id>                 Show draft PR URL + per-repo state + sub-PR rollup for a convoy
+  convoy ship <id> [--merge squash|merge|rebase]
+                                 Promote the draft PR(s) to ready-for-review; optionally merge immediately
 
 Dashboard:
   watch                          Live-updating task dashboard

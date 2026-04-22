@@ -55,22 +55,91 @@ CREATE INDEX IF NOT EXISTS idx_taskdeps_depends_on ON TaskDependencies (depends_
 
 -- ── Convoy grouping ───────────────────────────────────────────────────────────
 -- Named groups of related CodeEdit subtasks produced by one Feature decomposition.
+-- PR-flow fields: ask_branch is the integration branch every sub-PR merges into;
+-- ask_branch_base_sha caches main's HEAD at ask-branch creation, used by
+-- main-drift-watch to detect when main has moved and a rebase is needed.
+-- draft_pr_* track the final human-gated PR into main.
 
 CREATE TABLE IF NOT EXISTS Convoys (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT UNIQUE NOT NULL,  -- '[<feature_id>] <preview>'
-    status       TEXT    DEFAULT 'Active',   -- 'Active' | 'Completed'
-    coordinated  INTEGER DEFAULT 0,     -- 1 = Astromech completions route through Captain
-    created_at   TEXT    DEFAULT (datetime('now'))
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                  TEXT UNIQUE NOT NULL,  -- '[<feature_id>] <preview>'
+    status                TEXT    DEFAULT 'Active',
+    coordinated           INTEGER DEFAULT 0,     -- 1 = Astromech completions route through Captain
+    ask_branch            TEXT    DEFAULT '',    -- 'force/ask-<id>-<slug>'; '' = legacy convoy
+    ask_branch_base_sha   TEXT    DEFAULT '',    -- main's HEAD at branch creation; updated on rebase
+    draft_pr_url          TEXT    DEFAULT '',
+    draft_pr_number       INTEGER DEFAULT 0,
+    draft_pr_state        TEXT    DEFAULT '',    -- 'Open' | 'Merged' | 'Closed'
+    shipped_at            TEXT    DEFAULT '',    -- set when draft PR is merged
+    created_at            TEXT    DEFAULT (datetime('now'))
 );
+
+-- Convoy status values:
+--   'Active'            — tasks running
+--   'AwaitingDraftPR'   — all sub-PRs merged; Diplomat enqueued
+--   'DraftPROpen'       — draft PR exists, waiting for human "Ship it"
+--   'Shipped'           — draft PR merged; cleanup may still be pending
+--   'Abandoned'         — draft PR closed without merge
+--   'Completed'         — legacy pre-PR-flow convoys (ask_branch = '')
+--   'Failed'            — one or more tasks Failed/Escalated
 
 -- ── Repository registry ───────────────────────────────────────────────────────
+-- PR-flow fields are populated by Layer B backfill at daemon startup (remote_url,
+-- default_branch) and by the FindPRTemplate task (pr_template_path). pr_flow_enabled
+-- defaults to 1 — repos opt OUT of the PR flow, not in.
 
 CREATE TABLE IF NOT EXISTS Repositories (
-    name        TEXT PRIMARY KEY,
-    local_path  TEXT,
-    description TEXT
+    name              TEXT PRIMARY KEY,
+    local_path        TEXT,
+    description       TEXT,
+    remote_url        TEXT    DEFAULT '',  -- populated by `git remote get-url origin` at startup
+    default_branch    TEXT    DEFAULT '',  -- populated by `git symbolic-ref refs/remotes/origin/HEAD`
+    pr_template_path  TEXT    DEFAULT '',  -- populated by FindPRTemplate task (may be '' if repo has no template)
+    pr_flow_enabled   INTEGER DEFAULT 1,   -- 0 = legacy local-merge, 1 = new PR flow (default)
+    quarantined_at    TEXT    DEFAULT '',  -- set by repo-config-check when repo becomes unhealthy
+    quarantine_reason TEXT    DEFAULT ''
 );
+
+-- ── Ask-branch sub-PR tracking ────────────────────────────────────────────────
+-- One row per astromech sub-PR opened against a convoy's ask-branch. Tracks
+-- CI state, retry counters, and terminal state transitions.
+
+CREATE TABLE IF NOT EXISTS AskBranchPRs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id        INTEGER NOT NULL,              -- FK → BountyBoard.id
+    convoy_id      INTEGER NOT NULL,              -- FK → Convoys.id
+    repo           TEXT    NOT NULL,              -- FK → Repositories.name
+    pr_number      INTEGER DEFAULT 0,
+    pr_url         TEXT    DEFAULT '',
+    state          TEXT    DEFAULT 'Open',        -- 'Open' | 'Merged' | 'Closed'
+    checks_state   TEXT    DEFAULT 'Pending',     -- 'Pending' | 'Success' | 'Failure'
+    failure_count  INTEGER DEFAULT 0,             -- incremented by Medic CIFailureTriage
+    merged_at      TEXT    DEFAULT '',
+    created_at     TEXT    DEFAULT (datetime('now')),
+    UNIQUE(repo, pr_number)
+);
+CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id   ON AskBranchPRs (task_id);
+CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_convoy_id ON AskBranchPRs (convoy_id);
+CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_state     ON AskBranchPRs (state);
+
+-- ── Per-(convoy, repo) ask-branch tracking ────────────────────────────────────
+-- A convoy's tasks may target multiple repos, so each touched repo gets its own
+-- ask-branch and eventually its own draft PR. One row per (convoy, repo).
+
+CREATE TABLE IF NOT EXISTS ConvoyAskBranches (
+    convoy_id            INTEGER NOT NULL,          -- FK → Convoys.id
+    repo                 TEXT    NOT NULL,          -- FK → Repositories.name
+    ask_branch           TEXT    NOT NULL,          -- 'force/ask-<id>-<slug>'
+    ask_branch_base_sha  TEXT    NOT NULL,          -- main's HEAD at branch creation; updated by rebase
+    draft_pr_url         TEXT    DEFAULT '',
+    draft_pr_number      INTEGER DEFAULT 0,
+    draft_pr_state       TEXT    DEFAULT '',         -- '' | 'Open' | 'Merged' | 'Closed'
+    shipped_at           TEXT    DEFAULT '',
+    last_rebased_at      TEXT    DEFAULT '',
+    created_at           TEXT    DEFAULT (datetime('now')),
+    PRIMARY KEY (convoy_id, repo)
+);
+CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo);
 
 -- ── Persistent agent worktrees ────────────────────────────────────────────────
 -- Astromechs reuse their worktree across tasks for the same repo.

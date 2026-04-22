@@ -45,6 +45,32 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND type = 'CodeEdit' AND status IN ('Failed','Escalated')`, c.id).Scan(&problemCount)
 
 		if completed == total {
+			// PR flow branch: if the convoy has any ConvoyAskBranch rows, the
+			// work is "complete at the sub-PR level" but a human still needs to
+			// ship the draft PR(s) to main. Transition to AwaitingDraftPR and
+			// enqueue a Diplomat ShipConvoy task.
+			askBranches := store.ListConvoyAskBranches(db, c.id)
+			if len(askBranches) > 0 {
+				// Don't duplicate if one is already queued or in flight.
+				// Boundary-match on JSON token so convoy id=1 doesn't dedup against 10, 100.
+				var existing int
+				db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+					WHERE type = 'ShipConvoy' AND status IN ('Pending', 'Locked')
+					  AND (payload LIKE '%"convoy_id":' || ? || ',%'
+					    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
+					c.id, c.id).Scan(&existing)
+				if existing == 0 {
+					db.Exec(`UPDATE Convoys SET status = 'AwaitingDraftPR' WHERE id = ?`, c.id)
+					if _, err := QueueShipConvoy(db, c.id); err != nil {
+						logger.Printf("Convoy '%s': failed to queue ShipConvoy: %v", c.name, err)
+					} else {
+						logger.Printf("Convoy '%s' all sub-PRs merged — enqueued Diplomat ShipConvoy", c.name)
+					}
+				}
+				continue
+			}
+
+			// Legacy path (no PR flow): mark convoy Completed outright.
 			db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ?`, c.id)
 			logger.Printf("Convoy '%s' COMPLETED (%d/%d tasks done)", c.name, completed, total)
 			telemetry.EmitEvent(telemetry.TelemetryEvent{

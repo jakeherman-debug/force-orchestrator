@@ -106,15 +106,42 @@ type DashboardEscalation struct {
 	AcknowledgedAt string `json:"acknowledged_at"`
 }
 
-// DashboardConvoy is a convoy with progress info
+// DashboardConvoy is a convoy with progress info.
+// PR-flow fields are populated only when the convoy has ConvoyAskBranch rows
+// (i.e. it went through the PR-based delivery path rather than legacy merges).
 type DashboardConvoy struct {
-	ID         int    `json:"id"`
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	CreatedAt  string `json:"created_at"`
-	Completed  int    `json:"completed"`
-	Total      int    `json:"total"`
-	HasPlanned bool   `json:"has_planned"`
+	ID            int                      `json:"id"`
+	Name          string                   `json:"name"`
+	Status        string                   `json:"status"`
+	CreatedAt     string                   `json:"created_at"`
+	Completed     int                      `json:"completed"`
+	Total         int                      `json:"total"`
+	HasPlanned    bool                     `json:"has_planned"`
+	AskBranches   []DashboardAskBranch     `json:"ask_branches,omitempty"`
+	SubPRRollup   *DashboardSubPRRollup    `json:"sub_pr_rollup,omitempty"`
+}
+
+// DashboardAskBranch is the dashboard view of one per-repo ask-branch's state.
+type DashboardAskBranch struct {
+	Repo             string `json:"repo"`
+	AskBranch        string `json:"ask_branch"`
+	AskBranchBaseSHA string `json:"ask_branch_base_sha"`
+	DraftPRURL       string `json:"draft_pr_url"`
+	DraftPRNumber    int    `json:"draft_pr_number"`
+	DraftPRState     string `json:"draft_pr_state"`
+	ShippedAt        string `json:"shipped_at,omitempty"`
+	LastRebasedAt    string `json:"last_rebased_at,omitempty"`
+}
+
+// DashboardSubPRRollup summarises sub-PR state for a convoy.
+type DashboardSubPRRollup struct {
+	Total          int `json:"total"`
+	Open           int `json:"open"`
+	Merged         int `json:"merged"`
+	Closed         int `json:"closed"`
+	ChecksPending  int `json:"checks_pending"`
+	ChecksSuccess  int `json:"checks_success"`
+	ChecksFailure  int `json:"checks_failure"`
 }
 
 // DashboardAgent is a registered agent with its current task

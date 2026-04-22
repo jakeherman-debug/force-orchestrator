@@ -74,6 +74,29 @@ func main() {
 	case "repos":
 		cmdRepos(db, os.Args[2:])
 
+	case "repo":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: force repo sync | force repo set-pr-flow <name> on|off")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "sync":
+			cmdRepoSync(db)
+		case "set-pr-flow":
+			if len(os.Args) < 5 {
+				fmt.Println("Usage: force repo set-pr-flow <name> on|off")
+				os.Exit(1)
+			}
+			cmdRepoSetPRFlow(db, os.Args[3], os.Args[4])
+		default:
+			fmt.Printf("Unknown repo subcommand: %s\n", os.Args[2])
+			fmt.Println("Usage: force repo sync | force repo set-pr-flow <name> on|off")
+			os.Exit(1)
+		}
+
+	case "migrate":
+		cmdMigrate(db, os.Args[2:])
+
 	case "add-repo":
 		if len(os.Args) < 5 {
 			fmt.Println("Usage: force add-repo <name> <local-path> <description>")

@@ -79,13 +79,16 @@ func SpawnMedic(db *sql.DB, name string) {
 			continue
 		}
 
-		bounty, claimed := store.ClaimBounty(db, "MedicReview", name)
-		if !claimed {
-			time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
+		if bounty, claimed := store.ClaimBounty(db, "MedicReview", name); claimed {
+			runMedicTask(db, name, bounty, logger)
+			continue
+		}
+		if bounty, claimed := store.ClaimBounty(db, "CIFailureTriage", name); claimed {
+			runMedicCITriage(db, name, bounty, logger)
 			continue
 		}
 
-		runMedicTask(db, name, bounty, logger)
+		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
 	}
 }
 

@@ -518,6 +518,73 @@ The Medic is biased toward `requeue` or `shard` — `escalate` is a last resort.
 
 ---
 
+### Pilot — PR-Flow Steward
+
+**File:** `pilot.go`
+**Roster:** Poe-Dameron, Wedge-Antilles, Hera-Pilot
+
+The Pilot is the git-ops steward for the PR-based delivery flow. It handles infra tasks that do not require code synthesis — cutting per-ask integration branches, rebasing them against main, auto-merging sub-PRs, and cleaning up branches after a convoy ships.
+
+Tasks the Pilot claims:
+
+| Task type | What it does |
+|---|---|
+| `FindPRTemplate` | Locate the PR template file for a repo. Deterministic filesystem search first (covers `.github/`, root, `docs/`, common variants); falls back to a single Claude call for repos whose templates live in unusual places. Writes the result to `Repositories.pr_template_path`. |
+| `CreateAskBranch` | Cut and push the convoy's integration branch (`force/ask-<id>-<slug>`) off main. For multi-repo convoys, fans out per-repo branch creation — each touched repo gets its own branch row in `ConvoyAskBranches`. Idempotent: running twice is a no-op on already-branched repos. |
+| `CleanupAskBranch` | Delete branches after the convoy ships or is abandoned. |
+| `RebaseAskBranch` | *(Phase 5)* Rebase an ask-branch onto main and force-push; spawn a `RebaseConflict` CodeEdit when the rebase doesn't apply cleanly. |
+| `RevalidateRepoConfig` | *(Phase 8)* Revalidate remote URL, default branch, and template path to catch repo renames or moved templates. |
+
+Pilot's happy path is pure shell-out (git + gh) — no LLM — so it's fast and auditable. When a rebase conflicts, Pilot never tries to resolve it itself; it spawns a CodeEdit task and lets an astromech do the code work.
+
+### Diplomat — Draft-PR Opener
+
+**File:** `diplomat.go`
+**Roster:** Leia-Organa, Padme-Amidala, Bail-Organa
+
+Diplomat handles the final ship step: once a convoy's sub-PRs are all merged, Diplomat rebases the ask-branch onto main, populates the repo's PR template via Claude, runs a sanity pass (secret scan + placeholder check + length limit), and opens a **draft PR** against main. Human operators review the draft PR on GitHub and click Ship it in the dashboard (or merge directly) to complete the convoy.
+
+Sanity pass failures trigger one LLM retry with critic feedback; a second failure escalates.
+
+### PR-Based Delivery Flow
+
+The fleet's default delivery path is a GitHub PR, not a local merge. For each convoy:
+
+1. **Pilot cuts an ask-branch** off main (e.g. `alice-smith/force/ask-7-oauth-support`) and pushes it to origin — one per (convoy, repo) since a convoy may touch multiple repos. The leading `alice-smith/` is the operator's GitHub username, discovered via a fallback chain (`gh api user --jq .login` → `gh config get user -h github.com` → `git config user.name`). Enterprise repos typically require this prefix for branch ownership / branch-protection rules; local setups with no username configured fall back to the bare name (e.g. `force/ask-7-oauth-support`). Astromech work branches follow the same convention: `<username>/agent/<astromech>/task-<id>`.
+2. **Astromechs branch off the ask-branch** (not main) to do their work.
+3. **Jedi Council approval** pushes the astromech branch, opens a sub-PR against the ask-branch, and marks it for auto-merge once Jenkins CI is green.
+4. **Medic handles any CI failure** (`CIFailureTriage`): classifies Flaky / RealBug / Environmental / BranchProtection / Unfixable, retriggers or spawns a fix task on the astromech branch.
+5. **CI circuit breaker**: if a repo accrues 5 Environmental failures in 1 hour, sub-PR creation for that repo pauses for 30 minutes so the fleet doesn't pile up broken PRs.
+6. **Pilot rebases the ask-branch periodically** as main drifts — every 15 minutes via `main-drift-watch`, using a cheap `git ls-remote` to detect whether main actually moved before spending compute. On rebase conflict, Pilot spawns a CodeEdit task on the ask-branch itself; when Jedi Council approves it, the special-case handler force-pushes the resolved ask-branch and updates the stored base SHA (no sub-PR, because head==base would be nonsense).
+7. **Diplomat opens the draft PR** into main once all sub-PRs are merged and ask-branch CI is green. The PR body is LLM-populated from the repo's `pull_request_template.md` plus the convoy summary; a pre-post sanity pass scans for secrets and unfilled placeholders.
+8. **Human clicks "Ship it"** in the dashboard (`force convoy ship <id>` on the CLI). There is no auto-ship to main — the human gate is intentional.
+9. **Pilot cleans up** the ask-branch after the draft PR merges; Librarian records a convoy-level memory.
+10. **ship-it-nag** reminds the operator if a draft PR sits unshipped for 24h / 72h / 1 week.
+
+All 14 dogs under the Inquisitor's 5-minute cycle; most are cheap polls that only trigger work when an actual event is detected.
+
+Per-repo opt-out flag: `pr_flow_enabled` (default `true`). Set to `false` to fall back to the legacy direct-to-main merge path.
+
+### Migration from pre-PR-flow databases
+
+Existing `holocron.db` state is preserved. Migration runs automatically on daemon startup in three layers:
+
+- **Layer A (schema):** additive `ALTER TABLE ADD COLUMN` + `CREATE TABLE IF NOT EXISTS AskBranchPRs`. Idempotent; no data is rewritten.
+- **Layer B (repo backfill):** populates `remote_url` and `default_branch` by shelling out to `git` per repo. Repos whose origin is unreachable are marked `pr_flow_enabled=0` so they fall back to the legacy path rather than producing broken PRs.
+- **Layer C (convoy backfill):** *(Phase 2)* for each Active convoy without an ask-branch, queues `CreateAskBranch` for Pilot.
+
+Operators can also run the migration explicitly:
+
+```sh
+force migrate pr-flow --dry-run    # preview changes
+force migrate pr-flow              # apply (auto-snapshots holocron.db first)
+force migrate pr-flow --rollback   # restore the most recent snapshot (daemon must be stopped)
+```
+
+Before any work the daemon verifies `gh auth status` passes. If it doesn't, startup aborts with a clear error — the fleet refuses to run a half-migrated PR flow.
+
+---
+
 ## Fleet Memory & RAG
 
 The fleet accumulates institutional knowledge across every task it completes or fails. This knowledge is stored in the `FleetMemory` table and injected into every Astromech prompt, giving agents context about what has worked and what hasn't on each repo — even across completely unrelated prior tasks.
@@ -843,9 +910,21 @@ force convoy approve <convoy-id>
 
 | Command | Description |
 |---|---|
-| `force add-repo <name> <path> <desc>` | Register a repository. Verifies path exists and is a git repo. |
+| `force add-repo <name> <path> <desc>` | Register a repository. Verifies path exists and is a git repo. Eagerly populates `remote_url`/`default_branch` and queues a `FindPRTemplate` task so the repo is ready for the PR flow immediately. |
 | `force repos` | List all registered repositories. Shows `[PATH MISSING]` if a repo has moved. |
 | `force repos remove <name>` | Unregister a repository. |
+| `force repo sync` | Re-discover `remote_url`/`default_branch` for every registered repo and queue a `FindPRTemplate` task for any repo whose template path is unknown. Only needed after origin/config changes — `add-repo` runs this automatically. |
+| `force repo set-pr-flow <name> on\|off` | Enable or disable the PR-based delivery flow for a repo. Affects **future tasks only**; in-flight work finishes on the path it started on. Disabling sends tasks through the legacy local-merge path. |
+
+### PR Flow Migration
+
+The PR-based delivery flow replaces direct `git merge` with sub-PRs + a human-gated draft PR. Migration is additive and idempotent.
+
+| Command | Description |
+|---|---|
+| `force migrate pr-flow --dry-run` | Preview what the migration would change: repos needing `remote_url` backfill, convoys needing ask-branch backfill, existing snapshots. No DB writes. |
+| `force migrate pr-flow` | Run the migration. Auto-snapshots `holocron.db` to `holocron.db.pre-pr-flow.<timestamp>` before Layer B. Safe to re-run. |
+| `force migrate pr-flow --rollback --confirm` | **DESTRUCTIVE.** Restore `holocron.db` from the most recent pre-migration snapshot. Daemon must be stopped. Loses any state changes since the snapshot (escalations, in-flight work, fleet memory). `--confirm` is required — `--rollback` alone refuses. |
 
 ### Convoys
 
@@ -857,6 +936,8 @@ force convoy approve <convoy-id>
 | `force convoy approve <id>` | Activate a plan-only convoy — moves all Planned tasks to Pending. |
 | `force convoy reset <id>` | Reset all failed/escalated tasks in a convoy to Pending. |
 | `force convoy reject <id> <feedback>` | Reject Commander's plan: cancels un-started tasks, sends feedback to Commander via mail, and requeues the parent Feature task for re-planning. |
+| `force convoy pr <id>` | Show per-repo ask-branches, draft PR URLs + state, and a sub-PR rollup (open/merged/closed counts, CI state). |
+| `force convoy ship <id> [--merge squash\|merge\|rebase]` | Promote the convoy's draft PR(s) from draft to ready-for-review. With `--merge`, immediately merges using the specified strategy (default: operator reviews on GitHub and merges there). Only valid when the convoy is in `DraftPROpen` state. |
 
 ### Escalations
 

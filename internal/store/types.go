@@ -57,11 +57,84 @@ type Escalation struct {
 
 // ── Convoy ────────────────────────────────────────────────────────────────────
 
+// Convoy status values:
+//   - Active            — tasks are running
+//   - AwaitingDraftPR   — all sub-PRs merged into ask-branch, Diplomat enqueued
+//   - DraftPROpen       — draft PR exists on main, waiting for human "Ship it"
+//   - Shipped           — draft PR merged; ask-branch cleanup has run or is pending
+//   - Abandoned         — draft PR closed without merge, convoy terminated
+//   - Completed         — legacy terminal state from pre-PR-flow convoys (no ask_branch)
+//   - Failed            — at least one constituent task is Failed or Escalated
 type Convoy struct {
-	ID        int
-	Name      string
-	Status    string // Active, Completed
-	CreatedAt string
+	ID                int
+	Name              string
+	Status            string
+	Coordinated       bool
+	AskBranch         string // "" until Pilot's CreateAskBranch runs
+	AskBranchBaseSHA  string // main's HEAD at ask-branch creation; used for drift detection
+	DraftPRURL        string
+	DraftPRNumber     int
+	DraftPRState      string // Open, Merged, Closed, "" (not yet created)
+	ShippedAt         string
+	CreatedAt         string
+}
+
+// ── Repository ────────────────────────────────────────────────────────────────
+
+// Repository describes a registered code repo plus its PR-flow configuration.
+// PRFlowEnabled defaults to true — repos opt out, not in. Quarantine fields are
+// set by the repo-config-check dog when a repo's remote becomes unreachable or
+// its origin URL changes; a quarantined repo falls back to the legacy local-merge
+// path until the operator re-validates it.
+type Repository struct {
+	Name             string
+	LocalPath        string
+	Description      string
+	RemoteURL        string
+	DefaultBranch    string
+	PRTemplatePath   string
+	PRFlowEnabled    bool
+	QuarantinedAt    string
+	QuarantineReason string
+}
+
+// ── Per-(convoy, repo) ask-branch ────────────────────────────────────────────
+//
+// A convoy's tasks may target multiple repos; each touched repo gets its own
+// ask-branch and, eventually, its own draft PR. ConvoyAskBranch is the state
+// for one (convoy, repo) pair.
+type ConvoyAskBranch struct {
+	ConvoyID         int
+	Repo             string
+	AskBranch        string
+	AskBranchBaseSHA string
+	DraftPRURL       string
+	DraftPRNumber    int
+	DraftPRState     string // "" | Open | Merged | Closed
+	ShippedAt        string
+	LastRebasedAt    string
+	CreatedAt        string
+}
+
+// ── Ask-branch sub-PR ────────────────────────────────────────────────────────
+
+// AskBranchPR tracks a single astromech-task-level GitHub PR that targets the
+// convoy's ask-branch. State transitions:
+//   Open → (CI green) → auto-merged → state=Merged
+//   Open → (CI red)   → failure_count++ → Medic CIFailureTriage
+//   Open → (closed externally) → state=Closed, task escalated
+type AskBranchPR struct {
+	ID           int
+	TaskID       int
+	ConvoyID     int
+	Repo         string
+	PRNumber     int
+	PRURL        string
+	State        string // Open, Merged, Closed
+	ChecksState  string // Pending, Success, Failure
+	FailureCount int
+	MergedAt     string
+	CreatedAt    string
 }
 
 // ── Persistent agent worktree ─────────────────────────────────────────────────

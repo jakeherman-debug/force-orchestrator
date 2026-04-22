@@ -301,8 +301,18 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		}
 		branchName = cb
 	} else {
+		// Under the PR flow, astromechs branch off the convoy's ask-branch for this
+		// repo. If the convoy has no ask-branch (legacy convoys, repos with
+		// pr_flow_enabled=0, or non-convoy tasks), baseBranch is "" and we fall
+		// back to the repo's default branch.
+		baseBranch := ""
+		if bounty.ConvoyID > 0 {
+			if ab := store.GetConvoyAskBranch(db, bounty.ConvoyID, bounty.TargetRepo); ab != nil {
+				baseBranch = ab.AskBranch
+			}
+		}
 		var branchErr error
-		branchName, isResume, branchErr = igit.PrepareAgentBranch(worktreeDir, repoPath, bounty.ID, name, bounty.BranchName)
+		branchName, isResume, branchErr = igit.PrepareAgentBranch(worktreeDir, repoPath, bounty.ID, name, bounty.BranchName, baseBranch)
 		if branchErr != nil {
 			msg := fmt.Sprintf("Branch Err: %v", branchErr)
 			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
@@ -699,7 +709,14 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 	}
 
 	// Foreground runs always start fresh — pass empty existingBranch to ignore any prior branch.
-	branchName, _, branchErr := igit.PrepareAgentBranch(worktreeDir, repoPath, taskID, fgAgent, "")
+	// Honor the convoy ask-branch if one exists, same as the normal astromech path.
+	baseBranch := ""
+	if bounty, bErr := store.GetBounty(db, taskID); bErr == nil && bounty.ConvoyID > 0 {
+		if ab := store.GetConvoyAskBranch(db, bounty.ConvoyID, bounty.TargetRepo); ab != nil {
+			baseBranch = ab.AskBranch
+		}
+	}
+	branchName, _, branchErr := igit.PrepareAgentBranch(worktreeDir, repoPath, taskID, fgAgent, "", baseBranch)
 	if branchErr != nil {
 		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '' WHERE id = ?`, taskID)
 		fmt.Printf("Branch error: %v\n", branchErr)

@@ -187,9 +187,31 @@ func cmdConvoy(db *sql.DB, args []string) {
 		fmt.Printf("Convoy %d rejected: %d task(s) cancelled, Feature #%d re-queued for Commander.\n",
 			rejectConvoyID, cancelled, rejectParentID)
 		fmt.Printf("Feedback sent to Commander: %s\n", rejectFeedback)
+	case "pr":
+		// force convoy pr <id> — show draft PR URL + state per repo
+		if len(args) < 2 {
+			fmt.Println("Usage: force convoy pr <id>")
+			os.Exit(1)
+		}
+		cmdConvoyPR(db, mustParseID(args[1]))
+	case "ship":
+		// force convoy ship <id> [--merge <strategy>] — remove draft, optionally merge
+		if len(args) < 2 {
+			fmt.Println("Usage: force convoy ship <id> [--merge squash|merge|rebase]")
+			os.Exit(1)
+		}
+		convoyShipID := mustParseID(args[1])
+		mergeStrategy := ""
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--merge" && i+1 < len(args) {
+				mergeStrategy = args[i+1]
+				i++
+			}
+		}
+		cmdConvoyShip(db, convoyShipID, mergeStrategy)
 	default:
 		fmt.Printf("Unknown convoy subcommand: %s\n", subCmd)
-		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>]")
+		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|pr <id>|ship <id>]")
 		os.Exit(1)
 	}
 }

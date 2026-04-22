@@ -5,8 +5,20 @@ import "database/sql"
 // createSchema creates all Holocron tables if they don't already exist.
 // Safe to call on every startup — all statements are idempotent.
 func createSchema(db *sql.DB) {
+	// Repositories — registered code repos. PR-flow fields (remote_url, default_branch,
+	// pr_template_path, pr_flow_enabled) are populated by the Layer B backfill at daemon
+	// startup and the FindPRTemplate task. pr_flow_enabled defaults to 1 — repos opt OUT
+	// of the PR flow, not in.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Repositories (
-		name TEXT PRIMARY KEY, local_path TEXT, description TEXT
+		name             TEXT PRIMARY KEY,
+		local_path       TEXT,
+		description      TEXT,
+		remote_url       TEXT    DEFAULT '',
+		default_branch   TEXT    DEFAULT '',
+		pr_template_path TEXT    DEFAULT '',
+		pr_flow_enabled  INTEGER DEFAULT 1,
+		quarantined_at   TEXT    DEFAULT '',
+		quarantine_reason TEXT   DEFAULT ''
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
@@ -51,12 +63,23 @@ func createSchema(db *sql.DB) {
 	);`)
 
 	// Convoys — named groups of related tasks from a single feature request.
+	// PR-flow fields: ask_branch is the integration branch every sub-PR merges into;
+	// ask_branch_base_sha caches main's HEAD at ask-branch creation, used by
+	// main-drift-watch to detect when main has moved and a rebase is needed.
+	// draft_pr_* track the final human-gated PR into main. shipped_at is set when
+	// the draft PR is merged.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Convoys (
-		id           INTEGER PRIMARY KEY AUTOINCREMENT,
-		name         TEXT UNIQUE NOT NULL,
-		status       TEXT    DEFAULT 'Active',
-		coordinated  INTEGER DEFAULT 0,
-		created_at   TEXT    DEFAULT (datetime('now'))
+		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+		name                 TEXT UNIQUE NOT NULL,
+		status               TEXT    DEFAULT 'Active',
+		coordinated          INTEGER DEFAULT 0,
+		ask_branch           TEXT    DEFAULT '',
+		ask_branch_base_sha  TEXT    DEFAULT '',
+		draft_pr_url         TEXT    DEFAULT '',
+		draft_pr_number      INTEGER DEFAULT 0,
+		draft_pr_state       TEXT    DEFAULT '',
+		shipped_at           TEXT    DEFAULT '',
+		created_at           TEXT    DEFAULT (datetime('now'))
 	);`)
 
 	// Persistent agent worktrees — one per agent per repo, reused across task assignments.
@@ -175,6 +198,7 @@ func createSchema(db *sql.DB) {
 		created_at  DATETIME DEFAULT (datetime('now'))
 	)`)
 
+<<<<<<< Updated upstream
 	// Convoy lifecycle events — timeline of key events for each convoy.
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +207,52 @@ func createSchema(db *sql.DB) {
 		detail     TEXT    DEFAULT '',
 		created_at TEXT    DEFAULT (datetime('now'))
 	)`)
+=======
+	// AskBranchPRs — one row per astromech sub-PR opened against a convoy's ask-branch.
+	// Tracks CI state, retry counters, and terminal state transitions. Unique on
+	// (repo, pr_number) so we never double-create a row for the same PR.
+	db.Exec(`CREATE TABLE IF NOT EXISTS AskBranchPRs (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id        INTEGER NOT NULL,
+		convoy_id      INTEGER NOT NULL,
+		repo           TEXT    NOT NULL,
+		pr_number      INTEGER DEFAULT 0,
+		pr_url         TEXT    DEFAULT '',
+		state          TEXT    DEFAULT 'Open',
+		checks_state   TEXT    DEFAULT 'Pending',
+		failure_count  INTEGER DEFAULT 0,
+		merged_at      TEXT    DEFAULT '',
+		created_at     TEXT    DEFAULT (datetime('now')),
+		UNIQUE(repo, pr_number)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id   ON AskBranchPRs (task_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_convoy_id ON AskBranchPRs (convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_state     ON AskBranchPRs (state)`)
+
+	// ConvoyAskBranches — per-(convoy, repo) integration branch tracking.
+	//
+	// A convoy's tasks may target multiple repos (Feature "Add OAuth to api and
+	// monolith" produces tasks in both). Each touched repo needs its own ask-branch
+	// and eventually its own draft PR. We key on (convoy_id, repo) so every repo
+	// touched by a convoy carries its own state machine.
+	//
+	// The Convoys.ask_branch / draft_pr_* scalar fields on Convoys predate this
+	// table and are left in place for backwards-compat; new code reads this table.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyAskBranches (
+		convoy_id            INTEGER NOT NULL,
+		repo                 TEXT    NOT NULL,
+		ask_branch           TEXT    NOT NULL,
+		ask_branch_base_sha  TEXT    NOT NULL,
+		draft_pr_url         TEXT    DEFAULT '',
+		draft_pr_number      INTEGER DEFAULT 0,
+		draft_pr_state       TEXT    DEFAULT '',
+		shipped_at           TEXT    DEFAULT '',
+		last_rebased_at      TEXT    DEFAULT '',
+		created_at           TEXT    DEFAULT (datetime('now')),
+		PRIMARY KEY (convoy_id, repo)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+>>>>>>> Stashed changes
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -256,6 +326,7 @@ func runMigrations(db *sql.DB) {
 		created_at DATETIME DEFAULT (datetime('now'))
 	)`)
 
+<<<<<<< Updated upstream
 	// ConvoyEvents — convoy lifecycle event timeline (idempotent on fresh DBs).
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,4 +335,63 @@ func runMigrations(db *sql.DB) {
 		detail     TEXT    DEFAULT '',
 		created_at TEXT    DEFAULT (datetime('now'))
 	)`)
+=======
+	// ── PR flow migration (Layer A) ──────────────────────────────────────────
+	// Additive columns for the PR-based delivery flow. Each ALTER silently no-ops
+	// when the column already exists, so this block is safe to re-run on every
+	// startup (matching the pattern used elsewhere in runMigrations).
+	//
+	// Repositories: remote, default branch, PR template path, PR flow opt-out flag.
+	// pr_flow_enabled defaults to 1 (opt-out model per Decision #3).
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN remote_url        TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN default_branch    TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN pr_template_path  TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN pr_flow_enabled   INTEGER DEFAULT 1`)
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN quarantined_at    TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN quarantine_reason TEXT    DEFAULT ''`)
+
+	// Convoys: ask-branch integration + draft PR tracking.
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN ask_branch          TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN ask_branch_base_sha TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN draft_pr_url        TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN draft_pr_number     INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN draft_pr_state      TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN shipped_at          TEXT    DEFAULT ''`)
+
+	// AskBranchPRs — new table in Layer A. idempotent via IF NOT EXISTS.
+	db.Exec(`CREATE TABLE IF NOT EXISTS AskBranchPRs (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id        INTEGER NOT NULL,
+		convoy_id      INTEGER NOT NULL,
+		repo           TEXT    NOT NULL,
+		pr_number      INTEGER DEFAULT 0,
+		pr_url         TEXT    DEFAULT '',
+		state          TEXT    DEFAULT 'Open',
+		checks_state   TEXT    DEFAULT 'Pending',
+		failure_count  INTEGER DEFAULT 0,
+		merged_at      TEXT    DEFAULT '',
+		created_at     TEXT    DEFAULT (datetime('now')),
+		UNIQUE(repo, pr_number)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id   ON AskBranchPRs (task_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_convoy_id ON AskBranchPRs (convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_state     ON AskBranchPRs (state)`)
+
+	// ConvoyAskBranches — per-(convoy, repo) integration branch. Added as part of
+	// Phase 2; key on (convoy_id, repo) so convoys touching multiple repos work.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyAskBranches (
+		convoy_id            INTEGER NOT NULL,
+		repo                 TEXT    NOT NULL,
+		ask_branch           TEXT    NOT NULL,
+		ask_branch_base_sha  TEXT    NOT NULL,
+		draft_pr_url         TEXT    DEFAULT '',
+		draft_pr_number      INTEGER DEFAULT 0,
+		draft_pr_state       TEXT    DEFAULT '',
+		shipped_at           TEXT    DEFAULT '',
+		last_rebased_at      TEXT    DEFAULT '',
+		created_at           TEXT    DEFAULT (datetime('now')),
+		PRIMARY KEY (convoy_id, repo)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+>>>>>>> Stashed changes
 }

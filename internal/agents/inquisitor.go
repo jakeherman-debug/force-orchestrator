@@ -83,6 +83,7 @@ func SpawnInquisitor(db *sql.DB) {
 		store.RecoverStaleConvoys(db)
 		cleanOrphanedBranches(db, logger)
 		detectStalledTasks(db, logger)
+		backfillMissingAskBranches(db, logger)
 
 		// Prune bootLastCalled entries for tasks that are no longer in a locked state
 		// (completed, failed, reset, or escalated since the last cycle). This prevents

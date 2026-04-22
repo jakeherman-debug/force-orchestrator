@@ -73,7 +73,12 @@ func GetOrCreateAgentWorktree(db *sql.DB, agentName, repoPath string) (string, e
 // checks it out so the agent can build on top of its prior work (isResume=true).
 // Otherwise a fresh branch is created from the current default branch HEAD (isResume=false).
 // Any uncommitted changes in the worktree are forcibly discarded before switching branches.
-func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, existingBranch string) (branchName string, isResume bool, err error) {
+//
+// baseBranch (if non-empty) is used as the fresh-branch base INSTEAD of the repo's
+// default branch. Under the PR flow this is the convoy's ask-branch, so astromechs
+// branch off the integration branch rather than main. Pass "" to use the default
+// branch (legacy path + tasks with no ask-branch).
+func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, existingBranch, baseBranch string) (branchName string, isResume bool, err error) {
 	// Force-discard any uncommitted changes before switching branches.
 	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
 	exec.Command("git", "-C", worktreeDir, "clean", "-fd").Run()
@@ -89,9 +94,35 @@ func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, exi
 		}
 	}
 
-	// Fresh branch from current main.
-	base := GetDefaultBranch(repoPath)
-	newBranch := fmt.Sprintf("agent/%s/task-%d", agentName, taskID)
+	// Pick the base for the new branch: convoy ask-branch if supplied, else the
+	// repo's default branch. The ask-branch may only exist on origin (Pilot
+	// pushes without creating a local tracking branch), so we try remote refs
+	// first before falling back to the local name.
+	base := baseBranch
+	if base == "" {
+		base = GetDefaultBranch(repoPath)
+	} else {
+		// Ensure we have the branch locally; fetch if necessary.
+		if out, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", base).CombinedOutput(); verifyErr != nil || strings.TrimSpace(string(out)) == "" {
+			// Try origin ref.
+			remoteRef := "refs/remotes/origin/" + base
+			if out, remoteErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef).CombinedOutput(); remoteErr != nil || strings.TrimSpace(string(out)) == "" {
+				// Fetch and retry once.
+				exec.Command("git", "-C", repoPath, "fetch", "origin", base).Run()
+				if _, reVerifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef).CombinedOutput(); reVerifyErr != nil {
+					// Can't resolve the ask-branch — fall back to default branch
+					// rather than fail the task. Pilot will complain separately.
+					base = GetDefaultBranch(repoPath)
+				} else {
+					base = remoteRef
+				}
+			} else {
+				base = remoteRef
+			}
+		}
+	}
+
+	newBranch := fmt.Sprintf("%sagent/%s/task-%d", BranchPrefix(), agentName, taskID)
 
 	if out, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).CombinedOutput(); coErr != nil {
 		return "", false, fmt.Errorf("failed to detach to %s: %s", base, strings.TrimSpace(string(out)))
