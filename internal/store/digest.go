@@ -31,11 +31,16 @@ func FetchDigestStats(db *sql.DB) (DigestStats, error) {
 	var stats DigestStats
 
 	// (1) Task counts by terminal status in the last 24 hours.
+	// BountyBoard has no updated_at; use TaskHistory.created_at, which records
+	// the timestamp of each attempt outcome including terminal transitions.
 	rows, err := db.Query(`
-		SELECT status, COUNT(*) FROM BountyBoard
-		WHERE status IN ('Completed', 'Failed', 'Escalated')
-		  AND updated_at >= datetime('now', '-24 hours')
-		GROUP BY status`)
+		SELECT b.status, COUNT(DISTINCT b.id)
+		FROM BountyBoard b
+		JOIN TaskHistory h ON h.task_id = b.id
+		WHERE b.status IN ('Completed', 'Failed', 'Escalated')
+		  AND h.outcome IN ('Completed', 'Failed', 'Escalated')
+		  AND h.created_at >= datetime('now', '-24 hours')
+		GROUP BY b.status`)
 	if err != nil {
 		return stats, err
 	}
