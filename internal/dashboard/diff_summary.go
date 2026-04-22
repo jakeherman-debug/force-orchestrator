@@ -43,10 +43,10 @@ func parseDiffStats(diff string) []DiffFileStat {
 			if current != nil {
 				files = append(files, *current)
 			}
-			parts := strings.Fields(line)
+			header := strings.TrimPrefix(line, "diff --git ")
 			path := ""
-			if len(parts) == 4 {
-				path = strings.TrimPrefix(parts[3], "b/")
+			if idx := strings.LastIndex(header, " b/"); idx >= 0 {
+				path = strings.Trim(header[idx+3:], `"`)
 			}
 			current = &DiffFileStat{Path: path}
 		} else if current != nil {
