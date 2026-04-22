@@ -401,3 +401,39 @@ func itoa(i int) string {
 	}
 	return b.String()
 }
+
+// TestQueueCreateAskBranch_BlocksCodeEditTasksUntilComplete verifies that
+// QueueCreateAskBranch wires TaskDependencies so CodeEdit tasks in the same
+// convoy cannot be claimed by an astromech before Pilot finishes. This is the
+// regression test for the race condition where task-206 merged to main because
+// the Council ran before the ask-branch existed.
+func TestQueueCreateAskBranch_BlocksCodeEditTasksUntilComplete(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	cid, _ := store.CreateConvoy(db, "[99] test race")
+	ceID, _ := store.AddConvoyTask(db, 0, "api", "do work", cid, 0, "Pending")
+
+	pilotID, err := QueueCreateAskBranch(db, cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// CodeEdit task must NOT be claimable while the Pilot task is Pending.
+	if b, ok := store.ClaimBounty(db, "CodeEdit", "R2-D2"); ok {
+		t.Errorf("CodeEdit task %d was claimable before CreateAskBranch completed", b.ID)
+	}
+
+	// Complete the Pilot task — dependency edge should clear.
+	store.UpdateBountyStatus(db, pilotID, "Completed")
+	store.UnblockDependentsOf(db, pilotID)
+
+	// Now the CodeEdit task must be claimable.
+	b, ok := store.ClaimBounty(db, "CodeEdit", "R2-D2")
+	if !ok {
+		t.Fatal("CodeEdit task should be claimable after CreateAskBranch completed")
+	}
+	if b.ID != ceID {
+		t.Errorf("claimed wrong task: got %d, want %d", b.ID, ceID)
+	}
+}

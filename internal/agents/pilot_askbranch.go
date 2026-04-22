@@ -26,7 +26,10 @@ type createAskBranchPayload struct {
 	ConvoyID int `json:"convoy_id"`
 }
 
-// QueueCreateAskBranch enqueues a CreateAskBranch task for Pilot.
+// QueueCreateAskBranch enqueues a CreateAskBranch task for Pilot and blocks
+// every existing Pending/Planned CodeEdit task in the convoy on it. This
+// prevents astromechs from racing through the Council before the ask-branch
+// exists — ClaimBounty won't hand out a blocked task.
 func QueueCreateAskBranch(db *sql.DB, convoyID int) (int, error) {
 	if convoyID <= 0 {
 		return 0, fmt.Errorf("QueueCreateAskBranch: convoyID required")
@@ -39,8 +42,31 @@ func QueueCreateAskBranch(db *sql.DB, convoyID int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	pilotTaskID, _ := res.LastInsertId()
+
+	// Block all CodeEdit tasks in this convoy that haven't started yet.
+	// Collect IDs first, close the cursor, then write dependencies — keeping
+	// the read and write as separate DB operations avoids a connection deadlock
+	// on single-connection SQLite pools (including :memory: in tests).
+	rows, qErr := db.Query(
+		`SELECT id FROM BountyBoard
+		 WHERE convoy_id = ? AND type = 'CodeEdit' AND status IN ('Pending', 'Planned')`,
+		convoyID)
+	if qErr != nil {
+		return int(pilotTaskID), nil // non-fatal; requeue fallback in Council still handles it
+	}
+	var codeEditIDs []int
+	for rows.Next() {
+		var id int
+		if rows.Scan(&id) == nil {
+			codeEditIDs = append(codeEditIDs, id)
+		}
+	}
+	rows.Close()
+	for _, codeEditID := range codeEditIDs {
+		store.AddDependency(db, codeEditID, int(pilotTaskID))
+	}
+	return int(pilotTaskID), nil
 }
 
 // AskBranchNameForConvoy generates the ask-branch name for a convoy.
