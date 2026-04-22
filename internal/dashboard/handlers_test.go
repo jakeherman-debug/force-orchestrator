@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -502,14 +503,43 @@ func TestHandleHolonetStream_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "nonexistent.jsonl")
 
-	r := httptest.NewRequest(http.MethodGet, "/api/events", nil)
-	w := httptest.NewRecorder()
-	handleHolonetStream(logPath)(w, r)
+	ctx, cancel := context.WithCancel(context.Background())
 
-	body := w.Body.String()
-	if !strings.Contains(body, "holonet.jsonl not found") {
-		t.Errorf("expected error SSE event, got: %s", body)
+	srv := httptest.NewServer(handleHolonetStream(logPath))
+	defer srv.Close()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer resp.Body.Close()
+
+	sc := bufio.NewScanner(resp.Body)
+	var firstLine string
+	done := make(chan struct{})
+	go func() {
+		if sc.Scan() {
+			firstLine = sc.Text()
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sentinel frame")
+	}
+
+	if firstLine != `data: ""` {
+		t.Errorf("expected sentinel frame, got: %q", firstLine)
+	}
+	if strings.Contains(firstLine, "not found") {
+		t.Errorf("sentinel frame must not contain error text, got: %q", firstLine)
+	}
+
+	// connection should remain open; cancel context to verify clean shutdown
+	cancel()
 }
 
 func TestHandleHolonetStream_ContextCancelReturns(t *testing.T) {
@@ -560,6 +590,73 @@ func TestHandleHolonetStream_SSEHeaders(t *testing.T) {
 	}
 	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
 		t.Error("missing CORS header")
+	}
+}
+
+func TestHandleHolonetStream_Backfill(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.jsonl")
+
+	// write a pre-existing event before the stream connects
+	if err := os.WriteFile(logPath, []byte(`{"type":"pre","msg":"backfill-event"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(handleHolonetStream(logPath))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	readDataLine := func(sc *bufio.Scanner) string {
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.HasPrefix(line, "data: ") {
+				return strings.TrimPrefix(line, "data: ")
+			}
+		}
+		return ""
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+
+	// expect the backfill event
+	got := make(chan string, 1)
+	go func() { got <- readDataLine(sc) }()
+	select {
+	case line := <-got:
+		if !strings.Contains(line, "backfill-event") {
+			t.Errorf("expected backfill event, got: %q", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for backfill event")
+	}
+
+	// append a live event and verify it streams
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(f, `{"type":"live","msg":"live-event"}`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	go func() { got <- readDataLine(sc) }()
+	select {
+	case line := <-got:
+		if !strings.Contains(line, "live-event") {
+			t.Errorf("expected live event, got: %q", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for live event")
 	}
 }
 
