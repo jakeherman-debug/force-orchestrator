@@ -277,19 +277,66 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 				// resolution task's parent-complete mail logic fires on success.
 				logger.Printf("Task %d: true merge conflict on branch %s — spawning conflict resolution task", b.ID, branchName)
 				conflictPayload := fmt.Sprintf("[CONFLICT_BRANCH: %s]\n\n%s", branchName, b.Payload)
-				resTaskID, _ := store.AddConvoyTask(db, b.ID, b.TargetRepo, conflictPayload, b.ConvoyID, b.Priority, "Pending")
-				logger.Printf("Task %d: spawned conflict resolution task #%d", b.ID, resTaskID)
+
+				// Atomic bundle: create resolution task, stamp its branch, mark
+				// original ConflictPending, re-activate convoy, record history.
+				// Partial failure here risks duplicate resolution tasks on retry.
+				tx, txErr := db.Begin()
+				if txErr != nil {
+					logger.Printf("Task %d: begin conflict-handling tx failed: %v — falling back to non-atomic path", b.ID, txErr)
+					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+					return
+				}
+				resTaskID, addErr := store.AddConvoyTaskTx(tx, b.ID, b.TargetRepo, conflictPayload, b.ConvoyID, b.Priority, "Pending")
+				if addErr != nil {
+					tx.Rollback()
+					logger.Printf("Task %d: add conflict resolution task failed: %v", b.ID, addErr)
+					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+					return
+				}
+				if err := store.SetBranchNameTx(tx, resTaskID, ""); err != nil {
+					tx.Rollback()
+					logger.Printf("Task %d: set branch name on conflict task failed: %v", b.ID, err)
+					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+					return
+				}
 				failMsg := fmt.Sprintf("Merge conflict on branch %s — conflict resolution task #%d spawned", branchName, resTaskID)
-				store.MarkConflictPending(db, b.ID, failMsg)
-				// If the convoy was already marked Failed (stall detector fired before the
-				// conflict resolution task was spawned), reset it to Active so it can complete.
+				if err := store.MarkConflictPendingTx(tx, b.ID, failMsg); err != nil {
+					tx.Rollback()
+					logger.Printf("Task %d: mark ConflictPending failed: %v", b.ID, err)
+					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+					return
+				}
 				if b.ConvoyID > 0 {
-					db.Exec(`UPDATE Convoys SET status = 'Active' WHERE id = ? AND status = 'Failed'`, b.ConvoyID)
+					if _, err := tx.Exec(`UPDATE Convoys SET status = 'Active' WHERE id = ? AND status = 'Failed'`, b.ConvoyID); err != nil {
+						tx.Rollback()
+						logger.Printf("Task %d: convoy re-activate failed: %v", b.ID, err)
+						handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+						return
+					}
 				}
-				histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "ConflictPending")
+				histID, histErr := store.RecordTaskHistoryTx(tx, b.ID, agentName, sessionID, response, "ConflictPending")
+				if histErr != nil {
+					tx.Rollback()
+					logger.Printf("Task %d: record history failed: %v", b.ID, histErr)
+					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+					return
+				}
 				if tokIn > 0 || tokOut > 0 {
-					store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+					if _, err := tx.Exec(`UPDATE TaskHistory SET tokens_in = ?, tokens_out = ? WHERE id = ?`, tokIn, tokOut, histID); err != nil {
+						tx.Rollback()
+						logger.Printf("Task %d: update history tokens failed: %v", b.ID, err)
+						handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+						return
+					}
 				}
+				if err := tx.Commit(); err != nil {
+					logger.Printf("Task %d: conflict-handling commit failed: %v", b.ID, err)
+					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
+					return
+				}
+
+				logger.Printf("Task %d: spawned conflict resolution task #%d", b.ID, resTaskID)
 				store.SendMail(db, agentName, "operator",
 					fmt.Sprintf("[CONFLICT] Task #%d — conflict resolution task #%d spawned", b.ID, resTaskID),
 					fmt.Sprintf("Task #%d was approved but had a merge conflict on branch %s.\n\nConflict resolution task #%d has been spawned. An Astromech will resolve the conflict markers and resubmit for council review.\n\nYou will be notified when the resolution is complete.\n\nOriginal task: %s",

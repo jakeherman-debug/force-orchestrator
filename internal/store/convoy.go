@@ -212,6 +212,12 @@ func SetConvoyStatus(db *sql.DB, convoyID int, status string) error {
 	return err
 }
 
+// SetConvoyStatusTx is the transactional sibling of SetConvoyStatus.
+func SetConvoyStatusTx(tx *sql.Tx, convoyID int, status string) error {
+	_, err := tx.Exec(`UPDATE Convoys SET status = ? WHERE id = ?`, status, convoyID)
+	return err
+}
+
 // ActiveConvoysMissingAskBranch returns convoy IDs that are Active but have at
 // least one touched repo without a ConvoyAskBranch row. Correctly handles the
 // multi-repo case: a convoy with repos [api, monolith] where api has a branch

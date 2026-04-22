@@ -168,6 +168,14 @@ func MarkAskBranchPRMerged(db *sql.DB, id int) error {
 	return err
 }
 
+// MarkAskBranchPRMergedTx is the transactional sibling of MarkAskBranchPRMerged.
+func MarkAskBranchPRMergedTx(tx *sql.Tx, id int) error {
+	_, err := tx.Exec(`UPDATE AskBranchPRs
+		SET state = 'Merged', checks_state = 'Success', merged_at = datetime('now')
+		WHERE id = ?`, id)
+	return err
+}
+
 // MarkAskBranchPRClosed transitions the PR to state=Closed (closed on GitHub without
 // merge — either by a human or because the astromech branch was deleted). The
 // parent task should be escalated by the caller; this function only updates the
@@ -175,6 +183,46 @@ func MarkAskBranchPRMerged(db *sql.DB, id int) error {
 func MarkAskBranchPRClosed(db *sql.DB, id int) error {
 	_, err := db.Exec(`UPDATE AskBranchPRs SET state = 'Closed' WHERE id = ?`, id)
 	return err
+}
+
+// MarkAskBranchPRClosedTx is the transactional sibling of MarkAskBranchPRClosed.
+func MarkAskBranchPRClosedTx(tx *sql.Tx, id int) error {
+	_, err := tx.Exec(`UPDATE AskBranchPRs SET state = 'Closed' WHERE id = ?`, id)
+	return err
+}
+
+// IncrementAskBranchPRFailureCountTx is the transactional sibling of IncrementAskBranchPRFailureCount.
+func IncrementAskBranchPRFailureCountTx(tx *sql.Tx, id int) (int, error) {
+	if _, err := tx.Exec(`UPDATE AskBranchPRs SET failure_count = failure_count + 1 WHERE id = ?`, id); err != nil {
+		return 0, err
+	}
+	var count int
+	if err := tx.QueryRow(`SELECT failure_count FROM AskBranchPRs WHERE id = ?`, id).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// CreateAskBranchPRTx is the transactional sibling of CreateAskBranchPR.
+func CreateAskBranchPRTx(tx *sql.Tx, taskID, convoyID int, repo, prURL string, prNumber int) (int, error) {
+	if taskID <= 0 || convoyID <= 0 || repo == "" || prNumber <= 0 {
+		return 0, fmt.Errorf("CreateAskBranchPRTx: all fields required (got task=%d convoy=%d repo=%q pr=%d)",
+			taskID, convoyID, repo, prNumber)
+	}
+	res, err := tx.Exec(`INSERT INTO AskBranchPRs
+		(task_id, convoy_id, repo, pr_number, pr_url, state, checks_state)
+		VALUES (?, ?, ?, ?, ?, 'Open', 'Pending')`,
+		taskID, convoyID, repo, prNumber, prURL)
+	if err != nil {
+		var existingID int
+		if scanErr := tx.QueryRow(`SELECT id FROM AskBranchPRs WHERE repo = ? AND pr_number = ?`,
+			repo, prNumber).Scan(&existingID); scanErr == nil {
+			return existingID, nil
+		}
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
 }
 
 // AskBranchPRRollup summarises sub-PR state for a convoy. Used by Diplomat to

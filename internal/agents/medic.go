@@ -184,19 +184,40 @@ func applyMedicShard(db *sql.DB, agentName string, bounty, parent *store.Bounty,
 		return
 	}
 
-	// Cancel the original task.
-	db.Exec(`UPDATE BountyBoard SET status='Cancelled', error_log=? WHERE id=?`,
-		fmt.Sprintf("Medic sharded into %d sub-tasks: %s", len(d.Shards), d.Reason), parent.ID)
+	// Cancel + insert shards atomically. Without a tx, a partial-shard state
+	// (parent Cancelled, only some shards inserted) cannot be recovered by
+	// retry — the parent task is already terminal and a re-run would create
+	// duplicate shards alongside the existing incomplete set.
+	tx, err := db.Begin()
+	if err != nil {
+		logger.Printf("Medic: begin shard tx for task #%d failed: %v", parent.ID, err)
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
 
-	// Create sub-tasks in the same convoy.
+	if _, err := tx.Exec(`UPDATE BountyBoard SET status='Cancelled', error_log=? WHERE id=?`,
+		fmt.Sprintf("Medic sharded into %d sub-tasks: %s", len(d.Shards), d.Reason), parent.ID); err != nil {
+		logger.Printf("Medic: cancel parent #%d failed: %v", parent.ID, err)
+		return
+	}
+
 	var ids []int
 	for _, s := range d.Shards {
 		repo := s.Repo
 		if repo == "" {
 			repo = parent.TargetRepo
 		}
-		id, _ := store.AddConvoyTask(db, parent.ID, repo, s.Task, parent.ConvoyID, parent.Priority, "Pending")
+		id, addErr := store.AddConvoyTaskTx(tx, parent.ID, repo, s.Task, parent.ConvoyID, parent.Priority, "Pending")
+		if addErr != nil {
+			logger.Printf("Medic: add shard failed for task #%d (repo=%s): %v — rolling back", parent.ID, repo, addErr)
+			return
+		}
 		ids = append(ids, id)
+	}
+
+	if err := tx.Commit(); err != nil {
+		logger.Printf("Medic: commit shard for task #%d failed: %v", parent.ID, err)
+		return
 	}
 	logger.Printf("Medic: sharded task #%d into %d sub-tasks %v", parent.ID, len(ids), ids)
 }

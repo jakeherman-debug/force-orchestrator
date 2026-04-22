@@ -123,16 +123,11 @@ func pollConvoyDraftPRs(db *sql.DB, convoyID int, convoyName string, logger inte
 // ── terminal transitions ────────────────────────────────────────────────────
 
 func transitionConvoyToShipped(db *sql.DB, convoyID int, convoyName string, logger interface{ Printf(string, ...any) }) {
-	if err := store.SetConvoyStatus(db, convoyID, "Shipped"); err != nil {
-		logger.Printf("draft-pr-watch: set Shipped for convoy %d: %v", convoyID, err)
+	if err := terminalConvoyTransitionTx(db, convoyID, convoyName, "Shipped", "shipped",
+		"Convoy shipped via draft PR(s)."); err != nil {
+		logger.Printf("draft-pr-watch: transition convoy %d → Shipped failed: %v", convoyID, err)
 		return
 	}
-	if _, err := QueueCleanupAskBranch(db, convoyID); err != nil {
-		logger.Printf("draft-pr-watch: queue CleanupAskBranch: %v", err)
-	}
-	queueLibrarianConvoyMemory(db, convoyID, convoyName, "shipped",
-		"Convoy shipped via draft PR(s).", logger)
-
 	store.SendMail(db, "draft-pr-watch", "operator",
 		fmt.Sprintf("[SHIPPED] Convoy '%s' is live on main", convoyName),
 		fmt.Sprintf("Convoy '%s' draft PR(s) merged to main. Ask-branch cleanup has been queued.", convoyName),
@@ -141,17 +136,11 @@ func transitionConvoyToShipped(db *sql.DB, convoyID int, convoyName string, logg
 }
 
 func transitionConvoyToAbandoned(db *sql.DB, convoyID int, convoyName string, logger interface{ Printf(string, ...any) }) {
-	if err := store.SetConvoyStatus(db, convoyID, "Abandoned"); err != nil {
-		logger.Printf("draft-pr-watch: set Abandoned for convoy %d: %v", convoyID, err)
+	if err := terminalConvoyTransitionTx(db, convoyID, convoyName, "Abandoned", "abandoned",
+		"Convoy's draft PR was closed without merging — review for scoping/design issues."); err != nil {
+		logger.Printf("draft-pr-watch: transition convoy %d → Abandoned failed: %v", convoyID, err)
 		return
 	}
-	if _, err := QueueCleanupAskBranch(db, convoyID); err != nil {
-		logger.Printf("draft-pr-watch: queue CleanupAskBranch: %v", err)
-	}
-	queueLibrarianConvoyMemory(db, convoyID, convoyName, "abandoned",
-		"Convoy's draft PR was closed without merging — review for scoping/design issues.",
-		logger)
-
 	store.SendMail(db, "draft-pr-watch", "operator",
 		fmt.Sprintf("[ABANDONED] Convoy '%s' draft PR closed", convoyName),
 		fmt.Sprintf("Convoy '%s' had its draft PR closed without merging. Ask-branches will be cleaned up. Review the convoy for scoping issues before re-queuing similar work.",
@@ -160,28 +149,42 @@ func transitionConvoyToAbandoned(db *sql.DB, convoyID int, convoyName string, lo
 	logger.Printf("draft-pr-watch: convoy %d → Abandoned, cleanup queued", convoyID)
 }
 
-// queueLibrarianConvoyMemory writes a fleet-memory entry tagged with the convoy
-// outcome. Uses the standard WriteMemory bounty so the existing Librarian loop
-// picks it up without modification.
+// terminalConvoyTransitionTx atomically sets the convoy status, queues a
+// CleanupAskBranch task, and queues the Librarian memory entry. If any of
+// these fail, the transaction rolls back — the convoy stays in its prior
+// status and the dog will retry on the next tick.
 //
-// A failure here is non-fatal for the convoy lifecycle (the draft PR has
-// already merged/closed) but costs us a memory record, so we log the
-// miss so an operator can diagnose pattern issues.
-func queueLibrarianConvoyMemory(db *sql.DB, convoyID int, convoyName, outcome, summary string, logger interface{ Printf(string, ...any) }) {
+// This is the guarantee the caller relies on: we never finalize a convoy's
+// lifecycle status without also queuing the cleanup that depends on it.
+func terminalConvoyTransitionTx(db *sql.DB, convoyID int, convoyName, newStatus, outcomeTag, summary string) error {
+	// Read the repo for the memory entry OUTSIDE the tx (read-only).
 	branches := store.ListConvoyAskBranches(db, convoyID)
 	repo := ""
 	if len(branches) > 0 {
 		repo = branches[0].Repo
 	}
-	payload := fmt.Sprintf(`{"task":%q,"files":"","feedback":%q,"diff":"","repo":%q}`,
-		fmt.Sprintf("[convoy-%s] %s", outcome, convoyName),
+	memoryPayload := fmt.Sprintf(`{"task":%q,"files":"","feedback":%q,"diff":"","repo":%q}`,
+		fmt.Sprintf("[convoy-%s] %s", outcomeTag, convoyName),
 		summary,
 		repo)
-	id := store.AddBounty(db, 0, "WriteMemory", payload)
-	if id == 0 {
-		logger.Printf("queueLibrarianConvoyMemory: failed to queue WriteMemory for convoy %d (%s) — memory lost",
-			convoyID, outcome)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
 	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := store.SetConvoyStatusTx(tx, convoyID, newStatus); err != nil {
+		return fmt.Errorf("set convoy status: %w", err)
+	}
+	if _, err := QueueCleanupAskBranchTx(tx, convoyID); err != nil {
+		return fmt.Errorf("queue CleanupAskBranch: %w", err)
+	}
+	if _, err := store.AddBountyTx(tx, 0, "WriteMemory", memoryPayload); err != nil {
+		return fmt.Errorf("queue WriteMemory: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // ── ship-it-nag dog ─────────────────────────────────────────────────────────

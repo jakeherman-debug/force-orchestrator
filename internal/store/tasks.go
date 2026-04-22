@@ -128,11 +128,38 @@ func UpdateBountyStatus(db *sql.DB, id int, newStatus string) {
 	}
 }
 
+// UpdateBountyStatusTx updates task status inside an existing transaction.
+// The caller is responsible for firing the webhook AFTER commit — tx variants
+// deliberately skip side effects so a rolled-back transaction doesn't emit
+// spurious notifications.
+func UpdateBountyStatusTx(tx *sql.Tx, id int, newStatus string) error {
+	_, err := tx.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = '' WHERE id = ?`, newStatus, id)
+	return err
+}
+
+// UpdateBountyStatusWithErrorTx also clears error_log / sets a new error_log in the same UPDATE.
+func UpdateBountyStatusWithErrorTx(tx *sql.Tx, id int, newStatus, errorLog string) error {
+	_, err := tx.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = '', error_log = ? WHERE id = ?`,
+		newStatus, errorLog, id)
+	return err
+}
+
 func AddBounty(db *sql.DB, parentID int, taskType, payload string) int {
 	res, _ := db.Exec(`INSERT INTO BountyBoard (parent_id, type, status, payload, created_at) VALUES (?, ?, 'Pending', ?, datetime('now'))`,
 		parentID, taskType, payload)
 	id, _ := res.LastInsertId()
 	return int(id)
+}
+
+// AddBountyTx is the transactional sibling of AddBounty.
+func AddBountyTx(tx *sql.Tx, parentID int, taskType, payload string) (int, error) {
+	res, err := tx.Exec(`INSERT INTO BountyBoard (parent_id, type, status, payload, created_at) VALUES (?, ?, 'Pending', ?, datetime('now'))`,
+		parentID, taskType, payload)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
 }
 
 // AddBountyClassifying inserts a task with type='Auto' and status='Classifying'.
@@ -162,6 +189,13 @@ func FailBounty(db *sql.DB, id int, errorMsg string) {
 func MarkConflictPending(db *sql.DB, id int, msg string) {
 	db.Exec(`UPDATE BountyBoard SET status = 'ConflictPending', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
 		msg, id)
+}
+
+// MarkConflictPendingTx is the transactional sibling of MarkConflictPending.
+func MarkConflictPendingTx(tx *sql.Tx, id int, msg string) error {
+	_, err := tx.Exec(`UPDATE BountyBoard SET status = 'ConflictPending', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
+		msg, id)
+	return err
 }
 
 // CancelTask marks a task as Cancelled with a reason. Cancelled is distinct from Failed —
@@ -262,6 +296,12 @@ func SetBranchName(db *sql.DB, id int, branchName string) {
 	db.Exec(`UPDATE BountyBoard SET branch_name = ? WHERE id = ?`, branchName, id)
 }
 
+// SetBranchNameTx is the transactional sibling of SetBranchName.
+func SetBranchNameTx(tx *sql.Tx, id int, branchName string) error {
+	_, err := tx.Exec(`UPDATE BountyBoard SET branch_name = ? WHERE id = ?`, branchName, id)
+	return err
+}
+
 func SetBountyPriority(db *sql.DB, id, priority int) {
 	db.Exec(`UPDATE BountyBoard SET priority = ? WHERE id = ?`, priority, id)
 }
@@ -325,6 +365,17 @@ func UnblockDependentsOf(db *sql.DB, id int) int {
 	return int(n)
 }
 
+// UnblockDependentsOfTx is the transactional sibling of UnblockDependentsOf.
+// Returns (rowsDeleted, error). Does not swallow the exec error.
+func UnblockDependentsOfTx(tx *sql.Tx, id int) (int, error) {
+	res, err := tx.Exec(`DELETE FROM TaskDependencies WHERE depends_on = ?`, id)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ── Cost computation ──────────────────────────────────────────────────────────
 
 // Pricing constants for Claude Sonnet (per million tokens).
@@ -358,6 +409,21 @@ func RecordTaskHistory(db *sql.DB, taskID int, agent, sessionID, output, outcome
 		VALUES (?, ?, ?, ?, ?, ?)`, taskID, attempt+1, agent, sessionID, output, outcome)
 	id, _ := res.LastInsertId()
 	return id
+}
+
+// RecordTaskHistoryTx is the transactional sibling of RecordTaskHistory.
+func RecordTaskHistoryTx(tx *sql.Tx, taskID int, agent, sessionID, output, outcome string) (int64, error) {
+	var attempt int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM TaskHistory WHERE task_id = ?`, taskID).Scan(&attempt); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`INSERT INTO TaskHistory (task_id, attempt, agent, session_id, claude_output, outcome)
+		VALUES (?, ?, ?, ?, ?, ?)`, taskID, attempt+1, agent, sessionID, output, outcome)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return id, nil
 }
 
 // UpdateTaskHistoryTokens records token usage on an existing history row.

@@ -209,6 +209,23 @@ func QueueCleanupAskBranch(db *sql.DB, convoyID int) (int, error) {
 	return int(id), nil
 }
 
+// QueueCleanupAskBranchTx is the transactional sibling of QueueCleanupAskBranch.
+func QueueCleanupAskBranchTx(tx *sql.Tx, convoyID int) (int, error) {
+	if convoyID <= 0 {
+		return 0, fmt.Errorf("QueueCleanupAskBranchTx: convoyID required")
+	}
+	payload, _ := json.Marshal(cleanupAskBranchPayload{ConvoyID: convoyID})
+	res, err := tx.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+		 VALUES (0, '', 'CleanupAskBranch', 'Pending', ?, 0, datetime('now'))`,
+		string(payload))
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
 func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload cleanupAskBranchPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {

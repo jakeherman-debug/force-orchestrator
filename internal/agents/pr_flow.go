@@ -88,20 +88,27 @@ func openSubPRForApprovedTask(db *sql.DB, bounty *store.Bounty, agentName, branc
 		return cls, prErr
 	}
 
-	// Step 3: record the PR.
-	if _, storeErr := store.CreateAskBranchPR(db, bounty.ID, bounty.ConvoyID, bounty.TargetRepo, res.URL, res.Number); storeErr != nil {
+	// Steps 3-4 are atomic: either both land or neither. Without a tx, a crash
+	// between them leaves the PR recorded but the task still in its prior
+	// status — Jedi Council would re-claim it and attempt to re-open the same PR.
+	tx, err := db.Begin()
+	if err != nil {
+		return gh.ErrClassPermanent, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, storeErr := store.CreateAskBranchPRTx(tx, bounty.ID, bounty.ConvoyID, bounty.TargetRepo, res.URL, res.Number); storeErr != nil {
 		logger.Printf("Task %d: created PR #%d but failed to record it: %v", bounty.ID, res.Number, storeErr)
 		return gh.ErrClassPermanent, fmt.Errorf("store PR: %w", storeErr)
 	}
-
-	// Step 4: transition task to AwaitingSubPRCI. Also clear owner/locked_at so
-	// the task doesn't appear stuck in Locked state — sub-pr-ci-watch drives
-	// all further transitions.
-	if _, err := db.Exec(`UPDATE BountyBoard
-		SET status = ?, owner = '', locked_at = '', error_log = ''
-		WHERE id = ?`, subPRCITaskStatus, bounty.ID); err != nil {
+	if err := store.UpdateBountyStatusWithErrorTx(tx, bounty.ID, subPRCITaskStatus, ""); err != nil {
 		return gh.ErrClassPermanent, fmt.Errorf("update task status: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return gh.ErrClassPermanent, fmt.Errorf("commit: %w", err)
+	}
+
 	logger.Printf("Task %d: sub-PR #%d opened against %s (url=%s)",
 		bounty.ID, res.Number, ab.AskBranch, res.URL)
 	return "", nil
@@ -171,22 +178,43 @@ func completeAskBranchResolution(db *sql.DB, bounty *store.Bounty, ab *store.Con
 		return cls, fmt.Errorf("git push ask-branch: %s", msg)
 	}
 
-	// Update the stored base SHA to the new tip. The new tip is the local
-	// HEAD of the ask-branch after astromech committed.
+	// Capture the new tip SHA. The new tip is the local HEAD of the ask-branch
+	// after astromech committed.
 	tipOut, tipErr := exec.Command("git", "-C", repo.LocalPath, "rev-parse", ab.AskBranch).CombinedOutput()
 	if tipErr != nil {
 		return gh.ErrClassPermanent, fmt.Errorf("rev-parse %s: %s", ab.AskBranch, strings.TrimSpace(string(tipOut)))
 	}
 	newTip := strings.TrimSpace(string(tipOut))
-	if err := store.UpdateConvoyAskBranchBase(db, bounty.ConvoyID, bounty.TargetRepo, newTip); err != nil {
+
+	// Atomic DB state transition: update base SHA + mark task Completed +
+	// unblock dependents. Any partial failure here leaves the branch pushed to
+	// origin but DB state inconsistent — Jedi Council retry would re-push
+	// (idempotent) but might still see a stale DB state.
+	tx, err := db.Begin()
+	if err != nil {
+		return gh.ErrClassPermanent, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := store.UpdateConvoyAskBranchBaseTx(tx, bounty.ConvoyID, bounty.TargetRepo, newTip); err != nil {
 		return gh.ErrClassPermanent, fmt.Errorf("record new base SHA: %w", err)
 	}
+	if err := store.UpdateBountyStatusTx(tx, bounty.ID, "Completed"); err != nil {
+		return gh.ErrClassPermanent, fmt.Errorf("update task status: %w", err)
+	}
+	unblocked, err := store.UnblockDependentsOfTx(tx, bounty.ID)
+	if err != nil {
+		return gh.ErrClassPermanent, fmt.Errorf("unblock dependents: %w", err)
+	}
 
-	// Mark the task Completed directly — there's no CI step because no PR
-	// was opened. Unblock any dependents.
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
-	if n := store.UnblockDependentsOf(db, bounty.ID); n > 0 {
-		logger.Printf("Task %d: unblocked %d dependent(s) after ask-branch resolution", bounty.ID, n)
+	if err := tx.Commit(); err != nil {
+		return gh.ErrClassPermanent, fmt.Errorf("commit: %w", err)
+	}
+
+	// Post-commit side effects.
+	store.FireWebhook(db, bounty.ID, "Completed")
+	if unblocked > 0 {
+		logger.Printf("Task %d: unblocked %d dependent(s) after ask-branch resolution", bounty.ID, unblocked)
 	}
 	logger.Printf("Task %d: ask-branch %s resolved and pushed (new tip=%s)",
 		bounty.ID, ab.AskBranch, newTip[:minInt(8, len(newTip))])
@@ -226,9 +254,9 @@ func deriveGHRepoFromRemoteURL(remoteURL string) string {
 
 // ── sub-pr-ci-watch dog ──────────────────────────────────────────────────────
 
-// missingCITimeout is how long we wait for at least one CI check to appear on
-// a sub-PR before treating the repo as CI-less and auto-merging. Ten minutes
-// is generous — Jenkins typically starts within seconds of a push.
+// missingCITimeout is the fallback for repos where gh pr view does not return
+// mergeStateStatus (older GitHub Enterprise or API lag). In normal operation
+// mergeStateStatus=CLEAN triggers an immediate merge before this fires.
 const missingCITimeout = 10 * time.Minute
 
 // subPRCIStaleLimit caps how long a sub-PR's CI may keep us in Pending state
@@ -310,7 +338,74 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 		return
 	}
 
-	// Poll CI state.
+	// Fast path: check mergeStateStatus before polling individual CI checks.
+	// CLEAN means GitHub considers all required checks satisfied and the PR
+	// is mergeable — covers both "CI green" and "no CI configured" without
+	// any timeout. BLOCKED with no failing checks means a branch-protection
+	// rule (required reviewer, mandatory status check we can't trigger) is
+	// the blocker — escalate immediately rather than spinning for 2 hours.
+	switch strings.ToUpper(view.MergeStateStatus) {
+	case "CLEAN":
+		mergeSubPRDirect(db, ghc, pr, logger)
+		return
+	case "BLOCKED":
+		// BLOCKED covers multiple root causes; checks disambiguate.
+		checks, rollup, _ := ghc.PRChecks(cwd, ghRepo, pr.PRNumber)
+		switch rollup {
+		case gh.ChecksFailure:
+			// CI is the blocker — Medic triage.
+			onSubPRCIFailed(db, pr, logger)
+		case gh.ChecksPending:
+			if len(checks) == 0 {
+				// No CI configured at all but PR is BLOCKED — branch protection rule.
+				onSubPRMergeBlocked(db, pr, logger)
+			}
+			// else: CI is actively running (checks present, not yet resolved) — wait.
+		case gh.ChecksSuccess:
+			// All checks green but still BLOCKED — required reviewer, CODEOWNERS, etc.
+			onSubPRMergeBlocked(db, pr, logger)
+		}
+		return
+	case "BEHIND":
+		// Agent branch is behind the ask-branch tip (another sub-PR merged in).
+		// Queue Pilot to rebase and force-push — no user involvement needed.
+		bountyRow, _ := store.GetBounty(db, pr.TaskID)
+		if bountyRow == nil || bountyRow.BranchName == "" {
+			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND but task %d has no branch_name — skipping rebase", pr.PRNumber, pr.TaskID)
+			return
+		}
+		ab := store.GetConvoyAskBranch(db, pr.ConvoyID, pr.Repo)
+		if ab == nil {
+			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND but no ask-branch found for convoy %d / %s", pr.PRNumber, pr.ConvoyID, pr.Repo)
+			return
+		}
+		taskID, qErr := QueueRebaseAgentBranch(db, rebaseAgentPayload{
+			SubPRRowID: pr.ID,
+			TaskID:     pr.TaskID,
+			Branch:     bountyRow.BranchName,
+			AskBranch:  ab.AskBranch,
+			ConvoyID:   pr.ConvoyID,
+			Repo:       pr.Repo,
+		})
+		if qErr != nil {
+			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND — failed to queue RebaseAgentBranch: %v", pr.PRNumber, qErr)
+		} else if taskID > 0 {
+			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND — queued RebaseAgentBranch #%d for branch %s", pr.PRNumber, taskID, bountyRow.BranchName)
+		}
+		return
+	case "DIRTY":
+		// Merge conflict in the sub-PR — close the PR row and escalate once.
+		msg := fmt.Sprintf("sub-PR #%d has a merge conflict with its base branch; operator must resolve or re-run the task", pr.PRNumber)
+		if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
+			logger.Printf("sub-pr-ci-watch: task %d escalation tx failed: %v", pr.TaskID, err)
+			return
+		}
+		logger.Printf("sub-pr-ci-watch: task %d escalated — sub-PR #%d is DIRTY", pr.TaskID, pr.PRNumber)
+		return
+	}
+
+	// mergeStateStatus is "" or "UNKNOWN" — GitHub hasn't computed it yet (API
+	// lag on fresh PRs) or we're on an older GHE. Fall back to check-based logic.
 	checks, rollup, checksErr := ghc.PRChecks(cwd, ghRepo, pr.PRNumber)
 	if checksErr != nil {
 		logger.Printf("sub-pr-ci-watch: pr checks #%d failed: %v", pr.PRNumber, checksErr)
@@ -323,25 +418,17 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 
 	switch rollup {
 	case gh.ChecksSuccess:
-		// Queue auto-merge. Squash by default.
 		strategy := subPRAutoMergeStrategy(db)
 		if mErr := ghc.PRMergeAuto(cwd, ghRepo, pr.PRNumber, strategy); mErr != nil {
 			logger.Printf("sub-pr-ci-watch: auto-merge #%d failed: %v", pr.PRNumber, mErr)
 			return
 		}
 		// Don't mark SubPRMerged here — wait for gh pr view to report merged=true.
-		// GitHub's auto-merge happens asynchronously; the next tick will confirm.
 	case gh.ChecksFailure:
 		onSubPRCIFailed(db, pr, logger)
 	case gh.ChecksPending:
-		// Two gates apply:
-		//   (a) missingCITimeout (10m): if the PR has ZERO checks reported for
-		//       this long, the repo has no CI configured for this branch — just
-		//       merge immediately. The Jedi Council is the quality gate; CI is
-		//       a bonus. Waiting 2h for a run that will never arrive is
-		//       unnecessary operator friction.
-		//   (b) subPRCIStaleLimit (2h): hard upper bound for repos that DO have
-		//       CI but whose build is stuck. Escalate to operator.
+		// mergeStateStatus was UNKNOWN so we can't use it. Fall back to the
+		// age-based heuristic: 10m with zero checks → probably no CI.
 		createdAt, parseErr := time.Parse("2006-01-02 15:04:05", pr.CreatedAt)
 		if parseErr != nil {
 			return
@@ -351,7 +438,6 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 			onSubPRStalled(db, pr, logger)
 			return
 		}
-		// No checks after missingCITimeout → repo has no CI. Merge directly.
 		if age > missingCITimeout && len(checks) == 0 {
 			onSubPRMissingCI(db, ghc, pr, logger)
 		}
@@ -359,95 +445,211 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 }
 
 func onSubPRMerged(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
-	if err := store.MarkAskBranchPRMerged(db, pr.ID); err != nil {
+	// All four writes (mark PR merged, complete task, unblock deps, queue memory
+	// task) must land atomically. A partial failure here is catastrophic: if we
+	// mark the PR merged but don't complete the task, sub-pr-ci-watch will never
+	// re-pick it up (PR no longer in state=Open), so the task is stuck forever.
+	memoryPayload := fmt.Sprintf(`{"task":%q,"files":"","feedback":"merged via PR #%d","diff":"","repo":%q}`,
+		"sub-PR merged", pr.PRNumber, pr.Repo)
+
+	tx, err := db.Begin()
+	if err != nil {
+		logger.Printf("sub-pr-ci-watch: begin tx for sub-PR #%d merge: %v", pr.PRNumber, err)
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := store.MarkAskBranchPRMergedTx(tx, pr.ID); err != nil {
 		logger.Printf("sub-pr-ci-watch: mark merged #%d failed: %v", pr.PRNumber, err)
 		return
 	}
-	store.UpdateBountyStatus(db, pr.TaskID, "Completed")
-	if n := store.UnblockDependentsOf(db, pr.TaskID); n > 0 {
-		logger.Printf("Task %d: unblocked %d dependent(s) after sub-PR merge", pr.TaskID, n)
+	if err := store.UpdateBountyStatusTx(tx, pr.TaskID, "Completed"); err != nil {
+		logger.Printf("sub-pr-ci-watch: update task %d status failed: %v", pr.TaskID, err)
+		return
 	}
-	// Legacy memory-write task — keeps the Librarian in the loop even under PR flow.
-	// The payload is lightweight here (no diff); Librarian falls back to the task
-	// description. Phase 7 could enrich this if we want proper convoy-level memories.
-	payload := fmt.Sprintf(`{"task":%q,"files":"","feedback":"merged via PR #%d","diff":"","repo":%q}`,
-		"sub-PR merged", pr.PRNumber, pr.Repo)
-	store.AddBounty(db, pr.TaskID, "WriteMemory", payload)
+	unblocked, err := store.UnblockDependentsOfTx(tx, pr.TaskID)
+	if err != nil {
+		logger.Printf("sub-pr-ci-watch: unblock dependents of task %d failed: %v", pr.TaskID, err)
+		return
+	}
+	if _, err := store.AddBountyTx(tx, pr.TaskID, "WriteMemory", memoryPayload); err != nil {
+		logger.Printf("sub-pr-ci-watch: queue WriteMemory for task %d failed: %v", pr.TaskID, err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		logger.Printf("sub-pr-ci-watch: commit sub-PR #%d merge failed: %v", pr.PRNumber, err)
+		return
+	}
+
+	// Post-commit side effects: fire webhook only after DB state is durable.
+	store.FireWebhook(db, pr.TaskID, "Completed")
+	if unblocked > 0 {
+		logger.Printf("Task %d: unblocked %d dependent(s) after sub-PR merge", pr.TaskID, unblocked)
+	}
 	logger.Printf("sub-pr-ci-watch: task %d completed via sub-PR #%d merge", pr.TaskID, pr.PRNumber)
 }
 
 func onSubPRClosedExternally(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
-	_ = store.MarkAskBranchPRClosed(db, pr.ID)
 	msg := fmt.Sprintf("sub-PR #%d was closed without merge — requires operator decision", pr.PRNumber)
-	// Task status update is the critical transition here — if it fails, the
-	// task stays in AwaitingSubPRCI and sub-pr-ci-watch will loop. We create
-	// the escalation regardless so the operator at least sees the PR was closed.
-	if _, err := db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '', error_log = ? WHERE id = ?`, msg, pr.TaskID); err != nil {
-		logger.Printf("sub-pr-ci-watch: task %d update failed (%v) — will retry next tick; escalation still created", pr.TaskID, err)
+	if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
+		logger.Printf("sub-pr-ci-watch: task %d escalation tx failed: %v", pr.TaskID, err)
+		return
 	}
-	CreateEscalation(db, pr.TaskID, store.SeverityMedium, msg)
 	logger.Printf("sub-pr-ci-watch: task %d escalated — PR closed externally", pr.TaskID)
 }
 
 func onSubPRCIFailed(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
-	newCount, _ := store.IncrementAskBranchPRFailureCount(db, pr.ID)
-	// Avoid piling up duplicate CIFailureTriage tasks for the same PR — if one is
-	// already Pending or Locked, let it run before queueing another.
-	// Boundary-match on the JSON token so sub_pr_row_id=1 doesn't dedup against
-	// 10, 11, 100, etc. The JSON emitted by QueueCIFailureTriage always follows
-	// the ID with `,` or `}`, so we look for both shapes.
-	var existing int
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
-		WHERE type = 'CIFailureTriage' AND status IN ('Pending', 'Locked')
-		  AND (payload LIKE '%"sub_pr_row_id":' || ? || ',%'
-		    OR payload LIKE '%"sub_pr_row_id":' || ? || '}%')`,
-		pr.ID, pr.ID).Scan(&existing)
-	if existing > 0 {
-		logger.Printf("sub-pr-ci-watch: sub-PR #%d CI failed (count=%d) — triage already queued", pr.PRNumber, newCount)
-		return
-	}
 	// Fetch the parent task's branch name so Medic can route a fix task to it.
+	// Read outside the tx — it's a static property of the task row.
 	parent, _ := store.GetBounty(db, pr.TaskID)
 	branch := ""
 	if parent != nil {
 		branch = parent.BranchName
 	}
-	triageID, err := QueueCIFailureTriage(db, ciTriagePayload{
+
+	// Atomic sequence: increment failure_count + dedup-check + queue triage.
+	// Without a tx, an increment could land without a triage queue — the next
+	// tick would see a bumped count and queue another triage, creating an
+	// off-by-one in Medic's retry cap enforcement.
+	tx, err := db.Begin()
+	if err != nil {
+		logger.Printf("sub-pr-ci-watch: begin tx for sub-PR #%d CI failure: %v", pr.PRNumber, err)
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	newCount, countErr := store.IncrementAskBranchPRFailureCountTx(tx, pr.ID)
+	if countErr != nil {
+		logger.Printf("sub-pr-ci-watch: increment failure count #%d failed: %v", pr.ID, countErr)
+		return
+	}
+
+	// Dedup check: boundary-match on JSON token so sub_pr_row_id=1 doesn't dedup
+	// against 10, 11, 100, etc. JSON always follows the ID with `,` or `}`.
+	var existing int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'CIFailureTriage' AND status IN ('Pending', 'Locked')
+		  AND (payload LIKE '%"sub_pr_row_id":' || ? || ',%'
+		    OR payload LIKE '%"sub_pr_row_id":' || ? || '}%')`,
+		pr.ID, pr.ID).Scan(&existing); err != nil {
+		logger.Printf("sub-pr-ci-watch: dedup query failed for sub-PR #%d: %v", pr.PRNumber, err)
+		return
+	}
+	if existing > 0 {
+		// Commit so the failure_count increment lands even though no triage was queued.
+		if err := tx.Commit(); err != nil {
+			logger.Printf("sub-pr-ci-watch: commit failure count for #%d failed: %v", pr.PRNumber, err)
+			return
+		}
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d CI failed (count=%d) — triage already queued", pr.PRNumber, newCount)
+		return
+	}
+
+	triageID, qErr := QueueCIFailureTriageTx(tx, ciTriagePayload{
 		SubPRRowID: pr.ID, Repo: pr.Repo, PRNumber: pr.PRNumber,
 		Branch: branch, TaskID: pr.TaskID,
 	})
-	if err != nil {
-		logger.Printf("sub-pr-ci-watch: failed to queue CIFailureTriage: %v — escalating directly", err)
-		msg := fmt.Sprintf("sub-PR #%d CI failed and Medic triage could not be queued: %v", pr.PRNumber, err)
-		if _, uErr := db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '', error_log = ? WHERE id = ?`, msg, pr.TaskID); uErr != nil {
-			logger.Printf("sub-pr-ci-watch: task %d status update also failed (%v); escalation still recorded", pr.TaskID, uErr)
+	if qErr != nil {
+		// Can't queue triage — escalate instead. Roll back the tx so failure_count
+		// isn't left bumped (we'll go down the escalation path outside the tx),
+		// then escalate via the atomic escalateSubPR helper.
+		tx.Rollback() //nolint:errcheck
+		logger.Printf("sub-pr-ci-watch: failed to queue CIFailureTriage: %v — escalating directly", qErr)
+		msg := fmt.Sprintf("sub-PR #%d CI failed and Medic triage could not be queued: %v", pr.PRNumber, qErr)
+		if escErr := escalateSubPR(db, pr, store.SeverityMedium, msg); escErr != nil {
+			logger.Printf("sub-pr-ci-watch: escalation tx failed: %v", escErr)
 		}
-		CreateEscalation(db, pr.TaskID, store.SeverityMedium, msg)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		logger.Printf("sub-pr-ci-watch: commit CIFailureTriage for #%d failed: %v", pr.PRNumber, err)
 		return
 	}
 	logger.Printf("sub-pr-ci-watch: sub-PR #%d CI failed (count=%d) — queued Medic triage #%d", pr.PRNumber, newCount, triageID)
 }
 
+// escalateSubPR atomically closes the AskBranchPR row, inserts an escalation,
+// and sets the parent task to Escalated — all in one transaction so a partial
+// failure never leaves the PR open while the task is already Escalated (or
+// vice-versa). Fires the Escalated webhook only after commit so a rolled-back
+// tx never emits spurious notifications.
+func escalateSubPR(db *sql.DB, pr store.AskBranchPR, severity store.EscalationSeverity, msg string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := store.MarkAskBranchPRClosedTx(tx, pr.ID); err != nil {
+		return fmt.Errorf("mark PR closed: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO Escalations (task_id, severity, message, status) VALUES (?, ?, ?, 'Open')`,
+		pr.TaskID, string(severity), msg); err != nil {
+		return fmt.Errorf("insert escalation: %w", err)
+	}
+	if err := store.UpdateBountyStatusWithErrorTx(tx, pr.TaskID, "Escalated", msg); err != nil {
+		return fmt.Errorf("update task status: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	// Post-commit: fire webhook so subscribers see the Escalated transition.
+	store.FireWebhook(db, pr.TaskID, "Escalated")
+	return nil
+}
+
 func onSubPRStalled(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
 	msg := fmt.Sprintf("sub-PR #%d: CI pending over %v — stuck or misconfigured", pr.PRNumber, subPRCIStaleLimit)
-	CreateEscalation(db, pr.TaskID, store.SeverityMedium, msg)
+	if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
+		logger.Printf("sub-pr-ci-watch: task %d escalation tx failed: %v", pr.TaskID, err)
+		return
+	}
 	logger.Printf("sub-pr-ci-watch: task %d escalated — Pending for %v", pr.TaskID, subPRCIStaleLimit)
 }
 
-// onSubPRMissingCI handles a sub-PR with ZERO checks after missingCITimeout.
-// No CI means no gate to wait for — merge immediately using the same path as
-// a green CI run. The Jedi Council review is the quality gate; CI is additive.
-func onSubPRMissingCI(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+// onSubPRMergeBlocked handles a sub-PR that GitHub reports as BLOCKED with no
+// failing CI checks. This means a branch-protection rule (required reviewer,
+// mandatory status check we cannot trigger, CODEOWNERS, etc.) is preventing
+// auto-merge. Self-healing is not possible — the operator must adjust repo
+// settings or merge manually.
+func onSubPRMergeBlocked(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+	msg := fmt.Sprintf(
+		"sub-PR #%d is BLOCKED by branch protection (all CI checks pass / no CI). "+
+			"A required reviewer, mandatory status check, or CODEOWNERS rule is preventing auto-merge. "+
+			"Either merge manually on GitHub or adjust repo branch protection settings.",
+		pr.PRNumber,
+	)
+	if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
+		logger.Printf("sub-pr-ci-watch: task %d escalation tx failed: %v", pr.TaskID, err)
+		return
+	}
+	logger.Printf("sub-pr-ci-watch: task %d escalated — sub-PR #%d BLOCKED by branch protection", pr.TaskID, pr.PRNumber)
+}
+
+// mergeSubPRDirect merges a sub-PR immediately without waiting for CI. Called
+// when mergeStateStatus=CLEAN (covers both "no CI" and "CI already green") or
+// as a fallback after missingCITimeout with zero checks. The Jedi Council
+// review is the quality gate; CI is additive.
+func mergeSubPRDirect(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
 	repo := store.GetRepo(db, pr.Repo)
 	if repo == nil {
-		logger.Printf("sub-pr-ci-watch: task %d missing-CI merge: repo %q not found", pr.TaskID, pr.Repo)
+		logger.Printf("sub-pr-ci-watch: task %d direct merge: repo %q not found", pr.TaskID, pr.Repo)
 		return
 	}
 	strategy := subPRAutoMergeStrategy(db)
-	logger.Printf("sub-pr-ci-watch: task %d no CI configured for %s — merging PR #%d directly (%s)", pr.TaskID, pr.Repo, pr.PRNumber, strategy)
+	logger.Printf("sub-pr-ci-watch: task %d merging PR #%d directly (%s)", pr.TaskID, pr.PRNumber, strategy)
 	if mErr := ghc.PRMerge(repo.LocalPath, deriveGHRepoFromRemoteURL(repo.RemoteURL), pr.PRNumber, strategy); mErr != nil {
-		logger.Printf("sub-pr-ci-watch: task %d no-CI merge #%d failed: %v", pr.TaskID, pr.PRNumber, mErr)
+		logger.Printf("sub-pr-ci-watch: task %d direct merge #%d failed: %v", pr.TaskID, pr.PRNumber, mErr)
 		return
 	}
 	onSubPRMerged(db, pr, logger)
+}
+
+// onSubPRMissingCI is the legacy name used by cycle1 tests; delegates to mergeSubPRDirect.
+func onSubPRMissingCI(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+	mergeSubPRDirect(db, ghc, pr, logger)
 }

@@ -126,6 +126,18 @@ func UpdateConvoyAskBranchBase(db *sql.DB, convoyID int, repo, newBaseSHA string
 	return err
 }
 
+// UpdateConvoyAskBranchBaseTx is the transactional sibling of UpdateConvoyAskBranchBase.
+func UpdateConvoyAskBranchBaseTx(tx *sql.Tx, convoyID int, repo, newBaseSHA string) error {
+	if newBaseSHA == "" {
+		return fmt.Errorf("UpdateConvoyAskBranchBaseTx: newBaseSHA required")
+	}
+	_, err := tx.Exec(`UPDATE ConvoyAskBranches
+		SET ask_branch_base_sha = ?, last_rebased_at = datetime('now')
+		WHERE convoy_id = ? AND repo = ?`,
+		newBaseSHA, convoyID, repo)
+	return err
+}
+
 // SetConvoyAskBranchDraftPR records the draft PR opened by Diplomat for a
 // (convoy, repo). state should be "Open" at creation time.
 func SetConvoyAskBranchDraftPR(db *sql.DB, convoyID int, repo, url string, number int, state string) error {

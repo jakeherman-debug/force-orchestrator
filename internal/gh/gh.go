@@ -158,14 +158,16 @@ func (c *Client) PRCreate(req PRCreateRequest) (*PRCreateResult, error) {
 // PRView is the JSON subset of `gh pr view --json`. Only fields we actually use
 // are declared; `gh` will return extras we ignore without error.
 type PRView struct {
-	Number    int       `json:"number"`
-	URL       string    `json:"url"`
-	State     string    `json:"state"`   // OPEN | CLOSED | MERGED
-	IsDraft   bool      `json:"isDraft"`
-	Merged    bool      `json:"merged"`
-	MergedAt  string    `json:"mergedAt"`
-	ClosedAt  string    `json:"closedAt"`
-	Reviews   []PRReview `json:"reviews"`
+	Number           int        `json:"number"`
+	URL              string     `json:"url"`
+	State            string     `json:"state"`            // OPEN | CLOSED | MERGED
+	IsDraft          bool       `json:"isDraft"`
+	Merged           bool       `json:"merged"`
+	MergedAt         string     `json:"mergedAt"`
+	ClosedAt         string     `json:"closedAt"`
+	Reviews          []PRReview `json:"reviews"`
+	MergeStateStatus string     `json:"mergeStateStatus"` // CLEAN | BLOCKED | BEHIND | DIRTY | DRAFT | UNKNOWN
+	Mergeable        string     `json:"mergeable"`        // MERGEABLE | CONFLICTING | UNKNOWN
 }
 
 // PRReview is a single review comment or approval pulled from `gh pr view --json reviews`.
@@ -181,7 +183,7 @@ type PRReview struct {
 // PRView runs `gh pr view <number> --json ...` and unmarshals the result.
 func (c *Client) PRView(cwd, repo string, number int) (*PRView, error) {
 	args := []string{"pr", "view", fmt.Sprintf("%d", number),
-		"--json", "number,url,state,isDraft,merged,mergedAt,closedAt,reviews",
+		"--json", "number,url,state,isDraft,merged,mergedAt,closedAt,reviews,mergeStateStatus,mergeable",
 	}
 	if repo != "" {
 		args = append(args, "--repo", repo)

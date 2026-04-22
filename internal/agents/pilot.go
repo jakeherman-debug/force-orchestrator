@@ -324,6 +324,10 @@ func SpawnPilot(db *sql.DB, name string) {
 			runRebaseAskBranch(db, bounty, logger)
 			continue
 		}
+		if bounty, claimed := store.ClaimBounty(db, "RebaseAgentBranch", name); claimed {
+			runRebaseAgentBranch(db, bounty, logger)
+			continue
+		}
 		if bounty, claimed := store.ClaimBounty(db, "RevalidateRepoConfig", name); claimed {
 			runRevalidateRepoConfig(db, bounty, logger)
 			continue

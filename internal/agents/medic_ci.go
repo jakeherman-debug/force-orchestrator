@@ -93,6 +93,23 @@ func QueueCIFailureTriage(db *sql.DB, payload ciTriagePayload) (int, error) {
 	return int(id), nil
 }
 
+// QueueCIFailureTriageTx is the transactional sibling of QueueCIFailureTriage.
+func QueueCIFailureTriageTx(tx *sql.Tx, payload ciTriagePayload) (int, error) {
+	if payload.Repo == "" || payload.PRNumber == 0 || payload.TaskID == 0 {
+		return 0, fmt.Errorf("QueueCIFailureTriageTx: repo, pr_number, task_id required (got %+v)", payload)
+	}
+	body, _ := json.Marshal(payload)
+	res, err := tx.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+		 VALUES (?, ?, 'CIFailureTriage', 'Pending', ?, 5, datetime('now'))`,
+		payload.TaskID, payload.Repo, string(body))
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
 // runMedicCITriage is the handler for a single CIFailureTriage task.
 func runMedicCITriage(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload ciTriagePayload
