@@ -222,3 +222,17 @@ CREATE TABLE IF NOT EXISTS ProposedConvoys (
     status      TEXT    NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | merged
     created_at  DATETIME DEFAULT (datetime('now'))
 );
+
+-- ── Convoy events ─────────────────────────────────────────────────────────────
+-- Timestamped timeline of convoy lifecycle milestones (task completions, status
+-- changes, holds, etc.). Used by the dashboard's real-time convoy status view.
+
+CREATE TABLE IF NOT EXISTS ConvoyEvents (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    convoy_id  INTEGER NOT NULL,   -- FK → Convoys.id
+    event_type TEXT    NOT NULL,   -- e.g. 'task_completed', 'convoy_completed', 'hold_placed'
+    detail     TEXT    DEFAULT '', -- optional human-readable description
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_convoy_events_convoy_id ON ConvoyEvents (convoy_id);

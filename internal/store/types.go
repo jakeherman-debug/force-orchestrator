@@ -64,6 +64,15 @@ type Convoy struct {
 	CreatedAt string
 }
 
+// ConvoyEvent is a timestamped milestone in a convoy's lifecycle.
+type ConvoyEvent struct {
+	ID        int
+	ConvoyID  int
+	EventType string
+	Detail    string
+	CreatedAt string
+}
+
 // ── Persistent agent worktree ─────────────────────────────────────────────────
 
 type AgentWorktree struct {
