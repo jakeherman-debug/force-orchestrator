@@ -293,3 +293,15 @@ CREATE TABLE IF NOT EXISTS ProposedConvoys (
 );
 
 -- ── Convoy events ─────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS ConvoyEvents (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    convoy_id   INTEGER NOT NULL REFERENCES Convoys(id),
+    event_type  TEXT    NOT NULL,  -- 'status_change', 'ask_branch_created', 'draft_pr_opened', 'sub_pr_merged', 'shipped'
+    old_value   TEXT,
+    new_value   TEXT,
+    detail      TEXT,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_convoy_events_convoy_id ON ConvoyEvents(convoy_id);

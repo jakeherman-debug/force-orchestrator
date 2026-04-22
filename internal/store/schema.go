@@ -242,6 +242,17 @@ func createSchema(db *sql.DB) {
 		PRIMARY KEY (convoy_id, repo)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id   INTEGER NOT NULL REFERENCES Convoys(id),
+		event_type  TEXT    NOT NULL,
+		old_value   TEXT,
+		new_value   TEXT,
+		detail      TEXT,
+		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_events_convoy_id ON ConvoyEvents(convoy_id)`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -373,4 +384,16 @@ func runMigrations(db *sql.DB) {
 		PRIMARY KEY (convoy_id, repo)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+
+	// ConvoyEvents — timeline of state changes per convoy. idempotent via IF NOT EXISTS.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id   INTEGER NOT NULL REFERENCES Convoys(id),
+		event_type  TEXT    NOT NULL,
+		old_value   TEXT,
+		new_value   TEXT,
+		detail      TEXT,
+		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_events_convoy_id ON ConvoyEvents(convoy_id)`)
 }
