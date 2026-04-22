@@ -137,19 +137,6 @@ type AskBranchPR struct {
 	CreatedAt    string
 }
 
-// ── Convoy event timeline ─────────────────────────────────────────────────────
-
-// ConvoyEvent is one immutable record in the convoy's state-change timeline.
-type ConvoyEvent struct {
-	ID        int
-	ConvoyID  int
-	EventType string // status_change | ask_branch_created | draft_pr_opened | sub_pr_merged | shipped
-	OldValue  string
-	NewValue  string
-	Detail    string
-	CreatedAt string
-}
-
 // ── Persistent agent worktree ─────────────────────────────────────────────────
 
 type AgentWorktree struct {

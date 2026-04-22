@@ -781,25 +781,6 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			writePRReviewRetry(db, w, id)
-		case "events":
-			// GET: return the convoy's event timeline in chronological order.
-			if !requireGET() {
-				return
-			}
-			raw := store.ListConvoyEvents(db, id)
-			out := make([]DashboardConvoyEvent, 0, len(raw))
-			for _, e := range raw {
-				out = append(out, DashboardConvoyEvent{
-					ID:        e.ID,
-					ConvoyID:  e.ConvoyID,
-					EventType: e.EventType,
-					OldValue:  e.OldValue,
-					NewValue:  e.NewValue,
-					Detail:    e.Detail,
-					CreatedAt: e.CreatedAt,
-				})
-			}
-			json.NewEncoder(w).Encode(out)
 		default:
 			http.NotFound(w, r)
 		}

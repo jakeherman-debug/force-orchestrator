@@ -284,18 +284,6 @@ func createSchema(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_convoy ON PRReviewComments (convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id)`)
-
-	// ConvoyEvents — append-only timeline of convoy state transitions.
-	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		convoy_id  INTEGER NOT NULL,
-		event_type TEXT    NOT NULL,
-		old_value  TEXT    DEFAULT '',
-		new_value  TEXT    DEFAULT '',
-		detail     TEXT    DEFAULT '',
-		created_at TEXT    DEFAULT (datetime('now'))
-	)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_events_convoy_id ON ConvoyEvents (convoy_id)`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -485,16 +473,4 @@ func runMigrations(db *sql.DB) {
 			SELECT id, summary, IFNULL(files_changed, ''), IFNULL(topic_tags, '')
 			FROM FleetMemory`)
 	}
-
-	// ConvoyEvents — append-only convoy timeline.
-	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		convoy_id  INTEGER NOT NULL,
-		event_type TEXT    NOT NULL,
-		old_value  TEXT    DEFAULT '',
-		new_value  TEXT    DEFAULT '',
-		detail     TEXT    DEFAULT '',
-		created_at TEXT    DEFAULT (datetime('now'))
-	)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_events_convoy_id ON ConvoyEvents (convoy_id)`)
 }
