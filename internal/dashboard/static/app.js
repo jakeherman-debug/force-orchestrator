@@ -1299,39 +1299,89 @@ function openMail(id) {
 }
 
 // ── Logs (SSE) ────────────────────────────────────────────────────────────────
-function startLogStream() {
-  stopLogStream();
-  const url = S.logMode === 'fleet' ? '/api/fleet-log' : '/api/events';
-  const src = new EventSource(url);
+let _logBackoffMs    = 1000;
+let _logBackoffTimer = null;
+
+function _connectLogStream(url) {
+  const wrap = $('log-wrap');
+  const src  = new EventSource(url);
   S.logSource = src;
 
-  const wrap = $('log-wrap');
-  wrap.innerHTML = '';
-
   src.onmessage = evt => {
-    let text;
+    const errEl = wrap.querySelector('.log-line--error');
+    if (errEl) errEl.remove();
+
+    let text = evt.data;
     try {
-      text = JSON.parse(evt.data);         // fleet-log: JSON-encoded string
-    } catch(_) {
-      text = evt.data;                     // holonet: raw JSON object string
+      const parsed = JSON.parse(evt.data);
+      if (typeof parsed === 'string') text = parsed;
+    } catch(_) {}
+
+    // sentinel: server holds connection open waiting for the log file to appear
+    if (text === '') {
+      if (!wrap.querySelector('.log-sentinel')) {
+        const s = document.createElement('div');
+        s.className = 'log-sentinel';
+        s.textContent = 'waiting for events…';
+        wrap.appendChild(s);
+        if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120) {
+          wrap.scrollTop = wrap.scrollHeight;
+        }
+      }
+      return;
     }
+
+    const sentinelEl = wrap.querySelector('.log-sentinel');
+    if (sentinelEl) sentinelEl.remove();
+
     const line = document.createElement('div');
     line.className = 'log-line';
     line.textContent = text;
     wrap.appendChild(line);
-    // auto-scroll if near bottom
     if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120) {
       wrap.scrollTop = wrap.scrollHeight;
     }
-    // cap at 1000 lines
     while (wrap.children.length > 1000) {
       wrap.removeChild(wrap.firstChild);
     }
   };
 
   src.onerror = () => {
-    // EventSource auto-reconnects
+    src.close();
+    S.logSource = null;
+
+    if (!wrap.querySelector('.log-line--error')) {
+      const errLine = document.createElement('div');
+      errLine.className = 'log-line log-line--error';
+      errLine.textContent = '[holonet stream error — reconnecting…]';
+      wrap.appendChild(errLine);
+      if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120) {
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+    }
+
+    const delay = _logBackoffMs;
+    _logBackoffMs = Math.min(_logBackoffMs * 2, 30000);
+    _logBackoffTimer = setTimeout(() => {
+      _logBackoffTimer = null;
+      if (S.activeTab === 'logs') _connectLogStream(url);
+    }, delay);
   };
+}
+
+function startLogStream() {
+  if (_logBackoffTimer !== null) {
+    clearTimeout(_logBackoffTimer);
+    _logBackoffTimer = null;
+  }
+  stopLogStream();
+  _logBackoffMs = 1000;
+
+  const wrap = $('log-wrap');
+  wrap.innerHTML = '';
+
+  const url = S.logMode === 'fleet' ? '/api/fleet-log' : '/api/events';
+  _connectLogStream(url);
 }
 
 function stopLogStream() {
