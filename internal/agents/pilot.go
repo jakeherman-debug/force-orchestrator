@@ -60,10 +60,16 @@ func FindPRTemplatePath(repoPath string) (string, error) {
 		".github/pull_request_template.md",
 		".github/PULL_REQUEST_TEMPLATE.md",
 		".github/Pull_Request_Template.md",
+		".github/pull_request_template",
+		".github/PULL_REQUEST_TEMPLATE",
 		"docs/pull_request_template.md",
 		"docs/PULL_REQUEST_TEMPLATE.md",
+		"docs/pull_request_template",
+		"docs/PULL_REQUEST_TEMPLATE",
 		"pull_request_template.md",
 		"PULL_REQUEST_TEMPLATE.md",
+		"pull_request_template",
+		"PULL_REQUEST_TEMPLATE",
 	}
 	for _, rel := range wellKnown {
 		candidate := filepath.Join(repoPath, rel)
@@ -82,7 +88,7 @@ func FindPRTemplatePath(repoPath string) (string, error) {
 	// directory of multiple templates, but that's a different product decision
 	// (multiple templates per repo). Pilot picks one default template file;
 	// when we encounter the directory form, we pick the first file inside.
-	filenameRe := regexp.MustCompile(`(?i)^(pull[._-]?request[._-]?template|pr[._-]?template)\.(md|markdown|txt)$`)
+	filenameRe := regexp.MustCompile(`(?i)^(pull[._-]?request[._-]?template|pr[._-]?template)(\.(md|markdown|txt))?$`)
 
 	type match struct {
 		path     string

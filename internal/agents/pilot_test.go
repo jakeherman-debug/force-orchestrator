@@ -420,6 +420,38 @@ func TestQueueFindPRTemplate_RejectsEmptyFields(t *testing.T) {
 	}
 }
 
+// TestFindPRTemplatePath_NoExtension is a regression test for the upstart_web
+// repo whose template lives at PULL_REQUEST_TEMPLATE (no .md extension). The
+// well-known list and walk regex both previously required an extension.
+func TestFindPRTemplatePath_NoExtension(t *testing.T) {
+	dir := setupFakeRepo(t, map[string]string{
+		"PULL_REQUEST_TEMPLATE": "## Summary\n",
+	})
+	got, err := FindPRTemplatePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(filepath.Base(got), "PULL_REQUEST_TEMPLATE") {
+		t.Errorf("expected extension-less template to be found, got %q", got)
+	}
+}
+
+func TestFindPRTemplatePath_NoExtensionGitHub(t *testing.T) {
+	dir := setupFakeRepo(t, map[string]string{
+		".github/PULL_REQUEST_TEMPLATE": "## Summary\n",
+	})
+	got, err := FindPRTemplatePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(filepath.Base(got), "PULL_REQUEST_TEMPLATE") {
+		t.Errorf("expected extension-less .github template to be found, got %q", got)
+	}
+	if !strings.Contains(got, ".github") {
+		t.Errorf("expected .github/ path, got %q", got)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 
 type testLogger struct{}
