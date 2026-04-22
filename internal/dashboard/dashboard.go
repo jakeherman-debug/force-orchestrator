@@ -133,6 +133,9 @@ func handleHolonetStream(path string) http.HandlerFunc {
 		f, fi := openAtEnd(path)
 		if f == nil {
 			fmt.Fprintf(w, "data: {\"error\":\"holonet.jsonl not found\"}\n\n")
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
 			return
 		}
 		defer f.Close()
