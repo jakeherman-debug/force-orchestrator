@@ -567,6 +567,7 @@ td.mail-body-preview {
 .log-line { white-space: pre-wrap; word-break: break-all; color: var(--text2); }
 .log-line:last-child { color: var(--text); }
 .log-line--error { color: var(--red); }
+.log-sentinel { color: var(--text2); font-style: italic; opacity: .6; }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
 .modal-backdrop {
