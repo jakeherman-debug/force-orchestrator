@@ -32,9 +32,13 @@ func ListConvoyEvents(db *sql.DB, convoyID int) []ConvoyEvent {
 	for rows.Next() {
 		var e ConvoyEvent
 		if err := rows.Scan(&e.ID, &e.ConvoyID, &e.EventType,
-			&e.OldValue, &e.NewValue, &e.Detail, &e.CreatedAt); err == nil {
-			events = append(events, e)
+			&e.OldValue, &e.NewValue, &e.Detail, &e.CreatedAt); err != nil {
+			return nil
 		}
+		events = append(events, e)
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return events
 }
