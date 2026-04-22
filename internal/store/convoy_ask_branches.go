@@ -36,16 +36,12 @@ func UpsertConvoyAskBranch(db *sql.DB, convoyID int, repo, askBranch, baseSHA st
 			convoyID, repo, existingBranch, askBranch)
 	}
 
-	isNew := err != nil // sql.ErrNoRows → new row; nil → existing row (same branch)
 	_, err = db.Exec(`INSERT INTO ConvoyAskBranches
 		(convoy_id, repo, ask_branch, ask_branch_base_sha)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(convoy_id, repo) DO UPDATE SET
 			ask_branch_base_sha = excluded.ask_branch_base_sha`,
 		convoyID, repo, askBranch, baseSHA)
-	if err == nil && isNew {
-		AppendConvoyEvent(db, convoyID, "ask_branch_created", "", askBranch, repo)
-	}
 	return err
 }
 
@@ -149,9 +145,6 @@ func SetConvoyAskBranchDraftPR(db *sql.DB, convoyID int, repo, url string, numbe
 		SET draft_pr_url = ?, draft_pr_number = ?, draft_pr_state = ?
 		WHERE convoy_id = ? AND repo = ?`,
 		url, number, state, convoyID, repo)
-	if err == nil {
-		AppendConvoyEvent(db, convoyID, "draft_pr_opened", "", url, repo)
-	}
 	return err
 }
 

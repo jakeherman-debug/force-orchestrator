@@ -208,17 +208,6 @@ type StatsResponse struct {
 	CompletedTodayCount int            `json:"completed_today_count"`
 }
 
-// DashboardConvoyEvent is a single timeline entry for GET /api/convoys/{id}/events
-type DashboardConvoyEvent struct {
-	ID        int    `json:"id"`
-	ConvoyID  int    `json:"convoy_id"`
-	EventType string `json:"event_type"`
-	OldValue  string `json:"old_value,omitempty"`
-	NewValue  string `json:"new_value,omitempty"`
-	Detail    string `json:"detail,omitempty"`
-	CreatedAt string `json:"created_at"`
-}
-
 // addTaskBody is the POST /api/add request body
 type addTaskBody struct {
 	Type           string `json:"type"`
