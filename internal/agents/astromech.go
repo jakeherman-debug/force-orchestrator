@@ -156,7 +156,7 @@ func buildAstromechContext(
 	bounty *store.Bounty,
 	agentName string,
 	logger interface{ Printf(string, ...any) },
-) (goalCtx, fleetMemCtx, checkpointCtx, seanceCtx, inboxCtx string) {
+) (goalCtx, fleetMemCtx, checkpointCtx, seanceCtx, inboxCtx string, injectedMemoryIDs []int) {
 
 	// Parent goal context
 	if bounty.ParentID > 0 {
@@ -194,6 +194,7 @@ func buildAstromechContext(
 	if memories := RerankFleetMemories(db, bounty.Payload, candidates, 5, logger); len(memories) > 0 {
 		var successes, failures []string
 		for _, m := range memories {
+			injectedMemoryIDs = append(injectedMemoryIDs, m.ID)
 			entry := fmt.Sprintf("- [Task #%d] %s", m.TaskID, util.TruncateStr(m.Summary, 250))
 			if m.FilesChanged != "" {
 				entry += fmt.Sprintf("\n  Files: %s", m.FilesChanged)
@@ -333,7 +334,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 
 	// ── Build prompt ─────────────────────────────────────────────────────
 
-	goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext :=
+	goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext, injectedMemoryIDs :=
 		buildAstromechContext(db, bounty, name, logger)
 
 	directive := LoadDirective("astromech", bounty.TargetRepo)
@@ -469,7 +470,8 @@ Do not re-do work that is already correctly committed.`
 			if strings.TrimSpace(logOut) == "" {
 				newID := store.AddBounty(db, bounty.ID, "Decompose", bounty.Payload)
 				failMsg := fmt.Sprintf("Auto-sharded after %d timeout failures with no commits — re-queued as Decompose #%d", bounty.InfraFailures, newID)
-				store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
+				shardHistID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
+				store.StampHistoryMemoryIDs(db, shardHistID, injectedMemoryIDs)
 				store.FailBounty(db, bounty.ID, failMsg)
 				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, failMsg))
 				store.SendMail(db, name, "operator",
@@ -484,6 +486,7 @@ Do not re-do work that is already correctly committed.`
 		// Generic infra failure
 		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
+		store.StampHistoryMemoryIDs(db, histID, injectedMemoryIDs)
 		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
@@ -496,7 +499,7 @@ Do not re-do work that is already correctly committed.`
 	rateLimitRetries.Delete(name)
 	claude.ClearRateLimitHits(db, name)
 
-	processAstromechOutput(db, name, bounty, sessionID, outputStr, worktreeDir, branchName, repoPath, logger, true)
+	processAstromechOutput(db, name, bounty, sessionID, outputStr, worktreeDir, branchName, repoPath, logger, true, injectedMemoryIDs)
 }
 
 // processAstromechOutput handles all post-Claude-run logic shared between the daemon
@@ -515,8 +518,18 @@ func processAstromechOutput(
 	repoPath string,
 	logger interface{ Printf(string, ...any) },
 	checkOwnership bool,
+	injectedMemoryIDs []int,
 ) {
 	taskID := bounty.ID
+	// recordHist wraps RecordTaskHistory with automatic memory-id stamping so
+	// the dashboard can later display EXACTLY which memories were injected
+	// for this attempt (rather than re-querying, which would show today's
+	// matches instead of what the agent actually saw).
+	recordHist := func(output, outcome string) int64 {
+		histID := store.RecordTaskHistory(db, taskID, name, sessionID, output, outcome)
+		store.StampHistoryMemoryIDs(db, histID, injectedMemoryIDs)
+		return histID
+	}
 
 	// Scan output for checkpoint signals
 	for _, line := range strings.Split(outputStr, "\n") {
@@ -542,7 +555,7 @@ func processAstromechOutput(
 		)
 		if n, _ := ownerRes.RowsAffected(); n == 0 {
 			logger.Printf("Task %d: ownership lost mid-run — recording and discarding result", taskID)
-			store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Discarded")
+			recordHist(outputStr, "Discarded")
 			store.LogAudit(db, name, "ownership-lost", taskID,
 				"Claude completed work but ownership changed mid-run — work discarded")
 			base := igit.GetDefaultBranch(repoPath)
@@ -555,7 +568,7 @@ func processAstromechOutput(
 	// ── Output size circuit breaker ──────────────────────────────────────
 	if len(outputStr) > maxOutputBytes {
 		logger.Printf("Task %d: output too large (%d bytes) — likely context-blown, re-queuing as Decompose", taskID, len(outputStr))
-		store.RecordTaskHistory(db, taskID, name, sessionID, outputStr[:min(len(outputStr), 4000)]+"...[truncated for history]", "ContextBlown")
+		recordHist(outputStr[:min(len(outputStr), 4000)]+"...[truncated for history]", "ContextBlown")
 		store.StoreFleetMemory(db, bounty.TargetRepo, taskID, "failure",
 			fmt.Sprintf("Task produced %d bytes of output (context blown) — was re-queued for decomposition.\nTask: %s",
 				len(outputStr), util.TruncateStr(directiveText(bounty.Payload), 300)),
@@ -579,7 +592,7 @@ func processAstromechOutput(
 	// Astromech signaled it needs human input
 	if sev, msg, ok := ParseEscalationSignal(outputStr); ok {
 		logger.Printf("Task %d: escalated [%s] %s", taskID, sev, msg)
-		store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Escalated")
+		recordHist(outputStr, "Escalated")
 		CreateEscalation(db, taskID, sev, msg)
 		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, taskID, sev, msg))
 		store.SendMail(db, name, "operator",
@@ -593,7 +606,7 @@ func processAstromechOutput(
 	// Astromech detected the task is too large — hand off to Commander
 	if strings.Contains(outputStr, "[SHARD_NEEDED]") {
 		logger.Printf("Task %d: task too large, re-queuing as Decompose for Commander", taskID)
-		store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Sharded")
+		recordHist(outputStr, "Sharded")
 		store.StoreFleetMemory(db, bounty.TargetRepo, taskID, "failure",
 			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
 				util.TruncateStr(directiveText(bounty.Payload), 300)),
@@ -616,7 +629,7 @@ func processAstromechOutput(
 	if strings.Contains(outputStr, "[DONE]") {
 		nextStatus := nextReviewStatus(db, bounty.ConvoyID)
 		logger.Printf("Task %d: [DONE] signal received — submitting for review (%s)", taskID, nextStatus)
-		histID := store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Completed")
+		histID := recordHist(outputStr, "Completed")
 		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
@@ -655,7 +668,7 @@ func processAstromechOutput(
 			retryCount := store.IncrementRetryCount(db, taskID)
 			msg := fmt.Sprintf("Zero file changes (attempt %d/%d) — re-queuing for retry", retryCount, MaxRetries)
 			logger.Printf("Task %d: %s", taskID, msg)
-			store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "ZeroChanges")
+			recordHist(outputStr, "ZeroChanges")
 			if retryCount >= MaxRetries {
 				failMsg := fmt.Sprintf("Git Commit Err: Claude CLI finished but made zero file changes after %d attempts", MaxRetries)
 				store.FailBounty(db, taskID, failMsg)
@@ -671,7 +684,7 @@ func processAstromechOutput(
 		logger.Printf("Task %d: Claude already committed, treating as success", taskID)
 	}
 
-	histID := store.RecordTaskHistory(db, taskID, name, sessionID, outputStr, "Completed")
+	histID := recordHist(outputStr, "Completed")
 	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 	if tokIn > 0 || tokOut > 0 {
 		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
@@ -743,7 +756,7 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 	fgLogger := log.New(os.Stderr, "[force-run] ", log.LstdFlags)
 
 	// Build the same rich context as the daemon loop; checkpoint is intentionally skipped (_).
-	goalCtx, fleetMemCtx, _, seanceCtx, inboxCtx := buildAstromechContext(db, b, fgAgent, fgLogger)
+	goalCtx, fleetMemCtx, _, seanceCtx, inboxCtx, injectedMemoryIDs := buildAstromechContext(db, b, fgAgent, fgLogger)
 
 	directive := LoadDirective("astromech", b.TargetRepo)
 	directiveSection := ""
@@ -789,11 +802,12 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 
 	if runErr != nil {
 		fmt.Printf("\n[force run] claude exited with error: %v\n", runErr)
-		store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Failed")
+		fgHistID := store.RecordTaskHistory(db, taskID, fgAgent, sessionID, outputStr, "Failed")
+		store.StampHistoryMemoryIDs(db, fgHistID, injectedMemoryIDs)
 		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '' WHERE id = ?`, taskID)
 		fmt.Println("[force run] Task returned to Pending.")
 		os.Exit(1)
 	}
 
-	processAstromechOutput(db, fgAgent, b, sessionID, outputStr, worktreeDir, branchName, repoPath, fgLogger, false)
+	processAstromechOutput(db, fgAgent, b, sessionID, outputStr, worktreeDir, branchName, repoPath, fgLogger, false, injectedMemoryIDs)
 }

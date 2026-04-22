@@ -104,6 +104,7 @@ func createSchema(db *sql.DB) {
 		outcome       TEXT    NOT NULL,
 		tokens_in     INTEGER DEFAULT 0,
 		tokens_out    INTEGER DEFAULT 0,
+		memory_ids    TEXT    DEFAULT '',   -- CSV of FleetMemory IDs injected into this attempt's prompt
 		created_at    TEXT    DEFAULT (datetime('now'))
 	);`)
 
@@ -306,6 +307,7 @@ func runMigrations(db *sql.DB) {
 	// TaskHistory column additions
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_in  INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_out INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN memory_ids TEXT    DEFAULT ''`)
 
 	// Fleet_Mail column additions
 	db.Exec(`ALTER TABLE Fleet_Mail ADD COLUMN message_type TEXT NOT NULL DEFAULT 'info'`)

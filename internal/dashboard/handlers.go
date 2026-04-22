@@ -403,31 +403,72 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 		}
 	}
 
-	rawMems := store.GetFleetMemories(db, b.TargetRepo, b.Payload, 10)
-	mems := make([]DashboardMemory, 0, len(rawMems))
-	for _, m := range rawMems {
-		mems = append(mems, DashboardMemory{
-			Outcome:      m.Outcome,
-			Summary:      m.Summary,
-			FilesChanged: m.FilesChanged,
-			CreatedAt:    m.CreatedAt,
-		})
-	}
-
 	rawHist := store.GetTaskHistory(db, id)
 	hist := make([]DashboardAttempt, 0, len(rawHist))
 	var totalTokensIn, totalTokensOut int
+	// While walking history, capture the memory IDs from the most recent
+	// attempt that actually recorded an injection snapshot. That becomes
+	// the top-level `memories` field (the primary display in the UI).
+	var latestInjectedIDs []int
 	for _, h := range rawHist {
-		hist = append(hist, DashboardAttempt{
+		attempt := DashboardAttempt{
 			Attempt:   h.Attempt,
 			Agent:     h.Agent,
 			Outcome:   h.Outcome,
 			TokensIn:  h.TokensIn,
 			TokensOut: h.TokensOut,
 			CreatedAt: h.CreatedAt,
-		})
+		}
+		if ids := store.ParseMemoryIDsCSV(h.MemoryIDs); len(ids) > 0 {
+			injected := store.GetFleetMemoriesByIDs(db, ids)
+			for _, m := range injected {
+				attempt.InjectedMemories = append(attempt.InjectedMemories, DashboardMemory{
+					ID:           m.ID,
+					TaskID:       m.TaskID,
+					Outcome:      m.Outcome,
+					Summary:      m.Summary,
+					FilesChanged: m.FilesChanged,
+					TopicTags:    m.TopicTags,
+					CreatedAt:    m.CreatedAt,
+				})
+			}
+			latestInjectedIDs = ids
+		}
+		hist = append(hist, attempt)
 		totalTokensIn += h.TokensIn
 		totalTokensOut += h.TokensOut
+	}
+
+	// Top-level `memories`: if ANY attempt recorded an injection snapshot,
+	// show that most-recent snapshot — those were the memories the last agent
+	// on this task actually saw. Otherwise (task hasn't run yet, or pre-dates
+	// the memory_ids column), fall back to a live retrieval so the operator
+	// can still preview what WOULD be injected on the next claim.
+	mems := make([]DashboardMemory, 0)
+	if len(latestInjectedIDs) > 0 {
+		for _, m := range store.GetFleetMemoriesByIDs(db, latestInjectedIDs) {
+			mems = append(mems, DashboardMemory{
+				ID:           m.ID,
+				TaskID:       m.TaskID,
+				Outcome:      m.Outcome,
+				Summary:      m.Summary,
+				FilesChanged: m.FilesChanged,
+				TopicTags:    m.TopicTags,
+				CreatedAt:    m.CreatedAt,
+			})
+		}
+	} else {
+		for _, m := range store.GetFleetMemories(db, b.TargetRepo, b.Payload, 10) {
+			mems = append(mems, DashboardMemory{
+				ID:           m.ID,
+				TaskID:       m.TaskID,
+				Outcome:      m.Outcome,
+				Summary:      m.Summary,
+				FilesChanged: m.FilesChanged,
+				TopicTags:    m.TopicTags,
+				CreatedAt:    m.CreatedAt,
+			})
+		}
 	}
 
 	blockers := store.GetDependencies(db, id)

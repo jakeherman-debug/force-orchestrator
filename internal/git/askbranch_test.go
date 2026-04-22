@@ -178,11 +178,17 @@ func TestRebaseBranchOnto_CleanRebaseAdvancesTip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Add a commit on the ask-branch (separate file so no conflict on rebase).
+	// Add a commit on the ask-branch (separate file so no conflict on rebase)
+	// and push to origin — RebaseBranchOnto works off origin/<branch>, not
+	// the local tracking ref, so unpushed commits are invisible to it. This
+	// matches production reality where every commit reaches the ask-branch
+	// via a push (astromechs push their agent branches, sub-PRs merge on
+	// GitHub which pushes to origin/<ask-branch>).
 	exec.Command("git", "-C", wt, "checkout", "force/ask-1-clean").Run()
 	os.WriteFile(filepath.Join(wt, "feature.txt"), []byte("feat"), 0644)
 	exec.Command("git", "-C", wt, "add", "feature.txt").Run()
 	exec.Command("git", "-C", wt, "commit", "-q", "-m", "add feature").Run()
+	exec.Command("git", "-C", wt, "push", "origin", "force/ask-1-clean").Run()
 
 	// Now advance main.
 	exec.Command("git", "-C", wt, "checkout", "main").Run()
@@ -209,11 +215,13 @@ func TestRebaseBranchOnto_ConflictReturnsErrorAndAborts(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
 	_, _ = CreateAskBranch(wt, "force/ask-1-conflict")
 
-	// Ask-branch modifies README.
+	// Ask-branch modifies README, then pushes (RebaseBranchOnto operates on
+	// origin/<branch>, not the local ref).
 	exec.Command("git", "-C", wt, "checkout", "force/ask-1-conflict").Run()
 	os.WriteFile(filepath.Join(wt, "README"), []byte("ask-branch version"), 0644)
 	exec.Command("git", "-C", wt, "add", "README").Run()
 	exec.Command("git", "-C", wt, "commit", "-q", "-m", "ask branch modifies README").Run()
+	exec.Command("git", "-C", wt, "push", "origin", "force/ask-1-conflict").Run()
 
 	// Main ALSO modifies README.
 	exec.Command("git", "-C", wt, "checkout", "main").Run()
@@ -234,6 +242,65 @@ func TestRebaseBranchOnto_ConflictReturnsErrorAndAborts(t *testing.T) {
 	out, _ := exec.Command("git", "-C", wt, "status", "--porcelain=v2", "--branch").Output()
 	if strings.Contains(string(out), "rebase in progress") {
 		t.Errorf("repo left in rebase state: %s", out)
+	}
+}
+
+// TestRebaseBranchOnto_StaleLocalBranchDoesNotLoseMergeCommits is the
+// regression test for the task-292 silent-data-loss bug. Scenario:
+//
+//  1. Pilot creates ask-branch at main's tip; local and origin both at A.
+//  2. Astromechs commit to their agent branches, open sub-PRs into the
+//     ask-branch. Sub-PRs auto-merge on origin — origin's ask-branch tip
+//     advances from A to A+mergecommits. The LOCAL tracking branch stays
+//     at A because nothing on the local side ever re-fetched.
+//  3. main-drift-watch detects main has moved; queues RebaseAskBranch.
+//  4. RebaseBranchOnto runs: `git fetch` updates origin/ask-branch, but
+//     without the -B flag on worktree-add, the worktree checks out the
+//     local ref (still at A). Rebase from A onto new main replays zero
+//     commits. Force-push-with-lease succeeds (no concurrent writer since
+//     fetch) and clobbers origin's merge commits with A.
+//
+// After the fix, the worktree checks out origin/<branch> directly, so the
+// rebase has the real branch contents (A + merge commits) and preserves them.
+func TestRebaseBranchOnto_StaleLocalBranchDoesNotLoseMergeCommits(t *testing.T) {
+	wt, origin := makeOriginAndClone(t)
+	_, err := CreateAskBranch(wt, "force/ask-stale-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate sub-PR merges landing on origin's ask-branch out-of-band
+	// (via a throwaway clone) — this is the moral equivalent of GitHub's
+	// auto-merge. The LOCAL ask-branch ref is not touched.
+	tmp := t.TempDir()
+	if err := exec.Command("git", "clone", "-q", origin, tmp).Run(); err != nil {
+		t.Fatal(err)
+	}
+	exec.Command("git", "-C", tmp, "config", "user.email", "t@t").Run()
+	exec.Command("git", "-C", tmp, "config", "user.name", "Test").Run()
+	exec.Command("git", "-C", tmp, "checkout", "-b", "force/ask-stale-test", "origin/force/ask-stale-test").Run()
+	os.WriteFile(filepath.Join(tmp, "sub-pr-work.txt"), []byte("work"), 0644)
+	exec.Command("git", "-C", tmp, "add", "sub-pr-work.txt").Run()
+	exec.Command("git", "-C", tmp, "commit", "-q", "-m", "simulated sub-PR merge").Run()
+	exec.Command("git", "-C", tmp, "push", "origin", "force/ask-stale-test").Run()
+
+	// Advance origin/main too, so the rebase has work to do onto main.
+	advanceOriginMain(t, wt)
+
+	// Now run the rebase from the "operator repo" (wt) — where the local
+	// ask-branch ref is still stale at the original creation point.
+	newTip, err := RebaseBranchOnto(wt, "force/ask-stale-test", "main")
+	if err != nil {
+		t.Fatalf("rebase should succeed (non-conflicting): %v", err)
+	}
+
+	// Critical assertion: the rebased branch must INCLUDE sub-pr-work.txt.
+	// Before the fix, the branch would silently lose it because the stale
+	// local ref didn't have it.
+	exec.Command("git", "-C", wt, "fetch", "origin", "force/ask-stale-test").Run()
+	showOut, _ := exec.Command("git", "-C", wt, "show", newTip+":sub-pr-work.txt").CombinedOutput()
+	if strings.TrimSpace(string(showOut)) != "work" {
+		t.Errorf("rebased tip must preserve sub-PR merge content; got show=%q", string(showOut))
 	}
 }
 

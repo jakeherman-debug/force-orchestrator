@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -507,9 +508,84 @@ func UpdateTaskHistoryTokens(db *sql.DB, historyID int64, tokensIn, tokensOut in
 	db.Exec(`UPDATE TaskHistory SET tokens_in = ?, tokens_out = ? WHERE id = ?`, tokensIn, tokensOut, historyID)
 }
 
+// StampHistoryMemoryIDs records which FleetMemory rows were injected into an
+// attempt's prompt. Called right after RecordTaskHistory so the dashboard can
+// later show the operator the EXACT memories the agent saw rather than re-
+// querying at display time (which would show current-state memories, not the
+// ones that were live when the agent ran). memoryIDs is persisted as a CSV
+// string for simplicity — keeps join queries easy and avoids JSON parsing.
+func StampHistoryMemoryIDs(db *sql.DB, historyID int64, memoryIDs []int) {
+	if historyID <= 0 || len(memoryIDs) == 0 {
+		return
+	}
+	parts := make([]string, len(memoryIDs))
+	for i, id := range memoryIDs {
+		parts[i] = strconv.Itoa(id)
+	}
+	db.Exec(`UPDATE TaskHistory SET memory_ids = ? WHERE id = ?`, strings.Join(parts, ","), historyID)
+}
+
+// GetFleetMemoriesByIDs returns the specific memory rows named by the given
+// IDs, preserving the order of the input. Used by the dashboard task-detail
+// handler to show exactly the memories that were injected into an attempt's
+// context (rather than re-querying, which would show today's matches).
+func GetFleetMemoriesByIDs(db *sql.DB, ids []int) []FleetMemoryEntry {
+	if len(ids) == 0 {
+		return nil
+	}
+	// Build IN (?, ?, ...) dynamically.
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `SELECT id, repo, task_id, outcome, summary, files_changed, IFNULL(topic_tags, ''), created_at
+		FROM FleetMemory WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	byID := make(map[int]FleetMemoryEntry, len(ids))
+	for rows.Next() {
+		var e FleetMemoryEntry
+		if err := rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt); err == nil {
+			byID[e.ID] = e
+		}
+	}
+	// Preserve caller's order; skip any IDs that no longer exist.
+	out := make([]FleetMemoryEntry, 0, len(ids))
+	for _, id := range ids {
+		if e, ok := byID[id]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ParseMemoryIDsCSV parses a TaskHistory.memory_ids CSV string into a slice of
+// ints. Returns nil on empty/invalid input — callers treat that as "no
+// snapshot available for this attempt" and may fall back to re-querying.
+func ParseMemoryIDsCSV(csv string) []int {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return nil
+	}
+	parts := strings.Split(csv, ",")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err == nil && n > 0 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 	rows, err := db.Query(`SELECT id, task_id, attempt, agent, session_id, claude_output, outcome,
-		IFNULL(tokens_in,0), IFNULL(tokens_out,0), created_at
+		IFNULL(tokens_in,0), IFNULL(tokens_out,0), IFNULL(memory_ids, ''), created_at
 		FROM TaskHistory WHERE task_id = ? ORDER BY attempt ASC`, taskID)
 	if err != nil {
 		return nil
@@ -519,7 +595,7 @@ func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 	for rows.Next() {
 		var e TaskHistoryEntry
 		rows.Scan(&e.ID, &e.TaskID, &e.Attempt, &e.Agent, &e.SessionID, &e.ClaudeOutput, &e.Outcome,
-			&e.TokensIn, &e.TokensOut, &e.CreatedAt)
+			&e.TokensIn, &e.TokensOut, &e.MemoryIDs, &e.CreatedAt)
 		entries = append(entries, e)
 	}
 	return entries

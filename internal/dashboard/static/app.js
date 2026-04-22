@@ -378,6 +378,36 @@ function escHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// renderMemoryRows formats a DashboardMemory[] as HTML rows — used both for
+// the top-level Fleet Memories panel and for per-attempt injected-memory
+// expansions.
+function renderMemoryRows(memories) {
+  return memories.map(m => {
+    const oc = m.outcome === 'success' ? 'ok' : 'fail';
+    const tags = m.topic_tags
+      ? `<div class="mem-tags">${m.topic_tags.split(',').map(t => `<span class="mem-tag">${escHtml(t.trim())}</span>`).join(' ')}</div>`
+      : '';
+    const source = m.id && m.task_id
+      ? `<span class="mem-source">#${m.id} → task #${m.task_id}</span>`
+      : '';
+    return `<div class="mem-row">
+      <div class="mem-outcome ${oc}">${escHtml(m.outcome || '').toUpperCase()}</div>
+      <div class="mem-summary">${escHtml(truncate(m.summary || '', 400))}</div>
+      ${tags}
+      ${m.files_changed ? `<div class="mem-files">${escHtml(m.files_changed)}</div>` : ''}
+      ${source}
+    </div>`;
+  }).join('');
+}
+
+// toggleAttemptMemories expands/collapses the injected-memory list for a
+// specific attempt row.
+function toggleAttemptMemories(attemptNum) {
+  const el = document.getElementById(`attempt-memories-${attemptNum}`);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
 // ── Task detail panel ─────────────────────────────────────────────────────────
 async function openPanel(id) {
   S.selectedID = id;
@@ -489,32 +519,39 @@ function renderPanel(d) {
       </div>`);
   }
 
-  // History
+  // History — each attempt optionally expands to show the memories that
+  // were injected into that attempt's prompt.
   if (d.history && d.history.length) {
     const rows = d.history.map(h => {
       const oc = h.outcome === 'success' ? 'ok' : h.outcome === 'failure' ? 'fail' : 'mid';
       const tok = `${(h.tokens_in||0).toLocaleString()} in / ${(h.tokens_out||0).toLocaleString()} out`;
+      const injected = h.injected_memories || [];
+      const memBadge = injected.length
+        ? `<a class="attempt-mem-toggle" onclick="toggleAttemptMemories(${h.attempt});event.stopPropagation()" title="Click to view the ${injected.length} memory entries injected into this attempt">📚 ${injected.length} memor${injected.length === 1 ? 'y' : 'ies'} injected</a>`
+        : '';
+      const memBlock = injected.length
+        ? `<div class="attempt-memories" id="attempt-memories-${h.attempt}" style="display:none">${renderMemoryRows(injected)}</div>`
+        : '';
       return `<div class="attempt-row">
         <span class="attempt-num">#${h.attempt}</span>
         <span class="attempt-outcome ${oc}">${escHtml(h.agent || '')} — ${escHtml(h.outcome || '')}</span>
         <span class="attempt-tokens">${tok}</span>
         <span class="attempt-date">${fmtTS(h.created_at)}</span>
-      </div>`;
+        ${memBadge}
+      </div>${memBlock}`;
     }).join('');
     sections.push(`<div class="panel-section"><h3>Attempt History</h3>${rows}</div>`);
   }
 
-  // Memories
+  // Memories — if the most-recent attempt recorded a snapshot, that's what's
+  // shown (exactly what the agent saw). Otherwise it's a live preview of what
+  // WOULD be injected on the next claim.
   if (d.memories && d.memories.length) {
-    const rows = d.memories.map(m => {
-      const oc = m.outcome === 'success' ? 'ok' : 'fail';
-      return `<div class="mem-row">
-        <div class="mem-outcome ${oc}">${escHtml(m.outcome).toUpperCase()}</div>
-        <div class="mem-summary">${escHtml(truncate(m.summary, 200))}</div>
-        ${m.files_changed ? `<div class="mem-files">${escHtml(m.files_changed)}</div>` : ''}
-      </div>`;
-    }).join('');
-    sections.push(`<div class="panel-section"><h3>Fleet Memories</h3>${rows}</div>`);
+    const hasSnapshot = d.history && d.history.length && (d.history[d.history.length - 1].injected_memories || []).length > 0;
+    const heading = hasSnapshot
+      ? `Fleet Memories <span class="mem-heading-note">— snapshot from last run</span>`
+      : `Fleet Memories <span class="mem-heading-note">— live preview (no run yet)</span>`;
+    sections.push(`<div class="panel-section"><h3>${heading}</h3>${renderMemoryRows(d.memories)}</div>`);
   }
 
   // Mail for this task

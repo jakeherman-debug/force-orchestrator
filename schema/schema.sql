@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS TaskHistory (
     outcome       TEXT    NOT NULL,  -- 'Completed' | 'Failed' | 'Escalated' | 'Sharded' | 'Timeout' | 'Rejected'
     tokens_in     INTEGER DEFAULT 0,
     tokens_out    INTEGER DEFAULT 0,
+    memory_ids    TEXT    DEFAULT '',  -- CSV of FleetMemory.id values injected into this attempt's prompt
     created_at    TEXT    DEFAULT (datetime('now'))
 );
 

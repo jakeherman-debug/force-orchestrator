@@ -789,6 +789,51 @@ func TestDogSubPRCIWatch_Behind_QueuesRebaseAgentBranch(t *testing.T) {
 	}
 }
 
+// TestDogSubPRCIWatch_Dirty_QueuesRebaseAgentBranch verifies the same
+// self-healing path for DIRTY: rather than escalating, we queue a rebase and
+// let Pilot either clean-rebase or spawn a RebaseConflict CodeEdit for an
+// astromech. No operator involvement on the happy or clean-conflict paths.
+func TestDogSubPRCIWatch_Dirty_QueuesRebaseAgentBranch(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	db.Exec(`UPDATE BountyBoard SET branch_name = 'agent/R2D2/task-dirty' WHERE id = ?`, taskID)
+	db.Exec(`INSERT OR REPLACE INTO ConvoyAskBranches (convoy_id, repo, ask_branch, ask_branch_base_sha)
+		VALUES (?, 'api', 'force/ask-dirty-test', 'abc123')`, convoyID)
+
+	_, err := store.CreateAskBranchPR(db, taskID, convoyID, "api", "https://github.com/acme/api/pull/13", 13)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	installGHStub(t, map[string]ghStubResp{
+		"pr view 13": {stdout: `{"number":13,"url":"u","state":"OPEN","isDraft":false,"merged":false,"mergedAt":"","closedAt":"","reviews":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}`},
+	})
+
+	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var rebaseCount int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'RebaseAgentBranch' AND status = 'Pending'`).Scan(&rebaseCount)
+	if rebaseCount != 1 {
+		t.Errorf("DIRTY should queue exactly 1 RebaseAgentBranch, got %d", rebaseCount)
+	}
+
+	after, _ := store.GetBounty(db, taskID)
+	if after.Status == "Escalated" {
+		t.Errorf("task must not be escalated when DIRTY — rebase is the self-healing path")
+	}
+
+	// No Escalation rows should exist for this task.
+	var escCount int
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, taskID).Scan(&escCount)
+	if escCount != 0 {
+		t.Errorf("DIRTY should not create escalations, got %d", escCount)
+	}
+}
+
 // TestEscalateSubPR_IsAtomic verifies that escalateSubPR closes the PR row,
 // inserts the escalation, and sets the task status in a single atomic operation.
 func TestEscalateSubPR_IsAtomic(t *testing.T) {

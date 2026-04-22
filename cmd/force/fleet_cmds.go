@@ -95,7 +95,14 @@ func cmdDaemon(db *sql.DB) {
 	investigatorRoster := []string{"Ahsoka-Tano", "Kanan-Jarrus", "Ezra-Bridger", "Hera-Syndulla"}
 	auditorRoster      := []string{"IG-11", "Zeb-Orrelios", "Sabine-Wren", "Chopper"}
 	librarianRoster    := []string{"Jocasta-Nu", "Huyang", "Dexter-Jettster"}
-	commanderRoster    := []string{"Commander-Rex", "Commander-Cody", "Commander-Wolffe", "Commander-Gree", "Commander-Bly", "Commander-Fox", "Commander-Neyo", "Commander-Bacara"}
+	// Commander roster: disjoint from Captain (previously both had Rex/Wolffe/Bly/Gree,
+	// which produced "Captain-Rex" and "Commander-Rex" simultaneously and confused
+	// the operator). Current mix is clone commanders who never held captain rank
+	// (Cody, Fox, Neyo, Bacara) + Jedi Padawans, keeping the "strategic planner"
+	// archetype coherent. Any addition here must not appear in captainRoster or
+	// investigatorRoster.
+	commanderRoster    := []string{"Commander-Cody", "Commander-Fox", "Commander-Neyo", "Commander-Bacara",
+		"Commander-Barriss", "Commander-Cal", "Commander-Depa", "Commander-Caleb"}
 
 	numMedics := 1
 	if n := store.GetConfig(db, "num_medics", ""); n != "" {

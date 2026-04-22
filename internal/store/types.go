@@ -157,6 +157,7 @@ type TaskHistoryEntry struct {
 	Outcome      string // Completed, Failed, Escalated, Sharded, Timeout
 	TokensIn     int
 	TokensOut    int
+	MemoryIDs    string // CSV of FleetMemory.id values injected into this attempt's prompt
 	CreatedAt    string
 }
 

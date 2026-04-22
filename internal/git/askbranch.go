@@ -127,7 +127,8 @@ func DeleteAskBranch(repoPath, branchName string) error {
 // This deliberately does NOT force-push — the caller (Pilot) decides whether
 // to push after classifying the outcome.
 func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err error) {
-	// Fetch both branches so origin refs are current.
+	// Fetch both branches so origin refs are current. This updates
+	// refs/remotes/origin/<name>, but NOT the local refs/heads/<name>.
 	if out, fetchErr := exec.Command("git", "-C", repoPath, "fetch", "origin", onto, branch).CombinedOutput(); fetchErr != nil {
 		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
 	}
@@ -142,7 +143,19 @@ func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err erro
 		os.RemoveAll(wtPath)
 	}()
 
-	if out, wtAddErr := exec.Command("git", "-C", repoPath, "worktree", "add", "--checkout", wtPath, branch).CombinedOutput(); wtAddErr != nil {
+	// Check out `branch` in the worktree, CREATING OR RESETTING the local
+	// ref to match origin/<branch>. Without the `-B` form that resets from
+	// origin, the worktree would check out a stale local branch ref — which
+	// is how task 292 silently lost its sub-PR merge commits: sibling sub-PRs
+	// had merged into the branch on origin, the local ref was never updated
+	// after the initial fetch at ask-branch creation, and a "rebase" then
+	// replayed nothing (because stale local == origin/main), followed by a
+	// --force-with-lease push that silently reset origin to the stale tip.
+	// Force-with-lease doesn't guard against backwards moves from a stale
+	// starting point, only against concurrent writes — so this would have
+	// looked clean but was catastrophic.
+	if out, wtAddErr := exec.Command("git", "-C", repoPath, "worktree", "add",
+		"-B", branch, wtPath, "refs/remotes/origin/"+branch).CombinedOutput(); wtAddErr != nil {
 		return "", fmt.Errorf("git worktree add: %s", strings.TrimSpace(string(out)))
 	}
 

@@ -366,41 +366,18 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 			onSubPRMergeBlocked(db, pr, logger)
 		}
 		return
-	case "BEHIND":
-		// Agent branch is behind the ask-branch tip (another sub-PR merged in).
-		// Queue Pilot to rebase and force-push — no user involvement needed.
-		bountyRow, _ := store.GetBounty(db, pr.TaskID)
-		if bountyRow == nil || bountyRow.BranchName == "" {
-			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND but task %d has no branch_name — skipping rebase", pr.PRNumber, pr.TaskID)
-			return
-		}
-		ab := store.GetConvoyAskBranch(db, pr.ConvoyID, pr.Repo)
-		if ab == nil {
-			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND but no ask-branch found for convoy %d / %s", pr.PRNumber, pr.ConvoyID, pr.Repo)
-			return
-		}
-		taskID, qErr := QueueRebaseAgentBranch(db, rebaseAgentPayload{
-			SubPRRowID: pr.ID,
-			TaskID:     pr.TaskID,
-			Branch:     bountyRow.BranchName,
-			AskBranch:  ab.AskBranch,
-			ConvoyID:   pr.ConvoyID,
-			Repo:       pr.Repo,
-		})
-		if qErr != nil {
-			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND — failed to queue RebaseAgentBranch: %v", pr.PRNumber, qErr)
-		} else if taskID > 0 {
-			logger.Printf("sub-pr-ci-watch: sub-PR #%d BEHIND — queued RebaseAgentBranch #%d for branch %s", pr.PRNumber, taskID, bountyRow.BranchName)
-		}
-		return
-	case "DIRTY":
-		// Merge conflict in the sub-PR — close the PR row and escalate once.
-		msg := fmt.Sprintf("sub-PR #%d has a merge conflict with its base branch; operator must resolve or re-run the task", pr.PRNumber)
-		if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
-			logger.Printf("sub-pr-ci-watch: task %d escalation tx failed: %v", pr.TaskID, err)
-			return
-		}
-		logger.Printf("sub-pr-ci-watch: task %d escalated — sub-PR #%d is DIRTY", pr.TaskID, pr.PRNumber)
+	case "BEHIND", "DIRTY":
+		// Both states mean the agent branch needs to be rebased onto the
+		// current ask-branch tip:
+		//   BEHIND — ask-branch advanced after this sub-PR opened (a sibling
+		//            sub-PR merged in); fast-forward-style rebase.
+		//   DIRTY  — the merge would conflict; the rebase will try cleanly,
+		//            and if it truly conflicts, Pilot's RebaseAgentBranch
+		//            spawns a RebaseConflict CodeEdit for an astromech.
+		// Either way: queue the Pilot task and let the self-healing chain
+		// take over. Only escalate if that chain itself exhausts (which it
+		// does via the CodeEdit retry cap, not here).
+		queueAgentBranchRebase(db, pr, strings.ToUpper(view.MergeStateStatus), logger)
 		return
 	}
 
@@ -609,6 +586,49 @@ func onSubPRStalled(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(s
 		return
 	}
 	logger.Printf("sub-pr-ci-watch: task %d escalated — Pending for %v", pr.TaskID, subPRCIStaleLimit)
+}
+
+// queueAgentBranchRebase is the shared self-healing path for BEHIND and
+// DIRTY sub-PRs. Both states are resolved by rebasing the agent branch onto
+// the current ask-branch tip; Pilot's RebaseAgentBranch handler does a clean
+// rebase when possible and spawns a RebaseConflict CodeEdit task for an
+// astromech when the rebase itself conflicts.
+//
+// reason is just the merge-state label ("BEHIND" / "DIRTY") for log context.
+// Idempotent via QueueRebaseAgentBranch's internal dedup on sub_pr_row_id.
+func queueAgentBranchRebase(db *sql.DB, pr store.AskBranchPR, reason string, logger interface{ Printf(string, ...any) }) {
+	bountyRow, _ := store.GetBounty(db, pr.TaskID)
+	if bountyRow == nil || bountyRow.BranchName == "" {
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d %s but task %d has no branch_name — skipping rebase",
+			pr.PRNumber, reason, pr.TaskID)
+		return
+	}
+	ab := store.GetConvoyAskBranch(db, pr.ConvoyID, pr.Repo)
+	if ab == nil {
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d %s but no ask-branch found for convoy %d / %s",
+			pr.PRNumber, reason, pr.ConvoyID, pr.Repo)
+		return
+	}
+	taskID, qErr := QueueRebaseAgentBranch(db, rebaseAgentPayload{
+		SubPRRowID: pr.ID,
+		TaskID:     pr.TaskID,
+		Branch:     bountyRow.BranchName,
+		AskBranch:  ab.AskBranch,
+		ConvoyID:   pr.ConvoyID,
+		Repo:       pr.Repo,
+	})
+	if qErr != nil {
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d %s — failed to queue RebaseAgentBranch: %v",
+			pr.PRNumber, reason, qErr)
+		return
+	}
+	if taskID > 0 {
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d %s — queued RebaseAgentBranch #%d for branch %s",
+			pr.PRNumber, reason, taskID, bountyRow.BranchName)
+	} else {
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d %s — RebaseAgentBranch already queued, skipping",
+			pr.PRNumber, reason)
+	}
 }
 
 // onSubPRMergeBlocked handles a sub-PR that GitHub reports as BLOCKED with no

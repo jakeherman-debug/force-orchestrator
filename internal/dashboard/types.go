@@ -54,20 +54,28 @@ type DashboardMail struct {
 
 // DashboardMemory is a single fleet memory entry
 type DashboardMemory struct {
+	ID           int    `json:"id"`
+	TaskID       int    `json:"task_id,omitempty"`
 	Outcome      string `json:"outcome"`
 	Summary      string `json:"summary"`
 	FilesChanged string `json:"files_changed,omitempty"`
+	TopicTags    string `json:"topic_tags,omitempty"`
 	CreatedAt    string `json:"created_at"`
 }
 
-// DashboardAttempt is a single history entry
+// DashboardAttempt is a single history entry. InjectedMemories is populated
+// when the attempt recorded a memory_ids snapshot; it contains EXACTLY the
+// memories that were fed into the agent's prompt for this attempt (not a
+// re-query, which would return today's FTS matches instead of what the
+// agent actually saw).
 type DashboardAttempt struct {
-	Attempt   int    `json:"attempt"`
-	Agent     string `json:"agent"`
-	Outcome   string `json:"outcome"`
-	TokensIn  int    `json:"tokens_in"`
-	TokensOut int    `json:"tokens_out"`
-	CreatedAt string `json:"created_at"`
+	Attempt          int               `json:"attempt"`
+	Agent            string            `json:"agent"`
+	Outcome          string            `json:"outcome"`
+	TokensIn         int               `json:"tokens_in"`
+	TokensOut        int               `json:"tokens_out"`
+	CreatedAt        string            `json:"created_at"`
+	InjectedMemories []DashboardMemory `json:"injected_memories,omitempty"`
 }
 
 // DashboardTaskDetail is the payload for GET /api/tasks/{id}
