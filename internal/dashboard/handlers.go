@@ -782,6 +782,11 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			writePRReviewRetry(db, w, id)
+		case "diff-summary":
+			if !requireGET() {
+				return
+			}
+			handleConvoyDiffSummary(db, id, w)
 		default:
 			http.NotFound(w, r)
 		}
