@@ -642,14 +642,11 @@ func handleConvoys(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// POST /api/convoys/{id}/approve
+// GET /api/convoys/{id}/ship-summary
+// POST /api/convoys/{id}/approve|cancel|ship
 func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jsonCORS(w)
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if len(parts) != 4 {
 			http.NotFound(w, r)
@@ -661,7 +658,26 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
 			return
 		}
-		switch parts[3] {
+		action := parts[3]
+		if r.Method == http.MethodGet {
+			switch action {
+			case "ship-summary":
+				summary, status, err := buildShipSummary(db, id)
+				if err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), status)
+					return
+				}
+				json.NewEncoder(w).Encode(summary)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		switch action {
 		case "approve":
 			n := store.ApproveConvoyTasks(db, id)
 			store.LogAudit(db, "dashboard", "convoy-approve", id,

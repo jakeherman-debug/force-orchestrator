@@ -52,6 +52,88 @@ func dashboardShipConvoy(db *sql.DB, convoyID int) (int, error) {
 	return promoted, nil
 }
 
+// ShipSummaryAskBranch holds per-repo ask-branch info for the ship-it modal.
+type ShipSummaryAskBranch struct {
+	Repo          string `json:"repo"`
+	AskBranch     string `json:"ask_branch"`
+	DraftPRURL    string `json:"draft_pr_url"`
+	DraftPRNumber int    `json:"draft_pr_number"`
+	DraftPRState  string `json:"draft_pr_state"`
+}
+
+// ShipSummarySubPRRollup aggregates CI state across all sub-PRs.
+type ShipSummarySubPRRollup struct {
+	Open      int `json:"open"`
+	Merged    int `json:"merged"`
+	Closed    int `json:"closed"`
+	CIPending int `json:"ci_pending"`
+	CISuccess int `json:"ci_success"`
+	CIFailure int `json:"ci_failure"`
+}
+
+// ShipSummaryTaskStats holds task completion counts for the convoy.
+type ShipSummaryTaskStats struct {
+	Completed int `json:"completed"`
+	Total     int `json:"total"`
+}
+
+// ShipSummaryResponse is the payload for GET /api/convoys/{id}/ship-summary.
+type ShipSummaryResponse struct {
+	ConvoyID     int                    `json:"convoy_id"`
+	ConvoyName   string                 `json:"convoy_name"`
+	ConvoyStatus string                 `json:"convoy_status"`
+	AskBranches  []ShipSummaryAskBranch `json:"ask_branches"`
+	SubPRRollup  ShipSummarySubPRRollup `json:"sub_pr_rollup"`
+	TaskStats    ShipSummaryTaskStats   `json:"task_stats"`
+}
+
+// buildShipSummary assembles a ShipSummaryResponse for the given convoy.
+// Returns (response, httpStatusCode, error).
+func buildShipSummary(db *sql.DB, convoyID int) (*ShipSummaryResponse, int, error) {
+	convoy := store.GetConvoy(db, convoyID)
+	if convoy == nil {
+		return nil, 404, fmt.Errorf("convoy %d not found", convoyID)
+	}
+	if convoy.Status != "DraftPROpen" {
+		return nil, 400, fmt.Errorf("convoy %d is not in DraftPROpen state (status=%s)", convoyID, convoy.Status)
+	}
+
+	branches := store.ListConvoyAskBranches(db, convoyID)
+	askBranches := make([]ShipSummaryAskBranch, 0, len(branches))
+	for _, ab := range branches {
+		askBranches = append(askBranches, ShipSummaryAskBranch{
+			Repo:          ab.Repo,
+			AskBranch:     ab.AskBranch,
+			DraftPRURL:    ab.DraftPRURL,
+			DraftPRNumber: ab.DraftPRNumber,
+			DraftPRState:  ab.DraftPRState,
+		})
+	}
+
+	rollup := store.RollupAskBranchPRs(db, convoyID)
+	subPRRollup := ShipSummarySubPRRollup{
+		Open:      rollup.Open,
+		Merged:    rollup.Merged,
+		Closed:    rollup.Closed,
+		CIPending: rollup.ChecksPending,
+		CISuccess: rollup.ChecksSuccess,
+		CIFailure: rollup.ChecksFailure,
+	}
+
+	var completed, total int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ?`, convoyID).Scan(&total)
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND status = 'Completed'`, convoyID).Scan(&completed)
+
+	return &ShipSummaryResponse{
+		ConvoyID:     convoy.ID,
+		ConvoyName:   convoy.Name,
+		ConvoyStatus: convoy.Status,
+		AskBranches:  askBranches,
+		SubPRRollup:  subPRRollup,
+		TaskStats:    ShipSummaryTaskStats{Completed: completed, Total: total},
+	}, 200, nil
+}
+
 // deriveGHRepoForDashboard mirrors the owner/name extraction used elsewhere.
 // Kept local to avoid cross-package dependency.
 func deriveGHRepoForDashboard(remoteURL string) string {
