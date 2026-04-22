@@ -568,7 +568,6 @@ td.mail-body-preview {
 
 .log-line { white-space: pre-wrap; word-break: break-all; color: var(--text2); }
 .log-line:last-child { color: var(--text); }
-.log-line--error { color: var(--danger, #e55); font-style: italic; }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
 .modal-backdrop {

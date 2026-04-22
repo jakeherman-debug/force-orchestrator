@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -503,21 +502,13 @@ func TestHandleHolonetStream_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "nonexistent.jsonl")
 
-	// pre-cancel so handler exits immediately after sending the sentinel
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	r := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+	r := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	w := httptest.NewRecorder()
 	handleHolonetStream(logPath)(w, r)
 
 	body := w.Body.String()
-	// handler now keeps connection alive (sentinel + block) instead of returning an error
-	if !strings.Contains(body, "data: ") {
-		t.Errorf("expected SSE sentinel, got: %s", body)
-	}
-	if strings.Contains(body, "holonet.jsonl not found") {
-		t.Error("handler should send sentinel and block, not return an error message")
+	if !strings.Contains(body, "holonet.jsonl not found") {
+		t.Errorf("expected error SSE event, got: %s", body)
 	}
 }
 
@@ -569,65 +560,6 @@ func TestHandleHolonetStream_SSEHeaders(t *testing.T) {
 	}
 	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
 		t.Error("missing CORS header")
-	}
-}
-
-func TestHandleHolonetStream_Backfill(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "holonet.jsonl")
-
-	existingEvent := `{"kind":"test","msg":"existing"}`
-	if err := os.WriteFile(logPath, []byte(existingEvent+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := httptest.NewServer(handleHolonetStream(logPath))
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	lines := make(chan string, 10)
-	go func() {
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				lines <- strings.TrimPrefix(line, "data: ")
-			}
-		}
-		close(lines)
-	}()
-
-	// pre-existing event must arrive on connect
-	select {
-	case got := <-lines:
-		if got != existingEvent {
-			t.Errorf("backfill: expected %q, got %q", existingEvent, got)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for pre-existing event (backfill)")
-	}
-
-	// append a new event and verify it is streamed live
-	newEvent := `{"kind":"test","msg":"new"}`
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fmt.Fprintln(f, newEvent)
-	f.Close()
-
-	select {
-	case got := <-lines:
-		if got != newEvent {
-			t.Errorf("live: expected %q, got %q", newEvent, got)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for newly appended event")
 	}
 }
 
