@@ -35,6 +35,7 @@ func UpsertConvoyAskBranch(db *sql.DB, convoyID int, repo, askBranch, baseSHA st
 		return fmt.Errorf("UpsertConvoyAskBranch: convoy %d repo %s already has ask-branch %q; refusing to overwrite with %q",
 			convoyID, repo, existingBranch, askBranch)
 	}
+	isNew := err != nil // no existing row → this is a branch creation
 
 	_, err = db.Exec(`INSERT INTO ConvoyAskBranches
 		(convoy_id, repo, ask_branch, ask_branch_base_sha)
@@ -42,7 +43,13 @@ func UpsertConvoyAskBranch(db *sql.DB, convoyID int, repo, askBranch, baseSHA st
 		ON CONFLICT(convoy_id, repo) DO UPDATE SET
 			ask_branch_base_sha = excluded.ask_branch_base_sha`,
 		convoyID, repo, askBranch, baseSHA)
-	return err
+	if err != nil {
+		return err
+	}
+	if isNew {
+		_ = AppendConvoyEvent(db, int64(convoyID), "ask_branch_created", "", askBranch, repo)
+	}
+	return nil
 }
 
 // GetConvoyAskBranch fetches the ask-branch row for a (convoy, repo) pair,
@@ -145,7 +152,11 @@ func SetConvoyAskBranchDraftPR(db *sql.DB, convoyID int, repo, url string, numbe
 		SET draft_pr_url = ?, draft_pr_number = ?, draft_pr_state = ?
 		WHERE convoy_id = ? AND repo = ?`,
 		url, number, state, convoyID, repo)
-	return err
+	if err != nil {
+		return err
+	}
+	_ = AppendConvoyEvent(db, int64(convoyID), "draft_pr_opened", "", url, repo)
+	return nil
 }
 
 // UpdateConvoyAskBranchDraftState transitions a (convoy, repo)'s draft PR state.

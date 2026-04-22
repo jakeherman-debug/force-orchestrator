@@ -28,6 +28,21 @@ func AppendConvoyEvent(db *sql.DB, convoyID int64, eventType, oldValue, newValue
 	return err
 }
 
+// AppendConvoyEventTx is the transactional sibling of AppendConvoyEvent.
+func AppendConvoyEventTx(tx *sql.Tx, convoyID int64, eventType, oldValue, newValue, detail string) error {
+	if convoyID <= 0 {
+		return fmt.Errorf("AppendConvoyEventTx: convoyID must be > 0, got %d", convoyID)
+	}
+	if eventType == "" {
+		return fmt.Errorf("AppendConvoyEventTx: eventType required")
+	}
+	_, err := tx.Exec(`INSERT INTO ConvoyEvents
+		(convoy_id, event_type, old_value, new_value, detail)
+		VALUES (?, ?, ?, ?, ?)`,
+		convoyID, eventType, oldValue, newValue, detail)
+	return err
+}
+
 // ListConvoyEvents returns every event for a convoy, oldest first. Nullable
 // text columns are coalesced to "" so callers never see sql.NullString.
 func ListConvoyEvents(db *sql.DB, convoyID int64) ([]ConvoyEvent, error) {

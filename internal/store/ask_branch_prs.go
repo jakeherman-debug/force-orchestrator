@@ -162,18 +162,39 @@ func IncrementAskBranchPRFailureCount(db *sql.DB, id int) (int, error) {
 // MarkAskBranchPRMerged transitions the PR to state=Merged, clearing further
 // polling by sub-pr-ci-watch. Stamps merged_at to the current time.
 func MarkAskBranchPRMerged(db *sql.DB, id int) error {
+	// Read before updating to capture convoy/PR context for the timeline event.
+	p := GetAskBranchPR(db, id)
 	_, err := db.Exec(`UPDATE AskBranchPRs
 		SET state = 'Merged', checks_state = 'Success', merged_at = datetime('now')
 		WHERE id = ?`, id)
-	return err
+	if err != nil {
+		return err
+	}
+	if p != nil {
+		_ = AppendConvoyEvent(db, int64(p.ConvoyID), "sub_pr_merged",
+			"", fmt.Sprintf("%d", p.PRNumber), p.Repo)
+	}
+	return nil
 }
 
 // MarkAskBranchPRMergedTx is the transactional sibling of MarkAskBranchPRMerged.
 func MarkAskBranchPRMergedTx(tx *sql.Tx, id int) error {
+	// Read before updating to capture convoy/PR context for the timeline event.
+	var convoyID, prNumber int
+	var repo string
+	tx.QueryRow(`SELECT convoy_id, IFNULL(pr_number, 0), IFNULL(repo, '') FROM AskBranchPRs WHERE id = ?`, id).
+		Scan(&convoyID, &prNumber, &repo)
 	_, err := tx.Exec(`UPDATE AskBranchPRs
 		SET state = 'Merged', checks_state = 'Success', merged_at = datetime('now')
 		WHERE id = ?`, id)
-	return err
+	if err != nil {
+		return err
+	}
+	if convoyID > 0 {
+		_ = AppendConvoyEventTx(tx, int64(convoyID), "sub_pr_merged",
+			"", fmt.Sprintf("%d", prNumber), repo)
+	}
+	return nil
 }
 
 // MarkAskBranchPRClosed transitions the PR to state=Closed (closed on GitHub without
