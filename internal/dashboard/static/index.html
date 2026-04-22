@@ -95,6 +95,9 @@
       <button class="filter-btn"        data-filter="done"      onclick="setTaskFilter('done')">Completed</button>
       <button class="filter-btn"        data-filter="all"       onclick="setTaskFilter('all')">All</button>
       <div class="filter-spacer"></div>
+      <label id="infra-toggle-label" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);margin-right:10px;cursor:pointer" title="Show fleet plumbing (Pilot git ops, memory writes, etc.). Hidden by default — they're always shown when Failed/Escalated.">
+        <input type="checkbox" id="show-infra-toggle" onchange="toggleShowInfra(this.checked)" style="margin:0"> Show infrastructure
+      </label>
       <input class="search-input" id="task-search" type="text" placeholder="Search tasks..." aria-label="Search tasks by keyword">
     </div>
     <div style="display:flex;flex:1;overflow:hidden">

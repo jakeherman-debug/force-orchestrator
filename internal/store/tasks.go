@@ -6,6 +6,62 @@ import (
 	"strings"
 )
 
+// ── Task-type classification ─────────────────────────────────────────────────
+//
+// The fleet runs two categories of work:
+//   1. Operator-facing work — tasks that reflect something the operator asked
+//      for, or direct children thereof (Feature, Decompose, CodeEdit).
+//   2. Fleet infrastructure — bookkeeping, git ops, rebases, memory writes,
+//      diplomatic ceremony, failure triage. These are how the fleet heals and
+//      maintains itself; the operator only cares when something in this
+//      bucket can't self-heal (Failed / Escalated).
+//
+// Dashboard surfaces hide infrastructure tasks by default to cut noise and
+// surface them selectively on failure. Tests, CLI tools, and internal logic
+// continue to see every row.
+
+// InfrastructureTaskTypes is the canonical list of task types considered
+// "fleet plumbing" rather than operator work. Keep synchronized with the
+// list referenced in SQL filters below.
+var InfrastructureTaskTypes = []string{
+	"FindPRTemplate",
+	"CreateAskBranch",
+	"CleanupAskBranch",
+	"RebaseAskBranch",
+	"RebaseAgentBranch",
+	"RevalidateRepoConfig",
+	"WriteMemory",
+	"ShipConvoy",
+	"CIFailureTriage",
+	"MedicReview",
+}
+
+var infrastructureTaskTypeSet = func() map[string]bool {
+	m := make(map[string]bool, len(InfrastructureTaskTypes))
+	for _, t := range InfrastructureTaskTypes {
+		m[t] = true
+	}
+	return m
+}()
+
+// IsInfrastructureTask reports whether a task type is fleet plumbing (hidden
+// from the dashboard task list by default unless it has Failed or Escalated).
+func IsInfrastructureTask(taskType string) bool {
+	return infrastructureTaskTypeSet[taskType]
+}
+
+// InfrastructureTaskTypesSQLList renders the infrastructure task types as a
+// comma-separated SQL string-list suitable for a NOT IN (...) clause.
+// Emits single-quoted identifiers, safe because InfrastructureTaskTypes is a
+// hardcoded compile-time constant (no user input).
+func InfrastructureTaskTypesSQLList() string {
+	parts := make([]string, len(InfrastructureTaskTypes))
+	for i, t := range InfrastructureTaskTypes {
+		parts[i] = "'" + t + "'"
+	}
+	return strings.Join(parts, ",")
+}
+
 // ── BountyBoard ───────────────────────────────────────────────────────────────
 
 func GetBounty(db *sql.DB, id int) (*Bounty, error) {

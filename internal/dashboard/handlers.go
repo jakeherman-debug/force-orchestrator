@@ -100,7 +100,7 @@ func handleStats(db *sql.DB) http.HandlerFunc {
 		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoys)
 
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status = 'Pending'`).Scan(&s.PendingCount)
-		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status IN ('Locked','AwaitingCaptainReview','UnderCaptainReview','AwaitingCouncilReview','UnderReview')`).Scan(&s.ActiveCount)
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status IN ('Locked','AwaitingCaptainReview','UnderCaptainReview','AwaitingCouncilReview','UnderReview','AwaitingSubPRCI')`).Scan(&s.ActiveCount)
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status = 'Completed' AND date(created_at) = date('now')`).Scan(&s.CompletedTodayCount)
 
 		json.NewEncoder(w).Encode(s)
@@ -144,6 +144,11 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
+		// Infrastructure filter: by default, hide fleet-plumbing task types
+		// (FindPRTemplate, CreateAskBranch, WriteMemory, etc.) unless they
+		// have Failed or Escalated. Pass show_infrastructure=1 to see them all.
+		showInfra := r.URL.Query().Get("show_infrastructure") == "1"
+
 		baseQuery := `FROM BountyBoard`
 		args := []any{}
 		var conditions []string
@@ -162,6 +167,11 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 				conditions = append(conditions, `convoy_id = ?`)
 				args = append(args, convoyID)
 			}
+		}
+		if !showInfra {
+			// Infra types are always OK to show if they're in a stuck state.
+			conditions = append(conditions,
+				`(type NOT IN (`+store.InfrastructureTaskTypesSQLList()+`) OR status IN ('Failed','Escalated'))`)
 		}
 		if len(conditions) > 0 {
 			baseQuery += ` WHERE ` + strings.Join(conditions, ` AND `)

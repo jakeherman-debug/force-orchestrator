@@ -226,6 +226,49 @@ func TestHandleTasks_StatusFilter(t *testing.T) {
 	}
 }
 
+func TestHandleTasks_HidesInfrastructureByDefault(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Three tasks: Feature (user work), WriteMemory (infra, Pending),
+	// FindPRTemplate (infra, Failed — should still surface).
+	store.AddBounty(db, 0, "Feature", "ship it")
+	store.AddBounty(db, 0, "WriteMemory", "memory payload")
+	failedInfraID := store.AddBounty(db, 0, "FindPRTemplate", "template lookup")
+	db.Exec(`UPDATE BountyBoard SET status = 'Failed' WHERE id = ?`, failedInfraID)
+
+	// Default: infra hidden UNLESS Failed/Escalated.
+	r := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	handleTasks(db)(w, r)
+
+	var resp TasksResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	// Expect: Feature + failed FindPRTemplate = 2 (WriteMemory is hidden)
+	if len(resp.Tasks) != 2 {
+		t.Errorf("default view: expected 2 tasks (user work + failed infra), got %d", len(resp.Tasks))
+	}
+	for _, tk := range resp.Tasks {
+		if tk.Type == "WriteMemory" {
+			t.Errorf("healthy infra task should be hidden by default, got %+v", tk)
+		}
+	}
+
+	// show_infrastructure=1 → all 3 visible.
+	r = httptest.NewRequest(http.MethodGet, "/api/tasks?show_infrastructure=1", nil)
+	w = httptest.NewRecorder()
+	handleTasks(db)(w, r)
+
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp.Tasks) != 3 {
+		t.Errorf("show_infrastructure=1: expected 3 tasks, got %d", len(resp.Tasks))
+	}
+}
+
 func TestHandleTasks_PayloadTruncation(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()

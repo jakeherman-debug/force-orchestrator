@@ -21,6 +21,7 @@ const S = {
   activeTab:          'tasks',
   sortBy:             'id',
   sortDir:            'desc',
+  showInfra:          false,     // toggle — hide fleet plumbing (Pilot, Librarian, Medic triage) by default
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -190,6 +191,7 @@ function syncURL() {
   if (S.convoyStatusFilter !== 'all')     p.set('convoy_status', S.convoyStatusFilter);
   if (S.convoyTimeFilter   !== 'all')     p.set('convoy_since',  S.convoyTimeFilter);
   if (S.logMode            !== 'fleet')   p.set('log_mode',      S.logMode);
+  if (S.showInfra)                        p.set('show_infra',    '1');
   const qs = p.toString();
   history.pushState(null, '', qs ? '?' + qs : window.location.pathname);
 }
@@ -224,8 +226,10 @@ function switchTab(name) {
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
+// Any task status should be visible in at least one of these filters besides
+// "all" — orphaning a status hides in-flight work from the default views.
 const FILTER_STATUS = {
-  active:    'Pending,Classifying,Locked,Planned,AwaitingChancellorReview,AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview',
+  active:    'Pending,Classifying,Locked,Planned,AwaitingChancellorReview,AwaitingCouncilReview,UnderReview,AwaitingCaptainReview,UnderCaptainReview,AwaitingSubPRCI',
   pending:   'Pending,Classifying,Blocked,Planned,AwaitingChancellorReview',
   failed:    'Failed,Escalated,ConflictPending',
   done:      'Completed',
@@ -242,6 +246,7 @@ async function loadTasks() {
   if (S.convoyFilter > 0) params.push(`convoy_id=${S.convoyFilter}`);
   if (S.sortBy)  params.push(`sort_by=${encodeURIComponent(S.sortBy)}`);
   if (S.sortDir) params.push(`sort_dir=${encodeURIComponent(S.sortDir)}`);
+  if (S.showInfra) params.push(`show_infrastructure=1`);
   params.push(`offset=${S.taskOffset}`);
   params.push(`limit=${TASK_PAGE_SIZE}`);
   const qs = `?${params.join('&')}`;
@@ -254,6 +259,13 @@ async function loadTasks() {
   } catch(e) {
     showToast('Failed to load tasks: ' + e.message, 'err');
   }
+}
+
+function toggleShowInfra(checked) {
+  S.showInfra  = !!checked;
+  S.taskOffset = 0;
+  syncURL();
+  loadTasks();
 }
 
 function setTaskFilter(f) {
@@ -329,11 +341,15 @@ function renderTasks() {
       runtimeStr ? `<span class="runtime-badge">${runtimeStr}</span>` : '',
       blockedBy,
     ].filter(Boolean).join(' ');
-    return `<tr class="task-row${sel}" onclick="openPanel(${t.id})" data-id="${t.id}">
+    const isInfra = INFRASTRUCTURE_TASK_TYPES.has(t.type || '');
+    const typeCell = isInfra
+      ? `<span class="dim" style="font-size:11px" title="Fleet infrastructure">${t.type || ''} <span style="opacity:.6">⚙︎</span></span>`
+      : (t.type || '');
+    return `<tr class="task-row${sel}${isInfra ? ' task-row-infra' : ''}" onclick="openPanel(${t.id})" data-id="${t.id}">
       <td class="mono dim">${t.id}</td>
       <td>${statusPill(t.status)}</td>
       <td class="dim" style="font-size:11px">${escHtml(t.owner || '')}</td>
-      <td class="dim">${t.type || ''}</td>
+      <td class="dim">${typeCell}</td>
       <td class="payload-cell">${escHtml(truncate(t.payload, 140))}</td>
       <td class="mono dim" style="font-size:11px">${escHtml(t.repo || '')}</td>
       <td style="text-align:center">${prio}</td>
@@ -344,6 +360,15 @@ function renderTasks() {
     </tr>`;
   }).join('');
 }
+
+// Task types considered fleet infrastructure — kept in sync with
+// store.InfrastructureTaskTypes server-side. Used only for UI styling;
+// the authoritative filter is applied on the server.
+const INFRASTRUCTURE_TASK_TYPES = new Set([
+  'FindPRTemplate', 'CreateAskBranch', 'CleanupAskBranch',
+  'RebaseAskBranch', 'RebaseAgentBranch', 'RevalidateRepoConfig',
+  'WriteMemory', 'ShipConvoy', 'CIFailureTriage', 'MedicReview',
+]);
 
 function escHtml(s) {
   return String(s)
@@ -1275,6 +1300,10 @@ function initFromURL() {
 
   const lm = p.get('log_mode');
   if (['fleet', 'holonet'].includes(lm)) S.logMode = lm;
+
+  S.showInfra = p.get('show_infra') === '1';
+  const infraToggle = $('show-infra-toggle');
+  if (infraToggle) infraToggle.checked = S.showInfra;
 }
 
 window.addEventListener('popstate', () => {

@@ -814,3 +814,13 @@ select option { background: var(--bg2); color: var(--text); }
   font-size: 12px;
   color: var(--text2);
 }
+
+/* Infrastructure task rows — visually dimmer since they're fleet plumbing,
+   not operator work. Only shown when toggled on or in a Failed/Escalated state. */
+.task-row-infra td {
+  color: var(--text2);
+}
+.task-row-infra td.payload-cell {
+  font-style: italic;
+  opacity: 0.75;
+}
