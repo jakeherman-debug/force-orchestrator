@@ -48,6 +48,24 @@ func QueueRebaseAgentBranch(db *sql.DB, p rebaseAgentPayload) (int, error) {
 		return 0, nil // already queued
 	}
 
+	// Also dedup if there's an active REBASE_CONFLICT resolution task for the
+	// same agent branch. RebaseAgentBranch marks itself Completed after spawning
+	// the child, so the check above misses the escalated-child case and lets
+	// sub-pr-ci-watch spawn duplicate rebase chains. Block until the conflict
+	// task is resolved (Completed or Cancelled) — if it escalated, the operator
+	// must dismiss it before the system retries.
+	if p.Branch != "" {
+		var existingConflict int
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+			WHERE status NOT IN ('Completed', 'Cancelled')
+			  AND branch_name = ?
+			  AND payload LIKE '%[REBASE_CONFLICT for task #%'`,
+			p.Branch).Scan(&existingConflict)
+		if existingConflict > 0 {
+			return 0, nil // conflict resolution still in flight or escalated
+		}
+	}
+
 	payload, _ := json.Marshal(p)
 	res, err := db.Exec(
 		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)

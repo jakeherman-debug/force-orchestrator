@@ -697,6 +697,7 @@ func handleConvoys(db *sql.DB) http.HandlerFunc {
 						BotConflicted:   prr.BotConflicted,
 						BotUnclassified: prr.BotUnclassified,
 						HumanAwaiting:   prr.HumanAwaiting,
+						BotBlocking:     prr.BotBlocking,
 					}
 				}
 			}

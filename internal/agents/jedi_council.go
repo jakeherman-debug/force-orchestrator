@@ -247,6 +247,15 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 					handleInfraFailure(db, agentName, "council", b, sessionID, prErr.Error(), "AwaitingCouncilReview", true, logger)
 					return
 				}
+				// "No commits between" means the agent's branch has no net diff vs the
+				// ask-branch — the work is already incorporated via a parallel task.
+				// Self-cancel rather than escalate; no operator action required.
+				if strings.Contains(prErr.Error(), "No commits between") {
+					cancelMsg := fmt.Sprintf("Cancelled: no net diff vs ask-branch — work already incorporated (%v)", prErr)
+					db.Exec(`UPDATE BountyBoard SET status = 'Cancelled', owner = '', locked_at = '', error_log = ? WHERE id = ?`, cancelMsg, b.ID)
+					logger.Printf("Task %d: cancelled — no net diff vs ask-branch (work already in convoy)", b.ID)
+					return
+				}
 				escMsg := fmt.Sprintf("Sub-PR flow failed (class=%s): %v", errClass, prErr)
 				logger.Printf("Task %d: escalating — %s", b.ID, escMsg)
 				if _, uErr := db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '', error_log = ? WHERE id = ?`, escMsg, b.ID); uErr != nil {
@@ -411,10 +420,11 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 						b.ID, rootID, b.TargetRepo, ruling.Feedback),
 					b.ID, store.MailTypeInfo)
 			} else if parentStatus == "Failed" {
+				store.ResetTask(db, b.ParentID)
 				store.SendMail(db, agentName, "operator",
-					fmt.Sprintf("[REMEDIATION COMPLETE] Task #%d fixed — run: force reset %d", b.ID, b.ParentID),
-					fmt.Sprintf("Remediation task #%d has been approved and merged.\n\nThe infra issue blocking task #%d (%s) should now be resolved.\n\nRun the following to retry the original task:\n  force reset %d\n\nCouncil feedback: %s",
-						b.ID, b.ParentID, b.TargetRepo, b.ParentID, ruling.Feedback),
+					fmt.Sprintf("[REMEDIATION COMPLETE] Task #%d fixed — original task #%d requeued", b.ID, b.ParentID),
+					fmt.Sprintf("Remediation task #%d has been approved and merged.\n\nThe infra issue blocking task #%d (%s) has been resolved and the original task has been automatically requeued.\n\nCouncil feedback: %s",
+						b.ID, b.ParentID, b.TargetRepo, ruling.Feedback),
 					b.ID, store.MailTypeRemediation)
 			}
 		}

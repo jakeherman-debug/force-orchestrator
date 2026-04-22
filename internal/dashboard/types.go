@@ -141,6 +141,9 @@ type DashboardPRReviewRollup struct {
 	BotConflicted   int `json:"bot_conflicted_loop"`
 	BotUnclassified int `json:"bot_unclassified"`
 	HumanAwaiting   int `json:"human_awaiting"`
+	// BotBlocking is unclassified + in_scope_fix whose fix has not yet landed.
+	// Non-zero means the convoy has open bot issues that must resolve before shipping.
+	BotBlocking int `json:"bot_blocking"`
 }
 
 // DashboardPRReviewComment is a single row in the convoy-detail comment table.
@@ -158,6 +161,7 @@ type DashboardPRReviewComment struct {
 	Classification        string `json:"classification"`
 	ClassificationReason  string `json:"classification_reason,omitempty"`
 	SpawnedTaskID         int    `json:"spawned_task_id,omitempty"`
+	SpawnedTaskStatus     string `json:"spawned_task_status,omitempty"`
 	ReplyBody             string `json:"reply_body,omitempty"`
 	RepliedAt             string `json:"replied_at,omitempty"`
 	ThreadResolvedAt      string `json:"thread_resolved_at,omitempty"`

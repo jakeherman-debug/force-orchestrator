@@ -109,7 +109,7 @@ func handleInfraFailure(
 				"- Repository path misconfigured → run 'force repos' to verify\n"+
 				"- Worktree corruption → run 'force cleanup' or manually remove stale worktrees\n"+
 				"- Disk full or permission denied → check disk space and file permissions\n\n"+
-				"After fixing, run: force reset %d",
+				"Once your fix is merged, the fleet will automatically requeue task #%d.",
 			b.ID, b.TargetRepo, stageName, msg, b.ID)
 		remID, addErr := store.AddConvoyTask(db, b.ID, b.TargetRepo, remPayload, b.ConvoyID, b.Priority, "Pending")
 		if addErr != nil {
@@ -121,7 +121,7 @@ func handleInfraFailure(
 
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
-			fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nRemediation task #%d has been queued to investigate.\nOnce fixed, run: force reset %d",
+			fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nRemediation task #%d has been queued to investigate. Once the fix is merged, task #%d will be automatically requeued.",
 				b.ID, stageName, MaxInfraFailures, msg, remID, b.ID),
 			b.ID, store.MailTypeAlert)
 	} else {

@@ -285,10 +285,37 @@ func CancelTask(db *sql.DB, id int, reason string) bool {
 	return n > 0
 }
 
-// ResetTask resets a single task to Pending, clearing all error and lock state.
-// If the task belongs to a Failed convoy and no other problem tasks remain after
-// the reset, the convoy is automatically recovered to Active.
+// ResetTask resets an escalated/failed task, preserving committed coding work.
+// If the task has a branch_name set, coding work already exists on that branch —
+// the task is sent directly to AwaitingCouncilReview (or AwaitingCaptainReview
+// for coordinated convoys) so Jedi Council reviews the existing work rather than
+// an astromech redoing it from scratch.
+// If no branch_name is set (no coding work yet), it resets to Pending.
+// In both cases error/lock state is cleared and the convoy is auto-recovered.
 func ResetTask(db *sql.DB, id int) {
+	var convoyID int
+	var branchName string
+	db.QueryRow(`SELECT convoy_id, IFNULL(branch_name,'') FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID, &branchName)
+	if branchName != "" {
+		targetStatus := "AwaitingCouncilReview"
+		if IsConvoyCoordinated(db, convoyID) {
+			targetStatus = "AwaitingCaptainReview"
+		}
+		db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', error_log = '',
+			retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = ''
+			WHERE id = ?`, targetStatus, id)
+	} else {
+		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
+			retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = '', branch_name = ''
+			WHERE id = ?`, id)
+	}
+	AutoRecoverConvoy(db, convoyID, nil)
+}
+
+// ResetTaskFull always resets a task to Pending and clears branch_name regardless
+// of committed work. Used by Medic when re-running the coding phase with new
+// guidance — the astromech needs a fresh attempt, not a review of a bad branch.
+func ResetTaskFull(db *sql.DB, id int) {
 	var convoyID int
 	db.QueryRow(`SELECT convoy_id FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID)
 	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',

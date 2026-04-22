@@ -22,6 +22,7 @@ const S = {
   sortBy:             'id',
   sortDir:            'desc',
   showInfra:          false,     // toggle — hide fleet plumbing (Pilot, Librarian, Medic triage) by default
+  openPRReviewPanels: new Set(), // convoy IDs whose PR review panel is expanded
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -912,6 +913,12 @@ function renderConvoys(convoys) {
         <div id="pr-review-panel-${c.id}" class="pr-review-panel" style="display:none"></div>
       </div>`;
   }).join('');
+
+  // Re-open any panels that were open before the DOM was rebuilt.
+  S.openPRReviewPanels.forEach(id => {
+    if ($(`pr-review-panel-${id}`)) togglePRReviewPanel(id, true);
+    else S.openPRReviewPanels.delete(id); // convoy no longer in list
+  });
 }
 
 // renderPRReviewBadge returns a clickable summary badge when the convoy has
@@ -920,11 +927,14 @@ function renderPRReviewBadge(c) {
   const r = c.pr_review_rollup;
   if (!r || !r.total) return '';
   const parts = [];
-  if (r.bot_in_scope)      parts.push(`<span title="Bot fixes queued">🔧 ${r.bot_in_scope}</span>`);
-  if (r.bot_out_of_scope)  parts.push(`<span title="Follow-up features">📌 ${r.bot_out_of_scope}</span>`);
-  if (r.bot_not_actionable)parts.push(`<span title="Explained to bot">💬 ${r.bot_not_actionable}</span>`);
+  // Blocking indicator shown first — this is what the operator needs to know
+  // before deciding whether to ship.
+  if (r.bot_blocking)       parts.push(`<span title="${r.bot_blocking} bot issue(s) still in progress — fixes must land before shipping" style="color:var(--red);font-weight:600">⛔ ${r.bot_blocking} blocking</span>`);
+  if (r.bot_in_scope)       parts.push(`<span title="Bot in-scope fixes (${r.bot_in_scope} total)">🔧 ${r.bot_in_scope}</span>`);
+  if (r.bot_out_of_scope)   parts.push(`<span title="Follow-up features">📌 ${r.bot_out_of_scope}</span>`);
+  if (r.bot_not_actionable) parts.push(`<span title="Explained to bot">💬 ${r.bot_not_actionable}</span>`);
   if (r.bot_conflicted_loop)parts.push(`<span title="Bot loop escalated" style="color:var(--red)">⚠️ ${r.bot_conflicted_loop}</span>`);
-  if (r.human_awaiting)    parts.push(`<span title="Human comments awaiting operator" style="color:var(--accent)">👤 ${r.human_awaiting}</span>`);
+  if (r.human_awaiting)     parts.push(`<span title="Human comments awaiting operator" style="color:var(--accent)">👤 ${r.human_awaiting}</span>`);
   if (!parts.length) return '';
   return `<button class="pr-review-badge" onclick="togglePRReviewPanel(${c.id})" title="Click to view PR review comments">
     ${parts.join(' ')}
@@ -932,14 +942,18 @@ function renderPRReviewBadge(c) {
 }
 
 // togglePRReviewPanel lazy-loads the convoy's PR review comments inline.
-async function togglePRReviewPanel(convoyID) {
+// Pass forceOpen=true to open (or refresh) without toggling — used by
+// renderConvoys to restore panels that were open before a list refresh.
+async function togglePRReviewPanel(convoyID, forceOpen) {
   const el = $(`pr-review-panel-${convoyID}`);
   if (!el) return;
-  if (el.style.display === 'block') {
+  if (!forceOpen && el.style.display === 'block') {
     el.style.display = 'none';
+    S.openPRReviewPanels.delete(convoyID);
     return;
   }
   el.style.display = 'block';
+  S.openPRReviewPanels.add(convoyID);
   el.innerHTML = `<div class="dim" style="padding:10px">Loading comments…</div>`;
   try {
     const data = await api(`/api/convoys/${convoyID}/pr-review-comments`);
@@ -989,9 +1003,14 @@ function renderPRReviewRow(c) {
     reply = `<div class="pr-review-reply">${escHtml(truncate(c.reply_body || '', 200))}</div>
              <div class="dim" style="font-size:11px">replied ${fmtShortDate(c.replied_at)}</div>`;
   } else if (c.classification === 'in_scope_fix' && c.spawned_task_id) {
-    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ task #${c.spawned_task_id}</a>`;
+    const taskPill = c.spawned_task_status ? statusPill(c.spawned_task_status) : '';
+    const resolvedNote = c.thread_resolved_at
+      ? `<div class="dim" style="font-size:10px">✓ resolved ${fmtShortDate(c.thread_resolved_at)}</div>`
+      : '';
+    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ task #${c.spawned_task_id}</a> ${taskPill}${resolvedNote}`;
   } else if (c.classification === 'out_of_scope' && c.spawned_task_id) {
-    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ feature #${c.spawned_task_id}</a>`;
+    const taskPill = c.spawned_task_status ? statusPill(c.spawned_task_status) : '';
+    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ feature #${c.spawned_task_id}</a> ${taskPill}`;
   } else if (c.classification === 'conflicted_loop') {
     reply = `<span style="color:var(--red)">loop escalated — operator required</span>`;
   } else {
