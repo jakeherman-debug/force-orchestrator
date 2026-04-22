@@ -531,16 +531,23 @@ func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 // outcome should be "success" or "failure".
 // The FTS index is updated explicitly after the main insert — an FTS failure
 // is non-fatal and will not roll back the memory record.
-func StoreFleetMemory(db *sql.DB, repo string, taskID int, outcome, summary, filesChanged string) {
+// StoreFleetMemory saves a lesson learned from a completed or failed task.
+// topicTags is a comma-separated list of 3-5 short keywords (optional — pass
+// "" if none). Tags are indexed in FTS5 alongside the summary to broaden
+// recall — a memory tagged "authentication, jwt" matches a query about
+// "login" even when the summary prose doesn't mention "login" literally.
+func StoreFleetMemory(db *sql.DB, repo string, taskID int, outcome, summary, filesChanged, topicTags string) {
 	res, err := db.Exec(
-		`INSERT INTO FleetMemory (repo, task_id, outcome, summary, files_changed) VALUES (?, ?, ?, ?, ?)`,
-		repo, taskID, outcome, summary, filesChanged)
+		`INSERT INTO FleetMemory (repo, task_id, outcome, summary, files_changed, topic_tags)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		repo, taskID, outcome, summary, filesChanged, topicTags)
 	if err != nil {
 		return
 	}
 	if id, idErr := res.LastInsertId(); idErr == nil {
-		db.Exec(`INSERT INTO FleetMemory_fts(rowid, summary, files_changed) VALUES (?, ?, ?)`,
-			id, summary, filesChanged)
+		db.Exec(`INSERT INTO FleetMemory_fts(rowid, summary, files_changed, topic_tags)
+			VALUES (?, ?, ?, ?)`,
+			id, summary, filesChanged, topicTags)
 	}
 }
 
@@ -663,9 +670,9 @@ func ftsMemoryLookup(db *sql.DB, repo, ftsQ string, limit int) []FleetMemoryEntr
 		}
 		var e FleetMemoryEntry
 		err := db.QueryRow(
-			`SELECT id, repo, task_id, outcome, summary, files_changed, created_at
+			`SELECT id, repo, task_id, outcome, summary, files_changed, IFNULL(topic_tags, ''), created_at
 			 FROM FleetMemory WHERE id = ? AND repo = ?`, id, repo).
-			Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.CreatedAt)
+			Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt)
 		if err == nil {
 			entries = append(entries, e)
 		}
@@ -685,7 +692,7 @@ func ftsMemoryLookup(db *sql.DB, repo, ftsQ string, limit int) []FleetMemoryEntr
 // the astromech that task 247's work didn't exist).
 func recencyMemoryLookup(db *sql.DB, repo string, limit int) []FleetMemoryEntry {
 	rows, err := db.Query(`
-		SELECT id, repo, task_id, outcome, summary, files_changed, created_at
+		SELECT id, repo, task_id, outcome, summary, files_changed, IFNULL(topic_tags, ''), created_at
 		FROM FleetMemory
 		WHERE repo = ?
 		ORDER BY created_at DESC, id DESC
@@ -697,7 +704,7 @@ func recencyMemoryLookup(db *sql.DB, repo string, limit int) []FleetMemoryEntry 
 	var entries []FleetMemoryEntry
 	for rows.Next() {
 		var e FleetMemoryEntry
-		rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.CreatedAt)
+		rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt)
 		entries = append(entries, e)
 	}
 	return entries
@@ -748,9 +755,9 @@ func ListAllFleetMemories(db *sql.DB, repo string, limit int) []FleetMemoryEntry
 	var rows *sql.Rows
 	var err error
 	if repo != "" {
-		rows, err = db.Query(`SELECT id, repo, task_id, outcome, summary, files_changed, created_at FROM FleetMemory WHERE repo = ? ORDER BY created_at DESC, id DESC LIMIT ?`, repo, limit)
+		rows, err = db.Query(`SELECT id, repo, task_id, outcome, summary, files_changed, IFNULL(topic_tags, ''), created_at FROM FleetMemory WHERE repo = ? ORDER BY created_at DESC, id DESC LIMIT ?`, repo, limit)
 	} else {
-		rows, err = db.Query(`SELECT id, repo, task_id, outcome, summary, files_changed, created_at FROM FleetMemory ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+		rows, err = db.Query(`SELECT id, repo, task_id, outcome, summary, files_changed, IFNULL(topic_tags, ''), created_at FROM FleetMemory ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
 	}
 	if err != nil {
 		return nil
@@ -759,7 +766,7 @@ func ListAllFleetMemories(db *sql.DB, repo string, limit int) []FleetMemoryEntry
 	var entries []FleetMemoryEntry
 	for rows.Next() {
 		var e FleetMemoryEntry
-		rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.CreatedAt)
+		rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt)
 		entries = append(entries, e)
 	}
 	return entries

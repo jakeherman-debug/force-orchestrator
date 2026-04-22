@@ -186,8 +186,12 @@ func buildAstromechContext(
 			len(history), strings.Join(parts, "\n\n"))
 	}
 
-	// Fleet memory — recent successes and failures on this repo
-	if memories := store.GetFleetMemories(db, bounty.TargetRepo, bounty.Payload, 10); len(memories) > 0 {
+	// Fleet memory — retrieve FTS candidates over-fetched at 20, then let
+	// the LLM re-ranker filter to the 5 genuinely relevant ones. FTS gives
+	// us recall; the re-ranker gives us precision. If the re-ranker is
+	// disabled or errors, we fall through to the FTS order trimmed to 5.
+	candidates := store.GetFleetMemories(db, bounty.TargetRepo, bounty.Payload, 20)
+	if memories := RerankFleetMemories(db, bounty.Payload, candidates, 5, logger); len(memories) > 0 {
 		var successes, failures []string
 		for _, m := range memories {
 			entry := fmt.Sprintf("- [Task #%d] %s", m.TaskID, util.TruncateStr(m.Summary, 250))
@@ -555,7 +559,7 @@ func processAstromechOutput(
 		store.StoreFleetMemory(db, bounty.TargetRepo, taskID, "failure",
 			fmt.Sprintf("Task produced %d bytes of output (context blown) — was re-queued for decomposition.\nTask: %s",
 				len(outputStr), util.TruncateStr(directiveText(bounty.Payload), 300)),
-			"")
+			"", "context-blown, scope-too-large")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
 		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
@@ -593,7 +597,7 @@ func processAstromechOutput(
 		store.StoreFleetMemory(db, bounty.TargetRepo, taskID, "failure",
 			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
 				util.TruncateStr(directiveText(bounty.Payload), 300)),
-			"")
+			"", "scope-too-large, shard-needed")
 		base := igit.GetDefaultBranch(repoPath)
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
 		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()

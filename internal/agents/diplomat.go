@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"math/rand"
 	"os"
 	"regexp"
@@ -354,8 +356,12 @@ func buildDiplomatConvoyContext(db *sql.DB, convoy *store.Convoy, ab store.Convo
 		}
 	}
 
-	// Relevant memory excerpts.
-	memories := store.GetFleetMemories(db, ab.Repo, convoy.Name, 5)
+	// Relevant memory excerpts — FTS over-fetches, re-ranker trims to top 3.
+	// Diplomat is summarizing for the draft PR body so 3 is plenty. The
+	// re-ranker's own log lines aren't useful here (there's no operator
+	// logger in scope at context-build time), so discard them.
+	candidates := store.GetFleetMemories(db, ab.Repo, convoy.Name, 15)
+	memories := RerankFleetMemories(db, convoy.Name, candidates, 3, log.New(io.Discard, "", 0))
 	if len(memories) > 0 {
 		sb.WriteString("\nRelated memory entries:\n")
 		for _, m := range memories {

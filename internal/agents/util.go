@@ -94,7 +94,7 @@ func handleInfraFailure(
 		store.LogAudit(db, agentName, "infra-fail", b.ID, msg)
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
 			fmt.Sprintf("Task: %s\nInfra failure in %s (permanent): %s",
-				util.TruncateStr(directiveText(b.Payload), 300), stageName, msg), "")
+				util.TruncateStr(directiveText(b.Payload), 300), stageName, msg), "", "")
 
 		// Spawn a CodeEdit remediation task so an agent can investigate the infra issue
 		// and re-queue the original task once fixed. We use AddConvoyTask (not

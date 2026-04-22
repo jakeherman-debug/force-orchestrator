@@ -721,7 +721,7 @@ func TestDeleteFleetMemory(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "added endpoint", "handler.go")
+	StoreFleetMemory(db, "api", 1, "success", "added endpoint", "handler.go", "")
 	var id int
 	db.QueryRow(`SELECT id FROM FleetMemory WHERE task_id = 1`).Scan(&id)
 
@@ -753,9 +753,9 @@ func TestListAllFleetMemories_AllRepos(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "api work", "api.go")
-	StoreFleetMemory(db, "frontend", 2, "success", "frontend work", "app.tsx")
-	StoreFleetMemory(db, "backend", 3, "failure", "backend work", "")
+	StoreFleetMemory(db, "api", 1, "success", "api work", "api.go", "")
+	StoreFleetMemory(db, "frontend", 2, "success", "frontend work", "app.tsx", "")
+	StoreFleetMemory(db, "backend", 3, "failure", "backend work", "", "")
 
 	entries := ListAllFleetMemories(db, "", 10)
 	if len(entries) != 3 {
@@ -767,8 +767,8 @@ func TestListAllFleetMemories_Filtered(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "api work", "")
-	StoreFleetMemory(db, "frontend", 2, "success", "frontend work", "")
+	StoreFleetMemory(db, "api", 1, "success", "api work", "", "")
+	StoreFleetMemory(db, "frontend", 2, "success", "frontend work", "", "")
 
 	entries := ListAllFleetMemories(db, "api", 10)
 	if len(entries) != 1 {
@@ -784,7 +784,7 @@ func TestListAllFleetMemories_Limit(t *testing.T) {
 	defer db.Close()
 
 	for i := 1; i <= 5; i++ {
-		StoreFleetMemory(db, "repo", i, "success", "work", "")
+		StoreFleetMemory(db, "repo", i, "success", "work", "", "")
 	}
 
 	entries := ListAllFleetMemories(db, "", 3)
@@ -799,8 +799,8 @@ func TestStoreAndGetFleetMemories(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 10, "success", "Added POST /users endpoint", "handlers/users.go, routes.go")
-	StoreFleetMemory(db, "api", 11, "success", "Fixed auth middleware", "middleware/auth.go")
+	StoreFleetMemory(db, "api", 10, "success", "Added POST /users endpoint", "handlers/users.go, routes.go", "")
+	StoreFleetMemory(db, "api", 11, "success", "Fixed auth middleware", "middleware/auth.go", "")
 
 	memories := GetFleetMemories(db, "api", "", 10)
 	if len(memories) != 2 {
@@ -819,9 +819,9 @@ func TestFleetMemory_SuccessAndFailure(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "Added endpoint", "handler.go")
-	StoreFleetMemory(db, "api", 2, "failure", "Task failed after 3 attempts. Final rejection: wrong approach", "")
-	StoreFleetMemory(db, "api", 3, "failure", "Infra failure: repo path missing", "")
+	StoreFleetMemory(db, "api", 1, "success", "Added endpoint", "handler.go", "")
+	StoreFleetMemory(db, "api", 2, "failure", "Task failed after 3 attempts. Final rejection: wrong approach", "", "")
+	StoreFleetMemory(db, "api", 3, "failure", "Infra failure: repo path missing", "", "")
 
 	memories := GetFleetMemories(db, "api", "", 10)
 	if len(memories) != 3 {
@@ -844,8 +844,8 @@ func TestGetFleetMemories_RepoScoped(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "api task", "api.go")
-	StoreFleetMemory(db, "frontend", 2, "success", "frontend task", "app.tsx")
+	StoreFleetMemory(db, "api", 1, "success", "api task", "api.go", "")
+	StoreFleetMemory(db, "frontend", 2, "success", "frontend task", "app.tsx", "")
 
 	apiMems := GetFleetMemories(db, "api", "", 10)
 	if len(apiMems) != 1 {
@@ -866,7 +866,7 @@ func TestGetFleetMemories_Limit(t *testing.T) {
 	defer db.Close()
 
 	for i := 1; i <= 10; i++ {
-		StoreFleetMemory(db, "repo", i, "success", fmt.Sprintf("task %d", i), "")
+		StoreFleetMemory(db, "repo", i, "success", fmt.Sprintf("task %d", i), "", "")
 	}
 
 	memories := GetFleetMemories(db, "repo", "", 3)
@@ -890,9 +890,9 @@ func TestGetFleetMemories_FTSRanking(t *testing.T) {
 	}
 
 	// Three memories on the same repo — task 2 has the most JWT/auth/token vocabulary
-	StoreFleetMemory(db, "api", 1, "success", "Added pagination to the list endpoint", "handlers/list.go")
-	StoreFleetMemory(db, "api", 2, "success", "Fixed JWT token validation in auth middleware", "middleware/auth.go")
-	StoreFleetMemory(db, "api", 3, "failure", "Failed to add CSV export due to missing schema", "handlers/export.go")
+	StoreFleetMemory(db, "api", 1, "success", "Added pagination to the list endpoint", "handlers/list.go", "")
+	StoreFleetMemory(db, "api", 2, "success", "Fixed JWT token validation in auth middleware", "middleware/auth.go", "")
+	StoreFleetMemory(db, "api", 3, "failure", "Failed to add CSV export due to missing schema", "handlers/export.go", "")
 
 	// Query shares vocabulary with task 2 (JWT, token, auth, middleware)
 	results := GetFleetMemories(db, "api", "JWT token auth middleware", 3)
@@ -913,8 +913,8 @@ func TestGetFleetMemories_NoMatchReturnsEmpty(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 10, "success", "Added endpoint handler", "handler.go")
-	StoreFleetMemory(db, "api", 11, "success", "Fixed login bug in service", "service.go")
+	StoreFleetMemory(db, "api", 10, "success", "Added endpoint handler", "handler.go", "")
+	StoreFleetMemory(db, "api", 11, "success", "Fixed login bug in service", "service.go", "")
 
 	// Query with vocabulary that doesn't overlap any memory.
 	results := GetFleetMemories(db, "api", "xyzzy quux zorble", 5)
@@ -930,9 +930,9 @@ func TestGetFleetMemories_ANDPrecedesOR(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "updated payment processing flow", "payments.go")
-	StoreFleetMemory(db, "api", 2, "success", "fixed payment refund handler", "refunds.go")
-	StoreFleetMemory(db, "api", 3, "success", "added database migration for payments refund workflow", "migrate.go")
+	StoreFleetMemory(db, "api", 1, "success", "updated payment processing flow", "payments.go", "")
+	StoreFleetMemory(db, "api", 2, "success", "fixed payment refund handler", "refunds.go", "")
+	StoreFleetMemory(db, "api", 3, "success", "added database migration for payments refund workflow", "migrate.go", "")
 
 	// Query mentions both "payments" and "refund". Memory 3 hits both; 1 and
 	// 2 each hit one. AND should surface 3 (and only 3).
@@ -958,8 +958,8 @@ func TestGetFleetMemories_ORFallbackOnANDMiss(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "fixed authentication bug", "auth.go")
-	StoreFleetMemory(db, "api", 2, "success", "refactored handler wiring", "handler.go")
+	StoreFleetMemory(db, "api", 1, "success", "fixed authentication bug", "auth.go", "")
+	StoreFleetMemory(db, "api", 2, "success", "refactored handler wiring", "handler.go", "")
 
 	// No memory has BOTH "authentication" and "handler" together, but each
 	// term appears in one memory. OR fallback should surface both.
@@ -973,8 +973,8 @@ func TestGetFleetMemories_EmptyQueryUsesRecency(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "repo", 1, "success", "first task", "")
-	StoreFleetMemory(db, "repo", 2, "success", "second task", "")
+	StoreFleetMemory(db, "repo", 1, "success", "first task", "", "")
+	StoreFleetMemory(db, "repo", 2, "success", "second task", "", "")
 
 	results := GetFleetMemories(db, "repo", "", 5)
 	if len(results) != 2 {
@@ -989,8 +989,8 @@ func TestGetFleetMemories_FTSQuery(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "fixed authentication bug in handler", "auth.go")
-	StoreFleetMemory(db, "api", 2, "failed", "attempted refactor of database layer", "db.go")
+	StoreFleetMemory(db, "api", 1, "success", "fixed authentication bug in handler", "auth.go", "")
+	StoreFleetMemory(db, "api", 2, "failed", "attempted refactor of database layer", "db.go", "")
 
 	// FTS query that should match the first memory
 	results := GetFleetMemories(db, "api", "authentication handler", 10)
@@ -1003,7 +1003,7 @@ func TestStoreFleetMemory_FTSSearchable(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 1, "success", "refactored authentication middleware", "auth.go middleware.go")
+	StoreFleetMemory(db, "api", 1, "success", "refactored authentication middleware", "auth.go middleware.go", "")
 
 	// Should be findable via FTS
 	results := GetFleetMemories(db, "api", "authentication middleware", 5)
@@ -1012,11 +1012,54 @@ func TestStoreFleetMemory_FTSSearchable(t *testing.T) {
 	}
 }
 
+// TestStoreFleetMemory_TagsBroadenRecall is the key test for the topic-tags
+// improvement: a memory whose SUMMARY uses one vocabulary ("JWT validation")
+// can still be found by a query using synonyms ("authentication") if those
+// synonyms are in the topic_tags column. Without tags, the query would miss.
+func TestStoreFleetMemory_TagsBroadenRecall(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// The summary deliberately does NOT mention "authentication" — only JWT.
+	// Without tags, a query about "authentication" would return nothing.
+	StoreFleetMemory(db, "api", 1, "success",
+		"Added JWT validation to the request pipeline.",
+		"pipeline.go",
+		"authentication, jwt, auth, middleware")
+
+	// Query uses a tag synonym, not a literal word from the summary.
+	results := GetFleetMemories(db, "api", "authentication", 5)
+	if len(results) == 0 {
+		t.Fatal("topic_tags should let 'authentication' query match the JWT summary")
+	}
+	if results[0].TopicTags == "" {
+		t.Error("retrieved memory should carry its topic_tags field")
+	}
+	if !strings.Contains(results[0].TopicTags, "jwt") {
+		t.Errorf("expected tags to round-trip, got %q", results[0].TopicTags)
+	}
+}
+
+func TestStoreFleetMemory_TagsRoundTrip(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	StoreFleetMemory(db, "repo", 42, "success", "summary", "f.go", "alpha, beta, gamma")
+
+	got := GetFleetMemories(db, "repo", "", 5)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 memory, got %d", len(got))
+	}
+	if got[0].TopicTags != "alpha, beta, gamma" {
+		t.Errorf("tags did not round-trip: got %q", got[0].TopicTags)
+	}
+}
+
 func TestStoreFleetMemory_DBError(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	db.Close()
 	// Must not panic when DB is closed — covers early return on INSERT failure
-	StoreFleetMemory(db, "repo", 1, "success", "summary", "files")
+	StoreFleetMemory(db, "repo", 1, "success", "summary", "files", "")
 }
 
 // ── sanitizeFTSQuery ──────────────────────────────────────────────────────────

@@ -459,7 +459,7 @@ func cmdApproveTask(db *sql.DB, id int) {
 		changedFiles := igit.ExtractDiffFiles(diff)
 		filesStr := strings.Join(changedFiles, ", ")
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "success",
-			fmt.Sprintf("Task: %s", truncate(b.Payload, 400)), filesStr)
+			fmt.Sprintf("Task: %s", truncate(b.Payload, 400)), filesStr, "operator-approved")
 	}
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
 		EventType: "operator_approved",

@@ -354,7 +354,7 @@ func approveTask(db *sql.DB, id int, w http.ResponseWriter) error {
 	if diff != "" {
 		files := strings.Join(igit.ExtractDiffFiles(diff), ", ")
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "success",
-			fmt.Sprintf("Task: %s", util.TruncateStr(b.Payload, 400)), files)
+			fmt.Sprintf("Task: %s", util.TruncateStr(b.Payload, 400)), files, "operator-approved")
 	}
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
 		EventType: "operator_approved",

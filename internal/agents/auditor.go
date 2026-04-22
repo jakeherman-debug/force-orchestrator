@@ -268,7 +268,7 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 	store.StoreFleetMemory(db, bounty.TargetRepo, bounty.ID, "success",
 		fmt.Sprintf("Audit completed: %d finding(s) queued in convoy #%d.\nSummary: %s",
 			len(queued), convoyID, util.TruncateStr(report.Summary, 400)),
-		"")
+		"", "audit")
 
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
 

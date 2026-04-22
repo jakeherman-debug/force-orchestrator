@@ -217,7 +217,7 @@ func TestImportFleet_WithMemories(t *testing.T) {
 	// Build an export with memories
 	store.AddRepo(db, "api", "/tmp/api", "api service")
 	id := store.AddBounty(db, 0, "CodeEdit", "task with memory")
-	store.StoreFleetMemory(db, "api", id, "success", "added endpoint", "handler.go")
+	store.StoreFleetMemory(db, "api", id, "success", "added endpoint", "handler.go", "")
 
 	tmpFile := t.TempDir() + "/export.json"
 	if err := exportFleet(db, tmpFile); err != nil {
@@ -247,7 +247,7 @@ func TestImportFleet_SkipsDuplicateMemories(t *testing.T) {
 	defer db.Close()
 
 	store.AddRepo(db, "api", "/tmp/api", "service")
-	store.StoreFleetMemory(db, "api", 1, "success", "added endpoint", "handler.go")
+	store.StoreFleetMemory(db, "api", 1, "success", "added endpoint", "handler.go", "")
 
 	tmpFile := t.TempDir() + "/export.json"
 	exportFleet(db, tmpFile)
@@ -275,7 +275,7 @@ func TestExportFleet_WithAllData(t *testing.T) {
 	// Audit log
 	store.LogAudit(db, "test-actor", "test-action", id, "detail")
 	// Memory
-	store.StoreFleetMemory(db, "api", id, "success", "fixed bug", "handler.go")
+	store.StoreFleetMemory(db, "api", id, "success", "fixed bug", "handler.go", "")
 
 	tmpFile := t.TempDir() + "/export.json"
 	err := exportFleet(db, tmpFile)

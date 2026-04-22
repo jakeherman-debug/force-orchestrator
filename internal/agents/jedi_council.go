@@ -430,7 +430,7 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
 			fmt.Sprintf("Task: %s\nRejected (attempt %d/%d): %s",
 				util.TruncateStr(directiveText(b.Payload), 300), retryCount, MaxRetries, ruling.Feedback),
-			"")
+			"", "council-rejection")
 
 		if retryCount >= MaxRetries {
 			msg := fmt.Sprintf("Max retries (%d) exceeded. Final rejection: %s", MaxRetries, ruling.Feedback)

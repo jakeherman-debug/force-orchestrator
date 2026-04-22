@@ -233,15 +233,20 @@ CREATE TABLE IF NOT EXISTS FleetMemory (
     outcome       TEXT    NOT NULL DEFAULT 'success',  -- 'success' | 'failure'
     summary       TEXT    NOT NULL,
     files_changed TEXT    DEFAULT '',   -- comma-separated affected file paths (success only)
+    topic_tags    TEXT    DEFAULT '',   -- comma-separated 3-6 short keywords from Librarian (e.g. "auth, jwt, middleware")
     embedding     BLOB    DEFAULT NULL, -- reserved: float32 vector for future sqlite-vec upgrade
     created_at    TEXT    DEFAULT (datetime('now'))
 );
 
 -- FTS5 full-text search index over fleet memory (requires build tag: sqlite_fts5)
 -- Kept in sync explicitly by StoreFleetMemory — not a content table.
+-- topic_tags broadens recall: a memory tagged "auth, jwt" matches a query
+-- about "login" or "authentication" even when the summary prose uses
+-- different vocabulary.
 CREATE VIRTUAL TABLE IF NOT EXISTS FleetMemory_fts USING fts5(
     summary,
-    files_changed
+    files_changed,
+    topic_tags
 );
 
 -- ── Task notes ────────────────────────────────────────────────────────────────

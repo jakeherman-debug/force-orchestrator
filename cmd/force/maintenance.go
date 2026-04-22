@@ -258,6 +258,7 @@ type MemoryExport struct {
 	Outcome      string `json:"outcome"`
 	Summary      string `json:"summary"`
 	FilesChanged string `json:"files_changed,omitempty"`
+	TopicTags    string `json:"topic_tags,omitempty"`
 }
 
 type EscalationExport struct {
@@ -342,11 +343,11 @@ func exportFleet(db *sql.DB, outFile string) error {
 	export.Convoys = store.ListConvoys(db)
 
 	// Fleet memories
-	memRows, err := db.Query(`SELECT repo, task_id, outcome, summary, IFNULL(files_changed,'') FROM FleetMemory ORDER BY id ASC`)
+	memRows, err := db.Query(`SELECT repo, task_id, outcome, summary, IFNULL(files_changed,''), IFNULL(topic_tags,'') FROM FleetMemory ORDER BY id ASC`)
 	if err == nil {
 		for memRows.Next() {
 			var m MemoryExport
-			memRows.Scan(&m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged)
+			memRows.Scan(&m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged, &m.TopicTags)
 			export.Memories = append(export.Memories, m)
 		}
 		memRows.Close()
@@ -440,7 +441,7 @@ func importFleet(db *sql.DB, inFile string) (int, error) {
 		db.QueryRow(`SELECT COUNT(*) FROM FleetMemory WHERE repo = ? AND task_id = ? AND outcome = ? AND summary = ?`,
 			m.Repo, m.TaskID, m.Outcome, m.Summary).Scan(&exists)
 		if exists == 0 {
-			store.StoreFleetMemory(db, m.Repo, m.TaskID, m.Outcome, m.Summary, m.FilesChanged)
+			store.StoreFleetMemory(db, m.Repo, m.TaskID, m.Outcome, m.Summary, m.FilesChanged, m.TopicTags)
 		}
 	}
 

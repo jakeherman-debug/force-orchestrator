@@ -222,6 +222,7 @@ type FleetMemoryEntry struct {
 	Outcome      string // "success" or "failure"
 	Summary      string // task description + outcome reason
 	FilesChanged string // comma-separated list of affected files (success only)
+	TopicTags    string // comma-separated 3-5 short keywords (e.g. "auth, middleware, jwt")
 	Embedding    []byte // reserved: float32 vector blob for future sqlite-vec upgrade
 	CreatedAt    string
 }
