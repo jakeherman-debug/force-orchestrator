@@ -912,6 +912,28 @@ select option { background: var(--bg2); color: var(--text); }
   flex-wrap: wrap;
 }
 
+/* ── Convoy timeline ──────────────────────────────────────────────────────── */
+.convoy-timeline {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.timeline-header {
+  padding: 0 10px 6px;
+}
+.timeline-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--bg3);
+}
+.timeline-entry:last-child { border-bottom: none; }
+.timeline-ts     { font-size: 11px; color: var(--text2); min-width: 120px; flex-shrink: 0; }
+.timeline-label  { font-weight: 500; min-width: 140px; flex-shrink: 0; }
+.timeline-detail { color: var(--text2); }
+
 /* Fleet memory badges + per-attempt memory expansion */
 .mem-tags {
   margin-top: 4px;
