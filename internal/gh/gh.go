@@ -157,12 +157,16 @@ func (c *Client) PRCreate(req PRCreateRequest) (*PRCreateResult, error) {
 
 // PRView is the JSON subset of `gh pr view --json`. Only fields we actually use
 // are declared; `gh` will return extras we ignore without error.
+//
+// Note: `gh pr view --json` does NOT expose a boolean "merged" field (as of
+// gh 2.x). We derive Merged from State=="MERGED" after unmarshal so callers
+// get a stable bool without needing to know the gh quirk.
 type PRView struct {
 	Number           int        `json:"number"`
 	URL              string     `json:"url"`
 	State            string     `json:"state"`            // OPEN | CLOSED | MERGED
 	IsDraft          bool       `json:"isDraft"`
-	Merged           bool       `json:"merged"`
+	Merged           bool       `json:"-"`                // derived from State — NOT requested from gh
 	MergedAt         string     `json:"mergedAt"`
 	ClosedAt         string     `json:"closedAt"`
 	Reviews          []PRReview `json:"reviews"`
@@ -183,7 +187,7 @@ type PRReview struct {
 // PRView runs `gh pr view <number> --json ...` and unmarshals the result.
 func (c *Client) PRView(cwd, repo string, number int) (*PRView, error) {
 	args := []string{"pr", "view", fmt.Sprintf("%d", number),
-		"--json", "number,url,state,isDraft,merged,mergedAt,closedAt,reviews,mergeStateStatus,mergeable",
+		"--json", "number,url,state,isDraft,mergedAt,closedAt,reviews,mergeStateStatus,mergeable",
 	}
 	if repo != "" {
 		args = append(args, "--repo", repo)
@@ -197,6 +201,8 @@ func (c *Client) PRView(cwd, repo string, number int) (*PRView, error) {
 		return nil, fmt.Errorf("gh pr view: parse json: %v (payload=%s)", unmarshalErr,
 			strings.TrimSpace(string(stdout)))
 	}
+	// gh does not expose a `merged` field — derive it from state.
+	v.Merged = strings.EqualFold(v.State, "MERGED")
 	return &v, nil
 }
 
