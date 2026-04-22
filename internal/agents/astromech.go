@@ -432,7 +432,15 @@ Do not re-do work that is already correctly committed.`
 		if strings.HasPrefix(err.Error(), "claude CLI timed out") {
 			msg = fmt.Sprintf("Timeout Err: Claude CLI exceeded %v time limit", sessionTimeout)
 		} else {
-			msg = fmt.Sprintf("Claude CLI Err: %s", outputStr)
+			// Use err.Error() for the actual failure reason (e.g. "exit status
+			// 1") and append a short stdout preview only when it's likely to
+			// carry a real error message. Dumping the full stdout as the error
+			// poisons error_log with Claude's stream-of-thought narration when
+			// the CLI exits non-zero mid-stream.
+			msg = fmt.Sprintf("Claude CLI Err: %s", err.Error())
+			if excerpt := extractClaudeErrorExcerpt(outputStr); excerpt != "" {
+				msg += " — " + excerpt
+			}
 		}
 
 		// Rate limit: back off without burning the circuit breaker

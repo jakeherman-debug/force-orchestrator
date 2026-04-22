@@ -95,29 +95,32 @@ func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, exi
 	}
 
 	// Pick the base for the new branch: convoy ask-branch if supplied, else the
-	// repo's default branch. The ask-branch may only exist on origin (Pilot
-	// pushes without creating a local tracking branch), so we try remote refs
-	// first before falling back to the local name.
+	// repo's default branch.
+	//
+	// Invariant: when a baseBranch is supplied (ask-branch), we ALWAYS fetch
+	// and use refs/remotes/origin/<base> — never the local ref. Sub-PRs merge
+	// into the ask-branch on origin and the local tracking branch is never
+	// updated by the fleet. Using the local ref silently drops prior sibling
+	// tasks' work; new agent branches would start pre-merge and clash with
+	// already-landed changes when Jedi's sub-PR opens.
 	base := baseBranch
 	if base == "" {
 		base = GetDefaultBranch(repoPath)
 	} else {
-		// Ensure we have the branch locally; fetch if necessary.
-		if out, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", base).CombinedOutput(); verifyErr != nil || strings.TrimSpace(string(out)) == "" {
-			// Try origin ref.
-			remoteRef := "refs/remotes/origin/" + base
-			if out, remoteErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef).CombinedOutput(); remoteErr != nil || strings.TrimSpace(string(out)) == "" {
-				// Fetch and retry once.
-				exec.Command("git", "-C", repoPath, "fetch", "origin", base).Run()
-				if _, reVerifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef).CombinedOutput(); reVerifyErr != nil {
-					// Can't resolve the ask-branch — fall back to default branch
-					// rather than fail the task. Pilot will complain separately.
-					base = GetDefaultBranch(repoPath)
-				} else {
-					base = remoteRef
-				}
-			} else {
-				base = remoteRef
+		// Always fetch — cheap (milliseconds on an up-to-date remote) and
+		// ensures origin/<base> reflects any sub-PR merges that happened
+		// between this task and the prior sibling.
+		exec.Command("git", "-C", repoPath, "fetch", "origin", base).Run()
+		remoteRef := "refs/remotes/origin/" + base
+		if _, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef).CombinedOutput(); verifyErr == nil {
+			base = remoteRef
+		} else {
+			// Remote ref is unreachable (ask-branch was deleted, auth broken,
+			// etc.). Try the local ref as a fallback, then default branch. This
+			// is defensive — in practice Pilot's CreateAskBranch always pushes,
+			// so origin has the branch.
+			if _, localErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", base).CombinedOutput(); localErr != nil {
+				base = GetDefaultBranch(repoPath)
 			}
 		}
 	}
