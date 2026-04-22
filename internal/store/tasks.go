@@ -36,6 +36,7 @@ var InfrastructureTaskTypes = []string{
 	"CIFailureTriage",
 	"MedicReview",
 	"PRReviewTriage",
+	"ConvoyReview",
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {

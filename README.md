@@ -542,9 +542,11 @@ Pilot's happy path is pure shell-out (git + gh) — no LLM — so it's fast and 
 **File:** `diplomat.go`
 **Roster:** Leia-Organa, Padme-Amidala, Bail-Organa
 
-Diplomat handles the final ship step: once a convoy's sub-PRs are all merged, Diplomat rebases the ask-branch onto main, populates the repo's PR template via Claude, runs a sanity pass (secret scan + placeholder check + length limit), and opens a **draft PR** against main. Human operators review the draft PR on GitHub and click Ship it in the dashboard (or merge directly) to complete the convoy.
+Diplomat handles the final ship step: once a convoy's sub-PRs are all merged, Diplomat rebases the ask-branch onto main, populates the repo's PR template via Claude, runs a sanity pass (secret scan + placeholder check + length limit), and opens a **draft PR** against main. Immediately after the draft PR is created, Diplomat queues a **ConvoyReview** task (see PR-Based Delivery Flow below). Human operators review the draft PR on GitHub and click Ship it in the dashboard (or merge directly) after ConvoyReview passes.
 
 Sanity pass failures trigger one LLM retry with critic feedback; a second failure escalates.
+
+Diplomat also claims `ConvoyReview` and `PRReviewTriage` tasks in its work loop — these are convoy-level quality gates, not new delivery steps.
 
 ### PR-Based Delivery Flow
 
@@ -556,10 +558,11 @@ The fleet's default delivery path is a GitHub PR, not a local merge. For each co
 4. **Medic handles any CI failure** (`CIFailureTriage`): classifies Flaky / RealBug / Environmental / BranchProtection / Unfixable, retriggers or spawns a fix task on the astromech branch.
 5. **CI circuit breaker**: if a repo accrues 5 Environmental failures in 1 hour, sub-PR creation for that repo pauses for 30 minutes so the fleet doesn't pile up broken PRs.
 6. **Pilot rebases the ask-branch periodically** as main drifts — every 15 minutes via `main-drift-watch`, using a cheap `git ls-remote` to detect whether main actually moved before spending compute. On rebase conflict, Pilot spawns a CodeEdit task on the ask-branch itself; when Jedi Council approves it, the special-case handler force-pushes the resolved ask-branch and updates the stored base SHA (no sub-PR, because head==base would be nonsense).
-7. **Diplomat opens the draft PR** into main once all sub-PRs are merged and ask-branch CI is green. The PR body is LLM-populated from the repo's `pull_request_template.md` plus the convoy summary; a pre-post sanity pass scans for secrets and unfilled placeholders.
-8. **Human clicks "Ship it"** in the dashboard (`force convoy ship <id>` on the CLI). There is no auto-ship to main — the human gate is intentional.
-9. **Pilot cleans up** the ask-branch after the draft PR merges; Librarian records a convoy-level memory.
-10. **ship-it-nag** reminds the operator if a draft PR sits unshipped for 24h / 72h / 1 week.
+7. **Diplomat opens the draft PR** into main once all sub-PRs are merged and ask-branch CI is green. The PR body is LLM-populated from the repo's `pull_request_template.md` plus the convoy summary; a pre-post sanity pass scans for secrets and unfilled placeholders. Diplomat immediately queues a **ConvoyReview** task (see below).
+8. **ConvoyReview** runs one LLM pass over the full ask-branch diff vs main, checking it against every commissioned task. Gaps (commissioned work missing from the diff), regressions (correct code removed), and incorrect changes (does the opposite of what was asked) each spawn a CodeEdit fix task on the ask-branch. Once those fix tasks complete, the `convoy-review-watch` dog re-triggers a fresh pass. The loop terminates when a pass returns clean — at that point the operator's "Ship It" is a true final approval on a verified diff.
+9. **Human clicks "Ship it"** in the dashboard (`force convoy ship <id>` on the CLI). There is no auto-ship to main — the human gate is intentional.
+10. **Pilot cleans up** the ask-branch after the draft PR merges; Librarian records a convoy-level memory.
+11. **ship-it-nag** reminds the operator if a draft PR sits unshipped for 24h / 72h / 1 week.
 
 All 14 dogs under the Inquisitor's 5-minute cycle; most are cheap polls that only trigger work when an actual event is detected.
 
@@ -1055,6 +1058,7 @@ Background maintenance tasks that run on a cooldown managed by the Inquisitor. V
 | `db-vacuum` | 6 hours | Runs `PRAGMA wal_checkpoint`, `ANALYZE`, and `VACUUM` on holocron.db |
 | `holonet-rotate` | 24 hours | Rotates `holonet.jsonl` when it exceeds 50 MB |
 | `mail-cleanup` | 12 hours | Removes unread task-scoped mail for completed/failed tasks older than 48h; removes read mail older than 30 days |
+| `convoy-review-watch` | 5 min | Re-triggers ConvoyReview for `DraftPROpen` convoys once their fix tasks complete; also catches any convoy that missed the Diplomat fast-path trigger |
 
 If any dog fails, the operator receives an alert mail.
 
@@ -1130,7 +1134,27 @@ Tests that require `git` or FTS5 skip themselves gracefully when those dependenc
 
 11. Council-Mace reviews #3 → Approved → merges → spawns WriteMemory for Librarian
 
-12. Inquisitor notices Convoy #1 is complete
-    └─ Marks Convoy #1 Completed
-    └─ Mails operator: "[CONVOY COMPLETE] [1] Add search to the API"
+12. Diplomat picks up ShipConvoy
+    └─ Rebases ask-branch onto main, runs sanity pass
+    └─ Opens draft PR into main
+    └─ Queues ConvoyReview #10 for Convoy #1
+
+13. Diplomat picks up ConvoyReview #10
+    └─ Reads full ask-branch diff vs main
+    └─ Runs LLM pass: finds gap — rateLimitPatterns not updated
+    └─ Spawns CodeEdit fix task #11 on the ask-branch
+    └─ Marks ConvoyReview #10 Completed
+
+14. R2-D2 picks up CodeEdit #11, fixes the gap → AwaitingCouncilReview
+    Council approves → force-pushes ask-branch
+
+15. convoy-review-watch dog sees: DraftPROpen, no pending ConvoyReview, no active fix tasks
+    └─ Queues ConvoyReview #12
+
+16. Diplomat picks up ConvoyReview #12
+    └─ LLM pass returns "clean" — diff now correctly delivers everything commissioned
+    └─ Mails operator: "[CONVOY REVIEW PASSED] Add search to the API — pass 2"
+    └─ Marks Completed
+
+17. Operator clicks "Ship it" — confident the diff is complete and correct
 ```

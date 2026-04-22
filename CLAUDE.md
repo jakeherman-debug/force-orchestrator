@@ -52,6 +52,39 @@ bot and human review comments into `PRReviewComments` and Diplomat's
    entirely. Both switches check in `dogPRReviewPoll` and
    `dogPRReviewResolve` before any gh calls.
 
+## ConvoyReview invariants
+
+`ConvoyReview` is the convoy-level completeness gate. It runs one LLM pass over the full
+ask-branch diff vs main, finds gaps/regressions/incorrectness, and spawns CodeEdit fix tasks.
+A `convoy-review-watch` dog re-triggers it once those fix tasks complete, creating a
+self-healing loop that terminates when a pass returns `"clean"`.
+
+1. **Triggered on DraftPROpen (two paths).** Diplomat calls `QueueConvoyReview` immediately
+   after `SetConvoyStatus(db, convoyID, "DraftPROpen")`. The `convoy-review-watch` dog (5 min
+   cadence) acts as a safety net: it queues a ConvoyReview for any `DraftPROpen` convoy that
+   has no pending review and no active fix tasks.
+2. **Idempotent queue.** `QueueConvoyReview` returns `0, nil` (no-op) if a ConvoyReview is
+   already `Pending` or `Locked` for that convoy. Always call it freely; it will not double-queue.
+3. **Loop cap at 5 passes.** If a convoy has already completed ≥ 5 ConvoyReview passes,
+   `runConvoyReview` escalates (SeverityHigh) and fails the task instead of spawning more fix
+   tasks. The loop cap check runs BEFORE the LLM call.
+4. **Fix tasks are pinned to the ask-branch.** Each CodeEdit spawned by a ConvoyReview has its
+   `branch_name` set to the convoy's ask-branch via `store.SetBranchName`. This ensures the
+   Jedi Council's `completeAskBranchResolution` path applies (force-push to ask-branch, no
+   redundant sub-PR).
+5. **Max findings cap.** Each pass spawns at most `convoy_review_max_findings` fix tasks
+   (SystemConfig, default 5). Remaining findings are picked up in the next pass.
+6. **ConvoyReview is an infrastructure task.** It is registered in `InfrastructureTaskTypes`
+   and is hidden from the dashboard. It never spawns another ConvoyReview (only CodeEdit fix
+   tasks). The dog handles re-triggering.
+7. **On LLM parse failure.** One retry with a critic note appended. Second failure → mark
+   Completed (not Failed) so the dog retries on the next 5-min tick rather than leaving a
+   stuck Locked task.
+8. **Dog re-trigger condition.** `dogConvoyReviewWatch` queues a new ConvoyReview only when
+   ALL of the following hold: convoy status is `DraftPROpen`, no ConvoyReview is
+   `Pending`/`Locked`, and no child CodeEdit task (whose parent is a ConvoyReview for this
+   convoy) is in a non-terminal status.
+
 ## Self-healing is the default; escalation is the last step
 
 Every new `fmt.Errorf(...)` or `FailBounty(...)` added during a PR-flow change must fall into one of these buckets:
