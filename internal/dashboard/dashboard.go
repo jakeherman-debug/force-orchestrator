@@ -111,7 +111,7 @@ func sseLoop(w http.ResponseWriter, r *http.Request, f *os.File, fi os.FileInfo,
 			if newFI, statErr := os.Stat(path); statErr == nil && fi != nil {
 				if !os.SameFile(fi, newFI) {
 					f.Close()
-					f, fi = openWithBackfill(path, 0)
+					f, fi = openAtEnd(path)
 					if f == nil {
 						return
 					}
@@ -130,13 +130,9 @@ func handleHolonetStream(path string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		f, fi := openWithBackfill(path, 32*1024)
+		f, fi := openAtEnd(path)
 		if f == nil {
-			fmt.Fprintf(w, "data: \"\"\n\n") // sentinel: file not yet present, keep connection alive
-			if fl, ok := w.(http.Flusher); ok {
-				fl.Flush()
-			}
-			<-r.Context().Done()
+			fmt.Fprintf(w, "data: {\"error\":\"holonet.jsonl not found\"}\n\n")
 			return
 		}
 		defer f.Close()
