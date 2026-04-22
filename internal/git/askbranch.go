@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -117,34 +118,45 @@ func DeleteAskBranch(repoPath, branchName string) error {
 }
 
 // RebaseBranchOnto rebases branch onto the latest origin/<onto> and returns
-// the new tip SHA on success. On conflict, returns an error and leaves the
-// repo in a state the caller can inspect (rebase --abort is run first).
+// the new tip SHA on success. On conflict, returns an error.
+//
+// Uses a temporary git worktree so the operation never touches the HEAD of the
+// caller's checkout — the main working directory stays on whatever branch the
+// operator has checked out.
 //
 // This deliberately does NOT force-push — the caller (Pilot) decides whether
 // to push after classifying the outcome.
 func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err error) {
-	// Safety: always start from a clean state.
-	exec.Command("git", "-C", repoPath, "rebase", "--abort").Run()
-	exec.Command("git", "-C", repoPath, "merge", "--abort").Run()
+	// Fetch both branches so origin refs are current.
+	if out, fetchErr := exec.Command("git", "-C", repoPath, "fetch", "origin", onto, branch).CombinedOutput(); fetchErr != nil {
+		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
+	}
 
-	// Fetch the onto branch fresh.
-	if out, fetchErr := exec.Command("git", "-C", repoPath, "fetch", "origin", onto).CombinedOutput(); fetchErr != nil {
-		return "", fmt.Errorf("git fetch origin %s: %s", onto, strings.TrimSpace(string(out)))
+	// Create a temporary worktree so we never disturb the main checkout's HEAD.
+	wtPath, wtErr := os.MkdirTemp("", "force-rebase-*")
+	if wtErr != nil {
+		return "", fmt.Errorf("mktemp: %w", wtErr)
 	}
-	// Check out the branch to rebase.
-	if out, coErr := exec.Command("git", "-C", repoPath, "checkout", branch).CombinedOutput(); coErr != nil {
-		return "", fmt.Errorf("git checkout %s: %s", branch, strings.TrimSpace(string(out)))
+	defer func() {
+		exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", wtPath).Run()
+		os.RemoveAll(wtPath)
+	}()
+
+	if out, wtAddErr := exec.Command("git", "-C", repoPath, "worktree", "add", "--checkout", wtPath, branch).CombinedOutput(); wtAddErr != nil {
+		return "", fmt.Errorf("git worktree add: %s", strings.TrimSpace(string(out)))
 	}
-	// Rebase. Conflicts leave the repo mid-rebase — we abort and return error
-	// with the conflict output so Pilot can spawn a RebaseConflict task.
-	if out, rbErr := exec.Command("git", "-C", repoPath, "rebase", "refs/remotes/origin/"+onto).CombinedOutput(); rbErr != nil {
-		exec.Command("git", "-C", repoPath, "rebase", "--abort").Run()
+
+	// Rebase. Conflicts leave the worktree mid-rebase; we abort and return an
+	// error with conflict output so Pilot can spawn a RebaseConflict task.
+	if out, rbErr := exec.Command("git", "-C", wtPath, "rebase", "refs/remotes/origin/"+onto).CombinedOutput(); rbErr != nil {
+		exec.Command("git", "-C", wtPath, "rebase", "--abort").Run()
 		return "", fmt.Errorf("git rebase: %s", strings.TrimSpace(string(out)))
 	}
-	// Get the new tip SHA.
-	shaOut, shaErr := exec.Command("git", "-C", repoPath, "rev-parse", branch).CombinedOutput()
+
+	// Capture the new tip SHA from the worktree.
+	shaOut, shaErr := exec.Command("git", "-C", wtPath, "rev-parse", "HEAD").CombinedOutput()
 	if shaErr != nil {
-		return "", fmt.Errorf("git rev-parse %s: %s", branch, strings.TrimSpace(string(shaOut)))
+		return "", fmt.Errorf("git rev-parse HEAD: %s", strings.TrimSpace(string(shaOut)))
 	}
 	return strings.TrimSpace(string(shaOut)), nil
 }
