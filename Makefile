@@ -2,13 +2,16 @@ BINARY  := force
 TAGS    := sqlite_fts5
 GOFLAGS := -tags $(TAGS)
 
-.PHONY: build test cover clean help
+.PHONY: build test test-js cover clean help
 
 build:
 	go build $(GOFLAGS) -o $(BINARY) ./cmd/force/
 
 test:
 	go test $(GOFLAGS) -timeout 300s ./...
+
+test-js:
+	node --test internal/dashboard/static/app_test.js
 
 cover:
 	go test $(GOFLAGS) -timeout 300s -coverprofile=cover.out ./...
@@ -20,5 +23,6 @@ clean:
 help:
 	@echo "make build   — compile the force binary (with FTS5)"
 	@echo "make test    — run all tests (with FTS5)"
+	@echo "make test-js — run JS unit tests for dashboard"
 	@echo "make cover   — run tests and print coverage summary"
 	@echo "make clean   — remove build artifacts"
