@@ -59,6 +59,16 @@
   </div>
 </div>
 
+<!-- ── Ready-to-ship banner ─────────────────────────────────────────────────── -->
+<!-- Shows whenever one or more convoys are in DraftPROpen state. The fleet has
+     done its job and is waiting on the operator to click Ship It — this is the
+     only state where the operator is the bottleneck, so it needs to be loud. -->
+<div id="ship-banner" class="ship-banner hidden" onclick="jumpToShipReady()" role="button" tabindex="0">
+  <span class="ship-banner-icon">🚢</span>
+  <span class="ship-banner-msg"><span id="ship-banner-count">0</span> convoy(s) ready to ship — click to review</span>
+  <span class="ship-banner-cta">Go to Convoys →</span>
+</div>
+
 <!-- ── Tab bar ──────────────────────────────────────────────────────────────── -->
 <nav id="tab-bar">
   <button class="tab-btn active" data-tab="tasks"       onclick="switchTab('tasks')">Tasks <span class="tab-badge" id="tbadge-tasks"></span></button>

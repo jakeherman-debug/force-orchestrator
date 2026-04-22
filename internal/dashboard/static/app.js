@@ -178,6 +178,28 @@ function renderStats() {
 
   $('tbadge-mail').textContent = s.unread_mail || '';
   $('tbadge-mail').className = 'tab-badge' + (s.unread_mail > 0 ? ' hot' : '');
+
+  // Ship-ready banner: show when any convoy is DraftPROpen, hide otherwise.
+  // Visible from every tab so the operator can't miss it — the fleet is
+  // literally blocked on their Ship It click.
+  const shipCount = s.ready_to_ship || 0;
+  const banner = $('ship-banner');
+  if (banner) {
+    $('ship-banner-count').textContent = shipCount;
+    banner.classList.toggle('hidden', shipCount === 0);
+  }
+  const convoysBadge = $('tbadge-convoys');
+  if (convoysBadge) {
+    convoysBadge.textContent = shipCount > 0 ? String(shipCount) : '';
+    convoysBadge.className = 'tab-badge' + (shipCount > 0 ? ' hot' : '');
+  }
+}
+
+// jumpToShipReady switches to the Convoys tab and sets the filter so the
+// ship-ready convoys are visible immediately. Wired to the top banner click.
+function jumpToShipReady() {
+  setConvoyStatusFilter('active');
+  switchTab('convoys');
 }
 
 // ── URL sync ──────────────────────────────────────────────────────────────────
@@ -469,6 +491,13 @@ function renderPanel(d) {
   if (CANCELLABLE.includes(d.status)) {
     btns.push(`<button class="action-btn cancel-btn" onclick="cancelTask(${d.id})">Cancel</button>`);
   }
+  // Ship It shortcut: only when the parent convoy has genuinely finished
+  // (ConvoyReadyToShip = DraftPROpen + no active tasks + no pending review).
+  // Offering the button while fix tasks or rebase conflicts are still in
+  // flight would let an operator ship a half-finished convoy.
+  if (d.convoy_id > 0 && d.convoy_ready_to_ship) {
+    btns.push(`<button class="action-btn ship-btn" onclick="showShip(${d.convoy_id})">🚢 Ship Convoy #${d.convoy_id}</button>`);
+  }
   $('panel-actions').innerHTML = btns.join('');
 
   // Body
@@ -479,13 +508,35 @@ function renderPanel(d) {
   const blockedByLinks = (d.blocked_by && d.blocked_by.length > 0)
     ? d.blocked_by.map(id => `<a onclick="openPanel(${id})" style="cursor:pointer">#${id}</a>`).join(', ')
     : '';
+
+  // Branch cell: if the server returned a web URL (resolved from the repo's
+  // remote), render as a clickable link; otherwise plain text. Keeps legacy
+  // repos (no remote_url) and test DBs working without special casing.
+  const branchCell = d.branch_name
+    ? (d.branch_url
+        ? `<a href="${escHtml(d.branch_url)}" target="_blank" rel="noopener">${escHtml(d.branch_name)}</a>`
+        : escHtml(d.branch_name))
+    : '—';
+
+  // PR cell: only rendered when a sub-PR was opened for this task. The state
+  // badge mirrors the usual status-pill semantics (Open/Merged/Closed).
+  let prRow = '';
+  if (d.pr_number) {
+    const label = `#${d.pr_number}` + (d.pr_state ? ` <span class="dim">(${escHtml(d.pr_state)})</span>` : '');
+    const prCell = d.pr_url
+      ? `<a href="${escHtml(d.pr_url)}" target="_blank" rel="noopener">${label}</a>`
+      : label;
+    prRow = `<span class="meta-key">PR</span><span class="meta-val">${prCell}</span>`;
+  }
+
   sections.push(`
     <div class="panel-section">
       <h3>Details</h3>
       <div class="meta-grid">
         <span class="meta-key">Repo</span>      <span class="meta-val">${escHtml(d.repo || '—')}</span>
         <span class="meta-key">Owner</span>     <span class="meta-val">${escHtml(d.owner || '—')}</span>
-        <span class="meta-key">Branch</span>    <span class="meta-val">${escHtml(d.branch_name || '—')}</span>
+        <span class="meta-key">Branch</span>    <span class="meta-val">${branchCell}</span>
+        ${prRow}
         <span class="meta-key">Convoy</span>    <span class="meta-val">${d.convoy_id || '—'}</span>
         <span class="meta-key">Retries</span>   <span class="meta-val">${d.retry_count} / infra:${d.infra_failures}</span>
         <span class="meta-key">Priority</span>  <span class="meta-val">${d.priority}</span>
@@ -856,11 +907,18 @@ function renderConvoys(convoys) {
 
   let list = convoys || [];
 
-  // Status filter: 'active' matches Active and Failed; 'completed' matches only Completed
+  // Status filter:
+  //   'active'    — anything NOT in a terminal state (Active, Failed, AwaitingDraftPR,
+  //                 DraftPROpen, Shipping, etc.). Old versions of this filter hid
+  //                 DraftPROpen convoys, which is exactly when the Ship It button
+  //                 appears — so ops couldn't find convoys that needed their action.
+  //   'completed' — terminal-success states (Completed, Shipped).
+  const TERMINAL_CONVOY = new Set(['completed','shipped','cancelled','archived']);
   if (S.convoyStatusFilter !== 'all') {
     list = list.filter(c => {
       const st = (c.status || '').toLowerCase();
-      if (S.convoyStatusFilter === 'active') return st === 'active' || st === 'failed';
+      if (S.convoyStatusFilter === 'active')    return !TERMINAL_CONVOY.has(st);
+      if (S.convoyStatusFilter === 'completed') return st === 'completed' || st === 'shipped';
       return st === S.convoyStatusFilter;
     });
   }
@@ -892,7 +950,11 @@ function renderConvoys(convoys) {
     const cancelBtn = c.status === 'Active'
       ? `<button class="action-btn cancel-btn" onclick="cancelConvoy(${c.id})">Cancel Convoy</button>`
       : '';
-    const shipBtn = c.status === 'DraftPROpen'
+    // Ship It: only when the fleet has truly quiesced (no pending tasks, no
+    // in-flight ConvoyReview). Relying on status='DraftPROpen' alone was a bug —
+    // the draft PR exists well before fix tasks, rebase conflicts, and review
+    // comments are resolved.
+    const shipBtn = c.ready_to_ship
       ? `<button class="action-btn ship-btn" onclick="showShip(${c.id})">Ship It</button>`
       : '';
     const reviewBadge = renderPRReviewBadge(c);

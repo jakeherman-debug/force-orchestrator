@@ -185,6 +185,40 @@ func ForcePushBranch(repoPath, branch string) error {
 	return nil
 }
 
+// TriggerCIRerun adds an empty commit to `branch` and pushes it to origin.
+// The new HEAD SHA re-triggers any push-event-driven CI, which is how we
+// recover from stuck check runs (checks stayed QUEUED and never ran because
+// the runner never picked up the original push event).
+//
+// Fetches first to avoid non-fast-forward rejections when the remote branch
+// has advanced (e.g. a concurrent rebase landed). Uses a plain `push` (not
+// force) — the new empty commit is additive and should fast-forward.
+//
+// Errors from any step propagate so the caller can fall through to escalation
+// if the re-trigger attempt itself fails (we don't want to silently fail and
+// leave the stall undetected).
+func TriggerCIRerun(repoPath, branch, message string) error {
+	if message == "" {
+		message = "ci: trigger stalled check run"
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch %s: %s", branch, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "checkout", branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("git checkout %s: %s", branch, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "reset", "--hard", "origin/"+branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("git reset --hard origin/%s: %s", branch, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "commit", "--allow-empty", "-m", message).CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit --allow-empty: %s", strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "push", "origin", branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("git push origin %s: %s", branch, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // BranchNameSlug sanitises a string into a git-branch-safe slug: lowercases,
 // replaces non-alphanumerics with '-', collapses runs of '-', trims leading/
 // trailing '-', and caps at maxLen characters. An empty result yields "ask".

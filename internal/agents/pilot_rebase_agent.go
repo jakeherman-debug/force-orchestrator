@@ -107,14 +107,26 @@ func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pr
 
 	newTip, rebaseErr := igit.RebaseBranchOnto(repo.LocalPath, p.Branch, p.AskBranch)
 	if rebaseErr != nil {
-		// Rebase conflict — spawn a CodeEdit task for the astromech to resolve,
-		// then complete Pilot's task (resolution is the astromech's job).
-		logger.Printf("RebaseAgentBranch #%d: conflict — spawning RebaseConflict task for branch %s", bounty.ID, p.Branch)
+		// Rebase conflict — spawn (or reuse) a CodeEdit task for the astromech to
+		// resolve, then complete Pilot's task (resolution is the astromech's job).
+		// Idempotency key dedups on the agent branch: two concurrent rebase
+		// attempts can't produce two conflict tasks for the same branch.
+		idKey := "rebase-conflict:branch:" + p.Branch
 		conflictPayload := fmt.Sprintf(
 			"[REBASE_CONFLICT for task #%d repo %s]\n\nAgent branch: %s\nAsk-branch: %s\n\nThe rebase of the agent branch onto the ask-branch conflicted. Merge %s into %s, resolve conflict markers, and commit. The branch will be force-pushed after council review.",
 			p.TaskID, p.Repo, p.Branch, p.AskBranch, p.AskBranch, p.Branch,
 		)
-		conflictTaskID, _ := store.AddConvoyTask(db, bounty.ID, p.Repo, conflictPayload, p.ConvoyID, 5, "Pending")
+		conflictTaskID, existed, addErr := store.AddConvoyTaskIdempotent(db, idKey, bounty.ID, p.Repo, conflictPayload, p.ConvoyID, 5, "Pending")
+		if addErr != nil {
+			store.FailBounty(db, bounty.ID, fmt.Sprintf("queue rebase-conflict task: %v", addErr))
+			return
+		}
+		if existed {
+			logger.Printf("RebaseAgentBranch #%d: conflict — reusing existing task #%d for branch %s", bounty.ID, conflictTaskID, p.Branch)
+			store.UpdateBountyStatus(db, bounty.ID, "Completed")
+			return
+		}
+		logger.Printf("RebaseAgentBranch #%d: conflict — spawned task #%d for branch %s", bounty.ID, conflictTaskID, p.Branch)
 		store.SetBranchName(db, conflictTaskID, p.Branch)
 		store.SendMail(db, "Pilot", "astromech",
 			fmt.Sprintf("[REBASE CONFLICT] Task #%d — resolve and commit on %s", conflictTaskID, p.Branch),

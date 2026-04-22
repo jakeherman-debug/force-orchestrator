@@ -10,6 +10,7 @@ type DashboardStatus struct {
 	OpenEscalations   int            `json:"open_escalations"`
 	HighEscalations   int            `json:"high_escalations"`
 	ActiveConvoys     int            `json:"active_convoys"`
+	ReadyToShip       int            `json:"ready_to_ship"` // convoys in DraftPROpen awaiting operator "Ship It"
 	UnreadMail        int            `json:"unread_mail"`
 	TotalSpendDollars float64        `json:"total_spend_dollars"`
 }
@@ -88,6 +89,12 @@ type DashboardTaskDetail struct {
 	ParentID       int                `json:"parent_id"`
 	ConvoyID       int                `json:"convoy_id"`
 	BranchName     string             `json:"branch_name"`
+	BranchURL      string             `json:"branch_url,omitempty"` // web URL to the branch on origin (empty when remote not resolvable)
+	PRNumber       int                `json:"pr_number,omitempty"`  // sub-PR number if one is tracked in AskBranchPRs
+	PRURL          string             `json:"pr_url,omitempty"`     // sub-PR web URL if a PR has been opened
+	PRState        string             `json:"pr_state,omitempty"`   // Open | Merged | Closed
+	ConvoyStatus       string         `json:"convoy_status,omitempty"`         // parent convoy's current status
+	ConvoyReadyToShip  bool           `json:"convoy_ready_to_ship,omitempty"`  // true only when fleet work is truly done — drives the Ship It shortcut
 	RetryCount     int                `json:"retry_count"`
 	InfraFailures  int                `json:"infra_failures"`
 	Priority       int                `json:"priority"`
@@ -125,6 +132,7 @@ type DashboardConvoy struct {
 	Completed         int                        `json:"completed"`
 	Total             int                        `json:"total"`
 	HasPlanned        bool                       `json:"has_planned"`
+	ReadyToShip       bool                       `json:"ready_to_ship"` // DraftPROpen AND fleet work quiesced — operator's turn
 	AskBranches       []DashboardAskBranch       `json:"ask_branches,omitempty"`
 	SubPRRollup       *DashboardSubPRRollup      `json:"sub_pr_rollup,omitempty"`
 	PRReviewRollup    *DashboardPRReviewRollup   `json:"pr_review_rollup,omitempty"`

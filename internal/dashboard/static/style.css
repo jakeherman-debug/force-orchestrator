@@ -773,6 +773,35 @@ td.mail-body-preview {
 #mail-modal .directive-box strong { font-weight: 600; }
 #mail-modal .directive-box em { font-style: italic; }
 
+/* Ship-ready banner — visible above the tab bar whenever a convoy is in
+   DraftPROpen. Intentionally loud; the operator is the bottleneck here. */
+.ship-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: linear-gradient(90deg, #1f6feb 0%, #0969da 100%);
+  color: #fff;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  user-select: none;
+  transition: filter 120ms ease;
+}
+.ship-banner:hover { filter: brightness(1.08); }
+.ship-banner.hidden { display: none; }
+.ship-banner-icon { font-size: 18px; }
+.ship-banner-msg { flex: 1; }
+.ship-banner-cta {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.9;
+  padding: 3px 10px;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+}
+
 /* Ship-it confirmation modal */
 #ship-modal .modal-body { gap: 0; padding-bottom: 0; }
 

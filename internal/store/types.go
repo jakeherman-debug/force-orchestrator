@@ -124,17 +124,18 @@ type ConvoyAskBranch struct {
 //   Open → (CI red)   → failure_count++ → Medic CIFailureTriage
 //   Open → (closed externally) → state=Closed, task escalated
 type AskBranchPR struct {
-	ID           int
-	TaskID       int
-	ConvoyID     int
-	Repo         string
-	PRNumber     int
-	PRURL        string
-	State        string // Open, Merged, Closed
-	ChecksState  string // Pending, Success, Failure
-	FailureCount int
-	MergedAt     string
-	CreatedAt    string
+	ID                  int
+	TaskID              int
+	ConvoyID            int
+	Repo                string
+	PRNumber            int
+	PRURL               string
+	State               string // Open, Merged, Closed
+	ChecksState         string // Pending, Success, Failure
+	FailureCount        int
+	StallRetriggerCount int    // sub-PR CI stall diagnosis re-trigger attempts
+	MergedAt            string
+	CreatedAt           string
 }
 
 // ── Persistent agent worktree ─────────────────────────────────────────────────
@@ -191,10 +192,11 @@ const (
 // The captain checks convoy plan coherence after each Astromech commit —
 // it is not a code reviewer (that is the council's job) but a plan coherence check.
 type CaptainRuling struct {
-	Decision    string          `json:"decision"`     // "approve", "reject", "escalate"
-	Feedback    string          `json:"feedback"`     // reason for rejection or escalation; empty on approve
-	TaskUpdates []CaptainUpdate `json:"task_updates"` // downstream task payload changes
-	NewTasks    []CaptainTask   `json:"new_tasks"`    // additional tasks to insert into the convoy
+	Decision       string          `json:"decision"`        // "approve", "reject", "escalate"
+	Feedback       string          `json:"feedback"`        // reason for rejection or escalation; empty on approve
+	TaskUpdates    []CaptainUpdate `json:"task_updates"`    // downstream task payload changes
+	NewTasks       []CaptainTask   `json:"new_tasks"`       // additional tasks to insert into the convoy
+	RejectedFiles  []string        `json:"rejected_files"`  // files touched out-of-scope; propagated as a SCOPE GUARD section on requeue
 }
 
 // CaptainUpdate is a payload modification for an existing downstream task.

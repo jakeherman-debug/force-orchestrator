@@ -369,6 +369,46 @@ func AddConvoyTask(db *sql.DB, parentID int, repo, payload string, convoyID, pri
 	return int(id), nil
 }
 
+// AddConvoyTaskIdempotent is the dedup-aware sibling of AddConvoyTask. If a
+// non-terminal CodeEdit task already exists with the same idempotencyKey, it
+// returns that task's ID and (alreadyExisted=true) without inserting. Terminal
+// statuses (Completed / Cancelled / Failed) do not block a new insert — past
+// runs are "done" and the next pass is allowed to try again.
+//
+// Callers should use stable keys that describe the work, not the moment:
+//
+//	rebase-conflict:branch:<branch>         — one outstanding conflict per agent branch
+//	rebase-conflict:askbranch:<askbranch>   — one outstanding conflict per ask-branch
+//	convoy-review-fix:<convoyID>:<hash>     — one outstanding fix per review finding
+//
+// idempotencyKey must be non-empty; callers that can't produce a stable key
+// should use plain AddConvoyTask instead.
+func AddConvoyTaskIdempotent(db *sql.DB, idempotencyKey string, parentID int, repo, payload string, convoyID, priority int, status string) (id int, alreadyExisted bool, err error) {
+	if idempotencyKey == "" {
+		return 0, false, fmt.Errorf("AddConvoyTaskIdempotent: idempotencyKey required")
+	}
+	var existing int
+	qErr := db.QueryRow(`SELECT id FROM BountyBoard
+		WHERE idempotency_key = ?
+		  AND status NOT IN ('Completed','Cancelled','Failed')
+		LIMIT 1`, idempotencyKey).Scan(&existing)
+	if qErr == nil && existing > 0 {
+		return existing, true, nil
+	}
+	if qErr != nil && qErr != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("dedup query: %w", qErr)
+	}
+	res, execErr := db.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, idempotency_key, created_at)
+		 VALUES (?, ?, 'CodeEdit', ?, ?, ?, ?, ?, datetime('now'))`,
+		parentID, repo, status, payload, convoyID, priority, idempotencyKey)
+	if execErr != nil {
+		return 0, false, execErr
+	}
+	newID, _ := res.LastInsertId()
+	return int(newID), false, nil
+}
+
 // AddCodeEditTask creates a CodeEdit task with full field support. Returns the new task ID.
 func AddCodeEditTask(db *sql.DB, repo, payload string, convoyID, priority, taskTimeout int) int {
 	res, _ := db.Exec(

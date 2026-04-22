@@ -65,6 +65,50 @@ func extractClaudeErrorExcerpt(stdout string) string {
 	return ""
 }
 
+// queueReshardDecompose creates a Decompose bounty that sends a permanently-
+// failed task back to Commander for re-planning into smaller shards.
+// Idempotent per failed task: if a Decompose for the same parent task already
+// exists (any status except Cancelled), this is a no-op. Returns the existing
+// or new bounty ID, or 0 on insert failure.
+//
+// The payload is shaped as a Commander-style request: it tells Commander that
+// the original task was too large and names the target repo explicitly so the
+// re-plan stays in the same repo.
+func queueReshardDecompose(db *sql.DB, b *store.Bounty, stageName, errMsg string) int {
+	// Dedup: one outstanding reshard per failed task.
+	var existing int
+	db.QueryRow(`SELECT id FROM BountyBoard
+		WHERE type = 'Decompose' AND parent_id = ? AND status != 'Cancelled'
+		LIMIT 1`, b.ID).Scan(&existing)
+	if existing > 0 {
+		return existing
+	}
+
+	// Shape the payload as an operator-style feature request so Commander's
+	// standard decomposition prompt handles it naturally. Repo name is named
+	// explicitly because Commander keys on it.
+	payload := fmt.Sprintf(
+		"[INFRA_FAILURE_RESHARD from task #%d]\n\n"+
+			"The following task repeatedly crashed the agent (%d infra failures in %s). "+
+			"Most likely cause: the scope is too large to complete in a single agent session.\n\n"+
+			"Re-plan this work as 2-5 smaller, focused sub-tasks that each fit comfortably in a single session. "+
+			"Target repo: %s. Preserve the original goal.\n\n"+
+			"Last error:\n%s\n\n"+
+			"Original task payload:\n%s",
+		b.ID, MaxInfraFailures, stageName, b.TargetRepo, util.TruncateStr(errMsg, 400),
+		util.TruncateStr(b.Payload, 2000))
+
+	res, err := db.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		 VALUES (?, ?, 'Decompose', 'Pending', ?, ?, ?, datetime('now'))`,
+		b.ID, b.TargetRepo, payload, b.ConvoyID, b.Priority)
+	if err != nil {
+		return 0
+	}
+	id, _ := res.LastInsertId()
+	return int(id)
+}
+
 // handleInfraFailure handles a transient or permanent CLI/infra error for an agent stage.
 // It increments the infra failure counter, applies backoff on retry, and permanently fails
 // the task (with operator mail) once MaxInfraFailures is reached.
@@ -96,34 +140,25 @@ func handleInfraFailure(
 			fmt.Sprintf("Task: %s\nInfra failure in %s (permanent): %s",
 				util.TruncateStr(directiveText(b.Payload), 300), stageName, msg), "", "")
 
-		// Spawn a CodeEdit remediation task so an agent can investigate the infra issue
-		// and re-queue the original task once fixed. We use AddConvoyTask (not
-		// AddBounty) so target_repo, convoy_id, and priority carry forward —
-		// otherwise astromechs fail to claim with "unknown target repository ''"
-		// and the remediation task is permanently stuck.
-		remPayload := fmt.Sprintf(
-			"Infra failure on task #%d (repo: %s, stage: %s).\n\nError: %s\n\n"+
-				"Investigate and fix the underlying infrastructure issue so the original task can be retried.\n"+
-				"Common causes:\n"+
-				"- Claude API temporarily unavailable → verify API key and network connectivity\n"+
-				"- Repository path misconfigured → run 'force repos' to verify\n"+
-				"- Worktree corruption → run 'force cleanup' or manually remove stale worktrees\n"+
-				"- Disk full or permission denied → check disk space and file permissions\n\n"+
-				"Once your fix is merged, the fleet will automatically requeue task #%d.",
-			b.ID, b.TargetRepo, stageName, msg, b.ID)
-		remID, addErr := store.AddConvoyTask(db, b.ID, b.TargetRepo, remPayload, b.ConvoyID, b.Priority, "Pending")
-		if addErr != nil {
-			logger.Printf("Task %d: failed to spawn remediation task: %v", b.ID, addErr)
-			remID = 0
+		// Bubble to Commander for re-decomposition. Repeated infra failures on
+		// the same task usually mean the scope is too large for a single agent
+		// session (claude CLI crashes mid-execution on big multi-file tasks).
+		// Commander re-plans the work into smaller shards that each fit.
+		// If it turns out to be a true infrastructure outage, Commander will
+		// produce a similar plan and the next agent cycle will either succeed
+		// (transient issue resolved) or hit the same cap and re-bubble.
+		reshardID := queueReshardDecompose(db, b, stageName, msg)
+		if reshardID > 0 {
+			logger.Printf("Task %d: permanently failed in %s — queued Decompose #%d for Commander reshard", b.ID, stageName, reshardID)
 		} else {
-			logger.Printf("Task %d: permanently failed in %s — spawned remediation CodeEdit task #%d", b.ID, stageName, remID)
+			logger.Printf("Task %d: permanently failed in %s — Decompose reshard skipped (insert failed)", b.ID, stageName)
 		}
 
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
-			fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nRemediation task #%d has been queued to investigate. Once the fix is merged, task #%d will be automatically requeued.",
-				b.ID, stageName, MaxInfraFailures, msg, remID, b.ID),
-			b.ID, store.MailTypeAlert)
+			fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nDecompose task #%d has been queued — Commander will re-plan this work into smaller shards.",
+				b.ID, stageName, MaxInfraFailures, msg, reshardID),
+			b.ID, store.MailTypeInfo)
 	} else {
 		store.UpdateBountyStatus(db, b.ID, retryStatus)
 		backoff := InfraBackoff(count)

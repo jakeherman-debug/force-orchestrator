@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -52,6 +53,12 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open'`).Scan(&s.OpenEscalations)
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open' AND severity = 'HIGH'`).Scan(&s.HighEscalations)
 		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoys)
+		// "Ready to ship" is strictly narrower than DraftPROpen: the convoy's
+		// draft PR exists AND every in-convoy task is terminal AND no
+		// ConvoyReview is in flight. A DraftPROpen convoy with pending fix
+		// tasks or an unresolved ask-branch rebase is NOT ready — the fleet
+		// is still working on it.
+		s.ReadyToShip = len(store.ListReadyToShipConvoyIDs(db))
 		unread, _ := store.MailStats(db, "", "")
 		s.UnreadMail = unread
 		s.TotalSpendDollars = store.TotalSpendDollars(db)
@@ -504,6 +511,30 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 	db.QueryRow(`SELECT IFNULL(locked_at,''), IFNULL(error_log,'') FROM BountyBoard WHERE id = ?`, id).
 		Scan(&detail.LockedAt, &detail.ErrorLog)
 
+	// Link decoration — surface the web URL for the task's branch and, if a
+	// sub-PR has been opened, the PR URL/number/state. Both are best-effort:
+	// when the repo has no remote_url (legacy or test paths), BranchURL stays
+	// empty and the frontend renders the branch as plain text.
+	if b.BranchName != "" {
+		if repoCfg := store.GetRepo(db, b.TargetRepo); repoCfg != nil {
+			detail.BranchURL = gh.WebBranchURL(repoCfg.RemoteURL, b.BranchName)
+		}
+	}
+	if pr := store.GetAskBranchPRByTask(db, id); pr != nil {
+		detail.PRNumber = pr.PRNumber
+		detail.PRURL = pr.PRURL
+		detail.PRState = pr.State
+	}
+	// Parent convoy state powers the "Ship It" shortcut on the task panel.
+	// ConvoyStatus is the raw status string (informational); ConvoyReadyToShip
+	// is the strict gate the UI should actually branch on — it's true only
+	// when the fleet's self-healing work has finished and the operator is
+	// the sole remaining actor.
+	if b.ConvoyID > 0 {
+		db.QueryRow(`SELECT IFNULL(status,'') FROM Convoys WHERE id = ?`, b.ConvoyID).Scan(&detail.ConvoyStatus)
+		detail.ConvoyReadyToShip = store.ConvoyReadyToShip(db, b.ConvoyID)
+	}
+
 	json.NewEncoder(w).Encode(detail)
 }
 
@@ -652,13 +683,14 @@ func handleConvoys(db *sql.DB) http.HandlerFunc {
 			var planned int
 			db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND status = 'Planned'`, c.ID).Scan(&planned)
 			convoy := DashboardConvoy{
-				ID:         c.ID,
-				Name:       c.Name,
-				Status:     c.Status,
-				CreatedAt:  c.CreatedAt,
-				Completed:  completed,
-				Total:      total,
-				HasPlanned: planned > 0,
+				ID:          c.ID,
+				Name:        c.Name,
+				Status:      c.Status,
+				CreatedAt:   c.CreatedAt,
+				Completed:   completed,
+				Total:       total,
+				HasPlanned:  planned > 0,
+				ReadyToShip: store.ConvoyReadyToShip(db, c.ID),
 			}
 			// PR-flow annotations.
 			askBranches := store.ListConvoyAskBranches(db, c.ID)

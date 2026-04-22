@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/gh"
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
 
@@ -259,10 +260,19 @@ func deriveGHRepoFromRemoteURL(remoteURL string) string {
 // mergeStateStatus=CLEAN triggers an immediate merge before this fires.
 const missingCITimeout = 10 * time.Minute
 
-// subPRCIStaleLimit caps how long a sub-PR's CI may keep us in Pending state
-// before we flag the task stalled. 2 hours is far beyond normal CI runtimes
-// and points to a stuck build.
+// subPRCIStaleLimit is the first bell for CI stall. At this age we diagnose
+// the stuck-vs-slow distinction and, for stuck-runner cases, try a targeted
+// empty-commit re-trigger instead of escalating.
 const subPRCIStaleLimit = 2 * time.Hour
+
+// subPRCIHardLimit is the fallback ceiling. Past this age we escalate
+// regardless of diagnosis — either CI is genuinely broken or GitHub itself
+// isn't recovering.
+const subPRCIHardLimit = 6 * time.Hour
+
+// subPRMaxStallRetriggers caps empty-commit re-trigger attempts per PR to
+// prevent the self-healing loop from thrashing forever.
+const subPRMaxStallRetriggers = 2
 
 // subPRAutoMergeStrategy decides the merge strategy for sub-PRs. Squash keeps
 // ask-branch history linear (one commit per task); operators can override by
@@ -430,7 +440,7 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 		}
 		age := time.Since(createdAt)
 		if age > subPRCIStaleLimit {
-			onSubPRStalled(db, pr, logger)
+			onSubPRStalled(db, ghc, pr, logger)
 			return
 		}
 		if age > missingCITimeout && len(checks) == 0 {
@@ -597,13 +607,142 @@ func escalateSubPR(db *sql.DB, pr store.AskBranchPR, severity store.EscalationSe
 	return nil
 }
 
-func onSubPRStalled(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
-	msg := fmt.Sprintf("sub-PR #%d: CI pending over %v — stuck or misconfigured", pr.PRNumber, subPRCIStaleLimit)
-	if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
-		logger.Printf("sub-pr-ci-watch: task %d escalation tx failed: %v", pr.TaskID, err)
+// triggerStalledRerunFn is the dependency-injection point for re-triggering
+// a stuck CI run by force-pushing an empty commit. Tests swap it out.
+var triggerStalledRerunFn = func(repoPath, branch, message string) error {
+	return igit.TriggerCIRerun(repoPath, branch, message)
+}
+
+// SetTriggerStalledRerunForTest lets external packages install a fake re-trigger
+// function for the duration of a test. Call the returned restore fn (or use
+// t.Cleanup) to put the real impl back.
+func SetTriggerStalledRerunForTest(fn func(repoPath, branch, message string) error) (restore func()) {
+	prev := triggerStalledRerunFn
+	triggerStalledRerunFn = fn
+	return func() { triggerStalledRerunFn = prev }
+}
+
+// onSubPRStalled diagnoses a CI stall and attempts self-healing before
+// escalating. Flow:
+//
+//  1. If we're past the hard limit, escalate unconditionally — either the
+//     branch is truly broken or GitHub itself is not recovering.
+//  2. Otherwise inspect per-check state via `gh pr checks`:
+//     - All checks QUEUED (no runner ever picked up): stuck runner. If we
+//       haven't hit the re-trigger cap, push an empty commit to force a new
+//       check suite. Increment the retrigger counter.
+//     - Any check IN_PROGRESS or PENDING: actively running but slow. Wait
+//       another cycle without touching the branch — we'll re-check in 5 min.
+//     - No checks at all: this is a misconfig-or-runner-outage case. Re-trigger
+//       once (same empty-commit path) to shake GitHub out of it.
+//  3. If re-trigger fails or we've already retried the max number of times,
+//     escalate with a diagnosis-aware message.
+//
+// The counter (stall_retrigger_count on AskBranchPRs) persists across dog
+// ticks so we can't loop forever — two re-triggers then escalate.
+func onSubPRStalled(db *sql.DB, ghc interface {
+	PRChecks(cwd, repo string, number int) ([]gh.PRCheck, gh.ChecksState, error)
+}, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+	// Age calc — hard-limit shortcut so we don't burn cycles diagnosing a
+	// PR that's been stuck half a day.
+	age := timeSinceCreatedAt(pr.CreatedAt)
+	if age > subPRCIHardLimit {
+		msg := fmt.Sprintf("sub-PR #%d: CI pending over %v (hard limit) — giving up on automated recovery", pr.PRNumber, subPRCIHardLimit)
+		if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
+			logger.Printf("sub-pr-ci-watch: task %d hard-limit escalation failed: %v", pr.TaskID, err)
+			return
+		}
+		logger.Printf("sub-pr-ci-watch: task %d escalated — CI pending over hard limit %v", pr.TaskID, subPRCIHardLimit)
 		return
 	}
-	logger.Printf("sub-pr-ci-watch: task %d escalated — Pending for %v", pr.TaskID, subPRCIStaleLimit)
+
+	// Already tried the max number of re-triggers — escalate now rather than
+	// looping forever on a branch GitHub just won't run.
+	if pr.StallRetriggerCount >= subPRMaxStallRetriggers {
+		msg := fmt.Sprintf("sub-PR #%d: CI stall re-triggered %d× with no recovery — GitHub runner or workflow config issue", pr.PRNumber, pr.StallRetriggerCount)
+		if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
+			logger.Printf("sub-pr-ci-watch: task %d retrigger-cap escalation failed: %v", pr.TaskID, err)
+			return
+		}
+		logger.Printf("sub-pr-ci-watch: task %d escalated — re-trigger cap reached", pr.TaskID)
+		return
+	}
+
+	// Per-check diagnosis: we need to know WHY checks are pending. If a runner
+	// actually picked up the work, IN_PROGRESS is our signal to keep waiting;
+	// if everything is QUEUED, no runner ever engaged and we should nudge.
+	repo := store.GetRepo(db, pr.Repo)
+	cwd, ghRepo := "", ""
+	if repo != nil {
+		cwd = repo.LocalPath
+		ghRepo = deriveGHRepoFromRemoteURL(repo.RemoteURL)
+	}
+	checks, _, checksErr := ghc.PRChecks(cwd, ghRepo, pr.PRNumber)
+	if checksErr != nil {
+		// If we can't even list checks, we can't diagnose — wait another tick.
+		logger.Printf("sub-pr-ci-watch: stall diagnosis for #%d failed (%v) — deferring to next tick", pr.PRNumber, checksErr)
+		return
+	}
+
+	// Scan checks: if any are IN_PROGRESS, the runner engaged and CI is just
+	// slow — don't intervene. Every other state (QUEUED, PENDING, WAITING, or
+	// an empty check list) is a runner/workflow-dispatch problem we can try
+	// to unstick with an empty-commit push.
+	inProgress := false
+	for _, c := range checks {
+		if strings.ToUpper(c.State) == "IN_PROGRESS" {
+			inProgress = true
+			break
+		}
+	}
+
+	if inProgress {
+		// Genuinely slow CI — the runner is chewing on it. Leave it alone; the
+		// next tick will check again. Not a stall we need to intervene on.
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d still IN_PROGRESS at %v — deferring (slow CI, not stuck)", pr.PRNumber, age)
+		return
+	}
+
+	// All checks QUEUED or there are simply zero checks — both are symptoms
+	// of a runner/workflow problem we can try to unstick. Push an empty commit
+	// to force a new check suite.
+	branch := pr.Repo
+	parent, _ := store.GetBounty(db, pr.TaskID)
+	if parent != nil && parent.BranchName != "" {
+		branch = parent.BranchName
+	}
+	if cwd == "" || branch == "" {
+		// Missing infra — can't re-trigger, fall through to escalation path.
+		msg := fmt.Sprintf("sub-PR #%d: CI stalled and repo/branch info missing for re-trigger", pr.PRNumber)
+		if err := escalateSubPR(db, pr, store.SeverityMedium, msg); err != nil {
+			logger.Printf("sub-pr-ci-watch: task %d missing-infra escalation failed: %v", pr.TaskID, err)
+		}
+		return
+	}
+
+	retriggerMsg := fmt.Sprintf("ci: retrigger stalled run (sub-PR #%d)", pr.PRNumber)
+	if err := triggerStalledRerunFn(cwd, branch, retriggerMsg); err != nil {
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d re-trigger push failed: %v — escalating", pr.PRNumber, err)
+		msg := fmt.Sprintf("sub-PR #%d: CI stall re-trigger failed: %v", pr.PRNumber, err)
+		if escErr := escalateSubPR(db, pr, store.SeverityMedium, msg); escErr != nil {
+			logger.Printf("sub-pr-ci-watch: task %d retrigger-fail escalation failed: %v", pr.TaskID, escErr)
+		}
+		return
+	}
+	newCount, _ := store.IncrementStallRetriggerCount(db, pr.ID)
+	logger.Printf("sub-pr-ci-watch: sub-PR #%d stuck on QUEUED checks — pushed empty commit to re-trigger (attempt %d/%d)",
+		pr.PRNumber, newCount, subPRMaxStallRetriggers)
+}
+
+// timeSinceCreatedAt parses pr.CreatedAt (SQLite datetime format) and returns
+// the elapsed time since. Returns 0 on parse failure so callers treat the PR
+// as fresh rather than wrongly escalating.
+func timeSinceCreatedAt(createdAt string) time.Duration {
+	t, err := time.Parse("2006-01-02 15:04:05", createdAt)
+	if err != nil {
+		return 0
+	}
+	return time.Since(t)
 }
 
 // queueAgentBranchRebase is the shared self-healing path for BEHIND and

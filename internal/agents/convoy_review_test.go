@@ -309,6 +309,101 @@ func TestDogConvoyReviewWatch_SkipsWhenPendingExists(t *testing.T) {
 	}
 }
 
+func TestRunConvoyReview_ActiveAskBranchConflict_NoSpawn(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := seedDraftPROpenConvoy(t, db)
+
+	// Seed the Pilot-spawned ask-branch REBASE_CONFLICT (payload starts with
+	// "[REBASE_CONFLICT for convoy #N"). No other active tasks — this verifies
+	// the ask-branch conflict alone is enough to gate fix-task spawning.
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'api', 'CodeEdit', 'Pending', '[REBASE_CONFLICT for convoy #' || ? || ' repo api] resolve', ?, 5, datetime('now'))`,
+		convoyID, convoyID)
+
+	stubConvoyReviewLLM(t, convoyReviewResult{
+		Status: "needs_work",
+		Findings: []convoyReviewFinding{
+			{Type: "gap", Description: "missing feature", Fix: "add it", Repo: "api"},
+		},
+	})
+
+	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
+	bounty := &store.Bounty{ID: 993, Type: "ConvoyReview", Payload: string(payload)}
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
+		VALUES (993, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+
+	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 993`).Scan(&status)
+	if status != "Completed" {
+		t.Errorf("expected Completed (deferred), got %s", status)
+	}
+	var fixCount int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = 993`).Scan(&fixCount)
+	if fixCount != 0 {
+		t.Errorf("expected 0 fix tasks while ask-branch conflict unresolved, got %d", fixCount)
+	}
+}
+
+func TestDogConvoyReviewWatch_SkipsWhenActiveAskBranchConflict(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := seedDraftPROpenConvoy(t, db)
+
+	// Seed an unresolved ask-branch REBASE_CONFLICT. Everything else is quiet.
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'api', 'CodeEdit', 'Pending', '[REBASE_CONFLICT for convoy #' || ? || ' repo api] resolve', ?, 5, datetime('now'))`,
+		convoyID, convoyID)
+
+	if err := dogConvoyReviewWatch(db, testLogger{}); err != nil {
+		t.Fatalf("dog error: %v", err)
+	}
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
+		AND (payload LIKE '%"convoy_id":' || ? || ',%' OR payload LIKE '%"convoy_id":' || ? || '}%')`,
+		convoyID, convoyID).Scan(&count)
+	if count != 0 {
+		t.Errorf("dog must not queue ConvoyReview while ask-branch conflict unresolved, got %d", count)
+	}
+}
+
+func TestHasActiveAskBranchConflict_BoundaryMatching(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Convoy 1 has a conflict; convoy 10 must not match even though "1" is a
+	// prefix of "10" — that's exactly the bug the LIKE boundary guards against.
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'api', 'CodeEdit', 'Pending', '[REBASE_CONFLICT for convoy #1 repo api] resolve', 1, 5, datetime('now'))`)
+
+	if !store.HasActiveAskBranchConflict(db, 1) {
+		t.Error("convoy 1 should show active conflict")
+	}
+	if store.HasActiveAskBranchConflict(db, 10) {
+		t.Error("convoy 10 must not spuriously match convoy 1's conflict")
+	}
+	if store.HasActiveAskBranchConflict(db, 2) {
+		t.Error("convoy 2 has no conflict; should be false")
+	}
+}
+
+func TestHasActiveAskBranchConflict_CompletedDoesntCount(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'api', 'CodeEdit', 'Completed', '[REBASE_CONFLICT for convoy #5 repo api] resolve', 5, 5, datetime('now'))`)
+
+	if store.HasActiveAskBranchConflict(db, 5) {
+		t.Error("Completed conflict must not count as active")
+	}
+}
+
 func TestDogConvoyReviewWatch_SkipsWhenActiveFixTasks(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()

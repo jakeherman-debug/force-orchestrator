@@ -97,9 +97,49 @@ Every new `fmt.Errorf(...)` or `FailBounty(...)` added during a PR-flow change m
 - **Auto-retry:** the error is `ErrClassTransient` or `ErrClassRateLimited` (see `internal/gh/gh.go`). Pilot's retry wrapper handles these automatically.
 - **Auto-fix:** Medic `CIFailureTriage` spawns a CodeEdit task on the astromech branch. Fix loops cap at 3 attempts per PR.
 - **Auto-bypass:** repo marked `pr_flow_enabled=0` or `quarantined_at` stamped, so future tasks take the legacy path.
-- **Operator escalation:** `CreateEscalation(...)` + operator mail. Reserved for cases where self-healing is genuinely not possible (auth expired, branch protection, unfixable bug).
+- **Auto-reshard:** permanent infra failures bubble a `Decompose` bounty to Commander via `queueReshardDecompose` in `util.go`. Commander re-plans the oversized task into smaller shards instead of failing to the operator. Idempotent per failed task.
+- **Auto-retrigger:** CI stalls in `handleSubPRPoll` diagnose per-check state first. All-QUEUED (stuck runner) → push empty commit via `igit.TriggerCIRerun` to force a new check suite, capped at `subPRMaxStallRetriggers` attempts. Any IN_PROGRESS → wait (slow CI, not stuck). Only past `subPRCIHardLimit` or the retrigger cap do we escalate.
+- **Operator escalation:** `CreateEscalation(...)` + operator mail. Reserved for cases where self-healing is genuinely not possible (auth expired, branch protection, unfixable bug, loop caps hit).
 
 If a new error path does not fit any of the above, stop and design the self-healing path before writing the code.
+
+## Duplicate task prevention
+
+Spawned child tasks (rebase-conflict resolvers, ConvoyReview fix tasks) must be idempotent so that repeated dog ticks or racing code paths don't produce duplicate CodeEdits for the same underlying work.
+
+- Use `store.AddConvoyTaskIdempotent(db, key, ...)` (not plain `AddConvoyTask`) whenever the task is generated from a signal that may fire more than once for the same state. The key is written to `BountyBoard.idempotency_key`; a non-terminal row with the same key makes the call a no-op returning the existing ID.
+- Canonical keys:
+  - `rebase-conflict:branch:<agent_branch>` — Pilot's agent-branch conflict spawn (`pilot_rebase_agent.go`)
+  - `rebase-conflict:askbranch:<ask_branch>` — Pilot's ask-branch conflict spawn (`pilot_rebase.go`)
+- Terminal statuses (Completed / Cancelled / Failed) do NOT dedup — a genuine retry is allowed after the prior attempt finished. The dedup only suppresses parallel spawns against the same open work.
+
+## Captain scope guard
+
+When the Captain rejects a task for out-of-scope file changes, it populates `CaptainRuling.RejectedFiles` with the verbatim list of paths. On requeue, `buildScopeGuardedPayload` prepends a `[SCOPE GUARD — DO NOT MODIFY]` block listing exactly those paths. The next agent attempt sees the rules in the payload up front instead of having to parse free-form feedback prose.
+
+- The guard is marked with `scopeGuardMarker` at the top of the payload and terminates with `\n---\n`. `stripScopeGuard` peels it off so repeated rejections produce a single (latest) guard rather than accumulating.
+- The convoy-hold rejection path also strips any prior guard before re-appending its own feedback, keeping the payload clean.
+- Captain's system prompt instructs: populate `rejected_files` on scope-violation rejections; leave it `[]` on non-scope rejections (wrong approach, broken logic, etc.).
+
+## Ask-branch conflict gating
+
+When a convoy's ask-branch itself has an unresolved `REBASE_CONFLICT` CodeEdit (Pilot-spawned, payload starts with `[REBASE_CONFLICT for convoy #<convoyID>`), other fleet spawners must defer:
+
+- `runConvoyReview` gates fix-task spawning on `store.HasActiveAskBranchConflict(db, convoyID)`. A conflicted ask-branch tip means any new fix task would inherit the conflict and pile on.
+- `dogConvoyReviewWatch` gates queuing new ConvoyReview tasks on the same check.
+- The helper `HasActiveAskBranchConflict` uses boundary-safe LIKE matching (`[REBASE_CONFLICT for convoy #N ` with trailing space) so convoy 1's conflict doesn't mask convoy 10.
+
+## CI stall self-healing
+
+`onSubPRStalled` in `internal/agents/pr_flow.go` runs when a sub-PR has been in Pending CI longer than `subPRCIStaleLimit` (2h). It diagnoses the root cause before any escalation:
+
+1. **Past `subPRCIHardLimit` (6h)** — escalate unconditionally. GitHub isn't recovering.
+2. **Retrigger cap reached (`StallRetriggerCount >= subPRMaxStallRetriggers`)** — escalate. We tried and it didn't help.
+3. **Any check `IN_PROGRESS`** — wait another tick. CI is slow, not stuck.
+4. **All checks `QUEUED`/`PENDING` or zero checks reported** — push an empty commit via `igit.TriggerCIRerun` to force a new check suite, increment `stall_retrigger_count`. This is how we recover from stuck GitHub runners without operator intervention.
+5. **Retrigger push itself fails** — escalate with the git error.
+
+Tests inject a stub via `SetTriggerStalledRerunForTest` rather than running real `git push` in unit tests.
 
 ## Testing rules
 

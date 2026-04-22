@@ -222,6 +222,17 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		return
 	}
 
+	// Also gate on an unresolved ask-branch conflict. Spawning fix tasks onto
+	// an ask-branch whose tip is broken would stack more conflicts onto the
+	// same branch — wait for the astromech to resolve the existing conflict
+	// before piling on more work. The dog re-triggers once the conflict clears.
+	if store.HasActiveAskBranchConflict(db, payload.ConvoyID) {
+		logger.Printf("ConvoyReview #%d: convoy %d has an unresolved ask-branch REBASE_CONFLICT — deferring fix-task spawn",
+			bounty.ID, payload.ConvoyID)
+		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		return
+	}
+
 	// Spawn fix tasks, capped to avoid runaway task creation.
 	maxFindings := getIntConfig(db, "convoy_review_max_findings", 5)
 	findings := result.Findings
@@ -342,6 +353,14 @@ func dogConvoyReviewWatch(db *sql.DB, logger interface{ Printf(string, ...any) }
 			  AND type NOT IN (`+store.InfrastructureTaskTypesSQLList()+`)`,
 			c.id).Scan(&activeConvoyTasks)
 		if activeConvoyTasks > 0 {
+			continue
+		}
+
+		// Skip if the ask-branch itself has an unresolved REBASE_CONFLICT.
+		// Queuing a ConvoyReview while the tip is broken would just produce a
+		// no-spawn pass (same gate fires inside runConvoyReview), so save the
+		// LLM call and wait for the astromech to resolve it.
+		if store.HasActiveAskBranchConflict(db, c.id) {
 			continue
 		}
 

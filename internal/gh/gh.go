@@ -287,6 +287,47 @@ func rollupChecks(checks []PRCheck) ChecksState {
 	return ChecksSuccess
 }
 
+// WebRepoURL converts a git remote URL into the web URL root for the hosting
+// service (e.g. "git@github.com:acme/api.git" → "https://github.com/acme/api").
+// Supports GitHub SSH and HTTPS forms; returns "" for file:// and anything
+// else we can't confidently convert. Used by the dashboard to surface
+// clickable links to branches/PRs without any gh CLI roundtrip.
+func WebRepoURL(remoteURL string) string {
+	if remoteURL == "" {
+		return ""
+	}
+	// SSH form: git@<host>:owner/repo(.git)
+	if strings.HasPrefix(remoteURL, "git@") {
+		hostEnd := strings.Index(remoteURL, ":")
+		if hostEnd <= 4 {
+			return ""
+		}
+		host := remoteURL[4:hostEnd]
+		path := strings.TrimSuffix(remoteURL[hostEnd+1:], ".git")
+		if host == "" || path == "" {
+			return ""
+		}
+		return "https://" + host + "/" + path
+	}
+	// HTTPS/HTTP form: already a web URL, just strip .git suffix.
+	if strings.HasPrefix(remoteURL, "https://") || strings.HasPrefix(remoteURL, "http://") {
+		return strings.TrimSuffix(remoteURL, ".git")
+	}
+	return ""
+}
+
+// WebBranchURL returns the web URL for a branch on the given remote, e.g.
+// "https://github.com/acme/api/tree/force/ask-1-feature". Returns "" when
+// the remote URL isn't convertible (file://, unknown host) — callers should
+// fall back to plain text in that case.
+func WebBranchURL(remoteURL, branch string) string {
+	root := WebRepoURL(remoteURL)
+	if root == "" || branch == "" {
+		return ""
+	}
+	return root + "/tree/" + branch
+}
+
 // PRMergeAuto marks a PR for auto-merge once all required checks pass. Passing
 // --auto is what we actually want for sub-PRs: the fleet doesn't need to block
 // waiting for CI; GitHub merges for us when it's ready.
