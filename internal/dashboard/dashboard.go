@@ -45,6 +45,8 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/memories/", handleMemories(db))
 	mux.HandleFunc("/api/events", handleHolonetStream("holonet.jsonl"))
 	mux.HandleFunc("/api/fleet-log", handleFleetLogStream("fleet.log"))
+	mux.HandleFunc("/api/dogs", handleDogsList(db))
+	mux.HandleFunc("/api/dogs/", handleDogsRun(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── Static assets + SPA fallback ─────────────────────────────────────────

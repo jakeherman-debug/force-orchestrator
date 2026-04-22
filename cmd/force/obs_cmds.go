@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -354,16 +355,60 @@ func cmdPrune(db *sql.DB, keepDays int, dryRun bool) {
 	pruneFleet(db, keepDays, dryRun)
 }
 
-func cmdDogs(db *sql.DB) {
-	dogs := agents.ListDogs(db)
-	fmt.Printf("%-20s %-10s %-20s %s\n", "DOG", "RUNS", "LAST RUN", "NEXT RUN")
-	fmt.Println(strings.Repeat("-", 75))
-	for _, d := range dogs {
-		lastRun := d.LastRun
-		if lastRun == "" {
-			lastRun = "(never)"
+func cmdDogs(db *sql.DB, args []string) {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "", "list":
+		dogs := agents.ListDogs(db)
+		fmt.Printf("%-22s %-10s %-20s %s\n", "DOG", "RUNS", "LAST RUN", "NEXT RUN")
+		fmt.Println(strings.Repeat("-", 78))
+		for _, d := range dogs {
+			lastRun := d.LastRun
+			if lastRun == "" {
+				lastRun = "(never)"
+			}
+			fmt.Printf("%-22s %-10d %-20s %s\n", d.Name, d.RunCount, truncate(lastRun, 20), d.NextRun)
 		}
-		fmt.Printf("%-20s %-10d %-20s %s\n", d.Name, d.RunCount, truncate(lastRun, 20), d.NextRun)
+	case "run":
+		if len(args) < 2 {
+			fmt.Println("Usage: force dogs run <name>")
+			fmt.Println()
+			fmt.Println("Available dogs:")
+			for _, name := range agents.DogNames() {
+				fmt.Printf("  %s\n", name)
+			}
+			os.Exit(1)
+		}
+		name := args[1]
+		valid := false
+		for _, v := range agents.DogNames() {
+			if v == name {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			fmt.Printf("Unknown dog %q.\n\nAvailable dogs:\n", name)
+			for _, v := range agents.DogNames() {
+				fmt.Printf("  %s\n", v)
+			}
+			os.Exit(1)
+		}
+		fmt.Printf("Running %s...\n", name)
+		logger := log.New(os.Stdout, "["+name+"] ", log.LstdFlags)
+		if err := agents.RunDogByName(db, name, logger); err != nil {
+			fmt.Printf("Dog %s failed: %v\n", name, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Dog %s completed.\n", name)
+	default:
+		fmt.Printf("Unknown subcommand %q. Usage:\n", sub)
+		fmt.Println("  force dogs            # list dogs and last-run times")
+		fmt.Println("  force dogs run <name> # force-run a dog immediately")
+		os.Exit(1)
 	}
 }
 

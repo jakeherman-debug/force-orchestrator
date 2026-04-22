@@ -375,7 +375,7 @@ func main() {
 		cmdEscalations(db, os.Args[2:])
 
 	case "dogs":
-		cmdDogs(db)
+		cmdDogs(db, os.Args[2:])
 
 	case "cleanup":
 		cmdCleanup(db)

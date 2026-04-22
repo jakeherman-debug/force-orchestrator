@@ -86,6 +86,23 @@ func RunDogs(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 	}
 }
 
+// RunDogByName force-runs the named dog exactly once, bypassing the cooldown.
+// Used by CLI ("force dogs run <name>") and dashboard ("Run now") buttons.
+// Returns an error with the list of valid dog names if the name is unknown.
+func RunDogByName(db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
+	// Mark the run before executing so a crashed dog still shows up as attempted.
+	store.DogMarkRun(db, name)
+	return runDog(db, name, logger)
+}
+
+// DogNames returns the canonical order of registered dogs. Used for CLI
+// completion and validation.
+func DogNames() []string {
+	out := make([]string, len(dogOrder))
+	copy(out, dogOrder)
+	return out
+}
+
 func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
 	switch name {
 	case "git-hygiene":
