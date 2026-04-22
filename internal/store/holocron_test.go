@@ -904,21 +904,68 @@ func TestGetFleetMemories_FTSRanking(t *testing.T) {
 	}
 }
 
-func TestGetFleetMemories_FTSFallsBackToRecency(t *testing.T) {
+// TestGetFleetMemories_NoMatchReturnsEmpty is the regression test for the
+// task-248 bug: when a real query yields zero FTS matches we MUST return
+// empty, not fall back to recency. Irrelevant recent memories were actively
+// misleading agents (one historic case convinced an astromech that a table
+// it was supposed to build on "was reverted").
+func TestGetFleetMemories_NoMatchReturnsEmpty(t *testing.T) {
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	StoreFleetMemory(db, "api", 10, "success", "Added endpoint", "handler.go")
-	StoreFleetMemory(db, "api", 11, "success", "Fixed bug", "service.go")
+	StoreFleetMemory(db, "api", 10, "success", "Added endpoint handler", "handler.go")
+	StoreFleetMemory(db, "api", 11, "success", "Fixed login bug in service", "service.go")
 
-	// Query with words that don't appear in any memory — should fall back to recency
-	results := GetFleetMemories(db, "api", "xyzzy quux nonexistent", 5)
-	if len(results) != 2 {
-		t.Errorf("expected recency fallback to return 2 results, got %d", len(results))
+	// Query with vocabulary that doesn't overlap any memory.
+	results := GetFleetMemories(db, "api", "xyzzy quux zorble", 5)
+	if len(results) != 0 {
+		t.Errorf("no-match query MUST return empty (no recency fallback), got %d results", len(results))
 	}
-	// Recency order: task 11 first
-	if results[0].TaskID != 11 {
-		t.Errorf("expected most recent (task 11) first in fallback, got task %d", results[0].TaskID)
+}
+
+// TestGetFleetMemories_ANDPrecedesOR verifies the AND-first retrieval: when
+// multiple terms are present, memories matching ALL of them rank above those
+// matching some.
+func TestGetFleetMemories_ANDPrecedesOR(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	StoreFleetMemory(db, "api", 1, "success", "updated payment processing flow", "payments.go")
+	StoreFleetMemory(db, "api", 2, "success", "fixed payment refund handler", "refunds.go")
+	StoreFleetMemory(db, "api", 3, "success", "added database migration for payments refund workflow", "migrate.go")
+
+	// Query mentions both "payments" and "refund". Memory 3 hits both; 1 and
+	// 2 each hit one. AND should surface 3 (and only 3).
+	results := GetFleetMemories(db, "api", "payments refund", 5)
+	if len(results) == 0 {
+		t.Fatal("expected at least one match")
+	}
+	if results[0].TaskID != 3 {
+		t.Errorf("AND precision: expected task 3 to rank first, got task %d", results[0].TaskID)
+	}
+	for _, r := range results {
+		sum := strings.ToLower(r.Summary)
+		if !(strings.Contains(sum, "payments") && strings.Contains(sum, "refund")) {
+			t.Errorf("AND precision: task %d matched only one term; summary=%q", r.TaskID, r.Summary)
+		}
+	}
+}
+
+// TestGetFleetMemories_ORFallbackOnANDMiss verifies that when AND returns
+// nothing (no memory contains every term) we fall back to OR so we still
+// surface the single-term hits — but only when they exist.
+func TestGetFleetMemories_ORFallbackOnANDMiss(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	StoreFleetMemory(db, "api", 1, "success", "fixed authentication bug", "auth.go")
+	StoreFleetMemory(db, "api", 2, "success", "refactored handler wiring", "handler.go")
+
+	// No memory has BOTH "authentication" and "handler" together, but each
+	// term appears in one memory. OR fallback should surface both.
+	results := GetFleetMemories(db, "api", "authentication handler", 5)
+	if len(results) != 2 {
+		t.Errorf("OR fallback: expected 2 partial matches, got %d", len(results))
 	}
 }
 
@@ -1007,12 +1054,53 @@ func TestSanitizeFTSQuery_Empty(t *testing.T) {
 }
 
 func TestSanitizeFTSQuery_ShortWords(t *testing.T) {
-	got := sanitizeFTSQuery("a b cd")
-	if strings.Contains(got, " a ") || strings.Contains(got, "b ") {
-		t.Errorf("expected short words filtered out, got %q", got)
+	// Tokens shorter than 3 chars are dropped (1–2 char tokens are almost
+	// always noise — variable names, typos, or English articles).
+	got := sanitizeFTSQuery("a b cd def")
+	if strings.Contains(got, "a") && !strings.Contains(got, "def") {
+		// Both 1-char and 2-char tokens should be absent; only 3+ char tokens survive.
+		t.Errorf("short-word filter: got %q", got)
 	}
-	if !strings.Contains(got, "cd") {
-		t.Errorf("expected 'cd' to remain, got %q", got)
+	if !strings.Contains(got, "def") {
+		t.Errorf("expected 'def' (3 chars) to survive, got %q", got)
+	}
+	if strings.Contains(got, "cd") {
+		t.Errorf("expected 'cd' (2 chars) to be filtered, got %q", got)
+	}
+}
+
+// TestExtractMemoryQueryTerms_StopWords verifies general English stop words
+// are stripped and domain-specific tokens are preserved.
+func TestExtractMemoryQueryTerms_StopWords(t *testing.T) {
+	terms := extractMemoryQueryTerms("the pilot and the astromech are using the ask-branch")
+	// Stop words should be absent.
+	for _, w := range []string{"the", "and", "are", "using"} {
+		for _, got := range terms {
+			if got == w {
+				t.Errorf("expected stop word %q to be filtered, got terms=%v", w, terms)
+			}
+		}
+	}
+	// Domain tokens should be present.
+	want := map[string]bool{"pilot": false, "astromech": false, "ask": false, "branch": false}
+	for _, t := range terms {
+		if _, ok := want[t]; ok {
+			want[t] = true
+		}
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("expected domain token %q to survive stop-word filter, got terms=%v", k, terms)
+		}
+	}
+}
+
+// TestExtractMemoryQueryTerms_Deduplicates verifies the same token appearing
+// multiple times in the query is emitted once.
+func TestExtractMemoryQueryTerms_Deduplicates(t *testing.T) {
+	terms := extractMemoryQueryTerms("convoy convoy convoy")
+	if len(terms) != 1 || terms[0] != "convoy" {
+		t.Errorf("expected [convoy], got %v", terms)
 	}
 }
 

@@ -553,11 +553,47 @@ func DeleteFleetMemory(db *sql.DB, id int) bool {
 	return n > 0
 }
 
-// sanitizeFTSQuery strips FTS5 special characters and builds an OR query so
-// BM25 ranks by vocabulary overlap — any memory sharing terms with the current
-// task floats up, even when not every term matches. Words shorter than 2
-// characters are dropped as noise.
-func sanitizeFTSQuery(q string) string {
+// memoryStopWords is the English stop-word list used when tokenizing a query
+// for FleetMemory retrieval. Domain-specific tokens (task, convoy, pilot,
+// etc.) are DELIBERATELY excluded — BM25's IDF downweights them automatically
+// once the corpus grows, and over-aggressive stripping costs more recall than
+// it gains in precision. Keep this list conservative.
+var memoryStopWords = map[string]bool{
+	// articles / determiners / conjunctions
+	"the": true, "and": true, "any": true, "all": true, "but": true,
+	"for": true, "nor": true, "yet": true, "not": true, "its": true,
+	"that": true, "this": true, "these": true, "those": true,
+	"with": true, "from": true, "into": true, "onto": true,
+	"than": true, "also": true, "such": true, "each": true,
+	// auxiliary / modal verbs
+	"are": true, "was": true, "were": true, "been": true, "being": true,
+	"can": true, "will": true, "would": true, "could": true, "should": true,
+	"may": true, "might": true, "must": true, "has": true, "have": true,
+	"had": true, "does": true, "did": true, "doing": true, "done": true,
+	// interrogatives / connectors
+	"how": true, "why": true, "where": true, "when": true, "which": true,
+	"who": true, "whom": true, "whose": true, "what": true,
+	// quantifiers / adjectives of frequency
+	"more": true, "most": true, "some": true, "few": true, "many": true,
+	"much": true, "one": true, "two": true, "too": true, "very": true,
+	"now": true, "then": true, "here": true, "there": true,
+	// common instructive verbs that appear in most task payloads
+	"use": true, "uses": true, "using": true, "used": true,
+	"see": true, "seen": true, "saw": true, "show": true, "shows": true,
+	"new": true, "old": true, "get": true, "gets": true,
+	"let": true, "lets": true, "make": true, "makes": true, "making": true,
+	"ensure": true, "please": true, "only": true, "just": true,
+}
+
+// maxMemoryQueryTerms caps how many unique tokens we feed into FTS to prevent
+// the AND query from becoming over-restrictive on long task payloads. BM25
+// weighting within the first N terms is sufficient for ranking quality.
+const maxMemoryQueryTerms = 20
+
+// extractMemoryQueryTerms tokenizes free-form text into FTS-ready terms,
+// lowercasing, filtering stop words, requiring ≥3 chars, and deduplicating.
+// Returns the distinct terms in first-seen order.
+func extractMemoryQueryTerms(q string) []string {
 	var b strings.Builder
 	for _, r := range q {
 		switch {
@@ -567,65 +603,87 @@ func sanitizeFTSQuery(q string) string {
 			b.WriteRune(' ')
 		}
 	}
-	var words []string
+	seen := map[string]bool{}
+	var out []string
 	for _, w := range strings.Fields(b.String()) {
-		if len(w) >= 2 {
-			words = append(words, w)
+		if len(w) < 3 {
+			continue
 		}
+		lw := strings.ToLower(w)
+		if memoryStopWords[lw] {
+			continue
+		}
+		if seen[lw] {
+			continue
+		}
+		seen[lw] = true
+		out = append(out, lw)
 	}
-	if len(words) == 0 {
-		return ""
-	}
-	return strings.Join(words, " OR ")
+	return out
 }
 
-// GetFleetMemories returns relevant memory entries for a repo.
-// When query is non-empty, results are ranked by FTS5 BM25 relevance against
-// the query text. Falls back to recency order if the query yields no matches
-// or is empty — ensuring agents always get some context.
-func GetFleetMemories(db *sql.DB, repo, query string, limit int) []FleetMemoryEntry {
-	if query != "" {
-		if ftsQ := sanitizeFTSQuery(query); ftsQ != "" {
-			// Step 1: get BM25-ranked rowids from FTS5.
-			// Fetch more than limit to leave room for repo filtering in step 2.
-			// Rows are closed before step 2 to avoid blocking the single connection.
-			ftsRows, err := db.Query(
-				`SELECT rowid FROM FleetMemory_fts WHERE FleetMemory_fts MATCH ? ORDER BY rank LIMIT ?`,
-				ftsQ, limit*3)
-			var rankedIDs []int
-			if err == nil {
-				for ftsRows.Next() {
-					var id int
-					ftsRows.Scan(&id)
-					rankedIDs = append(rankedIDs, id)
-				}
-				ftsRows.Close()
-			}
+// sanitizeFTSQuery is kept for backwards compatibility with any caller that
+// built an OR query directly. New code should use extractMemoryQueryTerms +
+// ftsMemoryLookup via GetFleetMemories.
+func sanitizeFTSQuery(q string) string {
+	terms := extractMemoryQueryTerms(q)
+	if len(terms) == 0 {
+		return ""
+	}
+	return strings.Join(terms, " OR ")
+}
 
-			// Step 2: fetch full records in rank order, filtered by repo.
-			if len(rankedIDs) > 0 {
-				var entries []FleetMemoryEntry
-				for _, id := range rankedIDs {
-					if len(entries) >= limit {
-						break
-					}
-					var e FleetMemoryEntry
-					err := db.QueryRow(
-						`SELECT id, repo, task_id, outcome, summary, files_changed, created_at
-						 FROM FleetMemory WHERE id = ? AND repo = ?`, id, repo).
-						Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.CreatedAt)
-					if err == nil {
-						entries = append(entries, e)
-					}
-				}
-				if len(entries) > 0 {
-					return entries
-				}
-			}
+// ftsMemoryLookup executes an FTS5 MATCH query and returns repo-filtered
+// FleetMemory rows in BM25 rank order, up to limit entries. Returns nil (not
+// empty slice) on error or no matches — callers rely on the zero-result path
+// to decide whether to try a looser query.
+func ftsMemoryLookup(db *sql.DB, repo, ftsQ string, limit int) []FleetMemoryEntry {
+	// Over-fetch to leave room for repo filtering (FTS index doesn't know repo).
+	ftsRows, err := db.Query(
+		`SELECT rowid FROM FleetMemory_fts WHERE FleetMemory_fts MATCH ? ORDER BY rank LIMIT ?`,
+		ftsQ, limit*3)
+	if err != nil {
+		return nil
+	}
+	var rankedIDs []int
+	for ftsRows.Next() {
+		var id int
+		if ftsRows.Scan(&id) == nil {
+			rankedIDs = append(rankedIDs, id)
 		}
 	}
+	ftsRows.Close()
+	if len(rankedIDs) == 0 {
+		return nil
+	}
+	var entries []FleetMemoryEntry
+	for _, id := range rankedIDs {
+		if len(entries) >= limit {
+			break
+		}
+		var e FleetMemoryEntry
+		err := db.QueryRow(
+			`SELECT id, repo, task_id, outcome, summary, files_changed, created_at
+			 FROM FleetMemory WHERE id = ? AND repo = ?`, id, repo).
+			Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.CreatedAt)
+		if err == nil {
+			entries = append(entries, e)
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	return entries
+}
 
-	// Recency fallback — no query, empty query, or FTS returned nothing
+// recencyMemoryLookup returns the most-recent memories for a repo. Used as a
+// fallback ONLY when the caller didn't provide a query or the query yielded
+// no usable terms. Never triggered when a real query returned zero matches —
+// irrelevant recent memories are worse than no memories (they actively
+// mislead agent reasoning, as demonstrated by the task-248 bug where a stale
+// "ConvoyEvents was reverted" memory was injected via recency and convinced
+// the astromech that task 247's work didn't exist).
+func recencyMemoryLookup(db *sql.DB, repo string, limit int) []FleetMemoryEntry {
 	rows, err := db.Query(`
 		SELECT id, repo, task_id, outcome, summary, files_changed, created_at
 		FROM FleetMemory
@@ -643,6 +701,46 @@ func GetFleetMemories(db *sql.DB, repo, query string, limit int) []FleetMemoryEn
 		entries = append(entries, e)
 	}
 	return entries
+}
+
+// GetFleetMemories returns memory entries relevant to `query` within `repo`.
+//
+// Retrieval strategy (precision → recall → abstain):
+//  1. Extract content-bearing terms from the query (stop-words stripped,
+//     ≥3 chars, unique, capped at maxMemoryQueryTerms).
+//  2. Try an AND query: every term must appear. This gives the highest
+//     precision — a memory only matches when it shares multiple content
+//     tokens with the current task. BM25 ranks by overlap strength.
+//  3. If AND returns zero, fall back to OR: any shared token matches.
+//  4. If OR also returns zero, return nil. We deliberately DO NOT fall
+//     back to recency here — irrelevant memories poison agent reasoning
+//     more than absent ones. The caller sees an empty slice and skips
+//     the memory-injection block.
+//
+// Recency is only used when the caller provides no query (or the query
+// consists entirely of stop words), i.e. when there's no signal to rank by.
+func GetFleetMemories(db *sql.DB, repo, query string, limit int) []FleetMemoryEntry {
+	if query == "" {
+		return recencyMemoryLookup(db, repo, limit)
+	}
+	terms := extractMemoryQueryTerms(query)
+	if len(terms) == 0 {
+		return recencyMemoryLookup(db, repo, limit)
+	}
+	if len(terms) > maxMemoryQueryTerms {
+		terms = terms[:maxMemoryQueryTerms]
+	}
+
+	// Precision first: AND query.
+	if results := ftsMemoryLookup(db, repo, strings.Join(terms, " AND "), limit); len(results) > 0 {
+		return results
+	}
+	// Recall fallback: OR query.
+	if results := ftsMemoryLookup(db, repo, strings.Join(terms, " OR "), limit); len(results) > 0 {
+		return results
+	}
+	// No relevant memories — return empty, NEVER fall back to recency.
+	return nil
 }
 
 // ListAllFleetMemories returns all memories, optionally filtered by repo.
