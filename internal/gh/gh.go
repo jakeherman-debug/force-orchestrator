@@ -358,6 +358,19 @@ func (c *Client) PRMerge(cwd, repo string, number int, strategy string) error {
 	return nil
 }
 
+// PRClose closes a PR on GitHub without merging.
+func (c *Client) PRClose(cwd, repo string, number int) error {
+	args := []string{"pr", "close", fmt.Sprintf("%d", number)}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	_, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return fmt.Errorf("gh pr close: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	return nil
+}
+
 // ── PR review comments ───────────────────────────────────────────────────────
 //
 // GitHub has three distinct comment concepts on a PR:

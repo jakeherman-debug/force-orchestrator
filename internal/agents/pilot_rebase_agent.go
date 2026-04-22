@@ -64,6 +64,20 @@ func QueueRebaseAgentBranch(db *sql.DB, p rebaseAgentPayload) (int, error) {
 		if existingConflict > 0 {
 			return 0, nil // conflict resolution still in flight or escalated
 		}
+
+		// Rebase loop cap: if too many REBASE_CONFLICT tasks have been spawned
+		// for this branch (including cancelled ones), the loop is stuck. Return
+		// an error so queueAgentBranchRebase can escalate the task instead of
+		// silently no-op-ing while the loop continues.
+		const maxRebaseConflictTasks = 5
+		var totalConflicts int
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+			WHERE payload LIKE '[REBASE_CONFLICT for task #' || ? || ' %'`,
+			p.TaskID).Scan(&totalConflicts)
+		if totalConflicts >= maxRebaseConflictTasks {
+			return 0, fmt.Errorf("rebase loop cap: %d REBASE_CONFLICT tasks already spawned for task %d — manual resolution needed",
+				totalConflicts, p.TaskID)
+		}
 	}
 
 	payload, _ := json.Marshal(p)

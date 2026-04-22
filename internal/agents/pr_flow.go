@@ -321,6 +321,24 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 		ghRepo = deriveGHRepoFromRemoteURL(repo.RemoteURL)
 	}
 
+	// If the associated task is already terminal (escalated, failed, cancelled),
+	// close the sub-PR on GitHub and stop tracking it. This prevents rebase
+	// loops from continuing to spawn work against dead tasks.
+	if bounty, _ := store.GetBounty(db, pr.TaskID); bounty != nil {
+		switch bounty.Status {
+		case "Escalated", "Failed", "Cancelled":
+			logger.Printf("sub-pr-ci-watch: sub-PR #%d task %d is %s — closing PR and stopping tracking",
+				pr.PRNumber, pr.TaskID, bounty.Status)
+			if cwd != "" && ghRepo != "" {
+				if closeErr := ghc.PRClose(cwd, ghRepo, pr.PRNumber); closeErr != nil {
+					logger.Printf("sub-pr-ci-watch: close PR #%d on GitHub failed: %v", pr.PRNumber, closeErr)
+				}
+			}
+			store.MarkAskBranchPRClosed(db, pr.ID)
+			return
+		}
+	}
+
 	view, viewErr := ghc.PRView(cwd, ghRepo, pr.PRNumber)
 	if viewErr != nil {
 		logger.Printf("sub-pr-ci-watch: pr view #%d failed: %v", pr.PRNumber, viewErr)
@@ -618,8 +636,14 @@ func queueAgentBranchRebase(db *sql.DB, pr store.AskBranchPR, reason string, log
 		Repo:       pr.Repo,
 	})
 	if qErr != nil {
-		logger.Printf("sub-pr-ci-watch: sub-PR #%d %s — failed to queue RebaseAgentBranch: %v",
+		// Loop cap hit or other unrecoverable error — escalate the task and
+		// stop tracking the sub-PR so the dog doesn't retry indefinitely.
+		logger.Printf("sub-pr-ci-watch: sub-PR #%d %s — QueueRebaseAgentBranch failed: %v — escalating",
 			pr.PRNumber, reason, qErr)
+		msg := fmt.Sprintf("sub-PR #%d rebase loop terminated: %v", pr.PRNumber, qErr)
+		if escErr := escalateSubPR(db, pr, store.SeverityHigh, msg); escErr != nil {
+			logger.Printf("sub-pr-ci-watch: escalation failed for task %d: %v", pr.TaskID, escErr)
+		}
 		return
 	}
 	if taskID > 0 {
