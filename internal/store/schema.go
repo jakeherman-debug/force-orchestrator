@@ -174,6 +174,15 @@ func createSchema(db *sql.DB) {
 		status      TEXT    NOT NULL DEFAULT 'pending',
 		created_at  DATETIME DEFAULT (datetime('now'))
 	)`)
+
+	// Convoy lifecycle events — timeline of key events for each convoy.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id  INTEGER NOT NULL,
+		event_type TEXT    NOT NULL,
+		detail     TEXT    DEFAULT '',
+		created_at TEXT    DEFAULT (datetime('now'))
+	)`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -245,5 +254,14 @@ func runMigrations(db *sql.DB) {
 		convoy_id  INTEGER PRIMARY KEY,
 		reason     TEXT    NOT NULL,
 		created_at DATETIME DEFAULT (datetime('now'))
+	)`)
+
+	// ConvoyEvents — convoy lifecycle event timeline (idempotent on fresh DBs).
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id  INTEGER NOT NULL,
+		event_type TEXT    NOT NULL,
+		detail     TEXT    DEFAULT '',
+		created_at TEXT    DEFAULT (datetime('now'))
 	)`)
 }
