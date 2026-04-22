@@ -1,5 +1,17 @@
 package store
 
+// ── Convoy event timeline ─────────────────────────────────────────────────────
+
+type ConvoyEvent struct {
+	ID        int
+	ConvoyID  int
+	EventType string
+	OldValue  string
+	NewValue  string
+	Detail    string
+	CreatedAt string
+}
+
 // ── Core work item ────────────────────────────────────────────────────────────
 
 type Bounty struct {
