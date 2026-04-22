@@ -344,3 +344,248 @@ func TestErrorClass_BackoffFor(t *testing.T) {
 		t.Errorf("AuthExpired should have zero backoff (no retry)")
 	}
 }
+
+// ── PR comment methods ───────────────────────────────────────────────────────
+
+func TestPRIssueComments_ParsesResponse(t *testing.T) {
+	stub := newStub()
+	stub.responses["api --paginate repos/acme/api/issues/7/comments"] = stubResponse{
+		stdout: `[{"id":1,"body":"hi","user":{"login":"alice","type":"User"},"created_at":"2026-01-01T00:00:00Z","html_url":"https://github.com/acme/api/pull/7#c1"},
+			{"id":2,"body":"lgtm","user":{"login":"claude[bot]","type":"Bot"},"created_at":"2026-01-01T00:01:00Z","html_url":"https://github.com/acme/api/pull/7#c2"}]`,
+	}
+	c := NewClientWithRunner(stub)
+	out, err := c.PRIssueComments("", "acme/api", 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(out))
+	}
+	if out[0].User.Login != "alice" || out[1].User.Type != "Bot" {
+		t.Errorf("parse mismatch: %+v", out)
+	}
+}
+
+func TestPRIssueComments_RequiresRepo(t *testing.T) {
+	c := NewClientWithRunner(newStub())
+	if _, err := c.PRIssueComments("", "", 7); err == nil {
+		t.Fatal("expected error when repo is empty")
+	}
+}
+
+func TestPRReviewComments_ParsesResponse(t *testing.T) {
+	stub := newStub()
+	stub.responses["api --paginate repos/acme/api/pulls/7/comments"] = stubResponse{
+		stdout: `[{"id":100,"node_id":"RC_a","body":"nit: rename this var","path":"main.go","line":42,"diff_hunk":"-x\n+y","user":{"login":"coderabbitai[bot]","type":"Bot"},"pull_request_review_id":55,"created_at":"2026-01-01T00:00:00Z","in_reply_to_id":0},
+			{"id":101,"node_id":"RC_b","body":"done","path":"main.go","line":42,"user":{"login":"force-bot","type":"User"},"pull_request_review_id":56,"created_at":"2026-01-01T00:01:00Z","in_reply_to_id":100}]`,
+	}
+	c := NewClientWithRunner(stub)
+	out, err := c.PRReviewComments("", "acme/api", 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(out))
+	}
+	if out[0].NodeID != "RC_a" || out[0].Line != 42 || out[0].Path != "main.go" {
+		t.Errorf("first comment parse mismatch: %+v", out[0])
+	}
+	if out[1].InReplyToID != 100 {
+		t.Errorf("second comment should be a reply to 100, got InReplyToID=%d", out[1].InReplyToID)
+	}
+}
+
+func TestPRReviewComments_RequiresRepo(t *testing.T) {
+	c := NewClientWithRunner(newStub())
+	if _, err := c.PRReviewComments("", "", 7); err == nil {
+		t.Fatal("expected error when repo is empty")
+	}
+}
+
+func TestPostIssueComment_UsesBodyFile(t *testing.T) {
+	stub := newStub()
+	c := NewClientWithRunner(stub)
+	if err := c.PostIssueComment("/tmp/repo", "acme/api", 7, "hello world"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(stub.calls))
+	}
+	call := stub.calls[0]
+	if call.cwd != "/tmp/repo" {
+		t.Errorf("cwd should pass through, got %q", call.cwd)
+	}
+	joined := strings.Join(call.args, " ")
+	if !strings.Contains(joined, "pr comment 7") || !strings.Contains(joined, "--body-file -") || !strings.Contains(joined, "--repo acme/api") {
+		t.Errorf("unexpected args: %q", joined)
+	}
+	if call.stdin != "hello world" {
+		t.Errorf("body should be on stdin, got %q", call.stdin)
+	}
+}
+
+func TestPostIssueComment_EmptyBodyErrors(t *testing.T) {
+	c := NewClientWithRunner(newStub())
+	if err := c.PostIssueComment("", "acme/api", 7, ""); err == nil {
+		t.Fatal("expected error for empty body")
+	}
+}
+
+func TestPostReviewThreadReply_UsesAPIPath(t *testing.T) {
+	stub := newStub()
+	c := NewClientWithRunner(stub)
+	if err := c.PostReviewThreadReply("/tmp/repo", "acme/api", 7, 100, "thanks, addressed in task #42"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(stub.calls))
+	}
+	joined := strings.Join(stub.calls[0].args, " ")
+	if !strings.Contains(joined, "api -X POST") {
+		t.Errorf("should use POST: %q", joined)
+	}
+	if !strings.Contains(joined, "repos/acme/api/pulls/7/comments/100/replies") {
+		t.Errorf("should target replies path: %q", joined)
+	}
+	if !strings.Contains(joined, "body=thanks, addressed in task #42") {
+		t.Errorf("body should be passed via -f flag: %q", joined)
+	}
+}
+
+func TestPostReviewThreadReply_Validation(t *testing.T) {
+	c := NewClientWithRunner(newStub())
+	if err := c.PostReviewThreadReply("", "", 7, 100, "body"); err == nil {
+		t.Error("empty repo should error")
+	}
+	if err := c.PostReviewThreadReply("", "acme/api", 7, 0, "body"); err == nil {
+		t.Error("zero comment ID should error")
+	}
+	if err := c.PostReviewThreadReply("", "acme/api", 7, 100, ""); err == nil {
+		t.Error("empty body should error")
+	}
+}
+
+func TestFindReviewThreadNodeID_MatchesCommentID(t *testing.T) {
+	stub := newStub()
+	graphqlArgs := "api graphql -f query=" // partial match — the exact arg includes the full query
+	_ = graphqlArgs
+	// The stub matches by exact joined args, so we stash the response under a default.
+	stub.defaultResp = stubResponse{
+		stdout: `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+			{"id":"PRRT_aaa","isResolved":false,"comments":{"nodes":[{"databaseId":100},{"databaseId":101}]}},
+			{"id":"PRRT_bbb","isResolved":false,"comments":{"nodes":[{"databaseId":200}]}}
+		]}}}}}`,
+	}
+	c := NewClientWithRunner(stub)
+
+	// Comment 101 is in thread PRRT_aaa
+	nodeID, err := c.FindReviewThreadNodeID("", "acme/api", 7, 101)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if nodeID != "PRRT_aaa" {
+		t.Errorf("expected PRRT_aaa, got %q", nodeID)
+	}
+
+	// Comment 200 is in PRRT_bbb
+	nodeID, _ = c.FindReviewThreadNodeID("", "acme/api", 7, 200)
+	if nodeID != "PRRT_bbb" {
+		t.Errorf("expected PRRT_bbb, got %q", nodeID)
+	}
+
+	// Unknown comment returns "" with no error
+	nodeID, err = c.FindReviewThreadNodeID("", "acme/api", 7, 999)
+	if err != nil {
+		t.Fatalf("unexpected error for unknown comment: %v", err)
+	}
+	if nodeID != "" {
+		t.Errorf("expected empty for unknown comment, got %q", nodeID)
+	}
+}
+
+func TestFindReviewThreadNodeID_RepoValidation(t *testing.T) {
+	c := NewClientWithRunner(newStub())
+	if _, err := c.FindReviewThreadNodeID("", "", 7, 100); err == nil {
+		t.Error("empty repo should error")
+	}
+	if _, err := c.FindReviewThreadNodeID("", "not-a-slash-form", 7, 100); err == nil {
+		t.Error("non-owner/name repo should error")
+	}
+}
+
+func TestResolveReviewThread_CallsMutation(t *testing.T) {
+	stub := newStub()
+	c := NewClientWithRunner(stub)
+	if err := c.ResolveReviewThread("/tmp/repo", "PRRT_aaa"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(stub.calls))
+	}
+	joined := strings.Join(stub.calls[0].args, " ")
+	if !strings.Contains(joined, "api graphql") {
+		t.Errorf("should use graphql: %q", joined)
+	}
+	if !strings.Contains(joined, "resolveReviewThread") {
+		t.Errorf("should call resolveReviewThread mutation: %q", joined)
+	}
+	if !strings.Contains(joined, "id=PRRT_aaa") {
+		t.Errorf("should pass thread ID: %q", joined)
+	}
+}
+
+func TestResolveReviewThread_Validation(t *testing.T) {
+	c := NewClientWithRunner(newStub())
+	if err := c.ResolveReviewThread("", ""); err == nil {
+		t.Error("empty threadNodeID should error")
+	}
+}
+
+// ── IsBotAuthor ──────────────────────────────────────────────────────────────
+
+func TestIsBotAuthor_ByUserType(t *testing.T) {
+	if !IsBotAuthor("unknown-login", "Bot", nil) {
+		t.Error("userType=Bot should classify as bot regardless of allowlist")
+	}
+	if IsBotAuthor("alice", "User", nil) {
+		t.Error("userType=User with no allowlist match should be human")
+	}
+}
+
+func TestIsBotAuthor_ByAllowlist(t *testing.T) {
+	allowlist := []string{"claude[bot]", "coderabbit[bot]", "CustomBot"}
+	if !IsBotAuthor("claude[bot]", "User", allowlist) {
+		t.Error("login in allowlist should be bot even when userType=User")
+	}
+	if !IsBotAuthor("CUSTOMBOT", "", allowlist) {
+		t.Error("allowlist match should be case-insensitive")
+	}
+	if IsBotAuthor("alice", "User", allowlist) {
+		t.Error("login not in allowlist should be human")
+	}
+}
+
+func TestIsBotAuthor_EmptyLogin(t *testing.T) {
+	if IsBotAuthor("", "", DefaultBotLogins()) {
+		t.Error("empty login with no type should not be bot")
+	}
+}
+
+func TestDefaultBotLogins_Populated(t *testing.T) {
+	logins := DefaultBotLogins()
+	if len(logins) == 0 {
+		t.Fatal("default allowlist should not be empty")
+	}
+	// Sanity: make sure the common ones are present.
+	want := map[string]bool{"claude[bot]": false, "gemini-code-assist[bot]": false, "coderabbitai[bot]": false}
+	for _, l := range logins {
+		if _, ok := want[l]; ok {
+			want[l] = true
+		}
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("default allowlist missing %q", k)
+		}
+	}
+}

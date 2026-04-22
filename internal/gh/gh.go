@@ -358,6 +358,269 @@ func (c *Client) PRMerge(cwd, repo string, number int, strategy string) error {
 	return nil
 }
 
+// ── PR review comments ───────────────────────────────────────────────────────
+//
+// GitHub has three distinct comment concepts on a PR:
+//   1. Issue comments — top-level discussion on the PR (not attached to code).
+//      Fetched via /repos/{o}/{r}/issues/{n}/comments and posted with
+//      `gh pr comment`.
+//   2. Review comments — inline comments on specific code lines, each part of
+//      a review thread. Fetched via /repos/{o}/{r}/pulls/{n}/comments. Replies
+//      are posted with in_reply_to=<parent_id>.
+//   3. Review threads — the GraphQL grouping of related review comments.
+//      Required only for resolution (marking a thread Resolved).
+//
+// The fleet's pr-review-poll dog fetches (1) and (2) on every tick and feeds
+// new comments into the PRReviewComments table for triage.
+
+// PRIssueComment is a top-level PR discussion comment (not attached to code).
+type PRIssueComment struct {
+	ID        int64  `json:"id"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	HTMLURL   string `json:"html_url"`
+	User      struct {
+		Login string `json:"login"`
+		Type  string `json:"type"` // "User" | "Bot"
+	} `json:"user"`
+}
+
+// PRReviewComment is an inline comment on a specific line/hunk of a PR diff.
+// InReplyToID is populated when the comment is a reply within a review thread.
+type PRReviewComment struct {
+	ID                  int64  `json:"id"`
+	NodeID              string `json:"node_id"`
+	InReplyToID         int64  `json:"in_reply_to_id"`
+	Body                string `json:"body"`
+	Path                string `json:"path"`
+	Line                int    `json:"line"`
+	Position            int    `json:"position"`
+	DiffHunk            string `json:"diff_hunk"`
+	PullRequestReviewID int64  `json:"pull_request_review_id"`
+	HTMLURL             string `json:"html_url"`
+	CreatedAt           string `json:"created_at"`
+	User                struct {
+		Login string `json:"login"`
+		Type  string `json:"type"` // "User" | "Bot"
+	} `json:"user"`
+}
+
+// PRIssueComments lists PR-level (issue) comments for the given PR number.
+// Repo format is "owner/name"; may be empty to let gh infer from cwd.
+func (c *Client) PRIssueComments(cwd, repo string, number int) ([]PRIssueComment, error) {
+	path := fmt.Sprintf("repos/%s/issues/%d/comments", strings.TrimSpace(repo), number)
+	if strings.TrimSpace(repo) == "" {
+		return nil, fmt.Errorf("PRIssueComments: repo required (gh api paths must include owner/name)")
+	}
+	args := []string{"api", "--paginate", path}
+	stdout, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return nil, fmt.Errorf("gh api issue comments: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	var out []PRIssueComment
+	if parseErr := json.Unmarshal(stdout, &out); parseErr != nil {
+		return nil, fmt.Errorf("gh api issue comments: parse json: %v", parseErr)
+	}
+	return out, nil
+}
+
+// PRReviewComments lists inline review comments for the given PR number.
+func (c *Client) PRReviewComments(cwd, repo string, number int) ([]PRReviewComment, error) {
+	if strings.TrimSpace(repo) == "" {
+		return nil, fmt.Errorf("PRReviewComments: repo required")
+	}
+	path := fmt.Sprintf("repos/%s/pulls/%d/comments", strings.TrimSpace(repo), number)
+	args := []string{"api", "--paginate", path}
+	stdout, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return nil, fmt.Errorf("gh api review comments: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	var out []PRReviewComment
+	if parseErr := json.Unmarshal(stdout, &out); parseErr != nil {
+		return nil, fmt.Errorf("gh api review comments: parse json: %v", parseErr)
+	}
+	return out, nil
+}
+
+// PostIssueComment posts a top-level comment on a PR (not attached to code).
+// Uses `gh pr comment` which is simpler than the REST API for this case.
+func (c *Client) PostIssueComment(cwd, repo string, number int, body string) error {
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("PostIssueComment: body required")
+	}
+	args := []string{"pr", "comment", fmt.Sprintf("%d", number), "--body-file", "-"}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	_, stderr, err := c.runner.Run(cwd, args, []byte(body))
+	if err != nil {
+		return fmt.Errorf("gh pr comment: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	return nil
+}
+
+// PostReviewThreadReply posts a reply inside an existing review-comment thread.
+// inReplyToCommentID is the REST ID of the comment being replied to (GitHub
+// places the new comment in the same thread automatically).
+func (c *Client) PostReviewThreadReply(cwd, repo string, number int, inReplyToCommentID int64, body string) error {
+	if strings.TrimSpace(repo) == "" {
+		return fmt.Errorf("PostReviewThreadReply: repo required")
+	}
+	if inReplyToCommentID <= 0 {
+		return fmt.Errorf("PostReviewThreadReply: inReplyToCommentID required")
+	}
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("PostReviewThreadReply: body required")
+	}
+	path := fmt.Sprintf("repos/%s/pulls/%d/comments/%d/replies",
+		strings.TrimSpace(repo), number, inReplyToCommentID)
+	// `gh api -F body=... -X POST <path>` is the canonical invocation. Use -f
+	// (string field) so special characters in body don't get re-interpreted.
+	args := []string{"api", "-X", "POST", path, "-f", "body=" + body}
+	_, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return fmt.Errorf("gh api reply: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	return nil
+}
+
+// ── Review thread resolution (GraphQL) ───────────────────────────────────────
+//
+// GitHub's REST API doesn't expose review-thread IDs directly; those are a
+// GraphQL construct. To resolve a thread by REST comment ID we first look up
+// the thread containing that comment, then call the resolveReviewThread
+// mutation. Two API calls per resolution — acceptable for the post-Council
+// sweep which processes a handful of threads at a time.
+
+// FindReviewThreadNodeID queries the PR's review threads and returns the
+// GraphQL node ID of the thread containing the given REST comment databaseId.
+// Returns "" (no error) if no thread contains that comment — callers treat
+// that as "nothing to resolve".
+func (c *Client) FindReviewThreadNodeID(cwd, repo string, number int, commentDatabaseID int64) (string, error) {
+	if strings.TrimSpace(repo) == "" {
+		return "", fmt.Errorf("FindReviewThreadNodeID: repo required")
+	}
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("FindReviewThreadNodeID: repo must be owner/name, got %q", repo)
+	}
+	owner, name := parts[0], parts[1]
+
+	query := `query($owner:String!,$name:String!,$n:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$n){
+      reviewThreads(first:100){
+        nodes{ id isResolved comments(first:100){ nodes{ databaseId } } }
+      }
+    }
+  }
+}`
+	args := []string{
+		"api", "graphql",
+		"-f", "query=" + query,
+		"-F", "owner=" + owner,
+		"-F", "name=" + name,
+		"-F", fmt.Sprintf("n=%d", number),
+	}
+	stdout, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return "", fmt.Errorf("gh api graphql (reviewThreads): %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	var resp struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID         string `json:"id"`
+							IsResolved bool   `json:"isResolved"`
+							Comments   struct {
+								Nodes []struct {
+									DatabaseID int64 `json:"databaseId"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if parseErr := json.Unmarshal(stdout, &resp); parseErr != nil {
+		return "", fmt.Errorf("gh api graphql (reviewThreads): parse: %v", parseErr)
+	}
+	for _, thread := range resp.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		for _, com := range thread.Comments.Nodes {
+			if com.DatabaseID == commentDatabaseID {
+				return thread.ID, nil
+			}
+		}
+	}
+	return "", nil // not found — thread may be on a different PR or deleted
+}
+
+// ResolveReviewThread marks a review thread Resolved via the GraphQL mutation.
+// threadNodeID is the GraphQL node ID (see FindReviewThreadNodeID). Idempotent:
+// resolving an already-resolved thread succeeds.
+func (c *Client) ResolveReviewThread(cwd string, threadNodeID string) error {
+	if strings.TrimSpace(threadNodeID) == "" {
+		return fmt.Errorf("ResolveReviewThread: threadNodeID required")
+	}
+	mutation := `mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ id isResolved } } }`
+	args := []string{
+		"api", "graphql",
+		"-f", "query=" + mutation,
+		"-F", "id=" + threadNodeID,
+	}
+	_, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return fmt.Errorf("gh api graphql (resolveReviewThread): %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	return nil
+}
+
+// ── Bot author detection ─────────────────────────────────────────────────────
+//
+// Two signals:
+//   1. GitHub API's user.type == "Bot" (most reliable; set when the author is
+//      a GitHub App)
+//   2. A configurable login allowlist (catches bots that register as type=User,
+//      e.g., CodeRabbit in some configurations)
+// IsBotAuthor returns true if either signal indicates bot authorship.
+//
+// Callers pass the configured allowlist (typically from SystemConfig); tests
+// and callers that don't need overrides can pass DefaultBotLogins().
+
+// DefaultBotLogins is the compile-time allowlist of known review-bot logins.
+// Extendable at runtime via SystemConfig "pr_review_bot_logins" (CSV).
+func DefaultBotLogins() []string {
+	return []string{
+		"claude[bot]",
+		"gemini-code-assist[bot]",
+		"coderabbitai[bot]",
+		"coderabbit[bot]",
+		"github-actions[bot]",
+	}
+}
+
+// IsBotAuthor classifies a review author as bot or human. `userType` is the
+// GitHub API's user.type field ("User"|"Bot"|""); pass "" if unknown.
+func IsBotAuthor(login, userType string, allowlist []string) bool {
+	if strings.EqualFold(strings.TrimSpace(userType), "Bot") {
+		return true
+	}
+	login = strings.ToLower(strings.TrimSpace(login))
+	if login == "" {
+		return false
+	}
+	for _, allowed := range allowlist {
+		if strings.EqualFold(strings.TrimSpace(allowed), login) {
+			return true
+		}
+	}
+	return false
+}
+
 // ── Error classification ─────────────────────────────────────────────────────
 
 // ErrorClass categorises a gh/git error into one of five buckets, letting the

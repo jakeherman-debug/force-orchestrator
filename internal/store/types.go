@@ -269,6 +269,36 @@ type PendingFeatureInfo struct {
 }
 
 
+// ── PR review comments ───────────────────────────────────────────────────────
+
+// PRReviewComment is a single review comment on a draft PR (bot or human).
+// Populated by the pr-review-poll dog; classified and dispatched by Diplomat's
+// PRReviewTriage. See schema.sql for column semantics.
+type PRReviewComment struct {
+	ID                   int
+	ConvoyID             int
+	Repo                 string
+	DraftPRNumber        int
+	GitHubCommentID      int64
+	CommentType          string // "review_comment" | "issue_comment"
+	Author               string
+	AuthorKind           string // "bot" | "human"
+	Body                 string
+	Path                 string
+	Line                 int
+	DiffHunk             string
+	ReviewThreadID       string
+	InReplyToCommentID   int64
+	ThreadDepth          int
+	Classification       string
+	ClassificationReason string
+	SpawnedTaskID        int
+	ReplyBody            string
+	RepliedAt            string
+	ThreadResolvedAt     string
+	CreatedAt            string
+}
+
 type FleetMail struct {
 	ID          int
 	FromAgent   string

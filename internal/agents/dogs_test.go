@@ -371,8 +371,8 @@ func TestListDogs(t *testing.T) {
 	defer db.Close()
 
 	dogs := ListDogs(db)
-	if len(dogs) != 14 {
-		t.Errorf("expected 14 built-in dogs (9 legacy + 5 PR-flow), got %d", len(dogs))
+	if len(dogs) != 16 {
+		t.Errorf("expected 16 built-in dogs (9 legacy + 5 PR-flow + 2 PR-review), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {

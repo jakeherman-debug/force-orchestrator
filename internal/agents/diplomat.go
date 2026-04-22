@@ -94,6 +94,10 @@ func SpawnDiplomat(db *sql.DB, name string) {
 			runShipConvoy(db, name, bounty, logger)
 			continue
 		}
+		if bounty, claimed := store.ClaimBounty(db, "PRReviewTriage", name); claimed {
+			runPRReviewTriage(db, name, bounty, logger)
+			continue
+		}
 		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
 	}
 }

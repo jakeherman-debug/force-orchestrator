@@ -242,6 +242,37 @@ func createSchema(db *sql.DB) {
 		PRIMARY KEY (convoy_id, repo)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+
+	// PRReviewComments — per-comment state for bot and human reviews on draft PRs.
+	// author_kind discriminates; classification drives dispatch (see agents/pr_review_triage.go).
+	// review_thread_id + thread_depth power the back-and-forth loop detector.
+	db.Exec(`CREATE TABLE IF NOT EXISTS PRReviewComments (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id              INTEGER NOT NULL,
+		repo                   TEXT    NOT NULL,
+		draft_pr_number        INTEGER NOT NULL,
+		github_comment_id      INTEGER NOT NULL,
+		comment_type           TEXT    NOT NULL,
+		author                 TEXT    NOT NULL,
+		author_kind            TEXT    NOT NULL,
+		body                   TEXT    NOT NULL,
+		path                   TEXT    DEFAULT '',
+		line                   INTEGER DEFAULT 0,
+		diff_hunk              TEXT    DEFAULT '',
+		review_thread_id       TEXT    DEFAULT '',
+		in_reply_to_comment_id INTEGER DEFAULT 0,
+		thread_depth           INTEGER DEFAULT 0,
+		classification         TEXT    DEFAULT '',
+		classification_reason  TEXT    DEFAULT '',
+		spawned_task_id        INTEGER DEFAULT 0,
+		reply_body             TEXT    DEFAULT '',
+		replied_at             TEXT    DEFAULT '',
+		thread_resolved_at     TEXT    DEFAULT '',
+		created_at             TEXT    DEFAULT (datetime('now')),
+		UNIQUE(repo, draft_pr_number, github_comment_id)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_convoy ON PRReviewComments (convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id)`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -373,4 +404,36 @@ func runMigrations(db *sql.DB) {
 		PRIMARY KEY (convoy_id, repo)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+
+	// ── PR review-comment triage ─────────────────────────────────────────────
+	// Additive: table + column. No backfill — empty table is the expected state
+	// on first migration (no draft PRs have bot/human review comments yet).
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN pr_review_enabled INTEGER DEFAULT 1`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS PRReviewComments (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id              INTEGER NOT NULL,
+		repo                   TEXT    NOT NULL,
+		draft_pr_number        INTEGER NOT NULL,
+		github_comment_id      INTEGER NOT NULL,
+		comment_type           TEXT    NOT NULL,
+		author                 TEXT    NOT NULL,
+		author_kind            TEXT    NOT NULL,
+		body                   TEXT    NOT NULL,
+		path                   TEXT    DEFAULT '',
+		line                   INTEGER DEFAULT 0,
+		diff_hunk              TEXT    DEFAULT '',
+		review_thread_id       TEXT    DEFAULT '',
+		in_reply_to_comment_id INTEGER DEFAULT 0,
+		thread_depth           INTEGER DEFAULT 0,
+		classification         TEXT    DEFAULT '',
+		classification_reason  TEXT    DEFAULT '',
+		spawned_task_id        INTEGER DEFAULT 0,
+		reply_body             TEXT    DEFAULT '',
+		replied_at             TEXT    DEFAULT '',
+		thread_resolved_at     TEXT    DEFAULT '',
+		created_at             TEXT    DEFAULT (datetime('now')),
+		UNIQUE(repo, draft_pr_number, github_comment_id)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_convoy ON PRReviewComments (convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id)`)
 }

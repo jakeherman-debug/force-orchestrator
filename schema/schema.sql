@@ -292,4 +292,44 @@ CREATE TABLE IF NOT EXISTS ProposedConvoys (
     created_at  DATETIME DEFAULT (datetime('now'))
 );
 
+-- ── PR review comments (bot + human triage) ──────────────────────────────────
+-- Per-comment state for review comments on draft PRs. Unified for bot and
+-- human authors; author_kind discriminates. Bot comments are classified and
+-- replied to automatically. Human comments are classified + drafted-reply is
+-- stored but NEVER posted — surfaced on the dashboard for operator action.
+-- review_thread_id + thread_depth drive the back-and-forth loop detector
+-- (see agents/pr_review_triage.go).
+
+CREATE TABLE IF NOT EXISTS PRReviewComments (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    convoy_id              INTEGER NOT NULL,
+    repo                   TEXT    NOT NULL,
+    draft_pr_number        INTEGER NOT NULL,
+    github_comment_id      INTEGER NOT NULL,    -- stable ID from GitHub
+    comment_type           TEXT    NOT NULL,    -- 'review_comment' | 'issue_comment'
+    author                 TEXT    NOT NULL,    -- GitHub login
+    author_kind            TEXT    NOT NULL,    -- 'bot' | 'human'
+    body                   TEXT    NOT NULL,
+    path                   TEXT    DEFAULT '',  -- file path (review_comment only)
+    line                   INTEGER DEFAULT 0,   -- line number (review_comment only)
+    diff_hunk              TEXT    DEFAULT '',  -- inline diff context
+    review_thread_id       TEXT    DEFAULT '',  -- GitHub review thread (GraphQL node id) or 'issue:<id>' synthetic
+    in_reply_to_comment_id INTEGER DEFAULT 0,   -- parent comment if this is a reply
+    thread_depth           INTEGER DEFAULT 0,   -- # of fleet-authored fixes already in this thread
+    classification         TEXT    DEFAULT '',  -- '' | 'in_scope_fix' | 'out_of_scope' | 'not_actionable' | 'conflicted_loop' | 'human' | 'ignored'
+    classification_reason  TEXT    DEFAULT '',
+    spawned_task_id        INTEGER DEFAULT 0,   -- CodeEdit (in_scope) or Feature (out_of_scope)
+    reply_body             TEXT    DEFAULT '',  -- the reply text (DRAFT for humans, POSTED for bots)
+    replied_at             TEXT    DEFAULT '',  -- empty for humans (never posted) and conflicted_loop
+    thread_resolved_at     TEXT    DEFAULT '',  -- populated after GraphQL resolve sweep
+    created_at             TEXT    DEFAULT (datetime('now')),
+    UNIQUE(repo, draft_pr_number, github_comment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pr_review_comments_convoy ON PRReviewComments (convoy_id);
+CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id);
+
+-- Repositories gains pr_review_enabled (default 1). Set to 0 to opt a repo out
+-- of the PR review-comment triage flow.
+-- ALTER TABLE Repositories ADD COLUMN pr_review_enabled INTEGER DEFAULT 1;
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────

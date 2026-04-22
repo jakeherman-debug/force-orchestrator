@@ -34,6 +34,7 @@ var InfrastructureTaskTypes = []string{
 	"ShipConvoy",
 	"CIFailureTriage",
 	"MedicReview",
+	"PRReviewTriage",
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {
@@ -211,6 +212,25 @@ func AddBounty(db *sql.DB, parentID int, taskType, payload string) int {
 func AddBountyTx(tx *sql.Tx, parentID int, taskType, payload string) (int, error) {
 	res, err := tx.Exec(`INSERT INTO BountyBoard (parent_id, type, status, payload, created_at) VALUES (?, ?, 'Pending', ?, datetime('now'))`,
 		parentID, taskType, payload)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
+// AddFeatureTaskTx inserts a top-level Feature task targeting a specific repo.
+// Used by PRReviewTriage's out_of_scope branch — the suggestion becomes a
+// standalone Feature that Commander will plan and Chancellor will approve.
+// parent_id is 0 (top-level), status='Pending', priority is caller-chosen.
+func AddFeatureTaskTx(tx *sql.Tx, repo, payload string, priority int) (int, error) {
+	if repo == "" {
+		return 0, fmt.Errorf("AddFeatureTaskTx: repo required")
+	}
+	res, err := tx.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+		 VALUES (0, ?, 'Feature', 'Pending', ?, ?, datetime('now'))`,
+		repo, payload, priority)
 	if err != nil {
 		return 0, err
 	}
