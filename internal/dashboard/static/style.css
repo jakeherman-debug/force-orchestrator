@@ -412,6 +412,8 @@ td.dim  { color: var(--text2); }
 .action-btn.reject-btn:hover  { background: rgba(248,81,73,.12); }
 .action-btn.cancel-btn  { border-color: var(--orange); color: var(--orange); }
 .action-btn.cancel-btn:hover  { background: rgba(227,101,42,.1); }
+.action-btn.ship-btn    { border-color: var(--accent);  color: var(--accent); }
+.action-btn.ship-btn:hover    { background: rgba(88,166,255,.12); }
 .action-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 #panel-body { flex: 1; overflow-y: auto; padding: 0; }
