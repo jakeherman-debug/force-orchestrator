@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"force-orchestrator/internal/store"
@@ -55,6 +56,43 @@ func TestHandleConvoys_EmitsPRFlowFields(t *testing.T) {
 	}
 	if c.SubPRRollup.Total != 1 || c.SubPRRollup.Merged != 1 {
 		t.Errorf("rollup numbers wrong: %+v", c.SubPRRollup)
+	}
+}
+
+// TestHandleConvoysSubroutes_ShipMethodNotAllowed verifies that a GET to the
+// ship subroute is rejected with 405.
+func TestHandleConvoysSubroutes_ShipMethodNotAllowed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	_, _ = store.CreateConvoy(db, "[1] x")
+
+	handler := handleConvoysSubroutes(db)
+	req := httptest.NewRequest(http.MethodGet, "/api/convoys/1/ship", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rec.Code)
+	}
+}
+
+// TestHandleConvoysSubroutes_ShipWrongStatus verifies that shipping a convoy
+// not in DraftPROpen state returns a 500 with an error message.
+func TestHandleConvoysSubroutes_ShipWrongStatus(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	_, _ = store.CreateConvoy(db, "[1] active-convoy")
+
+	handler := handleConvoysSubroutes(db)
+	req := httptest.NewRequest(http.MethodPost, "/api/convoys/1/ship", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for wrong-status convoy, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "DraftPROpen") {
+		t.Errorf("expected error mentioning DraftPROpen, got: %s", rec.Body.String())
 	}
 }
 
