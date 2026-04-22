@@ -204,15 +204,23 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 	tokIn, tokOut := claude.ParseTokenUsage(response)
 
 	if ruling.Approved {
-		// Split on pr_flow_enabled: if the repo is on the PR flow AND the convoy
-		// has an ask-branch for this repo, open a sub-PR instead of local-merging.
-		// For PR flow repos without an ask-branch (race with CreateAskBranch or
-		// Layer C backfill), fall through to the local-merge path — the ask-branch
-		// will be created for future tasks; this one lands on main directly, which
-		// is strictly safer than blocking.
+		// Split on pr_flow_enabled: if the repo is on the PR flow, open a sub-PR
+		// instead of local-merging.
+		// If the ask-branch isn't ready yet (Pilot hasn't finished CreateAskBranch),
+		// requeue to AwaitingCouncilReview rather than falling through to main —
+		// merging to main bypasses the entire human-gate invariant.
 		repoCfg := store.GetRepo(db, b.TargetRepo)
-		usePRFlow := repoCfg != nil && repoCfg.PRFlowEnabled && b.ConvoyID > 0 &&
-			store.GetConvoyAskBranch(db, b.ConvoyID, b.TargetRepo) != nil
+		if repoCfg != nil && repoCfg.PRFlowEnabled && b.ConvoyID > 0 {
+			if store.GetConvoyAskBranch(db, b.ConvoyID, b.TargetRepo) == nil {
+				// Ask-branch not ready yet — requeue and wait for Pilot.
+				logger.Printf("Task %d: ask-branch not yet created for convoy %d/%s — requeuing", b.ID, b.ConvoyID, b.TargetRepo)
+				if _, err := db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', owner = '', locked_at = '' WHERE id = ?`, b.ID); err != nil {
+					logger.Printf("Task %d: requeue failed (%v); stale-lock detector will recover", b.ID, err)
+				}
+				return
+			}
+		}
+		usePRFlow := repoCfg != nil && repoCfg.PRFlowEnabled && b.ConvoyID > 0
 
 		if usePRFlow {
 			// CI circuit-breaker gate: if the breaker is open for this repo,
