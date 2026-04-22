@@ -18,35 +18,48 @@ import (
 // We test the happy path via existing git fixture in TestCountCommitsAheadBehind
 // below. For malformed output, we'd need a mock RunCmd — out of scope here.
 
-// TestOnSubPRMissingCI_EscalatesAfter10mWithZeroChecks verifies the new
-// early-escalation path: a sub-PR with zero checks reported after
-// missingCITimeout (10m) gets a Low-severity escalation so the operator
-// can wire up CI instead of waiting the full 2h subPRCIStaleLimit.
-func TestOnSubPRMissingCI_EscalatesAfter10mWithZeroChecks(t *testing.T) {
+// TestOnSubPRMissingCI_MergesDirectlyAfter10m verifies that a sub-PR with zero
+// checks after missingCITimeout is merged immediately rather than escalated.
+// Repos without CI still need to ship; the Jedi Council review is the gate.
+func TestOnSubPRMissingCI_MergesDirectlyAfter10m(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
 	store.AddRepo(db, "api", "/tmp/api", "")
+	_ = store.SetRepoRemoteInfo(db, "api", "git@github.com:acme/api.git", "main")
 	cid, _ := store.CreateConvoy(db, "[1] no-ci")
 	tid, _ := store.AddConvoyTask(db, 0, "api", "t", cid, 0, "Pending")
 	db.Exec(`UPDATE BountyBoard SET status = ? WHERE id = ?`, subPRCITaskStatus, tid)
 	prID, _ := store.CreateAskBranchPR(db, tid, cid, "api", "u", 5)
-	// Backdate PR row by 11 minutes — just past missingCITimeout (10m).
 	db.Exec(`UPDATE AskBranchPRs SET created_at = datetime('now', '-11 minutes') WHERE id = ?`, prID)
 
-	pr := store.GetAskBranchPR(db, prID)
-	onSubPRMissingCI(db, *pr, testLogger{})
+	stub := installGHStub(t, map[string]ghStubResp{
+		"pr merge 5": {stdout: ""},
+	})
 
-	var escCount int
-	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ? AND status = 'Open'`, tid).Scan(&escCount)
-	if escCount != 1 {
-		t.Errorf("missing-CI must escalate at 10m, got %d escalations", escCount)
+	pr := store.GetAskBranchPR(db, prID)
+	ghc := newGHClient()
+	onSubPRMissingCI(db, ghc, *pr, testLogger{})
+
+	// Must have called gh pr merge (not escalate).
+	var sawMerge bool
+	for _, c := range stub.calls {
+		if len(c.args) >= 2 && c.args[0] == "pr" && c.args[1] == "merge" {
+			sawMerge = true
+		}
 	}
-	// Second call with the same open escalation must dedup.
-	onSubPRMissingCI(db, *pr, testLogger{})
-	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ? AND status = 'Open'`, tid).Scan(&escCount)
-	if escCount != 1 {
-		t.Errorf("dedup failed: second call created duplicate escalation (%d)", escCount)
+	if !sawMerge {
+		t.Error("expected gh pr merge call for no-CI sub-PR")
+	}
+	after, _ := store.GetBounty(db, tid)
+	if after.Status != "Completed" {
+		t.Errorf("task should be Completed after no-CI merge, got %q", after.Status)
+	}
+	// No escalation should have been created.
+	var escCount int
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, tid).Scan(&escCount)
+	if escCount != 0 {
+		t.Errorf("no-CI merge must not create escalations, got %d", escCount)
 	}
 }
 

@@ -232,13 +232,20 @@ func (c *Client) PRChecks(cwd, repo string, number int) ([]PRCheck, ChecksState,
 	}
 	stdout, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		// `gh pr checks` exits non-zero when ANY check has failed. That's informational,
-		// not an execution error — if we can parse the JSON, proceed.
+		// `gh pr checks` exits non-zero in two distinct situations:
+		//   (a) one or more checks failed — stderr has check output, stdout is JSON
+		//   (b) no checks are configured — stderr is "no checks reported on the '…' branch", stdout is empty
+		// For (a), parse the JSON and proceed. For (b), return an empty list so
+		// callers can detect the no-CI case via len(checks)==0 without an error.
+		stderrStr := strings.TrimSpace(string(stderr))
+		if strings.Contains(stderrStr, "no checks reported") {
+			return nil, ChecksPending, nil
+		}
 		var checks []PRCheck
 		if parseErr := json.Unmarshal(stdout, &checks); parseErr == nil {
 			return checks, rollupChecks(checks), nil
 		}
-		return nil, ChecksPending, fmt.Errorf("gh pr checks: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return nil, ChecksPending, fmt.Errorf("gh pr checks: %w: %s", err, stderrStr)
 	}
 	var checks []PRCheck
 	if unmarshalErr := json.Unmarshal(stdout, &checks); unmarshalErr != nil {

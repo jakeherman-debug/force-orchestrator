@@ -227,9 +227,8 @@ func deriveGHRepoFromRemoteURL(remoteURL string) string {
 // ── sub-pr-ci-watch dog ──────────────────────────────────────────────────────
 
 // missingCITimeout is how long we wait for at least one CI check to appear on
-// a sub-PR before escalating. Ten minutes is generous — Jenkins typically
-// starts within seconds of a push; an empty check list past this threshold
-// means the repo isn't wired up and the task needs operator attention.
+// a sub-PR before treating the repo as CI-less and auto-merging. Ten minutes
+// is generous — Jenkins typically starts within seconds of a push.
 const missingCITimeout = 10 * time.Minute
 
 // subPRCIStaleLimit caps how long a sub-PR's CI may keep us in Pending state
@@ -335,13 +334,14 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 	case gh.ChecksFailure:
 		onSubPRCIFailed(db, pr, logger)
 	case gh.ChecksPending:
-		// Two staleness gates apply:
+		// Two gates apply:
 		//   (a) missingCITimeout (10m): if the PR has ZERO checks reported for
-		//       this long, the repo almost certainly has no CI configured for
-		//       the ask-branch target. Escalate early — waiting 2h for a CI
-		//       run that isn't coming is operator grief.
-		//   (b) subPRCIStaleLimit (2h): hard upper bound. Any Pending sub-PR
-		//       this old points to a stuck CI system that needs attention.
+		//       this long, the repo has no CI configured for this branch — just
+		//       merge immediately. The Jedi Council is the quality gate; CI is
+		//       a bonus. Waiting 2h for a run that will never arrive is
+		//       unnecessary operator friction.
+		//   (b) subPRCIStaleLimit (2h): hard upper bound for repos that DO have
+		//       CI but whose build is stuck. Escalate to operator.
 		createdAt, parseErr := time.Parse("2006-01-02 15:04:05", pr.CreatedAt)
 		if parseErr != nil {
 			return
@@ -351,11 +351,9 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 			onSubPRStalled(db, pr, logger)
 			return
 		}
-		// Early escalation: zero checks AFTER missingCITimeout. An empty checks
-		// slice IS the signal — GitHub would return >=1 check the moment any
-		// workflow is triggered on the push.
+		// No checks after missingCITimeout → repo has no CI. Merge directly.
 		if age > missingCITimeout && len(checks) == 0 {
-			onSubPRMissingCI(db, pr, logger)
+			onSubPRMissingCI(db, ghc, pr, logger)
 		}
 	}
 }
@@ -436,25 +434,20 @@ func onSubPRStalled(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(s
 	logger.Printf("sub-pr-ci-watch: task %d escalated — Pending for %v", pr.TaskID, subPRCIStaleLimit)
 }
 
-// onSubPRMissingCI handles the specific case of a sub-PR with ZERO checks
-// reported after missingCITimeout (10m). This almost always means the repo
-// hasn't configured CI for branches targeting the ask-branch. Escalate so
-// the operator can wire up CI or manually approve-and-merge; otherwise the
-// task would wait subPRCIStaleLimit (2h) for no reason.
-//
-// Dedupe: we emit the escalation only once per sub-PR (the failure_count
-// tracking serves as a soft marker). On subsequent dog ticks we re-check
-// the zero-checks condition, but only escalate if there's no existing
-// Open escalation for this task.
-func onSubPRMissingCI(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
-	var openEsc int
-	db.QueryRow(`SELECT COUNT(*) FROM Escalations
-		WHERE task_id = ? AND status = 'Open'`, pr.TaskID).Scan(&openEsc)
-	if openEsc > 0 {
+// onSubPRMissingCI handles a sub-PR with ZERO checks after missingCITimeout.
+// No CI means no gate to wait for — merge immediately using the same path as
+// a green CI run. The Jedi Council review is the quality gate; CI is additive.
+func onSubPRMissingCI(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+	repo := store.GetRepo(db, pr.Repo)
+	if repo == nil {
+		logger.Printf("sub-pr-ci-watch: task %d missing-CI merge: repo %q not found", pr.TaskID, pr.Repo)
 		return
 	}
-	msg := fmt.Sprintf("sub-PR #%d: no CI checks reported in %v — ask-branch likely has no CI configured. Operator: wire up CI or manually merge/reject.",
-		pr.PRNumber, missingCITimeout)
-	CreateEscalation(db, pr.TaskID, store.SeverityLow, msg)
-	logger.Printf("sub-pr-ci-watch: task %d flagged — no CI checks after %v", pr.TaskID, missingCITimeout)
+	strategy := subPRAutoMergeStrategy(db)
+	logger.Printf("sub-pr-ci-watch: task %d no CI configured for %s — merging PR #%d directly (%s)", pr.TaskID, pr.Repo, pr.PRNumber, strategy)
+	if mErr := ghc.PRMerge(repo.LocalPath, deriveGHRepoFromRemoteURL(repo.RemoteURL), pr.PRNumber, strategy); mErr != nil {
+		logger.Printf("sub-pr-ci-watch: task %d no-CI merge #%d failed: %v", pr.TaskID, pr.PRNumber, mErr)
+		return
+	}
+	onSubPRMerged(db, pr, logger)
 }

@@ -541,6 +541,54 @@ func TestDeriveGHRepoFromRemoteURL(t *testing.T) {
 	}
 }
 
+// TestDogSubPRCIWatch_NoCIConfigured_MergesDirectly is a regression test for
+// repos without Jenkins/GitHub Actions. Previously the dog escalated after
+// missingCITimeout; now it merges immediately — the Jedi Council review is
+// the quality gate, CI is additive.
+func TestDogSubPRCIWatch_NoCIConfigured_MergesDirectly(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	prRowID, err := store.CreateAskBranchPR(db, taskID, convoyID, "api", "https://github.com/acme/api/pull/7", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Back-date the PR so it's past missingCITimeout.
+	db.Exec(`UPDATE AskBranchPRs SET created_at = datetime('now', '-15 minutes') WHERE id = ?`, prRowID)
+
+	stub := installGHStub(t, map[string]ghStubResp{
+		"pr view 7":   {stdout: `{"number":7,"url":"u","state":"OPEN","isDraft":false,"merged":false,"mergedAt":"","closedAt":"","reviews":[]}`},
+		"pr checks 7": {stdout: "", stderr: "no checks reported on the 'branch' branch", err: fmt.Errorf("exit status 1")},
+		"pr merge 7":  {stdout: ""},
+	})
+
+	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// gh pr merge (not --auto) must have been called.
+	var sawMerge bool
+	for _, c := range stub.calls {
+		if len(c.args) >= 2 && c.args[0] == "pr" && c.args[1] == "merge" {
+			sawMerge = true
+			joined := strings.Join(c.args, " ")
+			if strings.Contains(joined, "--auto") {
+				t.Errorf("no-CI merge must NOT use --auto flag: %q", joined)
+			}
+		}
+	}
+	if !sawMerge {
+		t.Errorf("expected direct merge when no CI checks configured")
+	}
+
+	// Task must be Completed (direct merge is synchronous, not async like --auto).
+	after, _ := store.GetBounty(db, taskID)
+	if after.Status != "Completed" {
+		t.Errorf("task should be Completed after no-CI direct merge, got %q", after.Status)
+	}
+}
+
 // Silence unused-package warnings when the test file is built but not run.
 var _ = claude.SetCLIRunner
 var _ = time.Now
