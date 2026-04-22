@@ -141,6 +141,66 @@ func TestRunConvoyReview_NeedsWork_SpawnsFixTasks(t *testing.T) {
 	}
 }
 
+// ── runConvoyReview — active convoy tasks block fix spawning ─────────────────
+
+func TestRunConvoyReview_ActiveConvoyTasks_NoSpawn(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := seedDraftPROpenConvoy(t, db)
+
+	// Seed an active (Pending) non-infrastructure task in the convoy.
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'api', 'CodeEdit', 'Pending', 'in-flight work', ?, 5, datetime('now'))`, convoyID)
+
+	stubConvoyReviewLLM(t, convoyReviewResult{
+		Status: "needs_work",
+		Findings: []convoyReviewFinding{
+			{Type: "gap", Description: "missing feature", Fix: "add it", Repo: "api"},
+		},
+	})
+
+	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
+	bounty := &store.Bounty{ID: 994, Type: "ConvoyReview", Payload: string(payload)}
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
+		VALUES (994, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+
+	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+
+	// Should complete without spawning any fix tasks.
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 994`).Scan(&status)
+	if status != "Completed" {
+		t.Errorf("expected Completed, got %s", status)
+	}
+	var fixCount int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = 994`).Scan(&fixCount)
+	if fixCount != 0 {
+		t.Errorf("expected 0 fix tasks (diff still moving), got %d", fixCount)
+	}
+}
+
+func TestDogConvoyReviewWatch_SkipsWhenActiveConvoyTasks(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := seedDraftPROpenConvoy(t, db)
+
+	// Seed an active non-infrastructure task directly in the convoy (not via a ConvoyReview parent).
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'api', 'CodeEdit', 'Pending', 'in-flight work', ?, 5, datetime('now'))`, convoyID)
+
+	dogConvoyReviewWatch(db, testLogger{})
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
+		AND (payload LIKE '%"convoy_id":' || ? || ',%' OR payload LIKE '%"convoy_id":' || ? || '}%')`,
+		convoyID, convoyID).Scan(&count)
+	if count != 0 {
+		t.Errorf("expected no ConvoyReview queued while active tasks exist, got %d", count)
+	}
+}
+
 // ── runConvoyReview — max findings cap ──────────────────────────────────────
 
 func TestRunConvoyReview_MaxFindingsCap(t *testing.T) {

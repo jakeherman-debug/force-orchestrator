@@ -82,8 +82,13 @@ self-healing loop that terminates when a pass returns `"clean"`.
    stuck Locked task.
 8. **Dog re-trigger condition.** `dogConvoyReviewWatch` queues a new ConvoyReview only when
    ALL of the following hold: convoy status is `DraftPROpen`, no ConvoyReview is
-   `Pending`/`Locked`, and no child CodeEdit task (whose parent is a ConvoyReview for this
-   convoy) is in a non-terminal status.
+   `Pending`/`Locked`, no child CodeEdit task (whose parent is a ConvoyReview for this
+   convoy) is in a non-terminal status, AND no non-infrastructure task in the convoy is
+   in a non-terminal status. Reviewing against a moving diff produces fix tasks that
+   duplicate in-progress work — wait for the convoy to quiesce first.
+9. **Never spawn fix tasks against a moving diff.** `runConvoyReview` checks for active
+   non-infrastructure tasks in the convoy before spawning any fix tasks. If any exist,
+   it completes without spawning and lets the dog re-trigger once the convoy is quiescent.
 
 ## Self-healing is the default; escalation is the last step
 

@@ -207,6 +207,21 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		return
 	}
 
+	// Don't spawn fix tasks if non-infrastructure work is still in flight for
+	// this convoy — the diff is still changing. Complete so the dog re-triggers
+	// once those tasks settle.
+	var activeConvoyTasks int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE convoy_id = ? AND status NOT IN ('Completed','Cancelled','Failed')
+		  AND type NOT IN (`+store.InfrastructureTaskTypesSQLList()+`)`,
+		payload.ConvoyID).Scan(&activeConvoyTasks)
+	if activeConvoyTasks > 0 {
+		logger.Printf("ConvoyReview #%d: %d active task(s) in convoy %d — completing without spawning (diff still moving)",
+			bounty.ID, activeConvoyTasks, payload.ConvoyID)
+		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		return
+	}
+
 	// Spawn fix tasks, capped to avoid runaway task creation.
 	maxFindings := getIntConfig(db, "convoy_review_max_findings", 5)
 	findings := result.Findings
@@ -315,6 +330,18 @@ func dogConvoyReviewWatch(db *sql.DB, logger interface{ Printf(string, ...any) }
 			  AND child.status NOT IN ('Completed','Cancelled','Failed')`,
 			c.id).Scan(&activeFixTasks)
 		if activeFixTasks > 0 {
+			continue
+		}
+
+		// Skip if any non-infrastructure task in the convoy is still in flight —
+		// reviewing against a moving diff produces fix tasks that duplicate
+		// in-progress work.
+		var activeConvoyTasks int
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+			WHERE convoy_id = ? AND status NOT IN ('Completed','Cancelled','Failed')
+			  AND type NOT IN (`+store.InfrastructureTaskTypesSQLList()+`)`,
+			c.id).Scan(&activeConvoyTasks)
+		if activeConvoyTasks > 0 {
 			continue
 		}
 
