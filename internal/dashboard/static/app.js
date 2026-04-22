@@ -18,6 +18,7 @@ const S = {
   selectedID:         null,
   detail:             null,
   rejectID:           null,
+  shipConvoyID:       null,
   activeTab:          'tasks',
   sortBy:             'id',
   sortDir:            'desc',
@@ -890,6 +891,9 @@ function renderConvoys(convoys) {
     const cancelBtn = c.status === 'Active'
       ? `<button class="action-btn cancel-btn" onclick="cancelConvoy(${c.id})">Cancel Convoy</button>`
       : '';
+    const shipBtn = c.status === 'DraftPROpen'
+      ? `<button class="action-btn ship-btn" onclick="showShip(${c.id})">Ship It</button>`
+      : '';
     const reviewBadge = renderPRReviewBadge(c);
     return `
       <div class="convoy-card">
@@ -908,6 +912,7 @@ function renderConvoys(convoys) {
           <div style="flex:1"></div>
           ${approveBtn}
           ${cancelBtn}
+          ${shipBtn}
         </div>
         <div id="pr-review-panel-${c.id}" class="pr-review-panel" style="display:none"></div>
       </div>`;
@@ -1092,6 +1097,67 @@ async function confirmCancelConvoy() {
     loadConvoys();
   } catch(e) {
     showToast('Cancel failed: ' + e.message, 'err');
+  }
+}
+
+function showShip(id) {
+  S.shipConvoyID = id;
+  $('ship-modal-convoy').textContent = `#${id}`;
+  $('ship-branch-list').innerHTML = '<div class="dim" style="padding:10px">Loading diff…</div>';
+  $('ship-summary-line').innerHTML = '';
+  $('ship-modal').classList.remove('hidden');
+  api(`/api/convoys/${id}/diff-summary`)
+    .then(data => renderShipDiff(data))
+    .catch(e => {
+      $('ship-branch-list').innerHTML = `<div style="padding:10px;color:var(--red)">Failed to load diff: ${escHtml(e.message)}</div>`;
+    });
+}
+
+function renderShipDiff(data) {
+  const branches = data.ask_branches || [];
+  if (!branches.length) {
+    $('ship-branch-list').innerHTML = '<div class="dim" style="padding:10px">No pending diffs — all branches are clean.</div>';
+    $('ship-summary-line').innerHTML = '';
+    return;
+  }
+  let totalAdd = 0, totalDel = 0;
+  $('ship-branch-list').innerHTML = branches.map(ab => {
+    totalAdd += ab.total_additions || 0;
+    totalDel += ab.total_deletions || 0;
+    const prLink = ab.draft_pr_url
+      ? `<a href="${escHtml(ab.draft_pr_url)}" target="_blank" rel="noopener">PR #${ab.draft_pr_number}</a>`
+      : `PR #${ab.draft_pr_number}`;
+    const fileRows = (ab.files || []).map(f =>
+      `<tr><td class="ship-diff-file">${escHtml(f.path)}</td>` +
+      `<td class="ship-diff-add">+${f.additions}</td>` +
+      `<td class="ship-diff-del">-${f.deletions}</td></tr>`
+    ).join('');
+    const body = fileRows
+      ? `<table class="ship-diff-table"><tbody>${fileRows}</tbody></table>`
+      : '<div class="dim" style="padding:8px 10px;font-size:12px">No changed files.</div>';
+    return `
+      <div class="ship-branch">
+        <div class="ship-branch-hdr">
+          ${prLink}
+          <span class="ship-branch-name">${escHtml(ab.ask_branch)}</span>
+        </div>
+        ${body}
+      </div>`;
+  }).join('');
+  $('ship-summary-line').innerHTML =
+    `<span>Total: <strong>+${totalAdd}</strong> additions, <strong>-${totalDel}</strong> deletions` +
+    ` across ${branches.length} branch${branches.length === 1 ? '' : 'es'}</span>`;
+}
+
+async function confirmShip() {
+  const id = S.shipConvoyID;
+  try {
+    const r = await api(`/api/convoys/${id}/ship`, { method: 'POST' });
+    showToast(`Convoy #${id} shipped (${r.promoted} PR(s) promoted)`, 'ok');
+    closeModal('ship-modal');
+    loadConvoys();
+  } catch(e) {
+    showToast('Ship failed: ' + e.message, 'err');
   }
 }
 
