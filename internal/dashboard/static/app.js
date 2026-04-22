@@ -853,6 +853,7 @@ function renderConvoys(convoys) {
     const cancelBtn = c.status === 'Active'
       ? `<button class="action-btn cancel-btn" onclick="cancelConvoy(${c.id})">Cancel Convoy</button>`
       : '';
+    const reviewBadge = renderPRReviewBadge(c);
     return `
       <div class="convoy-card">
         <div class="convoy-header">
@@ -866,12 +867,165 @@ function renderConvoys(convoys) {
         </div>
         <div class="convoy-footer">
           <span class="convoy-counts">${c.completed} / ${c.total} tasks complete (${pct}%)</span>
+          ${reviewBadge}
           <div style="flex:1"></div>
           ${approveBtn}
           ${cancelBtn}
         </div>
+        <div id="pr-review-panel-${c.id}" class="pr-review-panel" style="display:none"></div>
       </div>`;
   }).join('');
+}
+
+// renderPRReviewBadge returns a clickable summary badge when the convoy has
+// any PR review comments. Clicking it toggles the inline comment panel.
+function renderPRReviewBadge(c) {
+  const r = c.pr_review_rollup;
+  if (!r || !r.total) return '';
+  const parts = [];
+  if (r.bot_in_scope)      parts.push(`<span title="Bot fixes queued">🔧 ${r.bot_in_scope}</span>`);
+  if (r.bot_out_of_scope)  parts.push(`<span title="Follow-up features">📌 ${r.bot_out_of_scope}</span>`);
+  if (r.bot_not_actionable)parts.push(`<span title="Explained to bot">💬 ${r.bot_not_actionable}</span>`);
+  if (r.bot_conflicted_loop)parts.push(`<span title="Bot loop escalated" style="color:var(--red)">⚠️ ${r.bot_conflicted_loop}</span>`);
+  if (r.human_awaiting)    parts.push(`<span title="Human comments awaiting operator" style="color:var(--accent)">👤 ${r.human_awaiting}</span>`);
+  if (!parts.length) return '';
+  return `<button class="pr-review-badge" onclick="togglePRReviewPanel(${c.id})" title="Click to view PR review comments">
+    ${parts.join(' ')}
+  </button>`;
+}
+
+// togglePRReviewPanel lazy-loads the convoy's PR review comments inline.
+async function togglePRReviewPanel(convoyID) {
+  const el = $(`pr-review-panel-${convoyID}`);
+  if (!el) return;
+  if (el.style.display === 'block') {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'block';
+  el.innerHTML = `<div class="dim" style="padding:10px">Loading comments…</div>`;
+  try {
+    const data = await api(`/api/convoys/${convoyID}/pr-review-comments`);
+    renderPRReviewPanel(el, convoyID, data.comments || []);
+  } catch (e) {
+    el.innerHTML = `<div style="padding:10px;color:var(--red)">Failed to load: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderPRReviewPanel(el, convoyID, comments) {
+  if (!comments.length) {
+    el.innerHTML = `<div class="dim" style="padding:10px">No comments yet.</div>`;
+    return;
+  }
+  const rows = comments.map(c => renderPRReviewRow(c)).join('');
+  el.innerHTML = `
+    <div class="pr-review-header">
+      <strong>PR review comments</strong>
+      <button class="action-btn" onclick="retriggerPRReview(${convoyID})" style="margin-left:auto">Re-run triage</button>
+    </div>
+    <table class="pr-review-table">
+      <thead><tr>
+        <th>Author</th><th>Where</th><th>Classification</th><th>Comment</th><th>Reply / Action</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderPRReviewRow(c) {
+  const isHuman = c.author_kind === 'human';
+  const clsBadge = prReviewClassBadge(c.classification);
+  const where = c.path
+    ? `<span class="mono" style="font-size:11px">${escHtml(c.path)}${c.line ? ':' + c.line : ''}</span>`
+    : `<span class="dim" style="font-size:11px">PR #${c.draft_pr_number}</span>`;
+  const body = `<div class="pr-review-body">${escHtml(truncate(c.body, 300))}</div>`;
+  let reply;
+  if (isHuman && !c.replied_at) {
+    // Draft reply + operator actions.
+    reply = `
+      <textarea class="pr-review-draft" id="pr-draft-${c.id}">${escHtml(c.reply_body || '')}</textarea>
+      <div class="pr-review-actions">
+        <button class="action-btn" onclick="postHumanReply(${c.id})">Post reply</button>
+        <button class="action-btn" onclick="queueFollowup(${c.id})">Queue follow-up</button>
+        <button class="action-btn cancel-btn" onclick="dismissComment(${c.id})">Dismiss</button>
+      </div>`;
+  } else if (c.replied_at) {
+    reply = `<div class="pr-review-reply">${escHtml(truncate(c.reply_body || '', 200))}</div>
+             <div class="dim" style="font-size:11px">replied ${fmtShortDate(c.replied_at)}</div>`;
+  } else if (c.classification === 'in_scope_fix' && c.spawned_task_id) {
+    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ task #${c.spawned_task_id}</a>`;
+  } else if (c.classification === 'out_of_scope' && c.spawned_task_id) {
+    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ feature #${c.spawned_task_id}</a>`;
+  } else if (c.classification === 'conflicted_loop') {
+    reply = `<span style="color:var(--red)">loop escalated — operator required</span>`;
+  } else {
+    reply = `<span class="dim">—</span>`;
+  }
+  return `<tr class="pr-review-row${isHuman ? ' pr-review-human' : ''}">
+    <td><span class="mono" style="font-size:11px">${escHtml(c.author)}</span>
+        <div class="dim" style="font-size:10px">${isHuman ? '👤 human' : '🤖 bot'}</div></td>
+    <td>${where}</td>
+    <td>${clsBadge}</td>
+    <td>${body}</td>
+    <td>${reply}</td>
+  </tr>`;
+}
+
+function prReviewClassBadge(cls) {
+  const map = {
+    'in_scope_fix':    { label: 'fix queued',  color: 'var(--green)' },
+    'out_of_scope':    { label: 'follow-up',   color: 'var(--accent)' },
+    'not_actionable':  { label: 'replied',     color: 'var(--text2)' },
+    'conflicted_loop': { label: 'loop',        color: 'var(--red)' },
+    'human':           { label: 'human',       color: 'var(--purple)' },
+    'ignored':         { label: 'dismissed',   color: 'var(--text2)' },
+    '':                { label: 'pending',     color: 'var(--yellow)' },
+  };
+  const m = map[cls] || { label: cls, color: 'var(--text2)' };
+  return `<span class="pr-review-cls" style="background:${m.color}">${m.label}</span>`;
+}
+
+async function postHumanReply(rowID) {
+  const textarea = $(`pr-draft-${rowID}`);
+  const body = textarea ? textarea.value : '';
+  try {
+    await api(`/api/pr-comments/${rowID}/post-reply`, {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    });
+    showToast('Reply posted', 'ok');
+    loadConvoys();
+  } catch (e) {
+    showToast('Post failed: ' + e.message, 'err');
+  }
+}
+
+async function queueFollowup(rowID) {
+  try {
+    const res = await api(`/api/pr-comments/${rowID}/queue-followup`, { method: 'POST' });
+    showToast(`Feature #${res.feature_id} queued`, 'ok');
+    loadConvoys();
+  } catch (e) {
+    showToast('Queue failed: ' + e.message, 'err');
+  }
+}
+
+async function dismissComment(rowID) {
+  try {
+    await api(`/api/pr-comments/${rowID}/dismiss`, { method: 'POST' });
+    showToast('Dismissed', 'ok');
+    loadConvoys();
+  } catch (e) {
+    showToast('Dismiss failed: ' + e.message, 'err');
+  }
+}
+
+async function retriggerPRReview(convoyID) {
+  try {
+    await api(`/api/convoys/${convoyID}/pr-review-retry`, { method: 'POST' });
+    showToast('Triage re-queued', 'ok');
+  } catch (e) {
+    showToast('Retry failed: ' + e.message, 'err');
+  }
 }
 
 function setConvoyStatusFilter(f) {

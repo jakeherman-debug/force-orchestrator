@@ -20,6 +20,38 @@ The fleet delivers via GitHub PRs by default (`pr_flow_enabled = true`). Code to
 4. **Human-gate invariant.** The draft PR into main NEVER auto-merges. The ship-it button (`gh pr ready` + optional `gh pr merge`) is the one and only path.
 5. **Legacy fallback is always available.** `pr_flow_enabled=0` on a repo sends it through the pre-PR-flow direct-merge path (`MergeAndCleanup` in `internal/git/git.go`). This is the escape hatch for repos with broken remotes or branch protection rules we can't satisfy.
 
+## PR review-comment invariants
+
+After Diplomat opens the draft PR to main, the `pr-review-poll` dog records
+bot and human review comments into `PRReviewComments` and Diplomat's
+`PRReviewTriage` classifier dispatches them.
+
+1. **Bots reply inline; humans never do.** For `author_kind='bot'`, the
+   triage dispatcher posts a reply to GitHub and resolves the thread (after
+   the fix lands). For `author_kind='human'`, the LLM still runs and the
+   reply is drafted into `reply_body`, but `replied_at` stays empty and
+   no gh call fires. The operator posts, edits, or dismisses from the
+   dashboard. The dispatcher must hard-normalize `AuthorKind=="human"` →
+   `classification="human"` regardless of what the LLM returned.
+2. **In-scope fixes route through the Jedi Council.** The dispatcher
+   spawns a CodeEdit on the ask-branch (`branch_name=<ask_branch>`), and
+   Council's `completeAskBranchResolution` path force-pushes when it
+   approves. We never bypass the quality gate for bot suggestions.
+3. **Thread loop cap.** When `thread_depth >= pr_review_thread_depth_cap`
+   (default 2) AND the classifier detects contradiction, it emits
+   `conflicted_loop`, escalates, and stops acting on that thread. The
+   classifier must NOT emit `conflicted_loop` at lower depths.
+4. **Thread resolution only after the fix lands.** For `in_scope_fix`,
+   the review thread is resolved by the `pr-review-resolve` sweep once
+   the spawned CodeEdit reaches status=Completed — not when the reply
+   was posted. For `not_actionable`, resolve immediately. For
+   `out_of_scope` and `conflicted_loop`, never resolve (keep threads
+   visible for human follow-up).
+5. **Global + per-repo kill switches.** `pr_review_enabled=0` in
+   SystemConfig or `Repositories.pr_review_enabled=0` skips the repo
+   entirely. Both switches check in `dogPRReviewPoll` and
+   `dogPRReviewResolve` before any gh calls.
+
 ## Self-healing is the default; escalation is the last step
 
 Every new `fmt.Errorf(...)` or `FailBounty(...)` added during a PR-flow change must fall into one of these buckets:

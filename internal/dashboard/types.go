@@ -110,15 +110,51 @@ type DashboardEscalation struct {
 // PR-flow fields are populated only when the convoy has ConvoyAskBranch rows
 // (i.e. it went through the PR-based delivery path rather than legacy merges).
 type DashboardConvoy struct {
-	ID            int                      `json:"id"`
-	Name          string                   `json:"name"`
-	Status        string                   `json:"status"`
-	CreatedAt     string                   `json:"created_at"`
-	Completed     int                      `json:"completed"`
-	Total         int                      `json:"total"`
-	HasPlanned    bool                     `json:"has_planned"`
-	AskBranches   []DashboardAskBranch     `json:"ask_branches,omitempty"`
-	SubPRRollup   *DashboardSubPRRollup    `json:"sub_pr_rollup,omitempty"`
+	ID                int                        `json:"id"`
+	Name              string                     `json:"name"`
+	Status            string                     `json:"status"`
+	CreatedAt         string                     `json:"created_at"`
+	Completed         int                        `json:"completed"`
+	Total             int                        `json:"total"`
+	HasPlanned        bool                       `json:"has_planned"`
+	AskBranches       []DashboardAskBranch       `json:"ask_branches,omitempty"`
+	SubPRRollup       *DashboardSubPRRollup      `json:"sub_pr_rollup,omitempty"`
+	PRReviewRollup    *DashboardPRReviewRollup   `json:"pr_review_rollup,omitempty"`
+}
+
+// DashboardPRReviewRollup counts PR review comments by classification for
+// display on the convoy card. Populated only for convoys that have draft PRs
+// (otherwise there can't be any review comments).
+type DashboardPRReviewRollup struct {
+	Total           int `json:"total"`
+	BotInScope      int `json:"bot_in_scope"`
+	BotOutOfScope   int `json:"bot_out_of_scope"`
+	BotNotAction    int `json:"bot_not_actionable"`
+	BotConflicted   int `json:"bot_conflicted_loop"`
+	BotUnclassified int `json:"bot_unclassified"`
+	HumanAwaiting   int `json:"human_awaiting"`
+}
+
+// DashboardPRReviewComment is a single row in the convoy-detail comment table.
+type DashboardPRReviewComment struct {
+	ID                    int    `json:"id"`
+	Repo                  string `json:"repo"`
+	DraftPRNumber         int    `json:"draft_pr_number"`
+	GitHubCommentID       int64  `json:"github_comment_id"`
+	CommentType           string `json:"comment_type"`
+	Author                string `json:"author"`
+	AuthorKind            string `json:"author_kind"`
+	Body                  string `json:"body"`
+	Path                  string `json:"path,omitempty"`
+	Line                  int    `json:"line,omitempty"`
+	Classification        string `json:"classification"`
+	ClassificationReason  string `json:"classification_reason,omitempty"`
+	SpawnedTaskID         int    `json:"spawned_task_id,omitempty"`
+	ReplyBody             string `json:"reply_body,omitempty"`
+	RepliedAt             string `json:"replied_at,omitempty"`
+	ThreadResolvedAt      string `json:"thread_resolved_at,omitempty"`
+	ThreadDepth           int    `json:"thread_depth"`
+	CreatedAt             string `json:"created_at"`
 }
 
 // DashboardAskBranch is the dashboard view of one per-repo ask-branch's state.

@@ -645,6 +645,19 @@ func handleConvoys(db *sql.DB) http.HandlerFunc {
 					ChecksSuccess: rollup.ChecksSuccess,
 					ChecksFailure: rollup.ChecksFailure,
 				}
+				// PR review-comment rollup (bot + human triage surface).
+				prr := store.ComputePRReviewRollup(db, c.ID)
+				if prr.Total > 0 {
+					convoy.PRReviewRollup = &DashboardPRReviewRollup{
+						Total:           prr.Total,
+						BotInScope:      prr.BotInScope,
+						BotOutOfScope:   prr.BotOutOfScope,
+						BotNotAction:    prr.BotNotAction,
+						BotConflicted:   prr.BotConflicted,
+						BotUnclassified: prr.BotUnclassified,
+						HumanAwaiting:   prr.HumanAwaiting,
+					}
+				}
 			}
 			out = append(out, convoy)
 		}
@@ -656,12 +669,8 @@ func handleConvoys(db *sql.DB) http.HandlerFunc {
 func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jsonCORS(w)
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) != 4 {
+		if len(parts) < 4 {
 			http.NotFound(w, r)
 			return
 		}
@@ -671,19 +680,46 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
 			return
 		}
+
+		// Methods enforced per-case: most are POST (mutations), but
+		// pr-review-comments is GET.
+		requirePOST := func() bool {
+			if r.Method != http.MethodPost {
+				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+				return false
+			}
+			return true
+		}
+		requireGET := func() bool {
+			if r.Method != http.MethodGet {
+				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+				return false
+			}
+			return true
+		}
+
 		switch parts[3] {
 		case "approve":
+			if !requirePOST() {
+				return
+			}
 			n := store.ApproveConvoyTasks(db, id)
 			store.LogAudit(db, "dashboard", "convoy-approve", id,
 				fmt.Sprintf("activated %d planned task(s) via dashboard", n))
 			fmt.Fprintf(w, `{"ok":true,"id":%d,"activated":%d}`, id, n)
 		case "cancel":
+			if !requirePOST() {
+				return
+			}
 			n := store.CancelConvoyPendingTasks(db, id)
 			db.Exec(`UPDATE Convoys SET status = 'Cancelled' WHERE id = ?`, id)
 			store.LogAudit(db, "dashboard", "convoy-cancel", id,
 				fmt.Sprintf("cancelled convoy #%d (%d pending task(s) stopped)", id, n))
 			fmt.Fprintf(w, `{"ok":true,"id":%d,"cancelled":%d}`, id, n)
 		case "ship":
+			if !requirePOST() {
+				return
+			}
 			// Ship-it: delegate to the per-process Ship handler. Shells out to
 			// gh; errors are surfaced to the operator via the mail system.
 			n, err := dashboardShipConvoy(db, id)
@@ -692,6 +728,18 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			fmt.Fprintf(w, `{"ok":true,"id":%d,"promoted":%d}`, id, n)
+		case "pr-review-comments":
+			// GET: list all PR review comments for this convoy (bot + human).
+			if !requireGET() {
+				return
+			}
+			writeConvoyPRReviewComments(db, w, id)
+		case "pr-review-retry":
+			// POST: queue a fresh PRReviewTriage for this convoy (operator override).
+			if !requirePOST() {
+				return
+			}
+			writePRReviewRetry(db, w, id)
 		default:
 			http.NotFound(w, r)
 		}

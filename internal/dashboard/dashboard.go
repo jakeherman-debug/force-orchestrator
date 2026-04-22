@@ -47,6 +47,7 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/fleet-log", handleFleetLogStream("fleet.log"))
 	mux.HandleFunc("/api/dogs", handleDogsList(db))
 	mux.HandleFunc("/api/dogs/", handleDogsRun(db))
+	mux.HandleFunc("/api/pr-comments/", handlePRCommentsSubroutes(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── Static assets + SPA fallback ─────────────────────────────────────────

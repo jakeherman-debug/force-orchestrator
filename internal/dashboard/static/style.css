@@ -824,3 +824,90 @@ select option { background: var(--bg2); color: var(--text); }
   font-style: italic;
   opacity: 0.75;
 }
+
+/* PR review comment surfaces on the convoy card. */
+.pr-review-badge {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+.pr-review-badge:hover {
+  background: var(--border);
+}
+.pr-review-panel {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.pr-review-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 6px;
+}
+.pr-review-table {
+  width: 100%;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+.pr-review-table th {
+  text-align: left;
+  color: var(--text2);
+  font-weight: normal;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.pr-review-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--bg3);
+  vertical-align: top;
+}
+.pr-review-row.pr-review-human {
+  background: rgba(188, 140, 255, 0.05);
+}
+.pr-review-cls {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  color: var(--bg);
+  font-weight: bold;
+}
+.pr-review-body {
+  max-width: 400px;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+.pr-review-reply {
+  max-width: 300px;
+  color: var(--text2);
+  font-style: italic;
+  white-space: pre-wrap;
+}
+.pr-review-draft {
+  width: 100%;
+  min-width: 250px;
+  min-height: 60px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px;
+  border-radius: 3px;
+  resize: vertical;
+}
+.pr-review-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}

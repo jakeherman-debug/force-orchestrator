@@ -209,9 +209,16 @@ func cmdConvoy(db *sql.DB, args []string) {
 			}
 		}
 		cmdConvoyShip(db, convoyShipID, mergeStrategy)
+	case "pr-review":
+		// force convoy pr-review <id> — print the PR review-comment table
+		if len(args) < 2 {
+			fmt.Println("Usage: force convoy pr-review <id>")
+			os.Exit(1)
+		}
+		cmdConvoyPRReview(db, mustParseID(args[1]))
 	default:
 		fmt.Printf("Unknown convoy subcommand: %s\n", subCmd)
-		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|pr <id>|ship <id>]")
+		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|pr <id>|ship <id>|pr-review <id>]")
 		os.Exit(1)
 	}
 }
