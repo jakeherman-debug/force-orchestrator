@@ -1,5 +1,7 @@
 package store
 
+import "time"
+
 // ── Core work item ────────────────────────────────────────────────────────────
 
 type Bounty struct {
@@ -268,6 +270,19 @@ type PendingFeatureInfo struct {
 	Payload   string
 }
 
+
+// ConvoyEvent is a single entry in a convoy's state-change timeline. Rows are
+// written as convoys progress (status changes, ask-branch cut, draft PR opened,
+// sub-PR merged, shipped) and rendered by the dashboard's timeline view.
+type ConvoyEvent struct {
+	ID        int64
+	ConvoyID  int64
+	EventType string
+	OldValue  string
+	NewValue  string
+	Detail    string
+	CreatedAt time.Time
+}
 
 type FleetMail struct {
 	ID          int
