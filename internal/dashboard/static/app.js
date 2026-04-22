@@ -22,6 +22,7 @@ const S = {
   sortBy:             'id',
   sortDir:            'desc',
   showInfra:          false,     // toggle — hide fleet plumbing (Pilot, Librarian, Medic triage) by default
+  openTimelinePanels: new Set(), // convoy IDs whose timeline panel is expanded
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -906,12 +907,25 @@ function renderConvoys(convoys) {
           <span class="convoy-counts">${c.completed} / ${c.total} tasks complete (${pct}%)</span>
           ${reviewBadge}
           <div style="flex:1"></div>
+          <button class="action-btn" onclick="toggleConvoyTimeline(${c.id})">Timeline</button>
           ${approveBtn}
           ${cancelBtn}
         </div>
         <div id="pr-review-panel-${c.id}" class="pr-review-panel" style="display:none"></div>
+        <div id="timeline-panel-${c.id}" class="convoy-timeline" style="display:none"></div>
       </div>`;
   }).join('');
+
+  // Re-populate any timeline panels that were open before the re-render
+  S.openTimelinePanels.forEach(convoyID => {
+    const panel = $(`timeline-panel-${convoyID}`);
+    if (panel) {
+      panel.style.display = 'block';
+      fetchAndRenderConvoyTimeline(convoyID);
+    } else {
+      S.openTimelinePanels.delete(convoyID);
+    }
+  });
 }
 
 // renderPRReviewBadge returns a clickable summary badge when the convoy has
@@ -929,6 +943,74 @@ function renderPRReviewBadge(c) {
   return `<button class="pr-review-badge" onclick="togglePRReviewPanel(${c.id})" title="Click to view PR review comments">
     ${parts.join(' ')}
   </button>`;
+}
+
+// ── Convoy timeline ───────────────────────────────────────────────────────────
+
+async function toggleConvoyTimeline(convoyID) {
+  const el = $(`timeline-panel-${convoyID}`);
+  if (!el) return;
+  if (S.openTimelinePanels.has(convoyID)) {
+    S.openTimelinePanels.delete(convoyID);
+    el.style.display = 'none';
+    return;
+  }
+  S.openTimelinePanels.add(convoyID);
+  el.style.display = 'block';
+  el.innerHTML = `<div class="dim" style="padding:10px">Loading…</div>`;
+  fetchAndRenderConvoyTimeline(convoyID);
+}
+
+async function fetchAndRenderConvoyTimeline(convoyID) {
+  const el = $(`timeline-panel-${convoyID}`);
+  if (!el || el.style.display === 'none') return;
+  try {
+    const events = await api(`/api/convoys/${convoyID}/events`);
+    renderConvoyTimelineEvents(el, events || []);
+  } catch (e) {
+    el.innerHTML = `<div style="padding:10px;color:var(--red)">Failed to load: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderConvoyTimelineEvents(el, events) {
+  if (!events.length) {
+    el.innerHTML = `<div class="dim" style="padding:10px">No events yet.</div>`;
+    return;
+  }
+  const rows = events.map(e => {
+    const label = fmtConvoyEventType(e.event_type);
+    let detail = '';
+    if (e.event_type === 'status_change') {
+      detail = `<span class="mono" style="font-size:11px">${escHtml(e.old_value)}</span> → <span class="mono" style="font-size:11px">${escHtml(e.new_value)}</span>`;
+    } else if (e.event_type === 'ask_branch_created') {
+      detail = `Branch: <span class="mono" style="font-size:11px">${escHtml(e.new_value)}</span>`;
+    } else if (e.event_type === 'draft_pr_opened') {
+      const repo = e.detail ? ` <span class="dim">(${escHtml(e.detail)})</span>` : '';
+      detail = `<a href="${escHtml(e.new_value)}" target="_blank" rel="noopener">${escHtml(e.new_value)}</a>${repo}`;
+    } else if (e.event_type === 'sub_pr_merged') {
+      const repo = e.detail ? ` <span class="dim">(${escHtml(e.detail)})</span>` : '';
+      detail = `PR #${escHtml(e.new_value)} merged${repo}`;
+    } else if (e.new_value) {
+      detail = escHtml(e.new_value);
+    }
+    return `<div class="timeline-entry">
+      <span class="timeline-ts">${fmtTS(e.created_at)}</span>
+      <span class="timeline-label">${escHtml(label)}</span>
+      <span class="timeline-detail">${detail}</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div class="timeline-header"><strong>Timeline</strong></div>${rows}`;
+}
+
+function fmtConvoyEventType(et) {
+  const map = {
+    'status_change':      'Status changed',
+    'ask_branch_created': 'Ask branch created',
+    'draft_pr_opened':    'Draft PR opened',
+    'sub_pr_merged':      'Sub-PR merged',
+    'shipped':            'Shipped',
+  };
+  return map[et] || et;
 }
 
 // togglePRReviewPanel lazy-loads the convoy's PR review comments inline.
@@ -1461,6 +1543,12 @@ function startPolling() {
       case 'knowledge':   loadMemories();    break;
     }
   }, 12000);
+
+  // Refresh open convoy timeline panels every 5s when on the convoys tab.
+  setInterval(() => {
+    if (S.activeTab !== 'convoys' || !S.openTimelinePanels.size) return;
+    S.openTimelinePanels.forEach(id => fetchAndRenderConvoyTimeline(id));
+  }, 5000);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

@@ -53,7 +53,7 @@ func AutoRecoverConvoy(db *sql.DB, convoyID int, logger interface{ Printf(string
 	var problemCount int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ? AND status IN ('Failed','Escalated')`, convoyID).Scan(&problemCount)
 	if problemCount == 0 {
-		db.Exec(`UPDATE Convoys SET status = 'Active' WHERE id = ?`, convoyID)
+		SetConvoyStatus(db, convoyID, "Active") //nolint:errcheck
 		if logger != nil {
 			logger.Printf("Convoy #%d auto-recovered to Active (no remaining problem tasks)", convoyID)
 		}
@@ -197,6 +197,9 @@ func UpdateConvoyDraftPRState(db *sql.DB, convoyID int, state string) error {
 	if state == "Merged" {
 		_, err := db.Exec(`UPDATE Convoys SET draft_pr_state = ?, shipped_at = datetime('now') WHERE id = ?`,
 			state, convoyID)
+		if err == nil {
+			AppendConvoyEvent(db, convoyID, "shipped", "", "", "")
+		}
 		return err
 	}
 	_, err := db.Exec(`UPDATE Convoys SET draft_pr_state = ? WHERE id = ?`, state, convoyID)
@@ -208,13 +211,25 @@ func UpdateConvoyDraftPRState(db *sql.DB, convoyID int, state string) error {
 // used for PR-flow state machine moves: Active → AwaitingDraftPR → DraftPROpen
 // → Shipped / Abandoned.
 func SetConvoyStatus(db *sql.DB, convoyID int, status string) error {
-	_, err := db.Exec(`UPDATE Convoys SET status = ? WHERE id = ?`, status, convoyID)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := SetConvoyStatusTx(tx, convoyID, status); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetConvoyStatusTx is the transactional sibling of SetConvoyStatus.
 func SetConvoyStatusTx(tx *sql.Tx, convoyID int, status string) error {
+	var oldStatus string
+	tx.QueryRow(`SELECT IFNULL(status, '') FROM Convoys WHERE id = ?`, convoyID).Scan(&oldStatus)
 	_, err := tx.Exec(`UPDATE Convoys SET status = ? WHERE id = ?`, status, convoyID)
+	if err == nil {
+		AppendConvoyEventTx(tx, convoyID, "status_change", oldStatus, status, "")
+	}
 	return err
 }
 
