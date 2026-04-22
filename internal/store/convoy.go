@@ -211,13 +211,15 @@ func UpdateConvoyDraftPRState(db *sql.DB, convoyID int, state string) error {
 // used for PR-flow state machine moves: Active → AwaitingDraftPR → DraftPROpen
 // → Shipped / Abandoned.
 func SetConvoyStatus(db *sql.DB, convoyID int, status string) error {
-	var oldStatus string
-	db.QueryRow(`SELECT IFNULL(status, '') FROM Convoys WHERE id = ?`, convoyID).Scan(&oldStatus)
-	_, err := db.Exec(`UPDATE Convoys SET status = ? WHERE id = ?`, status, convoyID)
-	if err == nil {
-		AppendConvoyEvent(db, convoyID, "status_change", oldStatus, status, "")
+	tx, err := db.Begin()
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback() //nolint:errcheck
+	if err := SetConvoyStatusTx(tx, convoyID, status); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetConvoyStatusTx is the transactional sibling of SetConvoyStatus.
