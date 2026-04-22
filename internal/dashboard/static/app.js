@@ -1224,12 +1224,14 @@ function startLogStream() {
   wrap.innerHTML = '';
 
   src.onmessage = evt => {
-    let text;
+    const existing = wrap.querySelector('.log-line--error');
+    if (existing) existing.remove();
+
+    let text = evt.data;
     try {
-      text = JSON.parse(evt.data);         // fleet-log: JSON-encoded string
-    } catch(_) {
-      text = evt.data;                     // holonet: raw JSON object string
-    }
+      const parsed = JSON.parse(evt.data);
+      if (typeof parsed === 'string') text = parsed;
+    } catch(_) {}
     const line = document.createElement('div');
     line.className = 'log-line';
     line.textContent = text;
@@ -1245,7 +1247,15 @@ function startLogStream() {
   };
 
   src.onerror = () => {
-    // EventSource auto-reconnects
+    if (!wrap.querySelector('.log-line--error')) {
+      const errLine = document.createElement('div');
+      errLine.className = 'log-line log-line--error';
+      errLine.textContent = '[holonet stream error — reconnecting…]';
+      wrap.appendChild(errLine);
+      if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120) {
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+    }
   };
 }
 
