@@ -16,7 +16,7 @@ import (
 
 // rateLimitPatterns matches known Claude CLI rate-limit / overload messages.
 var rateLimitPatterns = regexp.MustCompile(
-	`(?i)(rate.?limit|429|too many requests|overloaded|quota exceeded|capacity|service unavailable)`,
+	`(?i)(rate.?limit|429|too many requests|overloaded|quota exceeded|capacity|service unavailable|stream idle timeout|partial response received)`,
 )
 
 // IsRateLimitError returns true when Claude CLI output looks like a rate-limit
