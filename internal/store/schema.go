@@ -198,15 +198,6 @@ func createSchema(db *sql.DB) {
 		created_at  DATETIME DEFAULT (datetime('now'))
 	)`)
 
-	// Convoy lifecycle events — timeline of key events for each convoy.
-	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		convoy_id  INTEGER NOT NULL,
-		event_type TEXT    NOT NULL,
-		detail     TEXT    DEFAULT '',
-		created_at TEXT    DEFAULT (datetime('now'))
-	)`)
-
 	// AskBranchPRs — one row per astromech sub-PR opened against a convoy's ask-branch.
 	// Tracks CI state, retry counters, and terminal state transitions. Unique on
 	// (repo, pr_number) so we never double-create a row for the same PR.
@@ -324,14 +315,6 @@ func runMigrations(db *sql.DB) {
 		created_at DATETIME DEFAULT (datetime('now'))
 	)`)
 
-	// ConvoyEvents — convoy lifecycle event timeline (idempotent on fresh DBs).
-	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyEvents (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		convoy_id  INTEGER NOT NULL,
-		event_type TEXT    NOT NULL,
-		detail     TEXT    DEFAULT '',
-		created_at TEXT    DEFAULT (datetime('now'))
-	)`)
 
 	// ── PR flow migration (Layer A) ──────────────────────────────────────────
 	// Additive columns for the PR-based delivery flow. Each ALTER silently no-ops

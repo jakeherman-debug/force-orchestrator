@@ -268,14 +268,6 @@ type PendingFeatureInfo struct {
 	Payload   string
 }
 
-// ConvoyEvent records a lifecycle event for a convoy (e.g. created, status_changed, shipped).
-type ConvoyEvent struct {
-	ID        int
-	ConvoyID  int
-	EventType string
-	Detail    string
-	CreatedAt string
-}
 
 type FleetMail struct {
 	ID          int

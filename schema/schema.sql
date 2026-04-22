@@ -293,14 +293,3 @@ CREATE TABLE IF NOT EXISTS ProposedConvoys (
 );
 
 -- ── Convoy events ─────────────────────────────────────────────────────────────
--- Lifecycle timeline for each convoy. Populated by orchestrator components as
--- key events occur (created, status_changed, task_completed, task_failed,
--- ask_branch_created, draft_pr_opened, shipped).
-
-CREATE TABLE IF NOT EXISTS ConvoyEvents (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    convoy_id  INTEGER NOT NULL,                     -- FK → Convoys.id
-    event_type TEXT    NOT NULL,                     -- 'created' | 'status_changed' | 'task_completed' | 'task_failed' | 'ask_branch_created' | 'draft_pr_opened' | 'shipped'
-    detail     TEXT    DEFAULT '',                   -- optional human-readable context
-    created_at TEXT    DEFAULT (datetime('now'))
-);
