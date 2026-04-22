@@ -1309,6 +1309,9 @@ function startLogStream() {
   wrap.innerHTML = '';
 
   src.onmessage = evt => {
+    const existing = wrap.querySelector('.log-line--error');
+    if (existing) existing.remove();
+
     let text = evt.data;
     try {
       const parsed = JSON.parse(evt.data);
@@ -1329,7 +1332,15 @@ function startLogStream() {
   };
 
   src.onerror = () => {
-    // EventSource auto-reconnects
+    if (!wrap.querySelector('.log-line--error')) {
+      const err = document.createElement('div');
+      err.className = 'log-line log-line--error';
+      err.textContent = '[holonet stream error — reconnecting…]';
+      wrap.appendChild(err);
+      if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120) {
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+    }
   };
 }
 
