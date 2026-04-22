@@ -389,6 +389,24 @@
   </div>
 </div>
 
+<!-- ── Ship-it confirmation modal ──────────────────────────────────────────── -->
+<div class="modal-backdrop hidden" id="ship-modal">
+  <div class="modal-box" style="width:640px">
+    <div class="modal-header">
+      <h2>Ship Convoy <span id="ship-modal-convoy"></span></h2>
+      <button class="modal-close" onclick="closeModal('ship-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="ship-branch-list" id="ship-branch-list"></div>
+      <div class="ship-summary-line" id="ship-summary-line"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('ship-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmShip()">Confirm Ship</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="app.js"></script>
 </body>
