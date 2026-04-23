@@ -200,9 +200,13 @@ func UpdateBountyStatusTx(tx *sql.Tx, id int, newStatus string) error {
 }
 
 // UpdateBountyStatusWithErrorTx also clears error_log / sets a new error_log in the same UPDATE.
+// Runs errorLog through RedactSecrets so wrapped gh stderr containing a
+// ghp_/Bearer/url-basic-auth token never lands in the database (Fix #10
+// / AUDIT-055 defense in depth — the gh client already redacts at the
+// wrap site, but a future caller may forget).
 func UpdateBountyStatusWithErrorTx(tx *sql.Tx, id int, newStatus, errorLog string) error {
 	_, err := tx.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = '', error_log = ? WHERE id = ?`,
-		newStatus, errorLog, id)
+		newStatus, RedactSecrets(errorLog), id)
 	return err
 }
 
@@ -259,8 +263,10 @@ func AddBountyClassifying(db *sql.DB, repo, payload string, priority int, idempo
 }
 
 func FailBounty(db *sql.DB, id int, errorMsg string) {
+	// Defense in depth: scrub secrets even if the caller forgot to.
+	// AUDIT-055 / Fix #10.
 	db.Exec(`UPDATE BountyBoard SET status = 'Failed', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
-		errorMsg, id)
+		RedactSecrets(errorMsg), id)
 	FireWebhook(db, id, "Failed")
 }
 
@@ -269,13 +275,13 @@ func FailBounty(db *sql.DB, id int, errorMsg string) {
 // task has been spawned and will complete this task's work.
 func MarkConflictPending(db *sql.DB, id int, msg string) {
 	db.Exec(`UPDATE BountyBoard SET status = 'ConflictPending', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
-		msg, id)
+		RedactSecrets(msg), id)
 }
 
 // MarkConflictPendingTx is the transactional sibling of MarkConflictPending.
 func MarkConflictPendingTx(tx *sql.Tx, id int, msg string) error {
 	_, err := tx.Exec(`UPDATE BountyBoard SET status = 'ConflictPending', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
-		msg, id)
+		RedactSecrets(msg), id)
 	return err
 }
 

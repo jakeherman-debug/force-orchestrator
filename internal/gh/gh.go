@@ -10,11 +10,63 @@ package gh
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
+
+	"force-orchestrator/internal/store"
 )
+
+// maxGHStdoutBytes caps the size of captured `gh` stdout. A large
+// `gh api --paginate repos/.../comments` response (or an adversarial GHE
+// response) would otherwise be read entirely into a bytes.Buffer and OOM
+// the daemon. 64 MB is large enough for any legitimate comment paginate
+// and small enough that we never approach daemon RSS caps.
+//
+// AUDIT-057 fix. Overflow returns ErrOverflow, which higher layers map
+// to store.ErrClassPermanent so the task escalates rather than loops.
+const maxGHStdoutBytes = 64 * 1024 * 1024
+
+// ErrOverflow is returned when captured gh stdout exceeds maxGHStdoutBytes.
+// Classified as Permanent by ClassifyError (see "gh output exceeded").
+var ErrOverflow = errors.New("gh output exceeded 64MiB cap")
+
+// capWriter wraps a *bytes.Buffer and refuses further writes once the
+// buffer has accepted maxGHStdoutBytes. Subsequent writes return
+// ErrOverflow, which os/exec propagates up as the command's error so
+// ExecRunner.Run can distinguish "gh exited non-zero" from "we hit the
+// cap and killed it." The bytes written BEFORE the cap are preserved so
+// partial-response diagnostics still work.
+type capWriter struct {
+	buf *bytes.Buffer
+	cap int
+}
+
+func (cw *capWriter) Write(p []byte) (int, error) {
+	remaining := cw.cap - cw.buf.Len()
+	if remaining <= 0 {
+		return 0, ErrOverflow
+	}
+	if len(p) > remaining {
+		// Write what we can, then return the cap error. os/exec stops
+		// copying on the first Write error.
+		n, _ := cw.buf.Write(p[:remaining])
+		return n, ErrOverflow
+	}
+	return cw.buf.Write(p)
+}
+
+// redactGHError wraps a gh stderr into an error with every secret pattern
+// scrubbed. This is the single exfil boundary for gh → returned-error →
+// BountyBoard.error_log → dashboard. Every `fmt.Errorf("gh ...: %w: %s",
+// err, stderr)` site in this file funnels through here (AUDIT-055).
+func redactGHError(prefix string, err error, stderr []byte) error {
+	msg := strings.TrimSpace(string(stderr))
+	return fmt.Errorf("%s: %w: %s", prefix, err, store.RedactSecrets(msg))
+}
+
 
 // Runner executes a gh CLI command. Production uses ExecRunner; tests install
 // a stub via NewTestClient to avoid hitting real GitHub.
@@ -36,6 +88,13 @@ type ExecRunner struct {
 }
 
 // Run implements Runner.
+//
+// stdout is captured into a bounded buffer: once the buffer crosses
+// maxGHStdoutBytes (64 MiB) further writes return ErrOverflow, which
+// surfaces to the caller as the command's error. The partial stdout up
+// to the cap is returned alongside so higher layers can still parse
+// whatever prefix landed. Unbounded pagination on `gh api --paginate
+// repos/.../comments` would otherwise OOM the daemon — AUDIT-057.
 func (e ExecRunner) Run(cwd string, args []string, stdin []byte) ([]byte, []byte, error) {
 	timeout := e.Timeout
 	if timeout <= 0 {
@@ -49,7 +108,10 @@ func (e ExecRunner) Run(cwd string, args []string, stdin []byte) ([]byte, []byte
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
+	// Wrap stdout in a capWriter so we never allocate unbounded memory
+	// for a hostile or giant gh response. stderr is small by construction
+	// (gh prints one error line); no cap needed there.
+	cmd.Stdout = &capWriter{buf: &stdoutBuf, cap: maxGHStdoutBytes}
 	cmd.Stderr = &stderrBuf
 
 	done := make(chan error, 1)
@@ -60,6 +122,14 @@ func (e ExecRunner) Run(cwd string, args []string, stdin []byte) ([]byte, []byte
 
 	select {
 	case err := <-done:
+		// If the cap fired mid-command, prefer that error over the
+		// generic exit status so the caller can route to
+		// ErrClassPermanent (via ClassifyError's "output exceeded" hit).
+		if stdoutBuf.Len() >= maxGHStdoutBytes {
+			// Kill the process if it's somehow still alive — defensive;
+			// os/exec's copier should have already propagated ErrOverflow.
+			return stdoutBuf.Bytes(), stderrBuf.Bytes(), ErrOverflow
+		}
 		return stdoutBuf.Bytes(), stderrBuf.Bytes(), err
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
@@ -139,7 +209,7 @@ func (c *Client) PRCreate(req PRCreateRequest) (*PRCreateResult, error) {
 	}
 	stdout, stderr, err := c.runner.Run(req.CWD, args, []byte(req.Body))
 	if err != nil {
-		return nil, fmt.Errorf("gh pr create: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return nil, redactGHError("gh pr create", err, stderr)
 	}
 	// `gh pr create` prints the PR URL on stdout. Parse it for the number.
 	url := strings.TrimSpace(string(stdout))
@@ -194,7 +264,7 @@ func (c *Client) PRView(cwd, repo string, number int) (*PRView, error) {
 	}
 	stdout, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr view: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return nil, redactGHError("gh pr view", err, stderr)
 	}
 	var v PRView
 	if unmarshalErr := json.Unmarshal(stdout, &v); unmarshalErr != nil {
@@ -253,7 +323,7 @@ func (c *Client) PRChecks(cwd, repo string, number int) ([]PRCheck, ChecksState,
 		if parseErr := json.Unmarshal(stdout, &checks); parseErr == nil {
 			return checks, rollupChecks(checks), nil
 		}
-		return nil, ChecksPending, fmt.Errorf("gh pr checks: %w: %s", err, stderrStr)
+		return nil, ChecksPending, fmt.Errorf("gh pr checks: %w: %s", err, store.RedactSecrets(stderrStr))
 	}
 	var checks []PRCheck
 	if unmarshalErr := json.Unmarshal(stdout, &checks); unmarshalErr != nil {
@@ -352,7 +422,7 @@ func (c *Client) PRMergeAuto(cwd, repo string, number int, strategy string) erro
 	}
 	_, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return fmt.Errorf("gh pr merge --auto: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return redactGHError("gh pr merge --auto", err, stderr)
 	}
 	return nil
 }
@@ -366,7 +436,7 @@ func (c *Client) PRReady(cwd, repo string, number int) error {
 	}
 	_, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return fmt.Errorf("gh pr ready: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return redactGHError("gh pr ready", err, stderr)
 	}
 	return nil
 }
@@ -394,7 +464,7 @@ func (c *Client) PRMerge(cwd, repo string, number int, strategy string) error {
 	}
 	_, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return fmt.Errorf("gh pr merge: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return redactGHError("gh pr merge", err, stderr)
 	}
 	return nil
 }
@@ -407,7 +477,7 @@ func (c *Client) PRClose(cwd, repo string, number int) error {
 	}
 	_, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return fmt.Errorf("gh pr close: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return redactGHError("gh pr close", err, stderr)
 	}
 	return nil
 }
@@ -470,7 +540,7 @@ func (c *Client) PRIssueComments(cwd, repo string, number int) ([]PRIssueComment
 	args := []string{"api", "--paginate", path}
 	stdout, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return nil, fmt.Errorf("gh api issue comments: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return nil, redactGHError("gh api issue comments", err, stderr)
 	}
 	var out []PRIssueComment
 	if parseErr := json.Unmarshal(stdout, &out); parseErr != nil {
@@ -488,7 +558,7 @@ func (c *Client) PRReviewComments(cwd, repo string, number int) ([]PRReviewComme
 	args := []string{"api", "--paginate", path}
 	stdout, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return nil, fmt.Errorf("gh api review comments: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return nil, redactGHError("gh api review comments", err, stderr)
 	}
 	var out []PRReviewComment
 	if parseErr := json.Unmarshal(stdout, &out); parseErr != nil {
@@ -509,7 +579,7 @@ func (c *Client) PostIssueComment(cwd, repo string, number int, body string) err
 	}
 	_, stderr, err := c.runner.Run(cwd, args, []byte(body))
 	if err != nil {
-		return fmt.Errorf("gh pr comment: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return redactGHError("gh pr comment", err, stderr)
 	}
 	return nil
 }
@@ -534,7 +604,7 @@ func (c *Client) PostReviewThreadReply(cwd, repo string, number int, inReplyToCo
 	args := []string{"api", "-X", "POST", path, "-f", "body=" + body}
 	_, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return fmt.Errorf("gh api reply: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return redactGHError("gh api reply", err, stderr)
 	}
 	return nil
 }
@@ -579,7 +649,7 @@ func (c *Client) FindReviewThreadNodeID(cwd, repo string, number int, commentDat
 	}
 	stdout, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return "", fmt.Errorf("gh api graphql (reviewThreads): %w: %s", err, strings.TrimSpace(string(stderr)))
+		return "", redactGHError("gh api graphql (reviewThreads)", err, stderr)
 	}
 	var resp struct {
 		Data struct {
@@ -628,7 +698,7 @@ func (c *Client) ResolveReviewThread(cwd string, threadNodeID string) error {
 	}
 	_, stderr, err := c.runner.Run(cwd, args, nil)
 	if err != nil {
-		return fmt.Errorf("gh api graphql (resolveReviewThread): %w: %s", err, strings.TrimSpace(string(stderr)))
+		return redactGHError("gh api graphql (resolveReviewThread)", err, stderr)
 	}
 	return nil
 }
@@ -700,6 +770,10 @@ func ClassifyError(msg string) ErrorClass {
 	m := strings.ToLower(msg)
 	switch {
 	case m == "":
+		return ErrClassPermanent
+	// AUDIT-057: gh output exceeded the 64MiB stdout cap. No value in
+	// retrying — a larger response will just hit the cap again. Escalate.
+	case strings.Contains(m, "gh output exceeded"):
 		return ErrClassPermanent
 	case strings.Contains(m, "authentication token") && strings.Contains(m, "expired"),
 		strings.Contains(m, "bad credentials"),

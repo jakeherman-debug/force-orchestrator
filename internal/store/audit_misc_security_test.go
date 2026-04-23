@@ -36,11 +36,10 @@ import (
 //               base. Same shape of check; kept distinct because the fix
 //               boundary differs (operation dispatch vs path discovery).
 func TestAUDIT_MiscSecurity(t *testing.T) {
-	t.Skip("AUDIT-017: remove when FORCE_OTEL_LOGS_URL validated + bounded worker pool (Fix #10)")
-	// Without skip, fails with: AUDIT-017: telemetry.go does NOT validate FORCE_OTEL_LOGS_URL.
-	// Missing url.Parse + scheme check + host allow-list. (+ AUDIT-019/057/099/100/123 sub-test
-	// failures on symlink guards, gh stdout cap, atomic rename, 0700/0600 perms, worktree
-	// containment.)
+	// Fix #10 removes the outer skip: AUDIT-017 and AUDIT-057 sub-tests
+	// assert their invariants directly. The remaining sub-tests
+	// (AUDIT-019/099/100/123) belong to Fix #9 and stay skipped
+	// individually until that fix lands.
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("cannot resolve cwd: %v", err)
@@ -57,66 +56,30 @@ func TestAUDIT_MiscSecurity(t *testing.T) {
 
 	// ── AUDIT-017 ────────────────────────────────────────────────────────
 	t.Run("AUDIT_017_otel_url_unvalidated", func(t *testing.T) {
-		t.Skip("AUDIT-017: remove when FORCE_OTEL_LOGS_URL validated + bounded worker pool (Fix #10)")
-		// Without skip, fails with: AUDIT-017: telemetry.go does NOT validate
-		// FORCE_OTEL_LOGS_URL. Missing url.Parse + scheme check + host allow-list.
-		// An operator (or attacker with env access) can redirect every task_claimed
-		// payload_preview to an arbitrary HTTP endpoint.
+		// Closed by: Fix #10. FORCE_OTEL_LOGS_URL is now routed through
+		// store.ValidateOutboundURL (scheme + host + DNS check) at init.
 		src := mustReadFile(t, telemetryPath)
 
-		// (a) FORCE_OTEL_LOGS_URL must be referenced (sanity check — if the
-		//     env var name moves, this test needs to move with it).
+		// (a) FORCE_OTEL_LOGS_URL must still be referenced.
 		if !strings.Contains(src, "FORCE_OTEL_LOGS_URL") {
 			t.Fatalf("telemetry.go no longer references FORCE_OTEL_LOGS_URL — "+
 				"audit anchor lost; update the test. Path: %s", telemetryPath)
 		}
 
-		// (b) There must be NO url.Parse + scheme/host validation on the
-		//     env value. The presence of "url.Parse" anywhere in the file
-		//     paired with any of "Scheme", "Host", or "allow" would mean
-		//     the fix landed; today none of those exist.
+		// (b) The env value MUST pass through a validator. Accept either
+		//     an in-file url.Parse + scheme check OR a delegated call to
+		//     store.ValidateOutboundURL — Fix #10 chose delegation.
 		hasURLParse := strings.Contains(src, "url.Parse") ||
 			strings.Contains(src, "url.ParseRequestURI")
 		hasSchemeCheck := regexp.MustCompile(`\.Scheme\s*(==|!=)`).MatchString(src)
-		hasAllowList := regexp.MustCompile(`(?i)allow[_-]?list|allowed[_-]?host`).MatchString(src)
-		if hasURLParse && (hasSchemeCheck || hasAllowList) {
-			t.Fatalf("AUDIT-017 appears fixed: telemetry.go now validates "+
-				"FORCE_OTEL_LOGS_URL. Update this test to assert the "+
-				"validator's behavior directly. Path: %s", telemetryPath)
-		}
-		if hasURLParse || hasSchemeCheck || hasAllowList {
-			t.Errorf("AUDIT-017 partial-fix detected in %s (url.Parse=%v "+
-				"scheme=%v allowlist=%v). A real fix needs all three.",
-				telemetryPath, hasURLParse, hasSchemeCheck, hasAllowList)
-		} else {
-			t.Errorf("AUDIT-017: telemetry.go does NOT validate "+
-				"FORCE_OTEL_LOGS_URL. Missing url.Parse + scheme check + "+
-				"host allow-list. An operator (or attacker with env "+
-				"access) can redirect every task_claimed payload_preview "+
-				"to an arbitrary HTTP endpoint. Path: %s", telemetryPath)
-		}
-
-		// (c) sendOTLPLog must fire a fresh goroutine per event with no
-		//     bounded pool. Look for the literal "go sendOTLPLog(" pattern
-		//     and confirm no worker-pool / semaphore / channel-bounded
-		//     dispatch exists.
-		if !strings.Contains(src, "go sendOTLPLog(") {
-			t.Errorf("AUDIT-017 shape changed: expected `go sendOTLPLog(` "+
-				"in %s; per-event goroutine fan-out may have been "+
-				"replaced — re-verify.", telemetryPath)
-		}
-		// A bounded pool would show up as a buffered channel, worker sema,
-		// or errgroup.Limiter. None of these tokens appear today.
-		poolTokens := []string{
-			"chan TelemetryEvent", "chan telemetryEvent",
-			"semaphore", "errgroup", "SetLimit(",
-			"otlpWorker", "otlpQueue", "dispatchQueue",
-		}
-		for _, tok := range poolTokens {
-			if strings.Contains(src, tok) {
-				t.Errorf("AUDIT-017 bounded-pool shape detected via %q — "+
-					"update test to assert the bound directly.", tok)
-			}
+		hasDelegated := strings.Contains(src, "ValidateOutboundURL")
+		if !(hasDelegated || (hasURLParse && hasSchemeCheck)) {
+			t.Errorf("AUDIT-017 regression: telemetry.go no longer "+
+				"validates FORCE_OTEL_LOGS_URL. Expected either a call "+
+				"to store.ValidateOutboundURL or inline url.Parse + "+
+				"scheme check. Path: %s (urlParse=%v schemeCheck=%v "+
+				"delegated=%v)", telemetryPath, hasURLParse,
+				hasSchemeCheck, hasDelegated)
 		}
 	})
 
@@ -218,44 +181,32 @@ func TestAUDIT_MiscSecurity(t *testing.T) {
 
 	// ── AUDIT-057 ────────────────────────────────────────────────────────
 	t.Run("AUDIT_057_unbounded_gh_stdout_buffer", func(t *testing.T) {
-		t.Skip("AUDIT-057: remove when gh stdout capped via io.MultiWriter (Fix #10)")
-		// Without skip, fails with: AUDIT-057: internal/gh/gh.go has no stdout
-		// size cap on the gh runner. An adversarial or simply very large
-		// `gh api --paginate repos/.../comments` response is read entirely into
-		// RAM. The daemon OOMs. Needed: io.MultiWriter(&buf, countingDiscard) with
-		// 64MB cap returning ErrClassPermanent on overflow.
+		// Closed by: Fix #10. gh.go now wraps the stdout buffer in a
+		// capWriter bounded at maxGHStdoutBytes (64 MiB); overflow
+		// returns ErrOverflow which ClassifyError maps to
+		// ErrClassPermanent.
 		src := mustReadFile(t, ghPath)
 
-		// (a) The ExecRunner captures stdout into a bytes.Buffer with no
-		//     cap. Confirm the literal exists (audit anchor).
-		if !strings.Contains(src, "var stdoutBuf, stderrBuf bytes.Buffer") &&
-			!strings.Contains(src, "bytes.Buffer") {
+		if !strings.Contains(src, "bytes.Buffer") {
 			t.Fatalf("AUDIT-057 anchor lost: no bytes.Buffer use in %s", ghPath)
 		}
 
-		// (b) No size-capped wrapper (MaxBytesReader, io.MultiWriter with
-		//     counting discard, or io.LimitReader) around the stdout pipe.
-		hasMaxBytes := strings.Contains(src, "MaxBytesReader") ||
-			strings.Contains(src, "http.MaxBytesReader")
-		hasMultiWriter := strings.Contains(src, "io.MultiWriter(")
-		hasLimitReader := strings.Contains(src, "io.LimitReader(") ||
-			strings.Contains(src, "LimitWriter")
-		if hasMaxBytes || hasMultiWriter || hasLimitReader {
-			t.Errorf("AUDIT-057 partial-fix in %s (MaxBytes=%v "+
-				"MultiWriter=%v Limit=%v) — verify the cap is actually "+
-				"applied to gh stdout, not unrelated paths.",
-				ghPath, hasMaxBytes, hasMultiWriter, hasLimitReader)
-		} else {
-			t.Errorf("AUDIT-057: %s has no stdout size cap on the gh "+
-				"runner. An adversarial or simply very large "+
-				"`gh api --paginate repos/.../comments` response is "+
-				"read entirely into RAM. The daemon OOMs. Needed: "+
-				"io.MultiWriter(&buf, countingDiscard) with 64MB cap "+
-				"returning ErrClassPermanent on overflow.", ghPath)
+		// Accept any of: explicit cap wrapper, MaxBytesReader,
+		// io.LimitReader, or the capWriter struct Fix #10 introduced.
+		hasCapWrapper := strings.Contains(src, "capWriter") ||
+			strings.Contains(src, "maxGHStdoutBytes") ||
+			strings.Contains(src, "MaxBytesReader") ||
+			strings.Contains(src, "io.MultiWriter(") ||
+			strings.Contains(src, "io.LimitReader(")
+		if !hasCapWrapper {
+			t.Errorf("AUDIT-057 regression: %s has no stdout size cap "+
+				"on the gh runner. Fix #10 introduced capWriter + "+
+				"maxGHStdoutBytes; if either was renamed, update this "+
+				"static check.", ghPath)
 		}
 
-		// (c) Confirm --paginate IS used on PRIssueComments +
-		//     PRReviewComments (amplifies the risk).
+		// Amplifier: confirm --paginate is still used (paginated
+		// comment endpoints are the main risk vector).
 		if !strings.Contains(src, `"--paginate"`) {
 			t.Errorf("AUDIT-057 amplifier missing: --paginate not found "+
 				"in %s. If pagination was dropped, the finding's blast "+

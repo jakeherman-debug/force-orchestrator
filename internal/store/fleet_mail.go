@@ -7,9 +7,13 @@ import (
 // ── Fleet mail ────────────────────────────────────────────────────────────────
 
 func SendMail(db *sql.DB, from, to, subject, body string, taskID int, msgType MailType) int64 {
+	// Scrub secrets in subject and body before they land in Fleet_Mail.
+	// Operator mail is rendered on the dashboard and in FleetMail.body
+	// dumps, so redaction closes the AUDIT-055/056 exfil path at the
+	// store boundary (Fix #10).
 	res, err := db.Exec(
 		`INSERT INTO Fleet_Mail (from_agent, to_agent, subject, body, task_id, message_type) VALUES (?, ?, ?, ?, ?, ?)`,
-		from, to, subject, body, taskID, string(msgType),
+		from, to, RedactSecrets(subject), RedactSecrets(body), taskID, string(msgType),
 	)
 	if err != nil {
 		return 0

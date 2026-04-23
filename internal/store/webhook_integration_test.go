@@ -14,6 +14,9 @@ import (
 // POST with the correct JSON fields — exercising the full wiring path rather
 // than calling FireWebhook directly.
 func TestIntegration_UpdateBountyStatus_CompletedFiresWebhook(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -69,6 +72,9 @@ func TestIntegration_UpdateBountyStatus_CompletedFiresWebhook(t *testing.T) {
 // TestIntegration_UpdateBountyStatus_FailedFiresWebhook verifies that
 // transitioning a task to Failed via UpdateBountyStatus triggers the webhook.
 func TestIntegration_UpdateBountyStatus_FailedFiresWebhook(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -113,6 +119,9 @@ func TestIntegration_UpdateBountyStatus_FailedFiresWebhook(t *testing.T) {
 // TestIntegration_UpdateBountyStatus_EscalatedFiresWebhook verifies that
 // transitioning a task to Escalated via UpdateBountyStatus triggers the webhook.
 func TestIntegration_UpdateBountyStatus_EscalatedFiresWebhook(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -157,6 +166,9 @@ func TestIntegration_UpdateBountyStatus_EscalatedFiresWebhook(t *testing.T) {
 // TestIntegration_UpdateBountyStatus_NonTerminalNoWebhook verifies that
 // non-terminal status transitions (Pending, Locked, etc.) do NOT fire the webhook.
 func TestIntegration_UpdateBountyStatus_NonTerminalNoWebhook(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -193,6 +205,9 @@ func TestIntegration_UpdateBountyStatus_NonTerminalNoWebhook(t *testing.T) {
 // the webhook goroutine fires within a reasonable window after UpdateBountyStatus
 // returns — confirming the fire-and-forget behaviour when called from the wiring layer.
 func TestIntegration_UpdateBountyStatus_GoroutineFiresWithinWindow(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -234,6 +249,9 @@ func TestIntegration_UpdateBountyStatus_GoroutineFiresWithinWindow(t *testing.T)
 // UpdateBountyStatus → FireWebhook reads it back via GetConfig to route the POST.
 // This catches any mis-wiring where FireWebhook uses a hardcoded or stale URL.
 func TestIntegration_WebhookURL_ReadFromLiveSQLiteStore(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 

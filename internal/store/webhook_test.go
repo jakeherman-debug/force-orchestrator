@@ -13,6 +13,9 @@ import (
 // TestFireWebhook_NoOpWhenURLUnset verifies that FireWebhook is a no-op when
 // webhook_url is not configured — no HTTP request should be sent.
 func TestFireWebhook_NoOpWhenURLUnset(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -45,6 +48,9 @@ func TestFireWebhook_NoOpWhenURLUnset(t *testing.T) {
 // TestFireWebhook_PostsCorrectJSON verifies that FireWebhook sends the right
 // JSON fields (id, type, status, target_repo, payload) to the configured URL.
 func TestFireWebhook_PostsCorrectJSON(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -98,6 +104,9 @@ func TestFireWebhook_PostsCorrectJSON(t *testing.T) {
 // TestFireWebhook_PayloadTruncated verifies that a payload longer than 500 chars
 // is truncated to 500 bytes with a trailing ellipsis (…).
 func TestFireWebhook_PayloadTruncated(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -144,6 +153,9 @@ func TestFireWebhook_PayloadTruncated(t *testing.T) {
 // TestFireWebhook_IsAsynchronous verifies that FireWebhook returns immediately
 // even when the HTTP server is slow to respond.
 func TestFireWebhook_IsAsynchronous(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -178,6 +190,9 @@ func TestFireWebhook_IsAsynchronous(t *testing.T) {
 // TestFireWebhook_FailureDoesNotPropagate verifies that a non-2xx response
 // does not cause FireWebhook to panic or surface an error to the caller.
 func TestFireWebhook_FailureDoesNotPropagate(t *testing.T) {
+	restore := SetAllowLoopbackForTest(true)
+	t.Cleanup(restore)
+	t.Cleanup(WaitForWebhookDrain)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 

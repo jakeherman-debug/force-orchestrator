@@ -178,8 +178,10 @@ func RemoveRepo(db *sql.DB, name string) bool {
 // Used on daemon shutdown to prevent orphaned locks.
 // Returns the number of tasks released.
 func ReleaseInFlightTasks(db *sql.DB, reason string) int {
+	// Scrub any secrets that leaked into the caller-supplied reason
+	// string before it lands in error_log. Fix #10 / AUDIT-055.
 	res, _ := db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '', error_log = ?
-		WHERE status IN ('Locked', 'UnderCaptainReview', 'UnderReview')`, reason)
+		WHERE status IN ('Locked', 'UnderCaptainReview', 'UnderReview')`, RedactSecrets(reason))
 	n, _ := res.RowsAffected()
 	return int(n)
 }

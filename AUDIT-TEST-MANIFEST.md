@@ -18,7 +18,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | P6 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues` (+ 3 subtests) | Fix #5 (state machine sweepers + Resolved normalization) — **Closed by: Fix #5 (outer + A subtest); B remains pending Fix #5 AUDIT-025 follow-up; C remains pending AUDIT-085** |
 | P7 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace`, `TestPattern_P7_ResetTaskResurrectsCompleted` | Fix #8/#5 (UpdateBountyStatusFrom) |
 | P8 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | Fix #2 (dashboard hardening) | Closed by: Fix #2 (`fix/dashboard-hardening`) |
-| P9 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels` (+ 3 subtests) | Fix #10 (RedactSecrets + webhook allow-list) |
+| P9 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels` (+ 3 subtests) | Fix #10 (RedactSecrets + webhook allow-list) | Closed by: Fix #10 (`fix/redact-and-outbound`) |
 | P10 | `internal/git/audit_pattern_p10_test.go` | `TestPattern_P10_BranchValidatorsMissing`, `TestPattern_P10_GitInvocationsLackDashDashSeparator` | Fix #9 (validRef + `--` separator) |
 | P11 | `internal/agents/audit_pattern_p11_test.go` | `TestPattern_P11_EstopDoesNotStopTheWorld` (+ 3 subtests A/B/C for AUDIT-105/106/107) | Fix #1 (effective e-stop) |
 | P12 | `internal/agents/audit_pattern_p12_test.go` | `TestPattern_P12_PromptInjectionSurface` (+ 6 subtests A-F) | Fix #8.5 (LLM boundary markers + DisallowUnknownFields) |
@@ -42,8 +42,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-013 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_013_MedicPayloadJSONSwallow` | static | Fix #8 |
 | AUDIT-014 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_014_WorktreeResetParentRequeueSilent` | static | Fix #8 |
 | AUDIT-015 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn` | static | Fix #8 |
-| AUDIT-016 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels/A_*` | behavioral (httptest) | Fix #10 |
-| AUDIT-017 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_017_*` | static | Fix #10 |
+| AUDIT-016 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels/A_*` | behavioral (httptest) | Fix #10 | Closed by: Fix #10 (`fix/redact-and-outbound`) |
+| AUDIT-017 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_017_*` | static | Fix #10 | Closed by: Fix #10 |
 | AUDIT-018 | `internal/git/audit_pattern_p10_test.go` | `TestPattern_P10_BranchValidatorsMissing` | behavioral | Fix #9 |
 | AUDIT-019 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_019_*` | static | Fix #9 |
 | AUDIT-020 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_020_*` | static | Fix #1 | Closed by: Fix #1 |
@@ -99,9 +99,9 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-052 | same | P10 `--dangerously-skip-permissions` | static | Fix #9 |
 | AUDIT-053 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 | Closed by: Fix #2 (`fix/dashboard-hardening`) |
 | AUDIT-054 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 | Closed by: Fix #2 |
-| AUDIT-055 | `internal/store/audit_pattern_p9_test.go` | `.../C_GhStderrNotRedacted` | static grep | Fix #10 |
-| AUDIT-056 | `internal/store/audit_pattern_p9_test.go` | `.../B_WebhookBodyLeaksTokens` | behavioral (httptest) | Fix #10 |
-| AUDIT-057 | `internal/store/audit_misc_security_test.go` | `.../AUDIT_057_*` | static | Fix #10 |
+| AUDIT-055 | `internal/store/audit_pattern_p9_test.go` | `.../C_GhStderrNotRedacted` | static grep | Fix #10 | Closed by: Fix #10 |
+| AUDIT-056 | `internal/store/audit_pattern_p9_test.go` | `.../B_WebhookBodyLeaksTokens` | behavioral (httptest) | Fix #10 | Closed by: Fix #10 |
+| AUDIT-057 | `internal/store/audit_misc_security_test.go` | `.../AUDIT_057_*` | static | Fix #10 | Closed by: Fix #10 |
 | AUDIT-058 | `internal/store/audit_pattern_p4_test.go` | pattern coverage | static | Fix #4 | Closed by: Fix #4 |
 | AUDIT-059 | `internal/store/audit_pattern_p4_test.go` | pattern coverage | static | Fix #4 | Closed by: Fix #4 |
 | AUDIT-060 | `internal/dashboard/spend_cap_api_test.go` | `TestAPIStatus_ExposesHourlySpend` | acceptance | Fix #1 | Closed by: Fix #1 |

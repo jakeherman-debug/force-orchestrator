@@ -28,10 +28,14 @@ func ParseEscalationSignal(output string) (store.EscalationSeverity, string, boo
 }
 
 // CreateEscalation records a new escalation for a task.
+// Runs message through store.RedactSecrets so wrapped gh stderr or
+// Claude stdout containing a ghp_/Bearer/url-basic-auth token cannot
+// leak into Escalations.message (rendered on the dashboard) — Fix #10
+// / AUDIT-055.
 func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) int {
 	res, _ := db.Exec(
 		`INSERT INTO Escalations (task_id, severity, message, status) VALUES (?, ?, ?, 'Open')`,
-		taskID, string(severity), message,
+		taskID, string(severity), store.RedactSecrets(message),
 	)
 	id, _ := res.LastInsertId()
 
