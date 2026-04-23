@@ -27,3 +27,4 @@ fleet-task-**
 # Test coverage
 cover.out
 coverage.out
+.fix-worktrees/
