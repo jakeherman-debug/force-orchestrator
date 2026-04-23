@@ -166,12 +166,14 @@ func TestApplyMedicRequeue_AdversarialLLM(t *testing.T) {
 		t.Fatalf("adversarial loop: medic_requeue_count=%d, want %d (cap)", got, maxMedicRequeues)
 	}
 
-	// Every call past the cap creates another Open escalation (the current
-	// applyMedicEscalate posts one every time the cap is re-hit). Each
-	// post-cap cycle therefore produces exactly one escalation.
-	wantEsc := trials - maxMedicRequeues
-	if got := countEscalations(t, db, parentID, "Open"); got != wantEsc {
-		t.Fatalf("adversarial loop: Open escalation count=%d, want %d", got, wantEsc)
+	// Every call past the cap tries to post an escalation. Fix #3's partial
+	// UNIQUE idx_escalations_open_task(task_id) WHERE status='Open' collapses
+	// repeated Open rows for the same task into a single upserted row — so
+	// `trials - maxMedicRequeues` attempted inserts yield exactly 1 Open row.
+	// The severity CASE in CreateEscalation ensures the merged row rides the
+	// max observed severity (which stays MEDIUM in this scenario).
+	if got := countEscalations(t, db, parentID, "Open"); got != 1 {
+		t.Fatalf("adversarial loop: Open escalation count=%d, want 1 (Fix #3 partial UNIQUE collapses repeats)", got)
 	}
 }
 

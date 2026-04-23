@@ -46,7 +46,7 @@ func TestCreateEscalation_ConcurrentCallers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_ = CreateEscalation(db, taskID, sev, "concurrent call")
+			_, _ = CreateEscalation(db, taskID, sev, "concurrent call")
 			_ = i
 		}()
 	}
@@ -94,8 +94,8 @@ func TestCreateEscalation_NoDuplicatesAcrossSeparateTasks(t *testing.T) {
 		t.Fatalf("seed task ids collide: %d %d", id1, id2)
 	}
 
-	_ = CreateEscalation(db, int(id1), store.SeverityLow, "first")
-	_ = CreateEscalation(db, int(id2), store.SeverityMedium, "second")
+	_, _ = CreateEscalation(db, int(id1), store.SeverityLow, "first")
+	_, _ = CreateEscalation(db, int(id2), store.SeverityMedium, "second")
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open'`).Scan(&count)
@@ -116,7 +116,10 @@ func TestCreateEscalation_TerminalDoesNotBlockNewOpen(t *testing.T) {
 	id, _ := res.LastInsertId()
 	taskID := int(id)
 
-	first := CreateEscalation(db, taskID, store.SeverityLow, "first")
+	first, err := CreateEscalation(db, taskID, store.SeverityLow, "first")
+	if err != nil {
+		t.Fatalf("first CreateEscalation: %v", err)
+	}
 	if first == 0 {
 		t.Fatalf("first CreateEscalation returned 0")
 	}
@@ -128,7 +131,10 @@ func TestCreateEscalation_TerminalDoesNotBlockNewOpen(t *testing.T) {
 	// but keeps the row). Simulate that by resetting status directly.
 	db.Exec(`UPDATE BountyBoard SET status = 'Pending' WHERE id = ?`, taskID)
 
-	second := CreateEscalation(db, taskID, store.SeverityHigh, "second")
+	second, err := CreateEscalation(db, taskID, store.SeverityHigh, "second")
+	if err != nil {
+		t.Fatalf("second CreateEscalation: %v", err)
+	}
 	if second == 0 {
 		t.Fatalf("second CreateEscalation returned 0 — partial UNIQUE mis-scoped, "+
 			"may be blocking even Acknowledged rows")
