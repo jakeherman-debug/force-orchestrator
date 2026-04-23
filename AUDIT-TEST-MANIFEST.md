@@ -15,7 +15,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | P3 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan`, `TestPattern_P3_BoundaryFalsePositive` | Fix #3/#4 (structured convoy_id + index) |
 | P4 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes`, `TestPattern_P4_ClaimQueryUsesIndex` | Fix #4 (hot-table indexes) | Closed by: Fix #4 (`fix/hot-table-indexes`) |
 | P5 | `internal/agents/spend_cap_test.go` | `TestSpendCap_*`, `TestSpendBurnPattern_*` — feature now exists | Closed by: Fix #1 |
-| P6 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues` (+ 3 subtests) | Fix #5 (state machine sweepers + Resolved normalization) |
+| P6 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues` (+ 3 subtests) | Fix #5 (state machine sweepers + Resolved normalization) — **Closed by: Fix #5 (outer + A subtest); B remains pending Fix #5 AUDIT-025 follow-up; C remains pending AUDIT-085** |
 | P7 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace`, `TestPattern_P7_ResetTaskResurrectsCompleted` | Fix #8/#5 (UpdateBountyStatusFrom) |
 | P8 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | Fix #2 (dashboard hardening) |
 | P9 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels` (+ 3 subtests) | Fix #10 (RedactSecrets + webhook allow-list) |
@@ -38,7 +38,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-009 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static (PRAGMA) | Fix #4 | Closed by: Fix #4 |
 | AUDIT-010 | `internal/store/audit_pattern_p4_test.go` | same | static | Fix #4 | Closed by: Fix #4 |
 | AUDIT-011 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan` | static (EXPLAIN QUERY PLAN) | Fix #3/#4 |
-| AUDIT-012 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues/A_*` | static (AST grep) | Fix #5 |
+| AUDIT-012 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues/A_*` | static (AST grep) | Fix #5 | Closed by: Fix #5 |
 | AUDIT-013 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_013_MedicPayloadJSONSwallow` | static | Fix #8 |
 | AUDIT-014 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_014_WorktreeResetParentRequeueSilent` | static | Fix #8 |
 | AUDIT-015 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn` | static | Fix #8 |
@@ -69,7 +69,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 |---|---|---|---|---|
 | AUDIT-023 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_023_createSchema_drift` | static (PRAGMA) | Fix #4 companion | Closed by: Fix #4 |
 | AUDIT-024 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static | Fix #4 | Closed by: Fix #4 |
-| AUDIT-025 | `internal/store/audit_pattern_p6_test.go` | `.../B_*` | static grep | Fix #5 |
+| AUDIT-025 | `internal/store/audit_pattern_p6_test.go` | `.../B_*` | static grep | Fix #5 | **Still pending** — requires Resolved→Closed normalization pass, not covered by Fix #5's stale-convoys change. Sub-test B skip remains. |
 | AUDIT-026 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ResetTaskResurrectsCompleted` | behavioral | Fix #8 |
 | AUDIT-027 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace` | race | Fix #8 |
 | AUDIT-028 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_028_AskBranchRebaseConflictNoCap` | static (≈AUDIT-119) | Fix #6/#7 |
@@ -145,7 +145,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-074 | `internal/store/audit_medium_spotcheck_b_test.go` | `TestAUDIT_MediumSpotcheckB/AUDIT_074_*` | static | Fix #3 |
 | AUDIT-079 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_079_*` | static grep + live PRAGMA | Fix #4 companion | Closed by: Fix #4 |
 | AUDIT-081 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_081_*` | static grep + behavioural | Fix #4 companion | Closed by: Fix #4 |
-| AUDIT-149 | `internal/agents/audit_medium_spotcheck_c_test.go` | `TestAuditMediumSpotcheckC/TestAUDIT_149_*` | static | Fix #5 |
+| AUDIT-149 | `internal/agents/audit_medium_spotcheck_c_test.go` | `TestAuditMediumSpotcheckC/TestAUDIT_149_*` | static | Fix #5 | **Still pending** — requires `Escalations.auto_resolve_count` column + sweeper gate, not covered by Fix #5's stale-convoys change. |
 | AUDIT-151 | `internal/agents/audit_medium_spotcheck_c_test.go` | `.../TestAUDIT_151_*` | static | Fix #8 |
 | AUDIT-152 | `internal/agents/audit_medium_spotcheck_c_test.go` | `.../TestAUDIT_152_*` | static | Fix #1 | Closed by: Fix #1 |
 | AUDIT-155 | `internal/agents/audit_medium_spotcheck_d_test.go` | `TestAuditMedium155_UnionMergeNoRepoLock` | static | Fix #8 |
@@ -158,7 +158,7 @@ These are Medium findings where the pattern test in the table above structurally
 
 - **P1 (silent failures) covers:** AUDIT-070, -073, -090, -091, -094, -095, -099, -100, -156, -159
 - **P2 (idempotency) covers:** AUDIT-075, -076
-- **P6 (state machine) covers:** AUDIT-083, -084, -087
+- **P6 (state machine) covers:** AUDIT-083, -084, -087 — AUDIT-087 (convoy UPDATE source-status guard) *Closed by: Fix #5* via the new `AND status = 'Active'` clause on the mark-Completed / mark-Failed UPDATEs in `runStaleConvoysReport`. AUDIT-083 and -084 remain open (ConflictPending trap state + AwaitingChancellorReview stale-lock flow) — they need their own dog passes.
 - **P7 (unguarded transitions) covers:** AUDIT-072, -086
 - **P10 (shell injection) covers:** AUDIT-098, -099, -140, -153, -154
 - **P12 (prompt injection) covers:** AUDIT-139, -141, -142, -143 (also time), -144, -145
@@ -173,7 +173,7 @@ These are Medium findings where the pattern test in the table above structurally
 | AUDIT-163 | P12 — `audit_pattern_p12_test.go` |
 | AUDIT-164 | Lifecycle batch — `audit_lifecycle_test.go` (TestAUDIT_164) |
 | AUDIT-165 | Lifecycle batch — `audit_lifecycle_test.go` (TestAUDIT_165) |
-| AUDIT-166 | P6 — `audit_pattern_p6_test.go` |
+| AUDIT-166 | P6 — `audit_pattern_p6_test.go` — remains open (ReleaseInFlightTasks needs its own fix; stale-convoys dog does not touch `locked_at`) |
 
 ## Not committed (NOT-APPLICABLE / DUPLICATE)
 

@@ -518,6 +518,13 @@ func runDailyDigest(db *sql.DB, logger interface{ Printf(string, ...any) }) erro
 	return nil
 }
 
+// runStaleConvoysReport scans Active convoys and transitions those whose tasks
+// have all reached a terminal status. The terminal set is
+// ('Completed','Cancelled','Failed','Escalated') — NOT just the first two —
+// so a convoy full of Failed or Escalated tasks no longer silently flips to
+// Completed (AUDIT-012, Fix #5). When any child task is Failed/Escalated the
+// convoy transitions to 'Failed' and the operator receives an alert; only
+// convoys whose children are all Completed/Cancelled auto-complete.
 func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 	rows, err := db.Query(`SELECT id, name FROM Convoys WHERE status = 'Active'`)
 	if err != nil {
@@ -535,33 +542,79 @@ func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) 
 	}
 	rows.Close()
 
-	var fixedEmpty, fixedStale int
+	var fixedEmpty, fixedCompleted, fixedFailed int
 	for _, c := range convoys {
 		var total int
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE convoy_id = ?`, c.id).Scan(&total)
 
-		var shouldComplete bool
-		var reason string
+		// Decide whether this convoy is ready for a terminal transition.
+		//   total == 0          → empty convoy → Completed (no-tasks).
+		//   nonTerminal == 0    → every task has reached a terminal status
+		//                         (Completed, Cancelled, Failed, or Escalated).
+		//                         If any child is Failed/Escalated, the convoy
+		//                         is Failed (not Completed) — a convoy full of
+		//                         failed tasks is a stall, not a success.
+		var (
+			shouldAct  bool
+			wantFailed bool
+			reason     string
+		)
 		if total == 0 {
-			shouldComplete = true
+			shouldAct = true
 			reason = "no tasks"
 		} else {
 			var nonTerminal int
 			db.QueryRow(`
 				SELECT COUNT(*) FROM BountyBoard
 				WHERE convoy_id = ?
-				  AND status NOT IN ('Completed', 'Cancelled')`, c.id).Scan(&nonTerminal)
+				  AND status NOT IN ('Completed', 'Cancelled', 'Failed', 'Escalated')`, c.id).Scan(&nonTerminal)
 			if nonTerminal == 0 {
-				shouldComplete = true
-				reason = "all tasks terminal"
+				shouldAct = true
+
+				// If any child task is Failed/Escalated, the convoy is failed —
+				// not completed. Masking failures as "success" is exactly the
+				// bug AUDIT-012 called out.
+				var problemCount int
+				db.QueryRow(`
+					SELECT COUNT(*) FROM BountyBoard
+					WHERE convoy_id = ?
+					  AND status IN ('Failed','Escalated')`, c.id).Scan(&problemCount)
+				if problemCount > 0 {
+					wantFailed = true
+					reason = fmt.Sprintf("%d task(s) Failed/Escalated, remainder terminal", problemCount)
+				} else {
+					reason = "all tasks terminal"
+				}
 			}
 		}
 
-		if !shouldComplete {
+		if !shouldAct {
 			continue
 		}
 
-		db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ?`, c.id)
+		if wantFailed {
+			db.Exec(`UPDATE Convoys SET status = 'Failed' WHERE id = ? AND status = 'Active'`, c.id)
+			// Operator mail — modeled on CheckConvoyCompletions's STALLED alert so
+			// dashboards and inbox filters treat the two paths identically.
+			subject := fmt.Sprintf("[CONVOY FAILED] %s", c.name)
+			var existing int
+			db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE subject = ? AND read_at = ''`, subject).Scan(&existing)
+			if existing == 0 {
+				var taskErr string
+				db.QueryRow(`SELECT error_log FROM BountyBoard WHERE convoy_id = ? AND status IN ('Failed','Escalated') ORDER BY id ASC LIMIT 1`, c.id).Scan(&taskErr)
+				body := fmt.Sprintf(
+					"Convoy '%s' was transitioned to Failed by the stale-convoys-report dog (%s).\n\nInspect: force convoy show %d\nRetry failed tasks: force convoy reset %d",
+					c.name, reason, c.id, c.id)
+				if taskErr != "" {
+					body += "\n\nFirst failure:\n" + taskErr
+				}
+				store.SendMail(db, "inquisitor", "operator", subject, body, 0, store.MailTypeAlert)
+			}
+			fixedFailed++
+			continue
+		}
+
+		db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ? AND status = 'Active'`, c.id)
 		store.SendMail(db, "inquisitor", "operator",
 			fmt.Sprintf("[CONVOY COMPLETE] %s", c.name),
 			fmt.Sprintf("Convoy '%s' was auto-completed by the stale-convoys-report dog (%s).", c.name, reason),
@@ -570,14 +623,15 @@ func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) 
 		if total == 0 {
 			fixedEmpty++
 		} else {
-			fixedStale++
+			fixedCompleted++
 		}
 	}
 
-	if fixedEmpty == 0 && fixedStale == 0 {
+	switch {
+	case fixedEmpty == 0 && fixedCompleted == 0 && fixedFailed == 0:
 		logger.Printf("Dog stale-convoys-report: no stale convoys found")
-	} else {
-		logger.Printf("Dog stale-convoys-report: completed %d empty convoy(s) and %d stale convoy(s) where all tasks were terminal", fixedEmpty, fixedStale)
+	default:
+		logger.Printf("Dog stale-convoys-report: completed %d empty convoy(s), %d stale convoy(s) with all-success children, %d stale convoy(s) transitioned to Failed", fixedEmpty, fixedCompleted, fixedFailed)
 	}
 	return nil
 }

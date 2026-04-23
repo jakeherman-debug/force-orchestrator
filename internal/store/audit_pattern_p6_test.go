@@ -38,12 +38,13 @@ import (
 //     'Planned'. Active tasks in those states are invisible on the
 //     dashboard. Static check of the literal SQL in handlers.go.
 func TestPattern_P6_UndocumentedStatusValues(t *testing.T) {
-	t.Skip("AUDIT-012/025/085: remove when state-machine sweeper + escalation-Resolved normalization land (Fix #5)")
-	// Without skip, fails with:
-	//   --- FAIL: TestPattern_P6_UndocumentedStatusValues (0.00s)
-	//       --- FAIL: .../A_staleConvoysReport_treats_Failed_and_Escalated_as_terminal (0.00s)
-	//       --- FAIL: .../B_Resolved_escalation_status_written_but_unrecognized (0.00s)
-	//       --- FAIL: .../C_dashboard_ActiveCount_omits_real_active_states (0.00s)
+	// Outer skip removed by Fix #5 (AUDIT-012). Sub-test A now runs and
+	// asserts the stale-convoys terminal-status predicate. Sub-tests B and
+	// C remain individually skipped pending their own fixes:
+	//   B (AUDIT-025) — Escalations.status 'Resolved'→'Closed' normalization.
+	//   C (AUDIT-085) — dashboard ActiveCount SQL expansion.
+	// Under AUDIT-012's fix, A passes; B and C are still red and retain
+	// their inner t.Skip(...) lines.
 	// Resolve repo-root-relative paths from this test file's location.
 	// This test file lives at internal/store/audit_pattern_p6_test.go
 	// so the repo root is two levels up.
@@ -61,12 +62,11 @@ func TestPattern_P6_UndocumentedStatusValues(t *testing.T) {
 	worktreeResetPath := filepath.Join(repoRoot, "internal", "agents", "pilot_worktree_reset.go")
 
 	t.Run("A_staleConvoysReport_treats_Failed_and_Escalated_as_terminal", func(t *testing.T) {
-		t.Skip("AUDIT-012: remove when state-machine sweeper + escalation-Resolved normalization land (Fix #5)")
-		// Without skip, fails with:
-		//   audit_pattern_p6_test.go:111: AUDIT-012: runStaleConvoysReport's terminal-status
-		//   predicate does not include both 'Failed' and 'Escalated'
-		//   (hasFailed=false hasEscalated=false). A convoy whose tasks are all Failed or all
-		//   Escalated is silently UPDATEd to status='Completed'...
+		// Fix #5 (AUDIT-012): skip removed. runStaleConvoysReport's
+		// terminal-set now includes 'Failed' and 'Escalated', and the
+		// mark-Completed branch was split: convoys with any Failed/Escalated
+		// children transition to 'Failed' with operator mail.
+		//
 		// STATIC check: runStaleConvoysReport is unexported in
 		// package agents, so this sub-test (which is in package store)
 		// cannot invoke it directly without creating an import cycle.
