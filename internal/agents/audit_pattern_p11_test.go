@@ -26,11 +26,10 @@ package agents
 //               completion — combined with AUDIT-004 (no spend cap), the
 //               big-red-button is toothless for in-flight work.
 //
-// This test is a RED-phase pattern test: each sub-test FAILS today to prove
-// the defect is live. When the remedy lands (see AUDIT.md Fix #1), the
-// assertions pass and CI goes green. If any sub-test flips to PASS before
-// the corresponding fix is reviewed, that is the signal to verify the fix
-// semantics are correct.
+// Fix #1 closed all three findings. This test now asserts the remedy is in
+// place — permanent regression protection. If any sub-test fails, the
+// corresponding defect has been reintroduced and the fleet's e-stop has
+// lost its teeth again.
 
 import (
 	"os"
