@@ -3,6 +3,7 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"force-orchestrator/internal/store"
@@ -17,10 +18,30 @@ func seedConvoyReviewTask(t *testing.T, db interface {
 }
 
 // stubConvoyReviewLLM installs a stub CLI runner returning the given result JSON.
-func stubConvoyReviewLLM(t *testing.T, result convoyReviewResult) {
+// Returns the captured stub so callers can assert CallCount or inspect the
+// prompt structure (see AUDIT-135 prompt-capture assertion in
+// TestStubConvoyReviewLLM_CapturesPrompt).
+func stubConvoyReviewLLM(t *testing.T, result convoyReviewResult) *stubCLIRunner {
 	t.Helper()
 	raw, _ := json.Marshal(result)
-	withStubCLIRunner(t, string(raw), nil)
+	return withStubCLIRunner(t, string(raw), nil)
+}
+
+// assertConvoyReviewPromptShape is the shared AUDIT-135 assertion for
+// tests that stub the ConvoyReview LLM: every prompt must carry the
+// convoy name, the convoy_tasks block, and the diff block. An empty or
+// missing field would previously pass a test that only inspected DB
+// state, letting bugs like summarizeConvoyTasks returning "" slip by.
+//
+// Usage: call after runConvoyReview / runConvoyReviewLLM to fail fast on
+// prompt-structure regressions, independent of what the DB ended up with.
+func assertConvoyReviewPromptShape(t *testing.T, prompt string) {
+	t.Helper()
+	for _, required := range []string{"convoy_name:", "convoy_tasks:", "diff:"} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("ConvoyReview prompt missing required marker %q\n---prompt---\n%s\n---", required, prompt)
+		}
+	}
 }
 
 // ── QueueConvoyReview dedup ──────────────────────────────────────────────────
@@ -202,19 +223,25 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveConvoyTasks(t *testing.T) {
 }
 
 // ── runConvoyReview — max findings cap ──────────────────────────────────────
-
+// Fix #7 dropped the default from 5 → 2. This test pins the explicit-
+// override path against a cap of 5 (e.g. an operator raised the cap for
+// their fleet) to ensure the SystemConfig escape hatch still works
+// alongside the tightened default. The default-cap assertion lives in
+// convoy_review_fix7_test.go / TestRunConvoyReview_MaxFindingsDefaultIsTwo.
 func TestRunConvoyReview_MaxFindingsCap(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
 	convoyID := seedDraftPROpenConvoy(t, db)
+	db.Exec(`INSERT OR REPLACE INTO SystemConfig (key, value) VALUES ('convoy_review_max_findings', '5')`)
 
-	// Return 8 findings — cap is 5 by default.
+	// Return 8 findings — cap is 5 under the operator override.
 	findings := make([]convoyReviewFinding, 8)
 	for i := range findings {
 		findings[i] = convoyReviewFinding{
 			Type: "gap", Description: fmt.Sprintf("gap %d", i),
 			Fix: fmt.Sprintf("fix %d", i), Repo: "api",
+			File: fmt.Sprintf("f%d.go", i), Line: i + 1,
 		}
 	}
 	stubConvoyReviewLLM(t, convoyReviewResult{Status: "needs_work", Findings: findings})
@@ -229,7 +256,7 @@ func TestRunConvoyReview_MaxFindingsCap(t *testing.T) {
 	var fixCount int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = 997 AND type = 'CodeEdit'`).Scan(&fixCount)
 	if fixCount != 5 {
-		t.Errorf("expected 5 fix tasks (cap), got %d", fixCount)
+		t.Errorf("expected 5 fix tasks (operator override), got %d", fixCount)
 	}
 }
 

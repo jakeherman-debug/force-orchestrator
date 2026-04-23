@@ -41,8 +41,10 @@ func TestAUDIT_CostAdvisory(t *testing.T) {
 
 	// ── AUDIT-031 — PRReviewTriage depth cap is advisory only ────────────
 	t.Run("TestAUDIT_031_pr_review_depth_cap_advisory", func(t *testing.T) {
-		t.Skip("AUDIT-031: remove when thread_depth hard-guard / classify_attempts / auto-shard-on-zero-commit land (Fix #7)")
-		// Without skip, fails with: AUDIT-031: defective pattern still present — dispatchPRReviewDecision has no post-LLM thread_depth hard-guard and no ThreadDepth reference in dispatcher body
+		// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+		// dispatchPRReviewDecision now hard-forces classification=conflicted_loop
+		// when c.ThreadDepth >= depth_cap, regardless of what the classifier
+		// LLM returned. Test inverts: fails if the hard guard regresses.
 		src, err := os.ReadFile("pr_review_triage.go")
 		if err != nil {
 			t.Fatalf("read pr_review_triage.go: %v", err)
@@ -66,25 +68,26 @@ func TestAUDIT_CostAdvisory(t *testing.T) {
 		hasHardGuard := depthGuard.MatchString(body)
 		hasAnyThreadDepthRef := strings.Contains(body, "ThreadDepth")
 
-		if !hasHardGuard && !hasAnyThreadDepthRef {
-			t.Fatal("AUDIT-031: defective pattern still present — dispatchPRReviewDecision has no post-LLM thread_depth hard-guard and no ThreadDepth reference in dispatcher body")
+		if !hasHardGuard || !hasAnyThreadDepthRef {
+			t.Fatal("AUDIT-031 regression: dispatchPRReviewDecision no longer has a post-LLM ThreadDepth hard-guard — per-thread cap is back to advisory only")
 		}
 	})
 
 	// ── AUDIT-032 — PRReviewComments has no classify_attempts ────────────
 	t.Run("TestAUDIT_032_pr_review_comments_no_classify_attempts", func(t *testing.T) {
-		t.Skip("AUDIT-032: remove when thread_depth hard-guard / classify_attempts / auto-shard-on-zero-commit land (Fix #7)")
-		// Without skip, fails with: AUDIT-032: defective pattern still present — schema.go has no classify_attempts column, runPRReviewTriage uses 'leaving unclassified for retry' with no classify_attempts tracking; classifier retries indefinitely on transient failures
+		// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+		// Schema gained PRReviewComments.classify_attempts; runPRReviewTriage
+		// now increments it on classifier failures and marks the row
+		// classification='human' (with classifier-gave-up reason) past
+		// classifyAttemptsCap.
 		schema, err := os.ReadFile("../store/schema.go")
 		if err != nil {
 			t.Fatalf("read store/schema.go: %v", err)
 		}
 		schemaText := string(schema)
 
-		hasSchemaCol := strings.Contains(schemaText, "classify_attempts")
-
-		if !strings.Contains(schemaText, "CREATE TABLE IF NOT EXISTS PRReviewComments") {
-			t.Fatalf("PRReviewComments table def not found in schema.go — has it moved?")
+		if !strings.Contains(schemaText, "classify_attempts") {
+			t.Fatal("AUDIT-032 regression: PRReviewComments.classify_attempts column missing from schema.go — classifier retries are back to unbounded")
 		}
 
 		triage, err := os.ReadFile("pr_review_triage.go")
@@ -105,11 +108,12 @@ func TestAUDIT_CostAdvisory(t *testing.T) {
 			body = rest[:nextFunc+1]
 		}
 
-		hasRetryLog := strings.Contains(body, "leaving unclassified for retry")
-		hasClassifyAttempts := strings.Contains(body, "classify_attempts") || strings.Contains(body, "ClassifyAttempts")
+		hasClassifyAttempts := strings.Contains(body, "classify_attempts") ||
+			strings.Contains(body, "ClassifyAttempts") ||
+			strings.Contains(body, "IncrementClassifyAttempts")
 
-		if !hasSchemaCol && hasRetryLog && !hasClassifyAttempts {
-			t.Fatal("AUDIT-032: defective pattern still present — schema.go has no classify_attempts column, runPRReviewTriage uses 'leaving unclassified for retry' with no classify_attempts tracking; classifier retries indefinitely on transient failures")
+		if !hasClassifyAttempts {
+			t.Fatal("AUDIT-032 regression: runPRReviewTriage no longer increments classify_attempts — transient classifier failures would retry forever again")
 		}
 	})
 

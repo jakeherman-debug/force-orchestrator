@@ -116,8 +116,12 @@ func TestAuditMedium155_UnionMergeNoRepoLock(t *testing.T) {
 // test body exercises the breaker trip but never asserts Claude call
 // count drops to zero afterwards.
 func TestAuditMedium161_EnvBreakerTestNoCallCountAssert(t *testing.T) {
-	t.Skip("AUDIT-161: remove when TestRunMedicCITriage_EnvironmentalTripsBreaker asserts CallCount (Fix #7 companion)")
-	// Without skip, fails with: AUDIT-161: TestRunMedicCITriage_EnvironmentalTripsBreaker still lacks Claude call-count assertion after breaker trip
+	// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+	// TestRunMedicCITriage_EnvironmentalTripsBreaker now calls
+	// stub.CallCount() twice — once to verify N calls to trip the breaker,
+	// then a second time after 3 extra triages to confirm no regression
+	// into the breaker-open path. Test inverts: fails if call-count
+	// assertions are removed from the breaker test.
 	path, err := filepath.Abs("medic_ci_test.go")
 	if err != nil {
 		t.Fatalf("abs: %v", err)
@@ -129,26 +133,19 @@ func TestAuditMedium161_EnvBreakerTestNoCallCountAssert(t *testing.T) {
 		t.Fatalf("could not locate TestRunMedicCITriage_EnvironmentalTripsBreaker in %s", path)
 	}
 
-	// Sanity: make sure the test still exercises the breaker loop the
-	// finding is written against.
 	if !strings.Contains(body, "ciEnvThreshold") || !strings.Contains(body, "IsCIBreakerOpen") {
 		t.Fatalf("AUDIT-161 test body has drifted; re-audit against new shape:\n%s", body)
 	}
 
-	callCountPat := regexp.MustCompile(`(?i)\b(call[_]?count|invocations|stub\.Calls|runnerCalls)\b`)
-	if callCountPat.FindString(body) != "" {
-		t.Errorf("AUDIT-161 appears remedied: test now asserts Claude call count. " +
-			"Update AUDIT.md (mark resolved) and remove this spot-check.")
+	callCountPat := regexp.MustCompile(`(?i)\b(call[_]?count|CallCount\(\)|invocations|stub\.Calls|runnerCalls)\b`)
+	if callCountPat.FindString(body) == "" {
+		t.Fatal("AUDIT-161 regression: TestRunMedicCITriage_EnvironmentalTripsBreaker no longer asserts Claude call count; a breaker-open path that still calls Claude would pass")
 	}
-
-	// Secondary: the test does not re-stub the runner inside the loop,
-	// and does not take a post-trip snapshot of any counter — both are
-	// necessary to detect "calls Claude after breaker open" regressions.
-	if strings.Contains(body, "after breaker") || strings.Contains(body, "post-trip") {
-		t.Errorf("AUDIT-161 appears remedied: post-trip assertion present. Update AUDIT.md.")
+	// Post-trip assertion: ensure we continue to check that Claude isn't
+	// called after the breaker opens.
+	if !strings.Contains(body, "after breaker") {
+		t.Fatal("AUDIT-161 regression: post-trip 'after breaker' assertion removed from the test")
 	}
-	t.Fatalf("AUDIT-161: TestRunMedicCITriage_EnvironmentalTripsBreaker still lacks " +
-		"Claude call-count assertion after breaker trip")
 }
 
 // TestAuditMedium162_RateLimitTestNoCallCountAssert pins AUDIT-162: the
@@ -156,8 +153,10 @@ func TestAuditMedium161_EnvBreakerTestNoCallCountAssert(t *testing.T) {
 // runner was invoked exactly once — a broken retry loop that hammered
 // Claude N times would pass.
 func TestAuditMedium162_RateLimitTestNoCallCountAssert(t *testing.T) {
-	t.Skip("AUDIT-162: remove when TestRunAstromechTask_RateLimit asserts CallCount (Fix #7 companion)")
-	// Without skip, fails with: AUDIT-162: TestRunAstromechTask_RateLimit still lacks Claude call-count assertion
+	// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+	// TestRunAstromechTask_RateLimit now asserts stub.CallCount() == 1 —
+	// a broken retry wrapper that hammered Claude on a single 429 would
+	// re-fail the test. Test inverts: fails if the assertion is removed.
 	path, err := filepath.Abs("astromech_test.go")
 	if err != nil {
 		t.Fatalf("abs: %v", err)
@@ -169,22 +168,12 @@ func TestAuditMedium162_RateLimitTestNoCallCountAssert(t *testing.T) {
 		t.Fatalf("could not locate TestRunAstromechTask_RateLimit in %s", path)
 	}
 
-	// Sanity: test must still be about the rate-limit path.
 	if !strings.Contains(body, "rate limit") || !strings.Contains(body, "IsRateLimitError") && !strings.Contains(body, "rateLimitRetries") {
 		t.Fatalf("AUDIT-162 test body has drifted; re-audit against new shape:\n%s", body)
 	}
 
-	callCountPat := regexp.MustCompile(`(?i)\b(call[_]?count|invocations|stub\.Calls|runnerCalls|claudeCalls)\b`)
-	if callCountPat.FindString(body) != "" {
-		t.Errorf("AUDIT-162 appears remedied: test now asserts Claude call count. " +
-			"Update AUDIT.md (mark resolved) and remove this spot-check.")
+	callCountPat := regexp.MustCompile(`(?i)\b(call[_]?count|CallCount\(\)|invocations|stub\.Calls|runnerCalls|claudeCalls)\b`)
+	if callCountPat.FindString(body) == "" {
+		t.Fatal("AUDIT-162 regression: TestRunAstromechTask_RateLimit no longer asserts Claude call count; a broken retry wrapper that hammered Claude on one 429 would pass")
 	}
-
-	// The withStubCLIRunner helper today uses a stateless closure — if a
-	// tracking variant shows up in this test, the gap is likely closed.
-	if strings.Contains(body, "atomic.LoadInt") || strings.Contains(body, "atomic.AddInt") {
-		t.Errorf("AUDIT-162 appears remedied: atomic counter present in test. Update AUDIT.md.")
-	}
-	t.Fatalf("AUDIT-162: TestRunAstromechTask_RateLimit still lacks Claude " +
-		"call-count assertion")
 }

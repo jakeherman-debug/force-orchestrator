@@ -233,7 +233,7 @@ func TestRunMedicCITriage_EnvironmentalTripsBreaker(t *testing.T) {
 	defer db.Close()
 
 	// Simulate multiple Environmental classifications until the breaker trips.
-	withStubCLIRunner(t, `{"classification":"Environmental","diagnosis":"master broken","fix_guidance":"","operator_note":""}`, nil)
+	stub := withStubCLIRunner(t, `{"classification":"Environmental","diagnosis":"master broken","fix_guidance":"","operator_note":""}`, nil)
 
 	for i := 0; i < ciEnvThreshold; i++ {
 		_, payload, _ := setupTriageScenario(t, db)
@@ -243,6 +243,25 @@ func TestRunMedicCITriage_EnvironmentalTripsBreaker(t *testing.T) {
 	}
 	if !IsCIBreakerOpen(db, "api") {
 		t.Errorf("breaker should be open after %d Environmental failures", ciEnvThreshold)
+	}
+	// Fix #7 (AUDIT-161) — post-trip call-count assertion.
+	// Claude MUST have been called exactly ciEnvThreshold times to reach
+	// breaker-open. After breaker opens, additional triages on the same
+	// repo must NOT call Claude again — without this snapshot we'd miss a
+	// regression where the breaker-open branch still invokes the LLM.
+	postTripCount := stub.CallCount()
+	if postTripCount != int64(ciEnvThreshold) {
+		t.Errorf("AUDIT-161: expected %d Claude calls to reach breaker, got %d", ciEnvThreshold, postTripCount)
+	}
+	// Run three more triages — breaker is open, none should invoke Claude.
+	for i := 0; i < 3; i++ {
+		_, payload, _ := setupTriageScenario(t, db)
+		triageID, _ := QueueCIFailureTriage(db, payload)
+		b, _ := store.GetBounty(db, triageID)
+		runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	}
+	if after := stub.CallCount(); after > postTripCount {
+		t.Errorf("AUDIT-161: breaker-open path still calls Claude — CallCount grew from %d to %d after breaker opened", postTripCount, after)
 	}
 }
 
