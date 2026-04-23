@@ -65,6 +65,12 @@ func extractClaudeErrorExcerpt(stdout string) string {
 	return ""
 }
 
+// maxReshardGeneration bounds the auto-reshard cascade. A task whose parent is
+// already at generation maxReshardGeneration is refused — the 1→3→9→27 fanout
+// is structurally what happens when decomposing further produces subtasks
+// that are themselves too large, so we prefer an escalation at the cap.
+const maxReshardGeneration = 2
+
 // queueReshardDecompose creates a Decompose bounty that sends a permanently-
 // failed task back to Commander for re-planning into smaller shards.
 // Idempotent per failed task: if a Decompose for the same parent task already
@@ -74,6 +80,11 @@ func extractClaudeErrorExcerpt(stdout string) string {
 // The payload is shaped as a Commander-style request: it tells Commander that
 // the original task was too large and names the target repo explicitly so the
 // re-plan stays in the same repo.
+//
+// Fix #6 (AUDIT-118): if the parent task already carries a reshard_generation
+// at or above maxReshardGeneration, refuse and return 0. The caller's
+// handleInfraFailure flow then escalates to the operator instead of
+// cascading more shards.
 func queueReshardDecompose(db *sql.DB, b *store.Bounty, stageName, errMsg string) int {
 	// Dedup: one outstanding reshard per failed task.
 	var existing int
@@ -82,6 +93,11 @@ func queueReshardDecompose(db *sql.DB, b *store.Bounty, stageName, errMsg string
 		LIMIT 1`, b.ID).Scan(&existing)
 	if existing > 0 {
 		return existing
+	}
+
+	// Generation cap: refuse cascade past the limit.
+	if b.ReshardGeneration >= maxReshardGeneration {
+		return 0
 	}
 
 	// Shape the payload as an operator-style feature request so Commander's
@@ -150,15 +166,32 @@ func handleInfraFailure(
 		reshardID := queueReshardDecompose(db, b, stageName, msg)
 		if reshardID > 0 {
 			logger.Printf("Task %d: permanently failed in %s — queued Decompose #%d for Commander reshard", b.ID, stageName, reshardID)
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
+				fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nDecompose task #%d has been queued — Commander will re-plan this work into smaller shards.",
+					b.ID, stageName, MaxInfraFailures, msg, reshardID),
+				b.ID, store.MailTypeInfo)
+		} else if b.ReshardGeneration >= maxReshardGeneration {
+			// Fix #6 (AUDIT-118): reshard refused at the generation cap. Escalate
+			// rather than silently letting the task die — this is a structural
+			// signal that further decomposition isn't going to help.
+			logger.Printf("Task %d: reshard refused (generation=%d >= cap=%d) — escalating", b.ID, b.ReshardGeneration, maxReshardGeneration)
+			CreateEscalation(db, b.ID, store.SeverityHigh,
+				fmt.Sprintf("Reshard cascade reached generation cap (%d). Further decomposition is unlikely to help — this task needs human review. Last error: %s",
+					maxReshardGeneration, msg))
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[RESHARD CAP] Task #%d %s — cascade refused at generation %d", b.ID, stageName, b.ReshardGeneration),
+				fmt.Sprintf("Task #%d is a generation-%d reshard descendant that hit %d infra failures. The auto-reshard path is refused at the cap (%d) to avoid a 1→3→9→27 cascade.\n\nError: %s\n\nPlease review the task and either split it manually or close it.",
+					b.ID, b.ReshardGeneration, MaxInfraFailures, maxReshardGeneration, msg),
+				b.ID, store.MailTypeAlert)
 		} else {
 			logger.Printf("Task %d: permanently failed in %s — Decompose reshard skipped (insert failed)", b.ID, stageName)
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
+				fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nDecompose queueing failed — operator review required.",
+					b.ID, stageName, MaxInfraFailures, msg),
+				b.ID, store.MailTypeAlert)
 		}
-
-		store.SendMail(db, agentName, "operator",
-			fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
-			fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nDecompose task #%d has been queued — Commander will re-plan this work into smaller shards.",
-				b.ID, stageName, MaxInfraFailures, msg, reshardID),
-			b.ID, store.MailTypeInfo)
 	} else {
 		store.UpdateBountyStatus(db, b.ID, retryStatus)
 		backoff := InfraBackoff(count)

@@ -73,11 +73,13 @@ func GetBounty(db *sql.DB, id int) (*Bounty, error) {
 	err := db.QueryRow(`
 		SELECT id, parent_id, target_repo, type, status, payload,
 		       owner, retry_count, infra_failures, convoy_id, checkpoint, branch_name,
-		       priority, IFNULL(task_timeout,0)
+		       priority, IFNULL(task_timeout,0),
+		       IFNULL(medic_requeue_count,0), IFNULL(reshard_generation,0)
 		FROM BountyBoard WHERE id = ?`, id).
 		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Type, &b.Status,
 			&b.Payload, &b.Owner, &b.RetryCount, &b.InfraFailures, &b.ConvoyID,
-			&b.Checkpoint, &b.BranchName, &b.Priority, &b.TaskTimeout)
+			&b.Checkpoint, &b.BranchName, &b.Priority, &b.TaskTimeout,
+			&b.MedicRequeueCount, &b.ReshardGeneration)
 	return &b, err
 }
 
@@ -317,11 +319,19 @@ func ResetTask(db *sql.DB, id int) {
 // ResetTaskFull always resets a task to Pending and clears branch_name regardless
 // of committed work. Used by Medic when re-running the coding phase with new
 // guidance — the astromech needs a fresh attempt, not a review of a bad branch.
+//
+// Fix #6 (AUDIT-005): retry_count and infra_failures are deliberately PRESERVED.
+// Zeroing them on every Medic requeue let the Astromech→Council→Medic→Astromech
+// loop run indefinitely because every cycle started fresh from the caller's
+// perspective. The counters now accumulate so downstream gates
+// (auto-shard on timeout, permanent-fail on retries) remain bounded even
+// across multiple Medic-driven retries, and the `medic_requeue_count` cap
+// (see applyMedicRequeue) is the final bounded-lives budget.
 func ResetTaskFull(db *sql.DB, id int) {
 	var convoyID int
 	db.QueryRow(`SELECT convoy_id FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID)
 	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
-		retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = '', branch_name = ''
+		locked_at = '', checkpoint = '', branch_name = ''
 		WHERE id = ?`, id)
 	AutoRecoverConvoy(db, convoyID, nil)
 }
@@ -432,6 +442,72 @@ func IncrementInfraFailures(db *sql.DB, id int) int {
 	var count int
 	db.QueryRow(`SELECT infra_failures FROM BountyBoard WHERE id = ?`, id).Scan(&count)
 	return count
+}
+
+// IncrementMedicRequeue bumps the medic_requeue_count counter and returns the
+// new value. Used by Medic's requeue path (Fix #6) to enforce a hard cap on
+// the Astromech→Council→Medic→Astromech loop — past the cap, Medic forces an
+// escalate decision instead of spending another Claude cycle.
+func IncrementMedicRequeue(db *sql.DB, id int) int {
+	db.Exec(`UPDATE BountyBoard SET medic_requeue_count = medic_requeue_count + 1 WHERE id = ?`, id)
+	var count int
+	db.QueryRow(`SELECT IFNULL(medic_requeue_count, 0) FROM BountyBoard WHERE id = ?`, id).Scan(&count)
+	return count
+}
+
+// GetMedicRequeueCount returns the current medic_requeue_count for a task.
+// Used by the Medic decision path to decide whether to honor a requeue
+// decision or force-escalate (Fix #6).
+func GetMedicRequeueCount(db *sql.DB, id int) int {
+	var count int
+	db.QueryRow(`SELECT IFNULL(medic_requeue_count, 0) FROM BountyBoard WHERE id = ?`, id).Scan(&count)
+	return count
+}
+
+// GetReshardGeneration returns the reshard_generation stamp for a task.
+// Used by queueReshardDecompose (Fix #6) to refuse cascading auto-reshards
+// past the generation cap — bounds the 1→3→9→27 fanout.
+func GetReshardGeneration(db *sql.DB, id int) int {
+	var gen int
+	db.QueryRow(`SELECT IFNULL(reshard_generation, 0) FROM BountyBoard WHERE id = ?`, id).Scan(&gen)
+	return gen
+}
+
+// SetReshardGeneration stamps a task with its reshard generation. Used when
+// autoInsertReshardTasks writes shards so the next generation's failures
+// can be detected and refused.
+func SetReshardGeneration(db *sql.DB, id, generation int) {
+	db.Exec(`UPDATE BountyBoard SET reshard_generation = ? WHERE id = ?`, generation, id)
+}
+
+// IncrementFailedRebaseAttempts bumps ConvoyAskBranches.failed_rebase_attempts
+// for a (convoy, repo) pair and returns the new value. Used by
+// runRebaseAskBranch / dogMainDriftWatch (Fix #6 — AUDIT-028, AUDIT-119) to
+// bound the ask-branch rebase-conflict retry loop.
+func IncrementFailedRebaseAttempts(db *sql.DB, convoyID int, repo string) int {
+	db.Exec(`UPDATE ConvoyAskBranches SET failed_rebase_attempts = IFNULL(failed_rebase_attempts, 0) + 1
+		WHERE convoy_id = ? AND repo = ?`, convoyID, repo)
+	var count int
+	db.QueryRow(`SELECT IFNULL(failed_rebase_attempts, 0) FROM ConvoyAskBranches
+		WHERE convoy_id = ? AND repo = ?`, convoyID, repo).Scan(&count)
+	return count
+}
+
+// GetFailedRebaseAttempts reads the counter without incrementing. Used by
+// main-drift-watch to decide whether to queue another rebase or stand down.
+func GetFailedRebaseAttempts(db *sql.DB, convoyID int, repo string) int {
+	var count int
+	db.QueryRow(`SELECT IFNULL(failed_rebase_attempts, 0) FROM ConvoyAskBranches
+		WHERE convoy_id = ? AND repo = ?`, convoyID, repo).Scan(&count)
+	return count
+}
+
+// ResetFailedRebaseAttempts clears the counter — called by runRebaseAskBranch
+// on a clean rebase (the ask-branch caught up, so earlier failures are no
+// longer relevant).
+func ResetFailedRebaseAttempts(db *sql.DB, convoyID int, repo string) {
+	db.Exec(`UPDATE ConvoyAskBranches SET failed_rebase_attempts = 0
+		WHERE convoy_id = ? AND repo = ?`, convoyID, repo)
 }
 
 func UpdateCheckpoint(db *sql.DB, id int, checkpoint string) {

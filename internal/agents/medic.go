@@ -268,14 +268,40 @@ func autoCompletedMedicTask(db *sql.DB, agentName string, medicBounty, parent *s
 	return true
 }
 
+// maxMedicRequeues caps the Astromech→Council→Medic→Astromech loop at a
+// bounded number of Medic-driven requeues. Past this cap, Medic forces an
+// escalate decision regardless of the LLM's recommendation — at that point
+// the loop has convinced itself the task is "almost there" three times in
+// a row without converging, which is the exact signature of a task that
+// needs human judgement (Fix #6, AUDIT-005, AUDIT-033).
+const maxMedicRequeues = 2
+
 func applyMedicRequeue(db *sql.DB, agentName string, bounty, parent *store.Bounty, d medicDecision, logger *log.Logger) {
+	// Enforce the Medic-requeue cap BEFORE resetting the task. Checking on
+	// entry (rather than after increment) means the cap expresses "after N
+	// prior requeues, the next one is refused" — bounded at maxMedicRequeues
+	// total requeues per task, counting from zero.
+	prior := store.GetMedicRequeueCount(db, parent.ID)
+	if prior >= maxMedicRequeues {
+		logger.Printf("Medic: task #%d has hit the requeue cap (%d prior Medic requeues) — forcing escalate instead of requeue",
+			parent.ID, prior)
+		applyMedicEscalate(db, agentName, bounty, parent, medicDecision{
+			Decision: "escalate",
+			Reason:   d.Reason,
+			Escalation: fmt.Sprintf("Medic-requeue cap hit (%d prior cycles). Last Medic recommendation was requeue with guidance: %q — but the Astromech→Council→Medic→Astromech loop has not converged. Human judgement required.",
+				prior, d.Guidance),
+		}, logger)
+		return
+	}
+
 	store.ResetTaskFull(db, parent.ID)
+	newCount := store.IncrementMedicRequeue(db, parent.ID)
 	store.SendMail(db, agentName, "astromech",
-		fmt.Sprintf("[MEDIC GUIDANCE] Task #%d — requeued with updated guidance", parent.ID),
+		fmt.Sprintf("[MEDIC GUIDANCE] Task #%d — requeued with updated guidance (cycle %d/%d)", parent.ID, newCount, maxMedicRequeues),
 		fmt.Sprintf("The Fleet Medic has analyzed this task's failure history and requeued it.\n\nRoot cause: %s\n\nGuidance for your next attempt:\n%s",
 			d.Reason, d.Guidance),
 		parent.ID, store.MailTypeFeedback)
-	logger.Printf("Medic: requeued task #%d — %s", parent.ID, d.Reason)
+	logger.Printf("Medic: requeued task #%d (cycle %d/%d) — %s", parent.ID, newCount, maxMedicRequeues, d.Reason)
 }
 
 func applyMedicShard(db *sql.DB, agentName string, bounty, parent *store.Bounty, d medicDecision, logger *log.Logger) {

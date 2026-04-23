@@ -270,8 +270,13 @@ func autoInsertReshardTasks(db *sql.DB, bounty, parent *store.Bounty, tasks []st
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	// Fix #6 (AUDIT-118): stamp each shard with parent's reshard_generation + 1
+	// so a cascade (shard fails → queueReshardDecompose → shard fails) can be
+	// refused at the generation cap rather than fanning out 1→3→9→27.
+	nextGen := parent.ReshardGeneration + 1
+
 	var shardIDs []int
-	prefix := fmt.Sprintf("[RESHARD from task #%d]\n\n", parent.ID)
+	prefix := fmt.Sprintf("[RESHARD from task #%d gen=%d]\n\n", parent.ID, nextGen)
 	for _, t := range tasks {
 		repo := t.Repo
 		if repo == "" {
@@ -282,6 +287,11 @@ func autoInsertReshardTasks(db *sql.DB, bounty, parent *store.Bounty, tasks []st
 			return fmt.Errorf("add shard: %w", addErr)
 		}
 		shardIDs = append(shardIDs, id)
+		// Stamp the generation on the newly inserted shard so a future failure
+		// chain can read it via GetReshardGeneration and refuse.
+		if _, err := tx.Exec(`UPDATE BountyBoard SET reshard_generation = ? WHERE id = ?`, nextGen, id); err != nil {
+			return fmt.Errorf("stamp reshard_generation: %w", err)
+		}
 	}
 	if _, err := tx.Exec(`UPDATE BountyBoard SET status = 'Completed', error_log = ?
 		WHERE id = ?`,

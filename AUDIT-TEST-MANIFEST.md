@@ -31,7 +31,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-002 | `internal/dashboard/audit_pattern_p8_test.go` | same | static | Fix #2 | Closed by: Fix #2 |
 | AUDIT-003 | `internal/dashboard/audit_pattern_p8_test.go` | same | static | Fix #2 | Closed by: Fix #2 |
 | AUDIT-004 | `internal/agents/spend_cap_test.go` | `TestSpendCap_*`, `TestDogSpendBurnWatch_*` | unit+integration+feature | Fix #1 | Closed by: Fix #1 (`fix/spend-cap-and-estop`) |
-| AUDIT-005 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_005_MedicRequeueZerosRetryCount` | static | Fix #6 |
+| AUDIT-005 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_005_MedicRequeueZerosRetryCount` | static | Fix #6 | Closed by: Fix #6 (`fix/medic-requeue-cap`) |
 | AUDIT-006 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_006_ConvoyReview5x5Structural` | static | Fix #7 |
 | AUDIT-007 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_007_ConvoyReviewParseFailCompletesNoMemory` | static | Fix #7 |
 | AUDIT-008 | `internal/store/audit_pattern_p2_test.go` | `TestPattern_P2_IdempotencyKeyRace` | race (50 goroutines) | Fix #3 |
@@ -72,12 +72,12 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-025 | `internal/store/audit_pattern_p6_test.go` | `.../B_*` | static grep | Fix #5 | **Still pending** — requires Resolved→Closed normalization pass, not covered by Fix #5's stale-convoys change. Sub-test B skip remains. |
 | AUDIT-026 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ResetTaskResurrectsCompleted` | behavioral | Fix #8 |
 | AUDIT-027 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace` | race | Fix #8 |
-| AUDIT-028 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_028_AskBranchRebaseConflictNoCap` | static (≈AUDIT-119) | Fix #6/#7 |
+| AUDIT-028 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_028_AskBranchRebaseConflictNoCap` | static (≈AUDIT-119) | Fix #6/#7 | Closed by: Fix #6 |
 | AUDIT-029 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_029_CouncilJSONParseRoutesToInfra5x` | static | Fix #7 |
 | AUDIT-030 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_030_ChancellorAutoApprovesOnClaudeError` | DUPLICATE-OF-116 | Fix #8 |
 | AUDIT-031 | `internal/agents/audit_cost_advisory_test.go` | `TestAUDIT_CostAdvisory/TestAUDIT_031_*` | static | Fix #7 |
 | AUDIT-032 | `internal/agents/audit_cost_advisory_test.go` | `.../TestAUDIT_032_*` | static (PRAGMA) | Fix #7 |
-| AUDIT-033 | `internal/agents/audit_cost_advisory_test.go` | `.../TestAUDIT_033_*` | static | Fix #7 |
+| AUDIT-033 | `internal/agents/audit_cost_advisory_test.go` | `.../TestAUDIT_033_*` | static | Fix #7 | Closed by: Fix #6 |
 | AUDIT-034 | `internal/store/audit_pattern_p2_test.go` | pattern coverage (partial UNIQUE) | race | Fix #3 |
 | AUDIT-035 | same | pattern coverage | race | Fix #3 |
 | AUDIT-036 | same | pattern coverage | race | Fix #3 |
@@ -113,8 +113,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-115 | `internal/agents/audit_pattern_p12_test.go` | `.../D_MissingApprovedField*` | behavioral | Fix #8.5 |
 | AUDIT-116 | `internal/agents/audit_pattern_p12_test.go` | `.../F_ChancellorFailsOpen*` | static | Fix #8.5 |
 | AUDIT-117 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_117_PRReviewPerThreadCapBypassable` | static | Fix #7 |
-| AUDIT-118 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_118_ReshardCascadeNoGenerationCap` | static | Fix #6 |
-| AUDIT-119 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_119_MainDriftWatchNoAttemptCounter` | static (≈AUDIT-028) | Fix #6 |
+| AUDIT-118 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_118_ReshardCascadeNoGenerationCap` | static | Fix #6 | Closed by: Fix #6 |
+| AUDIT-119 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_119_MainDriftWatchNoAttemptCounter` | static (≈AUDIT-028) | Fix #6 | Closed by: Fix #6 |
 | AUDIT-120 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_120_FlakyRealBugConcurrentFixSpawns` | static | Fix #7 |
 | AUDIT-121 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-121/HardcodedMainFallback` | static | Fix #0 | Closed by: Fix #0 |
 | AUDIT-122 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-122/MergeAndCleanup` | static | Fix #0 | Closed by: Fix #0 |
@@ -128,7 +128,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-130 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_130_*` | static | Fix #8 |
 | AUDIT-131 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_131_*` | static | Fix #8 |
 | AUDIT-132 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_132_*` | static | Fix #8 |
-| AUDIT-133 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_133_*` | static | Fix #6 |
+| AUDIT-133 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_133_*` | static | Fix #6 | Closed by: Fix #6 |
 | AUDIT-134 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_ClaimQueryUsesIndex` | static (EXPLAIN) | Fix #4 | Closed by: Fix #4 |
 | AUDIT-135 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_135_*` | static | Fix #7 |
 | AUDIT-136 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_136_*` | static | Fix #7 |

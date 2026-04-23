@@ -26,24 +26,26 @@ func createSchema(db *sql.DB) {
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
-		id             INTEGER PRIMARY KEY AUTOINCREMENT,
-		parent_id      INTEGER DEFAULT 0,
-		target_repo    TEXT    DEFAULT '',
-		type           TEXT,
-		status         TEXT,
-		payload        TEXT,
-		owner          TEXT    DEFAULT '',
-		error_log      TEXT    DEFAULT '',
-		retry_count    INTEGER DEFAULT 0,
-		infra_failures INTEGER DEFAULT 0,
-		locked_at      TEXT    DEFAULT '',
-		convoy_id      INTEGER DEFAULT 0,
-		checkpoint     TEXT    DEFAULT '',
-		branch_name    TEXT    DEFAULT '',
-		priority       INTEGER DEFAULT 0,
-		task_timeout   INTEGER DEFAULT 0,
-		idempotency_key TEXT   DEFAULT '',
-		created_at     TEXT    DEFAULT (datetime('now'))
+		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+		parent_id            INTEGER DEFAULT 0,
+		target_repo          TEXT    DEFAULT '',
+		type                 TEXT,
+		status               TEXT,
+		payload              TEXT,
+		owner                TEXT    DEFAULT '',
+		error_log            TEXT    DEFAULT '',
+		retry_count          INTEGER DEFAULT 0,
+		infra_failures       INTEGER DEFAULT 0,
+		locked_at            TEXT    DEFAULT '',
+		convoy_id            INTEGER DEFAULT 0,
+		checkpoint           TEXT    DEFAULT '',
+		branch_name          TEXT    DEFAULT '',
+		priority             INTEGER DEFAULT 0,
+		task_timeout         INTEGER DEFAULT 0,
+		idempotency_key      TEXT    DEFAULT '',
+		medic_requeue_count  INTEGER DEFAULT 0,
+		reshard_generation   INTEGER DEFAULT 0,
+		created_at           TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
 	// dog tick hits these columns; without indexes they full-scan BountyBoard at
@@ -287,16 +289,17 @@ func createSchema(db *sql.DB) {
 	// The Convoys.ask_branch / draft_pr_* scalar fields on Convoys predate this
 	// table and are left in place for backwards-compat; new code reads this table.
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyAskBranches (
-		convoy_id            INTEGER NOT NULL,
-		repo                 TEXT    NOT NULL,
-		ask_branch           TEXT    NOT NULL,
-		ask_branch_base_sha  TEXT    NOT NULL,
-		draft_pr_url         TEXT    DEFAULT '',
-		draft_pr_number      INTEGER DEFAULT 0,
-		draft_pr_state       TEXT    DEFAULT '',
-		shipped_at           TEXT    DEFAULT '',
-		last_rebased_at      TEXT    DEFAULT '',
-		created_at           TEXT    DEFAULT (datetime('now')),
+		convoy_id             INTEGER NOT NULL,
+		repo                  TEXT    NOT NULL,
+		ask_branch            TEXT    NOT NULL,
+		ask_branch_base_sha   TEXT    NOT NULL,
+		draft_pr_url          TEXT    DEFAULT '',
+		draft_pr_number       INTEGER DEFAULT 0,
+		draft_pr_state        TEXT    DEFAULT '',
+		shipped_at            TEXT    DEFAULT '',
+		last_rebased_at       TEXT    DEFAULT '',
+		failed_rebase_attempts INTEGER DEFAULT 0,
+		created_at            TEXT    DEFAULT (datetime('now')),
 		PRIMARY KEY (convoy_id, repo)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
@@ -350,6 +353,14 @@ func runMigrations(db *sql.DB) {
 	// Backfill existing rows that have no created_at so they don't get pruned immediately.
 	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now') WHERE created_at = ''`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN idempotency_key TEXT    DEFAULT ''`)
+	// Fix #6 — Break the Medic-requeue infinite loop.
+	// medic_requeue_count caps the Astromech→Council→Medic→Astromech loop at
+	// a bounded number of Medic-driven requeues (default 2) before forcing
+	// an escalate decision. reshard_generation stamps auto-shards so the
+	// 1→3→9→27 cascade is refused past the generation cap in
+	// queueReshardDecompose.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN medic_requeue_count INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN reshard_generation  INTEGER DEFAULT 0`)
 
 	// TaskHistory column additions
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_in  INTEGER DEFAULT 0`)
@@ -493,6 +504,12 @@ func runMigrations(db *sql.DB) {
 		PRIMARY KEY (convoy_id, repo)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+	// Fix #6 — Bounded rebase-conflict retries.
+	// Incremented when main-drift-watch re-queues RebaseAskBranch for a
+	// convoy whose prior conflict spawn terminated without a SHA update.
+	// Past `maxAskBranchConflicts` (3), the dog pauses rebases for this
+	// ask-branch and escalates instead of paying another Claude cycle.
+	db.Exec(`ALTER TABLE ConvoyAskBranches ADD COLUMN failed_rebase_attempts INTEGER DEFAULT 0`)
 
 	// ── PR review-comment triage ─────────────────────────────────────────────
 	// Additive: table + column. No backfill — empty table is the expected state

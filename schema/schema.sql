@@ -10,24 +10,26 @@ PRAGMA foreign_keys=ON;
 -- ── Core task board ───────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS BountyBoard (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    parent_id      INTEGER DEFAULT 0,   -- ID of the Feature/Decompose task that spawned this
-    target_repo    TEXT    DEFAULT '',   -- registered repo name (FK → Repositories.name)
-    type           TEXT,                 -- 'Feature' | 'Decompose' | 'CodeEdit'
-    status         TEXT,                 -- see status lifecycle below
-    payload        TEXT,                 -- task description (enriched with [GOAL: ...] prefix by Commander)
-    owner          TEXT    DEFAULT '',   -- agent name currently holding the lock
-    error_log      TEXT    DEFAULT '',   -- last error or rejection reason
-    retry_count    INTEGER DEFAULT 0,    -- council/captain rejection count
-    infra_failures INTEGER DEFAULT 0,   -- transient Claude CLI / git failures
-    locked_at      TEXT    DEFAULT '',   -- datetime('now') when locked; '' when free
-    convoy_id      INTEGER DEFAULT 0,   -- FK → Convoys.id (0 = standalone task)
-    checkpoint     TEXT    DEFAULT '',   -- mid-task resume state written by Astromechs
-    branch_name    TEXT    DEFAULT '',   -- 'agent/<name>/task-<id>' persistent branch
-    priority       INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
-    task_timeout   INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
-    idempotency_key TEXT    DEFAULT '', -- client-supplied UUID; duplicate submissions within 60s return the existing task
-    created_at     TEXT    DEFAULT (datetime('now'))
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id            INTEGER DEFAULT 0,   -- ID of the Feature/Decompose task that spawned this
+    target_repo          TEXT    DEFAULT '',  -- registered repo name (FK → Repositories.name)
+    type                 TEXT,                -- 'Feature' | 'Decompose' | 'CodeEdit'
+    status               TEXT,                -- see status lifecycle below
+    payload              TEXT,                -- task description (enriched with [GOAL: ...] prefix by Commander)
+    owner                TEXT    DEFAULT '',  -- agent name currently holding the lock
+    error_log            TEXT    DEFAULT '',  -- last error or rejection reason
+    retry_count          INTEGER DEFAULT 0,   -- council/captain rejection count (preserved across Medic requeues, Fix #6)
+    infra_failures       INTEGER DEFAULT 0,   -- transient Claude CLI / git failures (preserved across Medic requeues, Fix #6)
+    locked_at            TEXT    DEFAULT '',  -- datetime('now') when locked; '' when free
+    convoy_id            INTEGER DEFAULT 0,   -- FK → Convoys.id (0 = standalone task)
+    checkpoint           TEXT    DEFAULT '',  -- mid-task resume state written by Astromechs
+    branch_name          TEXT    DEFAULT '',  -- 'agent/<name>/task-<id>' persistent branch
+    priority             INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
+    task_timeout         INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
+    idempotency_key      TEXT    DEFAULT '',  -- client-supplied UUID; duplicate submissions within 60s return the existing task
+    medic_requeue_count  INTEGER DEFAULT 0,   -- Fix #6: count of Medic-driven requeues; applyMedicRequeue escalates past maxMedicRequeues (2)
+    reshard_generation   INTEGER DEFAULT 0,   -- Fix #6: auto-reshard generation stamp; queueReshardDecompose refuses past maxReshardGeneration (2)
+    created_at           TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty
 -- poll and dashboard refresh full-scans BountyBoard.
@@ -140,16 +142,17 @@ CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id_id_desc ON AskBranchPRs (t
 -- ask-branch and eventually its own draft PR. One row per (convoy, repo).
 
 CREATE TABLE IF NOT EXISTS ConvoyAskBranches (
-    convoy_id            INTEGER NOT NULL,          -- FK → Convoys.id
-    repo                 TEXT    NOT NULL,          -- FK → Repositories.name
-    ask_branch           TEXT    NOT NULL,          -- 'force/ask-<id>-<slug>'
-    ask_branch_base_sha  TEXT    NOT NULL,          -- main's HEAD at branch creation; updated by rebase
-    draft_pr_url         TEXT    DEFAULT '',
-    draft_pr_number      INTEGER DEFAULT 0,
-    draft_pr_state       TEXT    DEFAULT '',         -- '' | 'Open' | 'Merged' | 'Closed'
-    shipped_at           TEXT    DEFAULT '',
-    last_rebased_at      TEXT    DEFAULT '',
-    created_at           TEXT    DEFAULT (datetime('now')),
+    convoy_id              INTEGER NOT NULL,         -- FK → Convoys.id
+    repo                   TEXT    NOT NULL,         -- FK → Repositories.name
+    ask_branch             TEXT    NOT NULL,         -- 'force/ask-<id>-<slug>'
+    ask_branch_base_sha    TEXT    NOT NULL,         -- main's HEAD at branch creation; updated by rebase
+    draft_pr_url           TEXT    DEFAULT '',
+    draft_pr_number        INTEGER DEFAULT 0,
+    draft_pr_state         TEXT    DEFAULT '',        -- '' | 'Open' | 'Merged' | 'Closed'
+    shipped_at             TEXT    DEFAULT '',
+    last_rebased_at        TEXT    DEFAULT '',
+    failed_rebase_attempts INTEGER DEFAULT 0,        -- Fix #6: bounded conflict-retry counter; main-drift-watch/runRebaseAskBranch escalate past maxAskBranchConflicts (3)
+    created_at             TEXT    DEFAULT (datetime('now')),
     PRIMARY KEY (convoy_id, repo)
 );
 CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo);

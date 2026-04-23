@@ -64,8 +64,8 @@ func hasColumn(t *testing.T, db *sql.DB, table, col string) bool {
 // exist. Lock both facts so a future fix must remove this test.
 
 func TestAUDIT_005_MedicRequeueZerosRetryCount(t *testing.T) {
-	t.Skip("AUDIT-005: remove when medic_requeue_count + ConvoyReview tightening land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-005: defective pattern still present — ResetTaskFull zeros retry_count/infra_failures, no medic_requeue_count counter in applyMedicRequeue, no medic_requeue_count column on BountyBoard
+	// Closed by Fix #6: medic_requeue_count column + ResetTaskFull no longer zeros counters.
+	// This test now inverts — it fails iff the defect pattern is re-introduced.
 	// Source-grep: ResetTaskFull in tasks.go must still zero retry_count.
 	src := readCostLoopSource(t, "../store/tasks.go")
 	start := strings.Index(src, "func ResetTaskFull(")
@@ -153,8 +153,7 @@ func TestAUDIT_007_ConvoyReviewParseFailCompletesNoMemory(t *testing.T) {
 // one terminates without resolving.
 
 func TestAUDIT_028_AskBranchRebaseConflictNoCap(t *testing.T) {
-	t.Skip("AUDIT-028: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-028: defective pattern still present — runRebaseAskBranch uses idempotency key only (no attempt counter), no failed_rebase_attempts column on ConvoyAskBranches
+	// Closed by Fix #6: failed_rebase_attempts column + maxAskBranchConflicts cap.
 	src := readCostLoopSource(t, "pilot_rebase.go")
 
 	start := strings.Index(src, "func runRebaseAskBranch(")
@@ -282,8 +281,7 @@ func TestAUDIT_117_PRReviewPerThreadCapBypassable(t *testing.T) {
 // idempotency key (per failed task), producing 1→3→9→27 fanout.
 
 func TestAUDIT_118_ReshardCascadeNoGenerationCap(t *testing.T) {
-	t.Skip("AUDIT-118: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-118: defective pattern still present — commander.go uses bare [RESHARD from task #N] prefix with no generation stamp, no reshard_generation in util.go, no reshard_generation column on BountyBoard
+	// Closed by Fix #6: reshard_generation column on BountyBoard + gen=N prefix + maxReshardGeneration cap in util.go.
 	src := readCostLoopSource(t, "commander.go")
 
 	start := strings.Index(src, "func autoInsertReshardTasks(")
@@ -321,8 +319,7 @@ func TestAUDIT_118_ReshardCascadeNoGenerationCap(t *testing.T) {
 // ConvoyAskBranches.failed_rebase_attempts counter.
 
 func TestAUDIT_119_MainDriftWatchNoAttemptCounter(t *testing.T) {
-	t.Skip("AUDIT-119: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-119: defective pattern still present — dogMainDriftWatch queues via QueueRebaseAskBranch with no attempt counter, no failed_rebase_attempts column on ConvoyAskBranches
+	// Closed by Fix #6: dogMainDriftWatch now short-circuits when the ask-branch has hit maxAskBranchConflicts.
 	src := readCostLoopSource(t, "pilot_rebase.go")
 
 	dogStart := strings.Index(src, "func dogMainDriftWatch(")
