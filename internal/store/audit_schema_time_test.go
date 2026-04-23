@@ -72,12 +72,10 @@ func columnsOf(t *testing.T, dsn, table string) map[string]bool {
 // distinct finding. Grouping them keeps the file to a single Test entry point
 // while still letting `-run` narrow to one AUDIT-NNN.
 func TestAUDIT_schema_and_time(t *testing.T) {
-	t.Skip("AUDIT-023/077/078/080/082/130/131/132/143/146/147/148: umbrella — remove as individual sub-test fixes land")
-	// Without skip, fails with: multiple sub-test failures — schema drift
-	// (023/077/078/080), wrong column in integration test (082), quarantine
-	// ignored by astromech claim (130), TZ parse hazards (131/146/147),
-	// silent parse swallow (132), missing classify_attempts (143), and
-	// RateLimitBackoff overflow (148).
+	// Umbrella test — each sub-test has its own `t.Skip(...)` that gets
+	// removed when the corresponding fix lands. Fix #4 removed the skip on
+	// TestAUDIT_023_createSchema_drift; all other sub-tests remain skipped
+	// until their respective fixes land.
 	root := projectRoot(t)
 	schemaGo := readFile(t, filepath.Join(root, "internal", "store", "schema.go"))
 	schemaSQL := readFile(t, filepath.Join(root, "schema", "schema.sql"))
@@ -89,11 +87,6 @@ func TestAUDIT_schema_and_time(t *testing.T) {
 	// it missing — but we DO assert createSchema is self-contained, which is
 	// what the audit asks for.
 	t.Run("TestAUDIT_023_createSchema_drift", func(t *testing.T) {
-		t.Skip("AUDIT-023: remove when createSchema is self-contained (Fix #4 companion)")
-		// Without skip, fails with: AUDIT-023: createSchema's Fleet_Mail CREATE
-		// omits consumed_at; createSchema's Repositories CREATE omits
-		// pr_review_enabled. Only runMigrations adds them, so createSchema alone
-		// is not self-contained.
 		// Extract the CREATE TABLE ... Fleet_Mail(...) body.
 		fleetMail := extractCreate(schemaGo, "Fleet_Mail")
 		if fleetMail == "" {

@@ -13,7 +13,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | P1 | `internal/store/audit_pattern_p1_test.go` | `TestPattern_P1_UpdateBountyStatusSwallowsDBError` | Fix #8 (no silent failures) |
 | P2 | `internal/store/audit_pattern_p2_test.go` | `TestPattern_P2_IdempotencyKeyRace`, `TestPattern_P2_NoUniqueIndex_Static` | Fix #3 (partial UNIQUE idempotency_key) |
 | P3 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan`, `TestPattern_P3_BoundaryFalsePositive` | Fix #3/#4 (structured convoy_id + index) |
-| P4 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes`, `TestPattern_P4_ClaimQueryUsesIndex` | Fix #4 (hot-table indexes) |
+| P4 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes`, `TestPattern_P4_ClaimQueryUsesIndex` | Fix #4 (hot-table indexes) | Closed by: Fix #4 (`fix/hot-table-indexes`) |
 | P5 | `internal/agents/spend_cap_test.go` | `TestSpendCap_*`, `TestSpendBurnPattern_*` — feature now exists | Closed by: Fix #1 |
 | P6 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues` (+ 3 subtests) | Fix #5 (state machine sweepers + Resolved normalization) |
 | P7 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace`, `TestPattern_P7_ResetTaskResurrectsCompleted` | Fix #8/#5 (UpdateBountyStatusFrom) |
@@ -35,8 +35,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-006 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_006_ConvoyReview5x5Structural` | static | Fix #7 |
 | AUDIT-007 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_007_ConvoyReviewParseFailCompletesNoMemory` | static | Fix #7 |
 | AUDIT-008 | `internal/store/audit_pattern_p2_test.go` | `TestPattern_P2_IdempotencyKeyRace` | race (50 goroutines) | Fix #3 |
-| AUDIT-009 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static (PRAGMA) | Fix #4 |
-| AUDIT-010 | `internal/store/audit_pattern_p4_test.go` | same | static | Fix #4 |
+| AUDIT-009 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static (PRAGMA) | Fix #4 | Closed by: Fix #4 |
+| AUDIT-010 | `internal/store/audit_pattern_p4_test.go` | same | static | Fix #4 | Closed by: Fix #4 |
 | AUDIT-011 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan` | static (EXPLAIN QUERY PLAN) | Fix #3/#4 |
 | AUDIT-012 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues/A_*` | static (AST grep) | Fix #5 |
 | AUDIT-013 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_013_MedicPayloadJSONSwallow` | static | Fix #8 |
@@ -67,8 +67,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 
 | ID | Test file | Test name / sub-test | Kind | Fix plan |
 |---|---|---|---|---|
-| AUDIT-023 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_023_createSchema_drift` | static (PRAGMA) | Fix #4 companion |
-| AUDIT-024 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static | Fix #4 |
+| AUDIT-023 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_023_createSchema_drift` | static (PRAGMA) | Fix #4 companion | Closed by: Fix #4 |
+| AUDIT-024 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static | Fix #4 | Closed by: Fix #4 |
 | AUDIT-025 | `internal/store/audit_pattern_p6_test.go` | `.../B_*` | static grep | Fix #5 |
 | AUDIT-026 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ResetTaskResurrectsCompleted` | behavioral | Fix #8 |
 | AUDIT-027 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace` | race | Fix #8 |
@@ -102,8 +102,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-055 | `internal/store/audit_pattern_p9_test.go` | `.../C_GhStderrNotRedacted` | static grep | Fix #10 |
 | AUDIT-056 | `internal/store/audit_pattern_p9_test.go` | `.../B_WebhookBodyLeaksTokens` | behavioral (httptest) | Fix #10 |
 | AUDIT-057 | `internal/store/audit_misc_security_test.go` | `.../AUDIT_057_*` | static | Fix #10 |
-| AUDIT-058 | `internal/store/audit_pattern_p4_test.go` | pattern coverage | static | Fix #4 |
-| AUDIT-059 | `internal/store/audit_pattern_p4_test.go` | pattern coverage | static | Fix #4 |
+| AUDIT-058 | `internal/store/audit_pattern_p4_test.go` | pattern coverage | static | Fix #4 | Closed by: Fix #4 |
+| AUDIT-059 | `internal/store/audit_pattern_p4_test.go` | pattern coverage | static | Fix #4 | Closed by: Fix #4 |
 | AUDIT-060 | `internal/dashboard/spend_cap_api_test.go` | `TestAPIStatus_ExposesHourlySpend` | acceptance | Fix #1 | Closed by: Fix #1 |
 | AUDIT-061 | `internal/agents/spend_cap_test.go` | `TestDogSpendBurnWatch_AutoEstopsAtHardCap`, `TestSpendBurnPattern_TriggersAutoEstopInOneCycle` | feature+integration | Fix #1 | Closed by: Fix #1 |
 | AUDIT-062 | — | NOT-APPLICABLE (no thrash dog) | — | Fix #1 |
@@ -129,7 +129,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-131 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_131_*` | static | Fix #8 |
 | AUDIT-132 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_132_*` | static | Fix #8 |
 | AUDIT-133 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_133_*` | static | Fix #6 |
-| AUDIT-134 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_ClaimQueryUsesIndex` | static (EXPLAIN) | Fix #4 |
+| AUDIT-134 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_ClaimQueryUsesIndex` | static (EXPLAIN) | Fix #4 | Closed by: Fix #4 |
 | AUDIT-135 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_135_*` | static | Fix #7 |
 | AUDIT-136 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_136_*` | static | Fix #7 |
 | AUDIT-137 | `internal/agents/audit_test_quality_test.go` | `.../AUDIT_137_*` | static | Fix #8 |
@@ -143,8 +143,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-068 | `internal/store/audit_medium_spotcheck_a_test.go` | `TestAUDIT_068_ClaimBountyConflatesErrNoRowsWithRealErrors` | behavioral | Fix #8 |
 | AUDIT-069 | `internal/store/audit_medium_spotcheck_a_test.go` | `TestAUDIT_069_ResolveFeatureBlockersNoTransaction` | static | Fix #8 |
 | AUDIT-074 | `internal/store/audit_medium_spotcheck_b_test.go` | `TestAUDIT_MediumSpotcheckB/AUDIT_074_*` | static | Fix #3 |
-| AUDIT-079 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_079_*` | static grep | Fix #4 companion |
-| AUDIT-081 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_081_*` | static grep | Fix #4 companion |
+| AUDIT-079 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_079_*` | static grep + live PRAGMA | Fix #4 companion | Closed by: Fix #4 |
+| AUDIT-081 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_081_*` | static grep + behavioural | Fix #4 companion | Closed by: Fix #4 |
 | AUDIT-149 | `internal/agents/audit_medium_spotcheck_c_test.go` | `TestAuditMediumSpotcheckC/TestAUDIT_149_*` | static | Fix #5 |
 | AUDIT-151 | `internal/agents/audit_medium_spotcheck_c_test.go` | `.../TestAUDIT_151_*` | static | Fix #8 |
 | AUDIT-152 | `internal/agents/audit_medium_spotcheck_c_test.go` | `.../TestAUDIT_152_*` | static | Fix #1 | Closed by: Fix #1 |

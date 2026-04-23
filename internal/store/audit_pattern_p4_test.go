@@ -110,14 +110,6 @@ func hasIndexCovering(existing map[string][]string, wantCols []string) bool {
 }
 
 func TestPattern_P4_HotTablesMissingIndexes(t *testing.T) {
-	t.Skip("AUDIT-009/010/024/058/059 (P4): remove when hot-table indexes land in schema.go (Fix #4)")
-	// Without skip, fails with:
-	//   audit_pattern_p4_test.go:166: missing index on BountyBoard(status, type) — AUDIT-009: ClaimBounty WHERE status='Pending' AND type=?
-	//   audit_pattern_p4_test.go:166: missing index on BountyBoard(convoy_id, status) — AUDIT-009: convoy-scoped dashboard queries
-	//   audit_pattern_p4_test.go:166: missing index on BountyBoard(parent_id) — AUDIT-009: parent rollups, child-task lookups
-	//   audit_pattern_p4_test.go:166: missing index on TaskHistory(task_id) — AUDIT-010: handleTasks correlated subquery per row
-	//   audit_pattern_p4_test.go:166: missing index on Fleet_Mail(to_agent, consumed_at) — AUDIT-024: ReadInboxForAgent hot path
-	//   (+ 8 more subtests fail — all 13 hot-table/column combos missing indexes)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -185,14 +177,6 @@ func TestPattern_P4_HotTablesMissingIndexes(t *testing.T) {
 // index on (status, type), SQLite picks a full SCAN; we assert the plan
 // shows USING INDEX (or USING COVERING INDEX) on BountyBoard.
 func TestPattern_P4_ClaimQueryUsesIndex(t *testing.T) {
-	t.Skip("AUDIT-009/134 (P4): remove when ClaimBounty hot-path index on BountyBoard(status,type) lands (Fix #4)")
-	// Without skip, fails with:
-	//   audit_pattern_p4_test.go:267: ClaimBounty does not use an index on BountyBoard — full SCAN in hot path (AUDIT-009, AUDIT-134)
-	//       plan:
-	//         SCAN BountyBoard
-	//         CORRELATED SCALAR SUBQUERY 1
-	//         SEARCH td USING COVERING INDEX sqlite_autoindex_TaskDependencies_1 (task_id=?)
-	//   --- FAIL: TestPattern_P4_ClaimQueryUsesIndex (0.01s)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 

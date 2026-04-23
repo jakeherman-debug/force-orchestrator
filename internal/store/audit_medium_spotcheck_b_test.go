@@ -33,7 +33,9 @@ import (
 //               orphaned if FKs were ever enabled — and mask silent
 //               row-identity churn today.
 func TestAUDIT_MediumSpotcheckB(t *testing.T) {
-	t.Skip("AUDIT-074/079/081: remove when sub-test fixes land (Fix #3 / Fix #4 companion)")
+	// Umbrella test — each sub-test keeps its own skip until the matching
+	// fix lands. Fix #4 removed the skips on AUDIT_079 (PRAGMA foreign_keys)
+	// and AUDIT_081 (AddRepo UPSERT); AUDIT_074 stays skipped until Fix #3.
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("cannot resolve cwd: %v", err)
@@ -111,112 +113,105 @@ func TestAUDIT_MediumSpotcheckB(t *testing.T) {
 
 	// ── AUDIT-079 ────────────────────────────────────────────────────────
 	t.Run("AUDIT_079_foreign_keys_pragma_never_enabled", func(t *testing.T) {
-		t.Skip("AUDIT-079: remove when PRAGMA foreign_keys=ON set + cascade audited (Fix #4 companion)")
-		// Without skip, fails with: AUDIT-079: holocron.go never executes `PRAGMA foreign_keys=ON`. SQLite defaults FK enforcement OFF per connection, so maintenance DELETEs create orphan rows.
+		// Fix #4 lands the PRAGMA. This test is now green-phase: assert both
+		// (a) that the PRAGMA is present in holocron.go, and (b) that a live
+		// connection reports foreign_keys enforcement actually enabled — the
+		// defensive pair that catches either a config regression or a driver
+		// that silently ignores the statement.
 		src := mustReadFile(t, holocronPath)
 
-		// Anchor: the DSN initialiser must still exist.
 		if !strings.Contains(src, "func InitHolocronDSN(") {
 			t.Fatalf("audit anchor lost: InitHolocronDSN missing from %s",
 				holocronPath)
 		}
 
-		// journal_mode=WAL is the existing PRAGMA; its absence means the
-		// init shape changed and the test target needs revisiting.
-		if !strings.Contains(src, "PRAGMA journal_mode=WAL") {
-			t.Fatalf("audit anchor lost: PRAGMA journal_mode=WAL no longer "+
-				"in %s — InitHolocronDSN shape changed; re-verify the "+
-				"foreign_keys check.", holocronPath)
-		}
-
-		// The fix would add a PRAGMA foreign_keys=ON statement somewhere
-		// in holocron.go (or in an imported helper, but the canonical
-		// location is beside the journal_mode line). A broad grep across
-		// the file suffices for the static check.
 		hasFKPragma := regexp.MustCompile(`(?i)PRAGMA\s+foreign_keys\s*=\s*(ON|1)`).
 			MatchString(src)
-		if hasFKPragma {
-			t.Errorf("AUDIT-079 appears fixed in %s (PRAGMA foreign_keys "+
-				"present). Update this test to assert cascade/restrict "+
-				"semantics directly.", holocronPath)
-		} else {
-			t.Errorf("AUDIT-079: %s never executes `PRAGMA foreign_keys=ON`. "+
-				"SQLite defaults FK enforcement OFF per connection, so "+
-				"maintenance DELETEs create orphan Escalations / "+
-				"AskBranchPRs / TaskDependencies / TaskHistory / "+
-				"FleetMemory rows; escalation-sweeper's JOIN to "+
-				"BountyBoard returns empty for those orphans and the "+
-				"self-healing sweep silently misses them.", holocronPath)
+		if !hasFKPragma {
+			t.Errorf("AUDIT-079 regression in %s: PRAGMA foreign_keys=ON is "+
+				"no longer set in InitHolocronDSN. SQLite defaults FK "+
+				"enforcement OFF per connection, so maintenance DELETEs "+
+				"would silently orphan child rows.", holocronPath)
+		}
+
+		// Live check: does a real connection opened through InitHolocronDSN
+		// report FK enforcement enabled?
+		db := InitHolocronDSN(":memory:")
+		defer db.Close()
+		var fk int
+		if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+			t.Fatalf("PRAGMA foreign_keys query: %v", err)
+		}
+		if fk != 1 {
+			t.Errorf("AUDIT-079 live check: PRAGMA foreign_keys reports %d, "+
+				"want 1. The statement is present in source but not applied "+
+				"to the working connection.", fk)
 		}
 	})
 
 	// ── AUDIT-081 ────────────────────────────────────────────────────────
 	t.Run("AUDIT_081_repositories_insert_or_replace_cascading_delete", func(t *testing.T) {
-		t.Skip("AUDIT-081: remove when AddRepo uses ON CONFLICT DO UPDATE (Fix #4 companion)")
-		// Without skip, fails with: AUDIT-081: holocron.go still uses `INSERT OR REPLACE INTO Repositories` in AddRepo. SQLite's REPLACE conflict resolution is DELETE+INSERT on PRIMARY KEY collisions.
+		// Fix #4 lands the UPSERT. This test is now green-phase: assert that
+		// (a) AddRepo no longer issues `INSERT OR REPLACE`, and (b) on
+		// re-registration the row's AUTOINCREMENT-style identity is
+		// preserved — a DELETE+INSERT (REPLACE) would have advanced any
+		// identity column or cascaded to referrers.
 		src := mustReadFile(t, holocronPath)
 
-		// Anchor: AddRepo must still exist — it's the named culprit.
 		if !strings.Contains(src, "func AddRepo(") {
 			t.Fatalf("audit anchor lost: AddRepo missing from %s",
 				holocronPath)
 		}
 
-		// The exact cited statement — its absence means the shape moved
-		// and this test needs re-aiming.
-		if !strings.Contains(src, "INSERT OR REPLACE INTO Repositories") {
-			t.Errorf("AUDIT-081 appears fixed in %s: `INSERT OR REPLACE "+
-				"INTO Repositories` no longer present — AddRepo likely "+
-				"switched to `INSERT ... ON CONFLICT DO UPDATE` (UPSERT) "+
-				"or a guarded UPDATE. Update this test to assert the "+
-				"non-destructive write semantics directly.", holocronPath)
-			return
+		if strings.Contains(src, "INSERT OR REPLACE INTO Repositories") {
+			t.Errorf("AUDIT-081 regression in %s: `INSERT OR REPLACE INTO "+
+				"Repositories` is back. SQLite's REPLACE conflict "+
+				"resolution is specified as DELETE+INSERT on PRIMARY KEY "+
+				"collisions; once PRAGMA foreign_keys=ON is set "+
+				"(AUDIT-079, Fix #4) this would cascade-delete any row in "+
+				"BountyBoard.target_repo / AskBranchPRs.repo / "+
+				"ConvoyAskBranches.repo. Use `INSERT ... ON CONFLICT(name) "+
+				"DO UPDATE SET ...` (UPSERT) instead.", holocronPath)
 		}
 
-		// Static-only claim: SQLite's `INSERT OR REPLACE` on a PRIMARY
-		// KEY conflict is specified as DELETE-then-INSERT (see
-		// https://sqlite.org/lang_conflict.html — REPLACE algorithm).
-		// That means any row in BountyBoard.target_repo,
-		// AskBranchPRs.repo, or ConvoyAskBranches.repo that logically
-		// references Repositories(name) is (a) silently detached from
-		// its row identity on every re-register, and (b) would cascade
-		// to NULL / be refused if FKs were ever turned on (see AUDIT-079).
-		//
-		// The fix the audit suggests is documenting immutability and
-		// having RemoveRepo refuse when active referrers exist. That
-		// would appear as a refusal path in RemoveRepo referencing the
-		// child tables by name.
-		removeRepoRefusalHints := []string{
-			"BountyBoard", "AskBranchPRs", "ConvoyAskBranches",
-		}
-		// Rough check: does RemoveRepo (if present) even mention any
-		// of the referring tables? If yes the fix may be in-flight.
-		if strings.Contains(src, "func RemoveRepo(") {
-			mentions := 0
-			for _, tok := range removeRepoRefusalHints {
-				if strings.Contains(src, tok) {
-					mentions++
-				}
-			}
-			if mentions > 0 {
-				t.Logf("AUDIT-081 fix-in-progress hint: RemoveRepo exists "+
-					"and holocron.go references %d of the three child "+
-					"tables (%v). Verify RemoveRepo actually refuses on "+
-					"active referrers rather than just naming them.",
-					mentions, removeRepoRefusalHints)
-			}
+		// Require the UPSERT pattern is actually present — belt AND
+		// suspenders, so a future refactor that deletes AddRepo entirely
+		// doesn't silently pass this test.
+		hasUpsert := regexp.MustCompile(`(?is)INSERT\s+INTO\s+Repositories[^;]*ON\s+CONFLICT\s*\(\s*name\s*\)\s+DO\s+UPDATE`).
+			MatchString(src)
+		if !hasUpsert {
+			t.Errorf("AUDIT-081 regression in %s: AddRepo no longer uses "+
+				"`INSERT ... ON CONFLICT(name) DO UPDATE` (UPSERT). The "+
+				"fix depends on this exact shape so row identity is "+
+				"preserved across re-registration.", holocronPath)
 		}
 
-		t.Errorf("AUDIT-081: %s still uses `INSERT OR REPLACE INTO "+
-			"Repositories` in AddRepo. SQLite's REPLACE conflict "+
-			"resolution is specified as DELETE+INSERT on PRIMARY KEY "+
-			"(name) collisions — every re-registration of a repo "+
-			"silently churns row identity out from under "+
-			"BountyBoard.target_repo / AskBranchPRs.repo / "+
-			"ConvoyAskBranches.repo references, and would cascade to "+
-			"orphan those rows the moment PRAGMA foreign_keys=ON "+
-			"lands (see AUDIT-079). Replace with `INSERT ... ON "+
-			"CONFLICT(name) DO UPDATE SET ...` (UPSERT, row-identity "+
-			"preserving) and document name immutability.", holocronPath)
+		// Behavioural check: re-adding a repo must not delete+reinsert the
+		// row. We verify by confirming that a Repository's state is
+		// preserved across AddRepo calls — specifically, the quarantine
+		// flag (set out-of-band by QuarantineRepo) must survive a
+		// subsequent AddRepo. Under INSERT OR REPLACE, QuarantineRepo's
+		// effect would be clobbered.
+		db := InitHolocronDSN(":memory:")
+		defer db.Close()
+		AddRepo(db, "example-repo", "/tmp/example", "first description")
+		if err := QuarantineRepo(db, "example-repo", "test quarantine"); err != nil {
+			t.Fatalf("QuarantineRepo: %v", err)
+		}
+		AddRepo(db, "example-repo", "/tmp/example", "second description")
+		r := GetRepo(db, "example-repo")
+		if r == nil {
+			t.Fatalf("GetRepo returned nil after re-AddRepo")
+		}
+		if r.QuarantinedAt == "" {
+			t.Errorf("AUDIT-081 behaviour regression: QuarantineRepo state "+
+				"was cleared by a subsequent AddRepo. Expected quarantined_at "+
+				"preserved (UPSERT); got empty (DELETE+INSERT). description=%q",
+				r.Description)
+		}
+		if r.Description != "second description" {
+			t.Errorf("AUDIT-081: description not updated on re-AddRepo; got %q want %q",
+				r.Description, "second description")
+		}
 	})
 }

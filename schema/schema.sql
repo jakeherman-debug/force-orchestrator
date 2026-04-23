@@ -5,6 +5,7 @@
 --       The application applies all migrations automatically on startup via InitHolocronDSN.
 
 PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
 
 -- ── Core task board ───────────────────────────────────────────────────────────
 
@@ -25,8 +26,15 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     branch_name    TEXT    DEFAULT '',   -- 'agent/<name>/task-<id>' persistent branch
     priority       INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
     task_timeout   INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
-    idempotency_key TEXT    DEFAULT ''  -- client-supplied UUID; duplicate submissions within 60s return the existing task
+    idempotency_key TEXT    DEFAULT '', -- client-supplied UUID; duplicate submissions within 60s return the existing task
+    created_at     TEXT    DEFAULT (datetime('now'))
 );
+-- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty
+-- poll and dashboard refresh full-scans BountyBoard.
+CREATE INDEX IF NOT EXISTS idx_bounty_status_type    ON BountyBoard (status, type);
+CREATE INDEX IF NOT EXISTS idx_bounty_convoy_status  ON BountyBoard (convoy_id, status);
+CREATE INDEX IF NOT EXISTS idx_bounty_parent_id      ON BountyBoard (parent_id);
+CREATE INDEX IF NOT EXISTS idx_bounty_created_at     ON BountyBoard (created_at);
 
 -- Status lifecycle:
 --   Pending → Locked (Astromech claims)
@@ -97,7 +105,8 @@ CREATE TABLE IF NOT EXISTS Repositories (
     pr_template_path  TEXT    DEFAULT '',  -- populated by FindPRTemplate task (may be '' if repo has no template)
     pr_flow_enabled   INTEGER DEFAULT 1,   -- 0 = legacy local-merge, 1 = new PR flow (default)
     quarantined_at    TEXT    DEFAULT '',  -- set by repo-config-check when repo becomes unhealthy
-    quarantine_reason TEXT    DEFAULT ''
+    quarantine_reason TEXT    DEFAULT '',
+    pr_review_enabled INTEGER DEFAULT 1    -- 0 = opt-out of PR review-comment triage (AUDIT-023, Fix #4)
 );
 
 -- ── Ask-branch sub-PR tracking ────────────────────────────────────────────────
@@ -105,22 +114,26 @@ CREATE TABLE IF NOT EXISTS Repositories (
 -- CI state, retry counters, and terminal state transitions.
 
 CREATE TABLE IF NOT EXISTS AskBranchPRs (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id        INTEGER NOT NULL,              -- FK → BountyBoard.id
-    convoy_id      INTEGER NOT NULL,              -- FK → Convoys.id
-    repo           TEXT    NOT NULL,              -- FK → Repositories.name
-    pr_number      INTEGER DEFAULT 0,
-    pr_url         TEXT    DEFAULT '',
-    state          TEXT    DEFAULT 'Open',        -- 'Open' | 'Merged' | 'Closed'
-    checks_state   TEXT    DEFAULT 'Pending',     -- 'Pending' | 'Success' | 'Failure'
-    failure_count  INTEGER DEFAULT 0,             -- incremented by Medic CIFailureTriage
-    merged_at      TEXT    DEFAULT '',
-    created_at     TEXT    DEFAULT (datetime('now')),
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id               INTEGER NOT NULL,              -- FK → BountyBoard.id
+    convoy_id             INTEGER NOT NULL,              -- FK → Convoys.id
+    repo                  TEXT    NOT NULL,              -- FK → Repositories.name
+    pr_number             INTEGER DEFAULT 0,
+    pr_url                TEXT    DEFAULT '',
+    state                 TEXT    DEFAULT 'Open',        -- 'Open' | 'Merged' | 'Closed'
+    checks_state          TEXT    DEFAULT 'Pending',     -- 'Pending' | 'Success' | 'Failure'
+    failure_count         INTEGER DEFAULT 0,             -- incremented by Medic CIFailureTriage
+    stall_retrigger_count INTEGER DEFAULT 0,             -- stuck-CI empty-commit retries (AUDIT-080)
+    merged_at             TEXT    DEFAULT '',
+    created_at            TEXT    DEFAULT (datetime('now')),
     UNIQUE(repo, pr_number)
 );
 CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id   ON AskBranchPRs (task_id);
 CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_convoy_id ON AskBranchPRs (convoy_id);
 CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_state     ON AskBranchPRs (state);
+-- escalation-sweeper's `GROUP BY task_id / MAX(id)` can read the latest sub-PR
+-- per task from this composite index without a sort (AUDIT-024 addendum, Fix #4).
+CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id_id_desc ON AskBranchPRs (task_id, id DESC);
 
 -- ── Per-(convoy, repo) ask-branch tracking ────────────────────────────────────
 -- A convoy's tasks may target multiple repos, so each touched repo gets its own
@@ -167,6 +180,10 @@ CREATE TABLE IF NOT EXISTS TaskHistory (
     memory_ids    TEXT    DEFAULT '',  -- CSV of FleetMemory.id values injected into this attempt's prompt
     created_at    TEXT    DEFAULT (datetime('now'))
 );
+-- Hot-table indexes (AUDIT-010, Fix #4).
+CREATE INDEX IF NOT EXISTS idx_taskhistory_task_id       ON TaskHistory (task_id);
+CREATE INDEX IF NOT EXISTS idx_taskhistory_created_at    ON TaskHistory (created_at);
+CREATE INDEX IF NOT EXISTS idx_taskhistory_outcome_agent ON TaskHistory (outcome, agent);
 
 -- ── Escalations ───────────────────────────────────────────────────────────────
 
@@ -179,6 +196,10 @@ CREATE TABLE IF NOT EXISTS Escalations (
     created_at       TEXT    DEFAULT (datetime('now')),
     acknowledged_at  TEXT    DEFAULT ''
 );
+-- Hot-table indexes (AUDIT-024, Fix #4). Sweeper runs `WHERE status='Open'`
+-- every 10 minutes + joins back to BountyBoard by task_id.
+CREATE INDEX IF NOT EXISTS idx_escalations_status  ON Escalations (status);
+CREATE INDEX IF NOT EXISTS idx_escalations_task_id ON Escalations (task_id);
 
 -- ── Fleet mail ────────────────────────────────────────────────────────────────
 -- Structured inter-agent messaging. Agents read their inbox at the start of each task.
@@ -195,6 +216,10 @@ CREATE TABLE IF NOT EXISTS Fleet_Mail (
     consumed_at  TEXT    DEFAULT '',     -- '' = not yet consumed by an agent
     created_at   TEXT    DEFAULT (datetime('now'))
 );
+-- Hot-table indexes (AUDIT-024, Fix #4).
+CREATE INDEX IF NOT EXISTS idx_mail_to_consumed ON Fleet_Mail (to_agent, consumed_at);
+CREATE INDEX IF NOT EXISTS idx_mail_task_id     ON Fleet_Mail (task_id);
+CREATE INDEX IF NOT EXISTS idx_mail_created_at  ON Fleet_Mail (created_at);
 
 -- ── System configuration ──────────────────────────────────────────────────────
 -- Runtime knobs: e-stop, max_concurrent, num_astromech, num_captain, etc.
@@ -222,6 +247,9 @@ CREATE TABLE IF NOT EXISTS AuditLog (
     detail     TEXT    DEFAULT '',
     created_at TEXT    DEFAULT (datetime('now'))
 );
+-- Hot-table indexes (AUDIT-024, Fix #4).
+CREATE INDEX IF NOT EXISTS idx_auditlog_created_at ON AuditLog (created_at);
+CREATE INDEX IF NOT EXISTS idx_auditlog_task_id    ON AuditLog (task_id);
 
 -- ── Dog agent state ───────────────────────────────────────────────────────────
 -- Cooldown tracking for periodic background dogs (log rotation, WAL checkpoint, etc.)
@@ -246,6 +274,8 @@ CREATE TABLE IF NOT EXISTS FleetMemory (
     embedding     BLOB    DEFAULT NULL, -- reserved: float32 vector for future sqlite-vec upgrade
     created_at    TEXT    DEFAULT (datetime('now'))
 );
+-- Hot-table index (AUDIT-024, Fix #4) — per-repo recency retrieval.
+CREATE INDEX IF NOT EXISTS idx_fleet_memory_repo_created ON FleetMemory (repo, created_at);
 
 -- FTS5 full-text search index over fleet memory (requires build tag: sqlite_fts5)
 -- Kept in sync explicitly by StoreFleetMemory — not a content table.
@@ -263,7 +293,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS FleetMemory_fts USING fts5(
 
 CREATE TABLE IF NOT EXISTS TaskNotes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id    INTEGER NOT NULL REFERENCES BountyBoard(id),
+    task_id    INTEGER NOT NULL REFERENCES BountyBoard(id) ON DELETE CASCADE,
     note       TEXT    NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

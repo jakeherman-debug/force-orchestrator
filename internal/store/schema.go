@@ -13,15 +13,16 @@ func createSchema(db *sql.DB) {
 	// startup and the FindPRTemplate task. pr_flow_enabled defaults to 1 — repos opt OUT
 	// of the PR flow, not in.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Repositories (
-		name             TEXT PRIMARY KEY,
-		local_path       TEXT,
-		description      TEXT,
-		remote_url       TEXT    DEFAULT '',
-		default_branch   TEXT    DEFAULT '',
-		pr_template_path TEXT    DEFAULT '',
-		pr_flow_enabled  INTEGER DEFAULT 1,
-		quarantined_at   TEXT    DEFAULT '',
-		quarantine_reason TEXT   DEFAULT ''
+		name              TEXT PRIMARY KEY,
+		local_path        TEXT,
+		description       TEXT,
+		remote_url        TEXT    DEFAULT '',
+		default_branch    TEXT    DEFAULT '',
+		pr_template_path  TEXT    DEFAULT '',
+		pr_flow_enabled   INTEGER DEFAULT 1,
+		quarantined_at    TEXT    DEFAULT '',
+		quarantine_reason TEXT    DEFAULT '',
+		pr_review_enabled INTEGER DEFAULT 1
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
@@ -44,6 +45,14 @@ func createSchema(db *sql.DB) {
 		idempotency_key TEXT   DEFAULT '',
 		created_at     TEXT    DEFAULT (datetime('now'))
 	);`)
+	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
+	// dog tick hits these columns; without indexes they full-scan BountyBoard at
+	// every poll. Keep covering-index column order aligned with the WHERE clauses
+	// in ClaimBounty, dashboard queries, and parent/child rollups.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_status_type    ON BountyBoard (status, type);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_convoy_status  ON BountyBoard (convoy_id, status);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_parent_id      ON BountyBoard (parent_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_created_at     ON BountyBoard (created_at);`)
 
 	// Task dependency graph — many-to-many; replaces the old blocked_by column.
 	// A task becomes claimable when all its depends_on tasks are Completed.
@@ -64,6 +73,11 @@ func createSchema(db *sql.DB) {
 		created_at       TEXT    DEFAULT (datetime('now')),
 		acknowledged_at  TEXT    DEFAULT ''
 	);`)
+	// Hot-table indexes on Escalations (AUDIT-024, Fix #4). escalation-sweeper
+	// runs `WHERE status='Open'` every 10 minutes and joins back to BountyBoard
+	// by task_id.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_escalations_status  ON Escalations (status);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_escalations_task_id ON Escalations (task_id);`)
 
 	// Convoys — named groups of related tasks from a single feature request.
 	// PR-flow fields: ask_branch is the integration branch every sub-PR merges into;
@@ -107,6 +121,13 @@ func createSchema(db *sql.DB) {
 		memory_ids    TEXT    DEFAULT '',   -- CSV of FleetMemory IDs injected into this attempt's prompt
 		created_at    TEXT    DEFAULT (datetime('now'))
 	);`)
+	// Hot-table indexes on TaskHistory (AUDIT-010, Fix #4). handleTasks runs
+	// correlated subqueries filtering on task_id per row; leaderboards and
+	// recency reports sort on created_at; outcome/agent powers per-agent
+	// success-rate reports.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_task_id        ON TaskHistory (task_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_created_at     ON TaskHistory (created_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_outcome_agent  ON TaskHistory (outcome, agent);`)
 
 	// Fleet mail — structured inter-agent messaging.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Fleet_Mail (
@@ -118,8 +139,16 @@ func createSchema(db *sql.DB) {
 		task_id      INTEGER DEFAULT 0,
 		message_type TEXT    NOT NULL DEFAULT 'info',
 		read_at      TEXT    DEFAULT '',
+		consumed_at  TEXT    DEFAULT '',
 		created_at   TEXT    DEFAULT (datetime('now'))
 	);`)
+	// Hot-table indexes on Fleet_Mail (AUDIT-024, Fix #4). Every agent's claim
+	// loop reads `WHERE consumed_at='' AND (to_agent=? OR ...)`; MailStats /
+	// dashboard refreshes sort by created_at; task-scoped mail lookups filter
+	// by task_id.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mail_to_consumed ON Fleet_Mail (to_agent, consumed_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mail_task_id     ON Fleet_Mail (task_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mail_created_at  ON Fleet_Mail (created_at);`)
 
 	// System configuration — e-stop, max_concurrent, rate-limit state, etc.
 	db.Exec(`CREATE TABLE IF NOT EXISTS SystemConfig (
@@ -136,6 +165,10 @@ func createSchema(db *sql.DB) {
 		detail     TEXT    DEFAULT '',
 		created_at TEXT    DEFAULT (datetime('now'))
 	);`)
+	// Hot-table indexes on AuditLog (AUDIT-024, Fix #4). Table-prune / retention
+	// scans filter by created_at; per-task audit views filter by task_id.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_auditlog_created_at ON AuditLog (created_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_auditlog_task_id    ON AuditLog (task_id);`)
 
 	// Periodic dog-agent state — cooldown tracking.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Dogs (
@@ -161,6 +194,10 @@ func createSchema(db *sql.DB) {
 		embedding     BLOB    DEFAULT NULL,
 		created_at    TEXT    DEFAULT (datetime('now'))
 	);`)
+	// Hot-table index on FleetMemory (AUDIT-024, Fix #4). GetFleetMemories runs
+	// per-repo recency retrieval before FTS re-rank; without this index it
+	// scans the whole table on every fetch.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_fleet_memory_repo_created ON FleetMemory (repo, created_at);`)
 
 	// FTS5 virtual table — full-text search over fleet memory summaries, file paths, and tags.
 	// Standalone (not a content table) so FTS sync failures never roll back the main insert.
@@ -175,9 +212,13 @@ func createSchema(db *sql.DB) {
 	)`)
 
 	// Operator notes on tasks — injected into agent context at claim time.
+	// ON DELETE CASCADE is required once PRAGMA foreign_keys=ON is set
+	// (AUDIT-079 companion): maintenance prunes BountyBoard rows by age, and
+	// without the cascade clause the DELETE would fail on any task that has
+	// TaskNotes attached.
 	db.Exec(`CREATE TABLE IF NOT EXISTS TaskNotes (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id    INTEGER NOT NULL REFERENCES BountyBoard(id),
+		task_id    INTEGER NOT NULL REFERENCES BountyBoard(id) ON DELETE CASCADE,
 		note       TEXT    NOT NULL,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
@@ -230,6 +271,11 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id   ON AskBranchPRs (task_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_convoy_id ON AskBranchPRs (convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_state     ON AskBranchPRs (state)`)
+	// Escalation-sweeper runs `SELECT task_id, MAX(id) FROM AskBranchPRs GROUP BY task_id`
+	// every 10 minutes. The default task_id-only index forces a sort for MAX(id);
+	// a composite (task_id, id DESC) index lets SQLite jump straight to the latest
+	// row per task. (Fix #4, addendum to AUDIT-024.)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id_id_desc ON AskBranchPRs (task_id, id DESC)`)
 
 	// ConvoyAskBranches — per-(convoy, repo) integration branch tracking.
 	//
@@ -327,12 +373,38 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE BountyBoard DROP COLUMN blocked_by`)
 
 	// TaskNotes — operator notes injected into agent context at claim time.
+	// The ON DELETE CASCADE clause is required once PRAGMA foreign_keys=ON is
+	// set (AUDIT-079 companion). Upgraded DBs may still have the cascade-less
+	// definition; rebuild them below.
 	db.Exec(`CREATE TABLE IF NOT EXISTS TaskNotes (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id    INTEGER NOT NULL REFERENCES BountyBoard(id),
+		task_id    INTEGER NOT NULL REFERENCES BountyBoard(id) ON DELETE CASCADE,
 		note       TEXT    NOT NULL,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
+	// If an older install created TaskNotes without the cascade clause, rebuild
+	// it. The check-and-rebuild idiom keeps the migration idempotent —
+	// sqlite_master holds the verbatim CREATE statement, so once the rebuild
+	// has run the guard is false on subsequent startups.
+	var taskNotesSQL string
+	db.QueryRow(`SELECT IFNULL(sql, '') FROM sqlite_master WHERE type='table' AND name='TaskNotes'`).Scan(&taskNotesSQL)
+	if taskNotesSQL != "" && !strings.Contains(taskNotesSQL, "ON DELETE CASCADE") {
+		// Standard SQLite "12-step" table rebuild, collapsed for the two-column case:
+		//   1. create new table with the desired schema
+		//   2. copy data
+		//   3. drop old
+		//   4. rename new into place
+		db.Exec(`CREATE TABLE TaskNotes_new (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id    INTEGER NOT NULL REFERENCES BountyBoard(id) ON DELETE CASCADE,
+			note       TEXT    NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`)
+		db.Exec(`INSERT INTO TaskNotes_new (id, task_id, note, created_at)
+			SELECT id, task_id, note, created_at FROM TaskNotes`)
+		db.Exec(`DROP TABLE TaskNotes`)
+		db.Exec(`ALTER TABLE TaskNotes_new RENAME TO TaskNotes`)
+	}
 
 	// ProposedConvoys — Commander submits plans here; Chancellor gates convoy creation.
 	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedConvoys (
@@ -478,4 +550,35 @@ func runMigrations(db *sql.DB) {
 			SELECT id, summary, IFNULL(files_changed, ''), IFNULL(topic_tags, '')
 			FROM FleetMemory`)
 	}
+
+	// ── Hot-table indexes (Fix #4, AUDIT-009, AUDIT-010, AUDIT-024, AUDIT-134) ─
+	// Upgraded DBs never got the indexes from createSchema. Every index is
+	// idempotent (CREATE INDEX IF NOT EXISTS) so re-running the migration is a
+	// no-op once the index exists. Column order matches WHERE / ORDER BY
+	// clauses in the hot paths so SQLite can read them as covering indexes.
+	//
+	// BountyBoard — ClaimBounty, dashboard, parent rollups, prune sweep.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_status_type    ON BountyBoard (status, type)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_convoy_status  ON BountyBoard (convoy_id, status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_parent_id      ON BountyBoard (parent_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_created_at     ON BountyBoard (created_at)`)
+	// TaskHistory — handleTasks correlated subqueries, recency, leaderboards.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_task_id        ON TaskHistory (task_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_created_at     ON TaskHistory (created_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_outcome_agent  ON TaskHistory (outcome, agent)`)
+	// Fleet_Mail — ReadInboxForAgent, MailStats, per-task lookups.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mail_to_consumed ON Fleet_Mail (to_agent, consumed_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mail_task_id     ON Fleet_Mail (task_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mail_created_at  ON Fleet_Mail (created_at)`)
+	// Escalations — sweeper WHERE status='Open', join back to BountyBoard by task_id.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_escalations_status  ON Escalations (status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_escalations_task_id ON Escalations (task_id)`)
+	// AuditLog — retention prune, per-task audit view.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_auditlog_created_at ON AuditLog (created_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_auditlog_task_id    ON AuditLog (task_id)`)
+	// FleetMemory — per-repo recency retrieval before FTS re-rank.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_fleet_memory_repo_created ON FleetMemory (repo, created_at)`)
+	// AskBranchPRs — escalation-sweeper's `GROUP BY task_id / MAX(id)` needs
+	// (task_id, id DESC) so SQLite can pick the latest row per task without sorting.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id_id_desc ON AskBranchPRs (task_id, id DESC)`)
 }
