@@ -13,10 +13,8 @@
 .claude/scheduled_tasks.lock
 
 # Runtime files
-holocron.db
-holocron.db-shm
-holocron.db-wal
-fleet.db
+holocron.db*
+fleet.db*
 fleet.db-shm
 fleet.db-wal
 fleet.log
