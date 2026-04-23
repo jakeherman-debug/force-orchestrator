@@ -163,15 +163,17 @@ func IncrementAskBranchPRFailureCount(db *sql.DB, id int) (int, error) {
 // MarkAskBranchPRMerged transitions the PR to state=Merged, clearing further
 // polling by sub-pr-ci-watch. Stamps merged_at to the current time.
 func MarkAskBranchPRMerged(db *sql.DB, id int) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
+	var convoyID, prNumber int
+	var repo string
+	db.QueryRow(`SELECT convoy_id, pr_number, repo FROM AskBranchPRs WHERE id = ?`, id).
+		Scan(&convoyID, &prNumber, &repo)
+	_, err := db.Exec(`UPDATE AskBranchPRs
+		SET state = 'Merged', checks_state = 'Success', merged_at = datetime('now')
+		WHERE id = ?`, id)
+	if err == nil && convoyID > 0 {
+		AppendConvoyEvent(db, convoyID, "sub_pr_merged", "", strconv.Itoa(prNumber), repo)
 	}
-	defer tx.Rollback()
-	if err := MarkAskBranchPRMergedTx(tx, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
 // MarkAskBranchPRMergedTx is the transactional sibling of MarkAskBranchPRMerged.
