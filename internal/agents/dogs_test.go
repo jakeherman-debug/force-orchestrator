@@ -687,3 +687,163 @@ func TestStaleConvoysReport_CompletedConvoyIgnored(t *testing.T) {
 		t.Errorf("expected no mail for already-Completed convoy, got %d", mailCount)
 	}
 }
+
+// ── Fix #5: Failed-transition integration coverage (AUDIT-012) ───────────────
+
+// TestStaleConvoysReport_AllFailedTasksTransitionsToFailed covers the
+// primary AUDIT-012 regression: a convoy whose children are ALL Failed or
+// Escalated must transition to 'Failed' (NOT silently 'Completed') and
+// emit an operator alert. Before Fix #5, the non-terminal predicate
+// excluded only 'Completed'/'Cancelled', so this scenario was auto-closed
+// as a green card while no code had shipped.
+func TestStaleConvoysReport_AllFailedTasksTransitionsToFailed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "convoy-all-failed")
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id, error_log)
+			VALUES ('CodeEdit', 'Failed', 'p1', ?, 'compile error on line 42')`, convoyID)
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id, error_log)
+			VALUES ('CodeEdit', 'Escalated', 'p2', ?, 'needs human')`, convoyID)
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport: %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Failed" {
+		t.Fatalf("AUDIT-012 regression: expected convoy status=Failed, got %q "+
+			"(stale-convoys dog silently completed a convoy of all-Failed/Escalated tasks)", status)
+	}
+
+	// Operator mail must fire: [CONVOY FAILED] subject, MailTypeAlert, and
+	// the first failure's error_log embedded.
+	var subject, body, messageType string
+	err := db.QueryRow(`SELECT subject, body, message_type FROM Fleet_Mail
+		WHERE subject = '[CONVOY FAILED] convoy-all-failed' AND read_at = ''`).Scan(&subject, &body, &messageType)
+	if err != nil {
+		t.Fatalf("expected operator mail for Failed convoy, got: %v", err)
+	}
+	if messageType != string(store.MailTypeAlert) {
+		t.Errorf("expected MailTypeAlert (%q), got %q", store.MailTypeAlert, messageType)
+	}
+	if !strings.Contains(body, "compile error on line 42") {
+		t.Errorf("expected operator mail body to include first task's error_log; got:\n%s", body)
+	}
+	if !strings.Contains(body, "force convoy show") || !strings.Contains(body, "force convoy reset") {
+		t.Errorf("expected operator mail to include remediation commands; got:\n%s", body)
+	}
+}
+
+// TestStaleConvoysReport_MixedCompletedAndFailedTransitionsToFailed covers
+// the subtler case: most tasks succeeded, ONE failed. Before Fix #5 this
+// also flipped to Completed — masking the single failure. After Fix #5 the
+// convoy is 'Failed' because any Failed/Escalated child forbids the
+// "success" transition.
+func TestStaleConvoysReport_MixedCompletedAndFailedTransitionsToFailed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "convoy-one-bad-apple")
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Completed', 'p1', ?)`, convoyID)
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Completed', 'p2', ?)`, convoyID)
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Completed', 'p3', ?)`, convoyID)
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id, error_log)
+			VALUES ('CodeEdit', 'Failed', 'p4', ?, 'type check failure')`, convoyID)
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport: %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Failed" {
+		t.Fatalf("AUDIT-012 regression: one failed task in an otherwise-complete convoy "+
+			"must transition the convoy to Failed (not Completed). Got %q", status)
+	}
+
+	// A [CONVOY COMPLETE] subject would indicate the failure was masked.
+	var completeCount int
+	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE subject = '[CONVOY COMPLETE] convoy-one-bad-apple'`).Scan(&completeCount)
+	if completeCount != 0 {
+		t.Fatalf("AUDIT-012 regression: convoy with a Failed child emitted [CONVOY COMPLETE] mail; "+
+			"that exact masking is the bug Fix #5 closes")
+	}
+	var failedCount int
+	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE subject = '[CONVOY FAILED] convoy-one-bad-apple'`).Scan(&failedCount)
+	if failedCount != 1 {
+		t.Errorf("expected exactly one [CONVOY FAILED] mail, got %d", failedCount)
+	}
+}
+
+// TestStaleConvoysReport_FullLoopFromPendingToFailedDoesNotShipConvoy is the
+// feature test specified in Fix #5's coverage sketch: drive a convoy from
+// all-Pending, fail every task, run the dog, and verify:
+//   (a) the convoy status transitions Active → Failed,
+//   (b) operator mail is sent,
+//   (c) NO ShipConvoy task is queued (a false "success" would have done so).
+func TestStaleConvoysReport_FullLoopFromPendingToFailedDoesNotShipConvoy(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "convoy-full-loop")
+
+	// Phase 1: tasks are Pending. Dog should NOT touch the convoy.
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Pending', 'p1', ?)`, convoyID)
+	db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id) VALUES ('CodeEdit', 'Pending', 'p2', ?)`, convoyID)
+
+	logger := log.New(io.Discard, "", 0)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport (pending pass): %v", err)
+	}
+
+	var status string
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Active" {
+		t.Fatalf("expected convoy to remain Active while children Pending; got %q", status)
+	}
+
+	// Phase 2: tasks fail. Dog now should transition convoy to Failed +
+	// mail operator. Critically, it must NOT queue a ShipConvoy — a
+	// silent-completion bug would produce ShipConvoy task rows on a
+	// failed convoy.
+	db.Exec(`UPDATE BountyBoard SET status = 'Failed', error_log = 'stub' WHERE convoy_id = ?`, convoyID)
+
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport (failed pass): %v", err)
+	}
+
+	db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&status)
+	if status != "Failed" {
+		t.Fatalf("expected convoy status=Failed after all children failed, got %q", status)
+	}
+
+	// Operator alert fired.
+	var mailSubj string
+	db.QueryRow(`SELECT subject FROM Fleet_Mail WHERE to_agent = 'operator' AND subject LIKE '[CONVOY%' ORDER BY id DESC LIMIT 1`).Scan(&mailSubj)
+	if mailSubj != "[CONVOY FAILED] convoy-full-loop" {
+		t.Errorf("expected most-recent operator mail = [CONVOY FAILED] convoy-full-loop, got %q", mailSubj)
+	}
+
+	// No ShipConvoy task should ever have been spawned for this convoy.
+	var shipCount int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ShipConvoy' AND convoy_id = ?`, convoyID).Scan(&shipCount)
+	if shipCount != 0 {
+		t.Fatalf("Fix #5 regression: stale-convoys dog on a Failed convoy spawned %d ShipConvoy task(s); "+
+			"a Failed convoy must NEVER ship", shipCount)
+	}
+
+	// Idempotence: re-running the dog on an already-Failed convoy is a no-op.
+	var mailBefore, mailAfter int
+	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE subject = '[CONVOY FAILED] convoy-full-loop'`).Scan(&mailBefore)
+	if err := runStaleConvoysReport(db, logger); err != nil {
+		t.Fatalf("runStaleConvoysReport (idempotence pass): %v", err)
+	}
+	db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail WHERE subject = '[CONVOY FAILED] convoy-full-loop'`).Scan(&mailAfter)
+	if mailAfter != mailBefore {
+		t.Errorf("expected no additional operator mail on idempotent re-run, got before=%d after=%d", mailBefore, mailAfter)
+	}
+}
