@@ -28,15 +28,12 @@ var remainingAuditSkips = map[string]string{
 	// AUDIT-011, AUDIT-025, AUDIT-085, AUDIT-149: closed by Campaign 2
 	// (scope deferrals). See FIX-LOG.md § "Campaign 2 — Scope deferrals".
 	//
-	// AUDIT-030 duplicates AUDIT-116 which duplicates Fix #8.5 (prompt
-	// injection). 8.5 was not in the worktree batch.
-	"AUDIT-030": "Fix #8.5 (LLM prompt boundary markers + DisallowUnknownFields)",
-	"AUDIT-108": "Fix #8.5",
-	"AUDIT-109": "Fix #8.5",
-	"AUDIT-114": "Fix #8.5",
-	"AUDIT-115": "Fix #8.5",
-	"AUDIT-116": "Fix #8.5",
-	"AUDIT-139": "Fix #8.5",
+	// AUDIT-030, -108, -109, -110, -114, -115, -116, -139: closed by
+	// Campaign 1 / Fix #8.5. Skip markers removed from
+	// audit_pattern_p12_test.go; the pattern test now asserts the post-fix
+	// contract (boundary markers, DisallowUnknownFields, Approved *bool,
+	// Captain fail-closed, Chancellor fail-closed, signal-token sanitizer).
+
 
 	// Fix #8 Phase A closed the three self-heal terminator signatures and
 	// two one-liners. Phase B/C migrate the remaining ~108 call sites. Each

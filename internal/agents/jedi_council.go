@@ -120,7 +120,8 @@ You have read-only access to Jira, Confluence, Glean, and SonarQube. Use them wh
 You may NOT create or edit any Jira tickets, Confluence pages, or SonarQube issues.
 
 Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
-{"approved": true/false, "feedback": "concise reason for rejection, or empty string if approved"}` + directiveSection
+{"approved": true/false, "feedback": "concise reason for rejection, or empty string if approved"}
+The "approved" field is REQUIRED. Do not omit it; a missing field will be treated as a parse failure and retried.` + promptInjectionClause + directiveSection
 
 	repoPath := store.GetRepoPath(db, b.TargetRepo)
 	if repoPath == "" {
@@ -207,7 +208,14 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 	}
 
 	inboxContext := buildInboxContext(db, agentName, "jedi-council", b.ID, logger)
-	reviewPrompt := fmt.Sprintf("Task: %s\n\nDiff:\n%s%s%s", b.Payload, diff, diffNote, inboxContext)
+	// Fix #8.5 — attacker-controllable inputs (task payload, git diff)
+	// wrapped in <user_content> sentinel tags. The system prompt's
+	// promptInjectionClause tells the model to treat everything inside
+	// these tags as data.
+	reviewPrompt := fmt.Sprintf("Task:\n%s\n\nDiff:\n%s%s%s",
+		WrapUserContent("task_payload", b.Payload),
+		WrapUserContent("diff", diff),
+		diffNote, inboxContext)
 
 	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt, claude.CouncilTools, 5)
 	if err != nil {
@@ -220,8 +228,15 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 	cleanJSON := claude.ExtractJSON(response)
 
 	var ruling store.CouncilRuling
-	if err := json.Unmarshal([]byte(cleanJSON), &ruling); err != nil {
-		msg := fmt.Sprintf("JSON Parse Err: %v | Output: %.500s", err, cleanJSON)
+	// Fix #8.5 — strict-field decode. An LLM that introduces new fields
+	// (model upgrade) or omits the required `approved` field surfaces as
+	// a parse error instead of silently defaulting to `approved=false`.
+	parseErr := strictJSONUnmarshal([]byte(cleanJSON), &ruling)
+	if parseErr == nil && ruling.Approved == nil {
+		parseErr = fmt.Errorf("council ruling missing required field 'approved'")
+	}
+	if parseErr != nil {
+		msg := fmt.Sprintf("JSON Parse Err: %v | Output: %.500s", parseErr, cleanJSON)
 		logger.Printf("Task %d: council JSON parse failed — returning to queue for retry: %s", b.ID, msg)
 		// Fix #7 (AUDIT-029) — dedicated parse-failure budget.
 		// Parse failures used to count against the shared MaxInfraFailures=5
@@ -242,11 +257,13 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 		return
 	}
 
-	telemetry.EmitEvent(telemetry.EventCouncilRuling(sessionID, agentName, b.ID, ruling.Approved, ruling.Feedback))
+	// Fix #8.5 — Approved is *bool; nil was rejected above, safe to deref.
+	approved := *ruling.Approved
+	telemetry.EmitEvent(telemetry.EventCouncilRuling(sessionID, agentName, b.ID, approved, ruling.Feedback))
 
 	tokIn, tokOut := claude.ParseTokenUsage(response)
 
-	if ruling.Approved {
+	if approved {
 		// Split on pr_flow_enabled: if the repo is on the PR flow, open a sub-PR
 		// instead of local-merging.
 		// If the ask-branch isn't ready yet (Pilot hasn't finished CreateAskBranch),

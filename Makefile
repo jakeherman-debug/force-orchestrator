@@ -25,7 +25,7 @@ smoke:
 # adversarial inputs; confirms no crash paths remain.
 fuzz:
 	@set -e; \
-	for pkg in internal/git internal/store; do \
+	for pkg in internal/git internal/store internal/agents; do \
 		for fn in $$(go test $(GOFLAGS) -list 'Fuzz.*' ./$$pkg | grep '^Fuzz'); do \
 			echo "==> $$pkg $$fn"; \
 			go test $(GOFLAGS) -run='^$$' -fuzz="^$$fn$$" -fuzztime=30s ./$$pkg || exit $$?; \

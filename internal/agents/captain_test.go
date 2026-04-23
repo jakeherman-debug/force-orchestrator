@@ -406,6 +406,11 @@ func TestRunCaptainTask_UnknownRepoInNewTasksCreatesEscalation(t *testing.T) {
 	}
 }
 
+// TestRunCaptainTask_UnknownDecision verifies Fix #8.5 (AUDIT-114):
+// unknown `decision` values MUST fail-closed through
+// handleInfraFailure rather than silently forwarding to Council. The
+// pre-fix behavior was to default to "approve" on any unrecognized
+// decision string — a typo or LLM truncation bypassed the gate.
 func TestRunCaptainTask_UnknownDecision(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")
@@ -423,14 +428,27 @@ func TestRunCaptainTask_UnknownDecision(t *testing.T) {
 		branchName, convoyID, id)
 	b, _ := store.GetBounty(db, id)
 
-	ruling := `{"decision":"bogus","feedback":"","task_updates":[],"new_tasks":[]}`
+	ruling := `{"decision":"bogus","feedback":"","task_updates":[],"new_tasks":[],"rejected_files":[]}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
 	runCaptainTask(db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
-	// Unknown decision defaults to approve
-	if b.Status != "AwaitingCouncilReview" {
-		t.Errorf("expected AwaitingCouncilReview for unknown decision, got %q", b.Status)
+	// Fix #8.5: unknown decision fails-closed. The task must NOT be
+	// advanced to AwaitingCouncilReview (that was the pre-fix bypass).
+	// It should stay in AwaitingCaptainReview (infra retry) — or end
+	// in Failed if the infra-failure budget has been consumed.
+	if b.Status == "AwaitingCouncilReview" {
+		t.Errorf("AUDIT-114 REGRESSION: Captain silently approved unknown decision — status=%q", b.Status)
+	}
+	if b.Status == "Completed" {
+		t.Errorf("AUDIT-114 REGRESSION: Captain Completed on unknown decision — status=%q", b.Status)
+	}
+	// Positive assertion: infra-failure counter should have been
+	// incremented at least once.
+	var infraCount int
+	db.QueryRow(`SELECT IFNULL(infra_failures, 0) FROM BountyBoard WHERE id = ?`, id).Scan(&infraCount)
+	if infraCount < 1 {
+		t.Errorf("expected infra_failures >= 1 after unknown decision, got %d", infraCount)
 	}
 }

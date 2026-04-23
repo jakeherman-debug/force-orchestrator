@@ -32,8 +32,17 @@ type TaskPlan struct {
 
 // ── Review ────────────────────────────────────────────────────────────────────
 
+// CouncilRuling is the structured response from the Jedi Council LLM.
+//
+// Fix #8.5 — `Approved` is a `*bool` (not `bool`) so the parser can
+// distinguish an LLM that explicitly returned `"approved":false` from
+// one that omitted the field entirely. A missing field is ambiguous:
+// before this change it silently parsed as `false` and fed a permanent-
+// reject loop through MaxRetries without any feedback. Now a nil
+// `Approved` is a schema violation that routes through the existing
+// council parse-failure budget (`councilParseFailureCap`).
 type CouncilRuling struct {
-	Approved bool   `json:"approved"`
+	Approved *bool  `json:"approved"`
 	Feedback string `json:"feedback"`
 }
 
