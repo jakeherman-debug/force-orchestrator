@@ -14,58 +14,71 @@ import (
 )
 
 // TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS verifies the
-// exposure surface described in AUDIT Pattern P8:
+// exposure surface described in AUDIT Pattern P8. Originally a red-phase test
+// (skipped until Fix #2 landed). Fix #2 made this pass; it now stays as
+// permanent regression protection.
 //
-//   - AUDIT-001: dashboard binds 0.0.0.0 with no auth and wildcard CORS
-//   - AUDIT-002: stored XSS via unsanitized marked.parse() on mail bodies
-//   - AUDIT-003: marked.min.js loaded from CDN with no SRI integrity pin
-//   - AUDIT-053: SSE endpoints emit Access-Control-Allow-Origin: *
-//   - AUDIT-054: POST handlers reuse wildcard-CORS helper with no size limit
-//   - AUDIT-064: critical-escalation banner not surfaced (indirectly exposed
-//     here because the same no-auth /api/status is world-readable)
-//   - AUDIT-100: combined with 0.0.0.0 bind, world-readable worktrees chain
+// What this test enforces (the SAFE posture):
 //
-// This test asserts the SAFE posture. It is expected to FAIL against
-// current HEAD — that is the point. Once the hardening PR lands, flipping
-// the dashboard to 127.0.0.1, Origin-gated CORS, and a bundled + SRI'd
-// marked (or DOMPurify wrap) will make this test pass.
+//   - AUDIT-001: dashboard.go binds 127.0.0.1 via loopbackBindAddr (not
+//     `fmt.Sprintf(":%d", port)` which bound all interfaces).
+//   - AUDIT-002: app.js does not call marked.parse() — the mail-body modal
+//     renders via textContent, which parses nothing. Zero XSS sink.
+//   - AUDIT-003: index.html does not load marked.js from any CDN. If marked
+//     is ever re-introduced, it must be bundled locally under static/ (and
+//     accompanied by a DOMPurify sanitize wrap).
+//   - AUDIT-053: SSE endpoints do not emit Access-Control-Allow-Origin.
+//   - AUDIT-054: jsonCORS does not emit wildcard Access-Control-Allow-Origin.
+//   - AUDIT-064: the dashboard is no longer world-readable; same-origin only.
+//
+// If any check fails, Fix #2's dashboard hardening has regressed.
 func TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS(t *testing.T) {
-	t.Skip("AUDIT-001/002/003/053/054/064: remove when dashboard binds 127.0.0.1 / drops wildcard CORS / bundles marked (Fix #2)")
-	// Without skip, fails with:
-	//   audit_pattern_p8_test.go:56: AUDIT-001: dashboard.go binds all interfaces (matched `fmt.Sprintf(":%d"...)`); expected 127.0.0.1 bind
-	//   audit_pattern_p8_test.go:59: AUDIT-001: dashboard.go does not contain `127.0.0.1` — bind is not loopback-gated
-	//   audit_pattern_p8_test.go:76: AUDIT-053/054: jsonCORS sets wildcard Access-Control-Allow-Origin — any origin can read/drive the API.
-	//   audit_pattern_p8_test.go:93: AUDIT-003: marked.min.js loaded from cdn.jsdelivr.net (unbundled supply-chain dependency).
 	_, thisFile, _, _ := runtime.Caller(0)
 	pkgDir := filepath.Dir(thisFile)
 
 	// ── Static check A: bind address in dashboard.go ─────────────────────
-	// SAFE posture: bind 127.0.0.1 explicitly. CURRENT: fmt.Sprintf(":%d", port).
+	// SAFE posture: bind via loopbackBindAddr (defined in security.go) which
+	// formats 127.0.0.1:PORT. The literal "127.0.0.1" should appear in one of
+	// the package's Go files (security.go or dashboard.go).
 	dashBytes, err := os.ReadFile(filepath.Join(pkgDir, "dashboard.go"))
 	if err != nil {
 		t.Fatalf("read dashboard.go: %v", err)
 	}
 	dashSrc := string(dashBytes)
 
-	// Match all-interface bind expressions of the form `":%d"` or `":PORT"`
-	// (i.e. a colon followed directly by a port with no host).
-	allIfaceBind := regexp.MustCompile(`fmt\.Sprintf\(\s*"\s*:%d"`)
+	// The old vulnerable pattern: fmt.Sprintf(":%d", port) — empty host.
+	// Must not appear as a bind-address construction in the RunDashboard body.
+	allIfaceBind := regexp.MustCompile(`fmt\.Sprintf\(\s*"\s*:%d"\s*,\s*port\s*\)`)
 	if allIfaceBind.MatchString(dashSrc) {
-		t.Errorf("AUDIT-001: dashboard.go binds all interfaces (matched `fmt.Sprintf(\":%%d\"...)`); expected 127.0.0.1 bind")
-	}
-	if !strings.Contains(dashSrc, "127.0.0.1") {
-		t.Errorf("AUDIT-001: dashboard.go does not contain `127.0.0.1` — bind is not loopback-gated")
+		t.Errorf("AUDIT-001: dashboard.go binds all interfaces (matched `fmt.Sprintf(\":%%d\", port)`); expected loopback bind")
 	}
 
-	// ── Static check B: jsonCORS writes wildcard Access-Control-Allow-Origin ─
+	// The loopback bind literal must exist somewhere in the package (we allow
+	// it to live in security.go alongside the middleware helpers).
+	loopbackFound := strings.Contains(dashSrc, "127.0.0.1")
+	if !loopbackFound {
+		secBytes, err := os.ReadFile(filepath.Join(pkgDir, "security.go"))
+		if err == nil && strings.Contains(string(secBytes), "127.0.0.1") {
+			loopbackFound = true
+		}
+	}
+	if !loopbackFound {
+		t.Errorf("AUDIT-001: neither dashboard.go nor security.go contains `127.0.0.1` — bind is not loopback-gated")
+	}
+
+	// dashboard.go must invoke loopbackBindAddr to get its bind address.
+	if !strings.Contains(dashSrc, "loopbackBindAddr(") {
+		t.Errorf("AUDIT-001: dashboard.go does not call loopbackBindAddr — bind address is not going through the loopback helper")
+	}
+
+	// ── Static check B: jsonCORS does not write wildcard Access-Control-Allow-Origin ─
 	handlersBytes, err := os.ReadFile(filepath.Join(pkgDir, "handlers.go"))
 	if err != nil {
 		t.Fatalf("read handlers.go: %v", err)
 	}
 	handlersSrc := string(handlersBytes)
 
-	// Locate the jsonCORS function body.
-	jsonCORSRe := regexp.MustCompile(`(?s)func\s+jsonCORS\s*\([^)]*\)\s*\{[^}]*\}`)
+	jsonCORSRe := regexp.MustCompile(`(?s)func\s+jsonCORS\s*\([^)]*\)\s*\{.*?\n\}`)
 	match := jsonCORSRe.FindString(handlersSrc)
 	if match == "" {
 		t.Fatalf("AUDIT-053/054: could not locate jsonCORS in handlers.go")
@@ -74,60 +87,69 @@ func TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS(t *testing.T)
 		t.Errorf("AUDIT-053/054: jsonCORS sets wildcard Access-Control-Allow-Origin — any origin can read/drive the API.\nFunction body:\n%s", match)
 	}
 
-	// ── Static check C: index.html loads marked.min.js from CDN with no SRI ─
+	// ── Static check C: index.html does not load marked.js from a CDN ──
 	indexBytes, err := os.ReadFile(filepath.Join(pkgDir, "static", "index.html"))
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
 	indexSrc := string(indexBytes)
 
-	// Find the <script ...> tag that loads marked(.min).js, if any.
 	markedTagRe := regexp.MustCompile(`(?i)<script[^>]*src=["'][^"']*marked(?:\.min)?\.js[^"']*["'][^>]*>`)
 	tag := markedTagRe.FindString(indexSrc)
-	if tag == "" {
-		t.Fatalf("AUDIT-003: could not locate marked.js script tag in index.html")
+	if tag != "" {
+		// A marked tag is tolerated ONLY if it is:
+		//   (1) bundled locally (no CDN host in the src),
+		//   (2) carries an integrity= SRI hash.
+		// If either is missing, AUDIT-003 is re-opened.
+		cdnHosts := []string{"cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com"}
+		for _, host := range cdnHosts {
+			if strings.Contains(tag, host) {
+				t.Errorf("AUDIT-003: marked.js loaded from CDN (%s) — must be bundled locally.\nTag: %s", host, tag)
+			}
+		}
+		if !strings.Contains(tag, "integrity=") {
+			t.Errorf("AUDIT-003: marked.js script tag has no `integrity=` SRI attribute.\nTag: %s", tag)
+		}
 	}
-	if strings.Contains(tag, "cdn.jsdelivr.net") {
-		t.Errorf("AUDIT-003: marked.min.js loaded from cdn.jsdelivr.net (unbundled supply-chain dependency).\nTag: %s", tag)
-	}
-	if !strings.Contains(tag, "integrity=") {
-		t.Errorf("AUDIT-003: marked.js script tag has no `integrity=` SRI attribute — CDN compromise = same-origin RCE.\nTag: %s", tag)
-	}
+	// If no marked tag at all, that's the preferred post-Fix-2 state
+	// (we render mail bodies via textContent). Nothing to assert.
 
-	// ── Static check D: app.js uses marked.parse without DOMPurify wrap ──
+	// ── Static check D: app.js does not call marked.parse ──
+	// Fix #2 switched mail-body rendering from marked.parse to textContent.
+	// A bare marked.parse call is forbidden — if marked is ever re-introduced,
+	// every call must be DOMPurify-wrapped.
 	appBytes, err := os.ReadFile(filepath.Join(pkgDir, "static", "app.js"))
 	if err != nil {
 		t.Fatalf("read static/app.js: %v", err)
 	}
 	appSrc := string(appBytes)
 
-	if !strings.Contains(appSrc, "marked.parse(") {
-		t.Fatalf("AUDIT-002: could not find `marked.parse(` in app.js; test assumption broken")
-	}
-	// Look for DOMPurify.sanitize wrapping anywhere in the file.
-	if !strings.Contains(appSrc, "DOMPurify.sanitize(") {
-		t.Errorf("AUDIT-002: app.js calls marked.parse() with no DOMPurify.sanitize() wrap anywhere in the file — stored XSS on mail bodies")
-	} else {
-		// If present, require that the specific marked.parse at the mail
-		// modal site (around line 1349) is itself wrapped. Grab ~200 chars
-		// of context around the first marked.parse( occurrence.
-		idx := strings.Index(appSrc, "marked.parse(")
-		start := idx - 120
-		if start < 0 {
-			start = 0
-		}
-		end := idx + 120
-		if end > len(appSrc) {
-			end = len(appSrc)
-		}
-		window := appSrc[start:end]
-		if !strings.Contains(window, "DOMPurify.sanitize(") {
-			t.Errorf("AUDIT-002: marked.parse() near mail-modal render is not DOMPurify-wrapped.\nWindow:\n%s", window)
+	if strings.Contains(appSrc, "marked.parse(") {
+		// If marked.parse is present, each call-site must be inside a
+		// DOMPurify.sanitize wrap. Grab ~200 chars of context around the
+		// first hit and check.
+		if !strings.Contains(appSrc, "DOMPurify.sanitize(") {
+			t.Errorf("AUDIT-002: app.js calls marked.parse() with no DOMPurify.sanitize() wrap — stored XSS on mail bodies.")
+		} else {
+			idx := strings.Index(appSrc, "marked.parse(")
+			start := idx - 120
+			if start < 0 {
+				start = 0
+			}
+			end := idx + 120
+			if end > len(appSrc) {
+				end = len(appSrc)
+			}
+			window := appSrc[start:end]
+			if !strings.Contains(window, "DOMPurify.sanitize(") {
+				t.Errorf("AUDIT-002: marked.parse() near mail-modal render is not DOMPurify-wrapped.\nWindow:\n%s", window)
+			}
 		}
 	}
+	// If no marked.parse call, the mail-body render path is textContent,
+	// which is XSS-free by construction — that's the current Fix-2 state.
 
-	// ── Dynamic check: real handler writes wildcard CORS header ──────────
-	// Exercise handleStatus against an in-memory DB and inspect response headers.
+	// ── Dynamic check: real handler does NOT write wildcard CORS header ──
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -137,5 +159,11 @@ func TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS(t *testing.T)
 
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got == "*" {
 		t.Errorf("AUDIT-001/053: handleStatus response sets Access-Control-Allow-Origin=* (got %q) — no origin gating", got)
+	}
+
+	// ── Index.html carries a CSP meta tag (AUDIT-002 belt-and-suspenders) ──
+	cspMetaRe := regexp.MustCompile(`(?i)<meta\s+http-equiv=["']Content-Security-Policy["']`)
+	if !cspMetaRe.MatchString(indexSrc) {
+		t.Errorf("AUDIT-002: index.html missing Content-Security-Policy meta tag — XSS defence-in-depth gone")
 	}
 }

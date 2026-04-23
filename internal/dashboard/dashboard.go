@@ -16,6 +16,12 @@ import (
 var staticFiles embed.FS
 
 // RunDashboard starts the HTTP command-center dashboard on the given port.
+// Security posture — see CLAUDE.md "Dashboard invariants":
+//   - binds 127.0.0.1 only (loopback-gated via loopbackBindAddr);
+//   - every response carries the security header set stamped by
+//     securityMiddleware (CSP, X-Frame-Options, etc.);
+//   - every mutating request (POST/PUT/PATCH/DELETE) is Origin-gated and
+//     body-capped at 256 KB before the handler sees it.
 func RunDashboard(db *sql.DB, port int) {
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -53,10 +59,19 @@ func RunDashboard(db *sql.DB, port int) {
 	// ── Static assets + SPA fallback ─────────────────────────────────────────
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
-	addr := fmt.Sprintf(":%d", port)
-	fmt.Printf("Fleet Command Center → http://localhost%s\n", addr)
+	// Loopback-only bind (AUDIT-001). The dashboard has no auth; exposing it
+	// on 0.0.0.0 was full fleet takeover from any LAN peer. If remote access
+	// is ever needed, the correct path is an SSH tunnel, not changing this bind.
+	// See CLAUDE.md "Dashboard invariants" before relaxing.
+	addr := loopbackBindAddr(port)
+	fmt.Printf("Fleet Command Center → http://%s\n", addr)
 	fmt.Println("Press Ctrl+C to stop.")
-	if err := http.ListenAndServe(addr, mux); err != nil {
+
+	// Wrap mux in the security middleware stack: CSP headers, Origin allow-list
+	// on mutations, 256 KB body cap. Applied globally so no future handler can
+	// opt out by accident.
+	handler := securityMiddleware(port, mux)
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		fmt.Fprintf(os.Stderr, "dashboard: %v\n", err)
 		os.Exit(1)
 	}
@@ -124,12 +139,13 @@ func sseLoop(w http.ResponseWriter, r *http.Request, f *os.File, fi os.FileInfo,
 }
 
 // handleHolonetStream streams holonet.jsonl as SSE (lines are already JSON).
+// AUDIT-053: the wildcard CORS header was dropped — same-origin fetches don't
+// need it, and any other origin has no business reading the fleet log stream.
 func handleHolonetStream(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		f, fi := openAtEnd(path)
 		if f == nil {
 			fmt.Fprintf(w, "data: {\"error\":\"holonet.jsonl not found\"}\n\n")
@@ -147,7 +163,9 @@ func handleFleetLogStream(path string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// AUDIT-053: wildcard CORS dropped. fleet.log can contain gh-auth
+		// stderr (token prefixes) and Claude stdout (env echoes) — no other
+		// origin should be able to EventSource this.
 		f, fi := openWithBackfill(path, 32*1024)
 		if f == nil {
 			fmt.Fprintf(w, "data: \"\"\n\n") // empty line so browser knows stream is alive

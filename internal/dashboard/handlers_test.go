@@ -125,7 +125,11 @@ func TestHandleStatus_Estopped(t *testing.T) {
 	}
 }
 
-func TestHandleStatus_CORS(t *testing.T) {
+// TestHandleStatus_NoWildcardCORS verifies that handleStatus does NOT emit
+// Access-Control-Allow-Origin: * (AUDIT-001, -053 / Fix #2). The dashboard is
+// same-origin only; a wildcard CORS header made every /api/* response readable
+// by any page in the browser.
+func TestHandleStatus_NoWildcardCORS(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -133,8 +137,11 @@ func TestHandleStatus_CORS(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleStatus(db)(w, r)
 
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("missing CORS header")
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("AUDIT-001/053: handleStatus must not set Access-Control-Allow-Origin; got %q", got)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected Content-Type: application/json, got %q", ct)
 	}
 }
 
@@ -295,7 +302,8 @@ func TestHandleTasks_PayloadTruncation(t *testing.T) {
 	}
 }
 
-func TestHandleTasks_CORS(t *testing.T) {
+// TestHandleTasks_NoWildcardCORS — dashboard is same-origin only (Fix #2).
+func TestHandleTasks_NoWildcardCORS(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -303,8 +311,8 @@ func TestHandleTasks_CORS(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleTasks(db)(w, r)
 
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("missing CORS header")
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("AUDIT-001/053: handleTasks must not set Access-Control-Allow-Origin; got %q", got)
 	}
 }
 
@@ -558,8 +566,10 @@ func TestHandleHolonetStream_SSEHeaders(t *testing.T) {
 	if w.Header().Get("Cache-Control") != "no-cache" {
 		t.Error("expected Cache-Control: no-cache")
 	}
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("missing CORS header")
+	// AUDIT-053 (Fix #2): SSE must NOT set wildcard CORS — fleet.log contains
+	// gh-auth stderr with token prefixes and Claude stdout with env echoes.
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("AUDIT-053: SSE must not set Access-Control-Allow-Origin; got %q", got)
 	}
 }
 

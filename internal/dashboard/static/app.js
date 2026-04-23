@@ -179,6 +179,17 @@ function renderStats() {
   $('tbadge-mail').textContent = s.unread_mail || '';
   $('tbadge-mail').className = 'tab-badge' + (s.unread_mail > 0 ? ' hot' : '');
 
+  // High-escalations banner (AUDIT-064 / Fix #2): show when >=3 HIGH-severity
+  // escalations are open. Three simultaneous HIGH escalations means the
+  // fleet's self-healing is genuinely exhausted — the operator is the
+  // bottleneck, and this needs to be impossible to miss from any tab.
+  const highEscCount = s.high_escalations || 0;
+  const highBanner = $('high-esc-banner');
+  if (highBanner) {
+    $('high-esc-banner-count').textContent = highEscCount;
+    highBanner.classList.toggle('hidden', highEscCount < 3);
+  }
+
   // Ship-ready banner: show when any convoy is DraftPROpen, hide otherwise.
   // Visible from every tab so the operator can't miss it — the fleet is
   // literally blocked on their Ship It click.
@@ -200,6 +211,12 @@ function renderStats() {
 function jumpToShipReady() {
   setConvoyStatusFilter('active');
   switchTab('convoys');
+}
+
+// jumpToEscalations switches to the Escalations tab with the default Open
+// filter. Wired to the high-escalations banner click (AUDIT-064).
+function jumpToEscalations() {
+  switchTab('escalations');
 }
 
 // ── URL sync ──────────────────────────────────────────────────────────────────
@@ -1346,9 +1363,15 @@ function openMail(id) {
     <span class="meta-key">Task</span>  <span class="meta-val">${m.task_id || '—'}</span>
     <span class="meta-key">Date</span>  <span class="meta-val">${fmtTS(m.created_at)}</span>
   `;
-  $('mail-modal-body').innerHTML = typeof marked !== 'undefined'
-    ? marked.parse(m.body || '')
-    : escHtml(m.body || '');
+  // AUDIT-002 / AUDIT-003 (Fix #2): render mail body as plain text.
+  // Mail bodies come from every agent + GitHub comments + operator paste,
+  // so they're effectively attacker-controlled. textContent assigns the
+  // string as text (no HTML parse, no script execution, no URL auto-run).
+  // If rich rendering is ever re-introduced, bundle marked + DOMPurify
+  // locally under static/ and gate the call on both being loaded — never
+  // reinstate the CDN.
+  const mailBody = $('mail-modal-body');
+  mailBody.textContent = m.body || '';
   $('mail-modal').classList.remove('hidden');
 
   if (!m.read_at) {

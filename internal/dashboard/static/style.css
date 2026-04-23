@@ -773,6 +773,36 @@ td.mail-body-preview {
 #mail-modal .directive-box strong { font-weight: 600; }
 #mail-modal .directive-box em { font-style: italic; }
 
+/* High-escalation banner — visible whenever HighEscalations >= 3. Red, loud,
+   must pierce every tab. AUDIT-064 / Fix #2. */
+.high-esc-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: linear-gradient(90deg, #b91c1c 0%, #dc2626 100%);
+  color: #fff;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  user-select: none;
+  transition: filter 120ms ease;
+}
+.high-esc-banner:hover { filter: brightness(1.08); }
+.high-esc-banner.hidden { display: none; }
+.high-esc-banner-icon { font-size: 18px; }
+.high-esc-banner-msg { flex: 1; }
+.high-esc-banner-cta {
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.95;
+  padding: 3px 10px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 4px;
+}
+
 /* Ship-ready banner — visible above the tab bar whenever a convoy is in
    DraftPROpen. Intentionally loud; the operator is the bottleneck here. */
 .ship-banner {

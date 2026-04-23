@@ -17,7 +17,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | P5 | `internal/agents/spend_cap_test.go` | `TestSpendCap_*`, `TestSpendBurnPattern_*` — feature now exists | Closed by: Fix #1 |
 | P6 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues` (+ 3 subtests) | Fix #5 (state machine sweepers + Resolved normalization) — **Closed by: Fix #5 (outer + A subtest); B remains pending Fix #5 AUDIT-025 follow-up; C remains pending AUDIT-085** |
 | P7 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace`, `TestPattern_P7_ResetTaskResurrectsCompleted` | Fix #8/#5 (UpdateBountyStatusFrom) |
-| P8 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | Fix #2 (dashboard hardening) |
+| P8 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | Fix #2 (dashboard hardening) | Closed by: Fix #2 (`fix/dashboard-hardening`) |
 | P9 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels` (+ 3 subtests) | Fix #10 (RedactSecrets + webhook allow-list) |
 | P10 | `internal/git/audit_pattern_p10_test.go` | `TestPattern_P10_BranchValidatorsMissing`, `TestPattern_P10_GitInvocationsLackDashDashSeparator` | Fix #9 (validRef + `--` separator) |
 | P11 | `internal/agents/audit_pattern_p11_test.go` | `TestPattern_P11_EstopDoesNotStopTheWorld` (+ 3 subtests A/B/C for AUDIT-105/106/107) | Fix #1 (effective e-stop) |
@@ -27,9 +27,9 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 
 | ID | Test file | Test name | Kind | Fix plan |
 |---|---|---|---|---|
-| AUDIT-001 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | static | Fix #2 |
-| AUDIT-002 | `internal/dashboard/audit_pattern_p8_test.go` | same | static | Fix #2 |
-| AUDIT-003 | `internal/dashboard/audit_pattern_p8_test.go` | same | static | Fix #2 |
+| AUDIT-001 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | static | Fix #2 | Closed by: Fix #2 (`fix/dashboard-hardening`) |
+| AUDIT-002 | `internal/dashboard/audit_pattern_p8_test.go` | same | static | Fix #2 | Closed by: Fix #2 |
+| AUDIT-003 | `internal/dashboard/audit_pattern_p8_test.go` | same | static | Fix #2 | Closed by: Fix #2 |
 | AUDIT-004 | `internal/agents/spend_cap_test.go` | `TestSpendCap_*`, `TestDogSpendBurnWatch_*` | unit+integration+feature | Fix #1 | Closed by: Fix #1 (`fix/spend-cap-and-estop`) |
 | AUDIT-005 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_005_MedicRequeueZerosRetryCount` | static | Fix #6 |
 | AUDIT-006 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_006_ConvoyReview5x5Structural` | static | Fix #7 |
@@ -97,8 +97,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-050 | same | P10 `--` separator coverage | static | Fix #9 |
 | AUDIT-051 | same | P10 end-to-end chain | static | Fix #9 |
 | AUDIT-052 | same | P10 `--dangerously-skip-permissions` | static | Fix #9 |
-| AUDIT-053 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 |
-| AUDIT-054 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 |
+| AUDIT-053 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 | Closed by: Fix #2 (`fix/dashboard-hardening`) |
+| AUDIT-054 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 | Closed by: Fix #2 |
 | AUDIT-055 | `internal/store/audit_pattern_p9_test.go` | `.../C_GhStderrNotRedacted` | static grep | Fix #10 |
 | AUDIT-056 | `internal/store/audit_pattern_p9_test.go` | `.../B_WebhookBodyLeaksTokens` | behavioral (httptest) | Fix #10 |
 | AUDIT-057 | `internal/store/audit_misc_security_test.go` | `.../AUDIT_057_*` | static | Fix #10 |
@@ -108,7 +108,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-061 | `internal/agents/spend_cap_test.go` | `TestDogSpendBurnWatch_AutoEstopsAtHardCap`, `TestSpendBurnPattern_TriggersAutoEstopInOneCycle` | feature+integration | Fix #1 | Closed by: Fix #1 |
 | AUDIT-062 | — | NOT-APPLICABLE (no thrash dog) | — | Fix #1 |
 | AUDIT-063 | — | NOT-APPLICABLE (no claude event) | — | Fix #1 |
-| AUDIT-064 | — | NOT-APPLICABLE (no banner) | — | Fix #2 |
+| AUDIT-064 | `internal/dashboard/security_test.go` | `TestFix2_HighEscalationBanner_Present` | static | Fix #2 | Closed by: Fix #2 (`fix/dashboard-hardening`) — banner now exists, formerly NOT-APPLICABLE (feature absence) |
 | AUDIT-065 | `internal/dashboard/spend_cap_api_test.go` | `TestAPIStatus_ExposesHourlySpend` (AttemptsLastHour) | acceptance | Fix #1 | Closed by: Fix #1 |
 | AUDIT-115 | `internal/agents/audit_pattern_p12_test.go` | `.../D_MissingApprovedField*` | behavioral | Fix #8.5 |
 | AUDIT-116 | `internal/agents/audit_pattern_p12_test.go` | `.../F_ChancellorFailsOpen*` | static | Fix #8.5 |
@@ -184,7 +184,7 @@ These are Medium findings where the pattern test in the table above structurally
 | AUDIT-061 | Closed by Fix #1 — test now committed | `internal/agents/spend_cap_test.go` |
 | AUDIT-062 | NOT-APPLICABLE (no convoy-thrash dog) | — |
 | AUDIT-063 | NOT-APPLICABLE (no claude_invocation_completed event) | — |
-| AUDIT-064 | NOT-APPLICABLE (no high-escalation banner) | — |
+| AUDIT-064 | PROMOTED to individual coverage by Fix #2 | see `TestFix2_HighEscalationBanner_Present` |
 | AUDIT-065 | Closed by Fix #1 — test now committed | `internal/dashboard/spend_cap_api_test.go` |
 | AUDIT-128 | NOT-APPLICABLE (no orphan-worktree sweep) | — |
 | AUDIT-019 | Canonical test exists | `TestAUDIT_MiscSecurity/AUDIT_019_worktree_symlink_follow` |
