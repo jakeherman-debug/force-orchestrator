@@ -168,6 +168,18 @@ func buildSubPRBody(b *store.Bounty, ruling store.CouncilRuling) string {
 // force-push the branch and update ConvoyAskBranch.ask_branch_base_sha to the
 // new tip. No sub-PR is created — the resolved commits ARE the ask-branch.
 func completeAskBranchResolution(db *sql.DB, bounty *store.Bounty, ab *store.ConvoyAskBranch, repo *store.Repository, logger interface{ Printf(string, ...any) }) (gh.ErrorClass, error) {
+	// Fix #0: refuse to force-push if ab.AskBranch has somehow become the
+	// default branch (DB corruption, manual edit) or doesn't look like a
+	// well-formed ask-branch. completeAskBranchResolution is the one path
+	// where a DB-supplied string flows straight into `git push --force`.
+	if err := igit.AssertNotDefaultBranch(repo.LocalPath, ab.AskBranch); err != nil {
+		logger.Printf("Task %d: ask-branch %q rejected by protected-branch guard: %v", bounty.ID, ab.AskBranch, err)
+		return gh.ErrClassPermanent, fmt.Errorf("protected-branch guard: %w", err)
+	}
+	if !igit.IsValidAskBranch(ab.AskBranch) {
+		logger.Printf("Task %d: ask-branch %q fails ask-branch naming pattern — refusing force-push", bounty.ID, ab.AskBranch)
+		return gh.ErrClassPermanent, fmt.Errorf("ask-branch %q does not match expected <prefix>force/ask-<id>-<slug> pattern", ab.AskBranch)
+	}
 	// Force-push the ask-branch with lease so a concurrent rewrite can't be
 	// silently clobbered.
 	pushOut, pushErr := exec.Command("git", "-C", repo.LocalPath, "push",
@@ -706,9 +718,16 @@ func onSubPRStalled(db *sql.DB, ghc interface {
 	// All checks QUEUED or there are simply zero checks — both are symptoms
 	// of a runner/workflow problem we can try to unstick. Push an empty commit
 	// to force a new check suite.
-	branch := pr.Repo
+	//
+	// Fix #0: do NOT fall back to `branch := pr.Repo` when the parent task's
+	// branch_name is empty. The prior fallback would push an empty commit to
+	// origin/<repo-short-name> — if that happened to match the default branch
+	// name (common: repo "force-orchestrator" with branch name "force-
+	// orchestrator"? no; but repo "main" would collapse the two), we'd
+	// trigger a CI rerun on origin/main. Escalate instead.
 	parent, _ := store.GetBounty(db, pr.TaskID)
-	if parent != nil && parent.BranchName != "" {
+	var branch string
+	if parent != nil {
 		branch = parent.BranchName
 	}
 	if cwd == "" || branch == "" {

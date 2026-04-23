@@ -8,6 +8,7 @@ This file captures invariants that are easy to violate without noticing. Read it
 - **No silent failures.** Every error path must terminate in `store.FailBounty(...)`, `store.UpdateBountyStatus(...)`, or an explicit escalation. Never `log.Printf` an error and continue as if nothing happened.
 - **CLI shelling for LLM calls.** Agents invoke Claude via `claude -p` (through `internal/claude`), not the Anthropic HTTP API. This preserves the MCP toolchain available to Claude Code.
 - **Worktree isolation.** Astromechs work in persistent per-agent git worktrees (`.force-worktrees/<repo>/<agent>`). They branch off HEAD of the repo (or the convoy's ask-branch under the PR flow). Never hardcode `main` or `master` — use `GetDefaultBranch(repoPath)`.
+- **Protected-branch guard (Fix #0).** Every destructive git op — `ForcePushBranch`, `TriggerCIRerun`, `DeleteAskBranch`, `MergeAndCleanup`, `completeAskBranchResolution` — MUST call `igit.AssertNotDefaultBranch(repoPath, branch)` as its first statement. Never add a new destructive git op without the guard. The store ingress (`UpsertConvoyAskBranch`) additionally rejects protected branch names at write time so DB-corrupt rows can't flow downstream. If you need to rewrite a protected branch for a legitimate reason, create a new entry point with an explicit opt-in — do NOT relax the denylist.
 
 ## PR flow invariants
 
