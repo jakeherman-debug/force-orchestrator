@@ -61,6 +61,13 @@ func UpsertConvoyAskBranch(db *sql.DB, convoyID int, repo, askBranch, baseSHA st
 		return fmt.Errorf("UpsertConvoyAskBranch: all fields required (convoy=%d repo=%q branch=%q sha=%q)",
 			convoyID, repo, askBranch, baseSHA)
 	}
+	// Fix #9: ingress ref validator. Reject branch names that would be
+	// re-interpreted as flags by git (CVE-2017-1000117 class) or contain
+	// git-check-ref-format-forbidden characters. Runs BEFORE the protected-
+	// branch denylist so we fail with the most specific error.
+	if err := validateRefName(askBranch); err != nil {
+		return fmt.Errorf("UpsertConvoyAskBranch: %w", err)
+	}
 	// Fix #0: ingress guard. Reject ask_branch="main"/"master"/... at DB-write
 	// time so a single manual edit or corrupt migration can't become the
 	// DB-supplied input to completeAskBranchResolution's force-push.

@@ -166,6 +166,12 @@ func SetConvoyAskBranch(db *sql.DB, convoyID int, branch, baseSHA string) error 
 	if branch == "" || baseSHA == "" {
 		return fmt.Errorf("SetConvoyAskBranch: branch and baseSHA must be non-empty (got %q, %q)", branch, baseSHA)
 	}
+	// Fix #9: ref validator at ingress. Prevents CVE-2017-1000117-class
+	// strings from landing in Convoys.ask_branch and flowing into a
+	// `git push --force-with-lease origin <branch>` call downstream.
+	if err := validateRefName(branch); err != nil {
+		return fmt.Errorf("SetConvoyAskBranch: %w", err)
+	}
 	_, err := db.Exec(`UPDATE Convoys SET ask_branch = ?, ask_branch_base_sha = ? WHERE id = ?`,
 		branch, baseSHA, convoyID)
 	return err

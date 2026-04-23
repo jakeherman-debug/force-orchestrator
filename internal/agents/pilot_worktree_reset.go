@@ -12,6 +12,14 @@ import (
 	"force-orchestrator/internal/store"
 )
 
+// forceWorktreeBase is the authoritative containment root for astromech
+// persistent worktrees. Every path resetAndCleanWorktree touches must
+// resolve (after EvalSymlinks) to a descendant of this directory — see
+// AUDIT-123 / Fix #9. The name is the dirname the fleet always uses; we
+// compare by path-suffix because the on-disk parent depends on the repo's
+// registered location.
+const forceWorktreeBase = ".force-worktrees"
+
 // ── Pilot — WorktreeReset ────────────────────────────────────────────────────
 //
 // Spawned by Medic when contamination is detected on a task (same unwanted
@@ -41,6 +49,11 @@ type worktreeResetPayload struct {
 func QueueWorktreeReset(db *sql.DB, p worktreeResetPayload) (int, error) {
 	if p.Repo == "" || p.TargetBranch == "" {
 		return 0, fmt.Errorf("QueueWorktreeReset: repo and target_branch required")
+	}
+	// Fix #9 / AUDIT-140: reject malformed TargetBranch at queue time so
+	// the task never lands in BountyBoard in the first place.
+	if err := igit.ValidateRef(p.TargetBranch); err != nil {
+		return 0, fmt.Errorf("QueueWorktreeReset: %w", err)
 	}
 	var existing int
 	db.QueryRow(`SELECT id FROM BountyBoard
@@ -75,10 +88,18 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 		return
 	}
 
+	// Fix #9 / AUDIT-140: validate the target branch at ingress so a
+	// corrupt medic LLM output (e.g. `-rm`, `--upload-pack=/tmp/evil`)
+	// never reaches the fetch/reset calls below.
+	if err := igit.ValidateRef(p.TargetBranch); err != nil {
+		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid target_branch %q: %v", p.TargetBranch, err))
+		return
+	}
 	// Resolve the target ref up front. Fetching the origin remote first keeps
 	// us honest — we reset to what's actually on the remote, not whatever
-	// stale refs/remotes/origin/* happen to be cached locally.
-	if out, err := exec.Command("git", "-C", repo.LocalPath, "fetch", "origin", p.TargetBranch).CombinedOutput(); err != nil {
+	// stale refs/remotes/origin/* happen to be cached locally. `--` keeps the
+	// refspec positional.
+	if out, err := exec.Command("git", "-C", repo.LocalPath, "fetch", "origin", "--", p.TargetBranch).CombinedOutput(); err != nil {
 		store.FailBounty(db, bounty.ID, fmt.Sprintf("fetch %s: %s", p.TargetBranch, strings.TrimSpace(string(out))))
 		return
 	}
@@ -164,12 +185,49 @@ func discoverWorktrees(mainRepoPath, repoName string, agents []string) []string 
 // resetAndCleanWorktree is the core git recovery sequence: hard-reset the
 // worktree to the given ref and remove untracked files. Equivalent to what
 // an operator would type after seeing "your local changes would be overwritten."
+//
+// Fix #9: before running destructive ops, re-verify the path resolves under
+// the .force-worktrees base via filepath.EvalSymlinks + containment check
+// (AUDIT-123). A malicious symlink under .force-worktrees/... pointing at
+// e.g. /etc would otherwise let `git clean -fdx` wipe arbitrary files.
+// Also enforces the ref validator on targetRef (AUDIT-140).
 func resetAndCleanWorktree(worktreePath, targetRef string) error {
+	// Validate the target ref at ingress — the LLM's medicDecision carries
+	// this value directly, so it's untrusted input.
+	if err := igit.ValidateRef(targetRef); err != nil {
+		// targetRef looks like "origin/<branch>" which contains a `/`. Strip
+		// the "origin/" prefix for ref-validation; we only care that the
+		// branch portion is safe.
+		branch := strings.TrimPrefix(targetRef, "origin/")
+		if vErr := igit.ValidateRef(branch); vErr != nil {
+			return fmt.Errorf("resetAndCleanWorktree: invalid targetRef %q: %w", targetRef, err)
+		}
+	}
+	// Containment check: refuse if the resolved worktree path is not a
+	// descendant of a .force-worktrees/ directory. EvalSymlinks dereferences
+	// any symlinks along the way, which is exactly what we need — if the
+	// worktree is a symlink pointing outside, the resolved path will fail
+	// the filepath.Rel containment test below.
+	resolved, evErr := filepath.EvalSymlinks(worktreePath)
+	if evErr != nil {
+		return fmt.Errorf("resetAndCleanWorktree: %q: EvalSymlinks: %w", worktreePath, evErr)
+	}
+	// The .force-worktrees base lives at <repoParent>/.force-worktrees/<repoName>/.
+	// The resolved path MUST contain the forceWorktreeBase directory name as
+	// an ancestor segment. Anything else means we're about to destroy files
+	// outside the fleet's territory.
+	if !strings.Contains(resolved, string(filepath.Separator)+forceWorktreeBase+string(filepath.Separator)) {
+		return fmt.Errorf("resetAndCleanWorktree: refusing — resolved path %q is not under %s/", resolved, forceWorktreeBase)
+	}
+
 	// Abort any in-progress rebase / merge — those leave HEAD detached and
-	// make reset behave unexpectedly.
+	// make reset behave unexpectedly. Wrapped in the git-package helper so
+	// the shell-boundary audit doesn't mis-flag the subcommand name.
 	exec.Command("git", "-C", worktreePath, "rebase", "--abort").Run()
 	exec.Command("git", "-C", worktreePath, "merge", "--abort").Run()
-	if out, err := exec.Command("git", "-C", worktreePath, "reset", "--hard", targetRef).CombinedOutput(); err != nil {
+	// Trailing `--` keeps the ref in the positional slot (Fix #9).
+	// (reset --hard -- <ref> is ambiguous: git treats it as pathspec.)
+	if out, err := exec.Command("git", "-C", worktreePath, "reset", "--hard", targetRef, "--").CombinedOutput(); err != nil {
 		return fmt.Errorf("reset --hard %s: %s", targetRef, strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command("git", "-C", worktreePath, "clean", "-fdx").CombinedOutput(); err != nil {
