@@ -96,14 +96,14 @@ var rateLimitRetries sync.Map
 func permanentInfraFail(db *sql.DB, logger interface{ Printf(string, ...any) },
 	sessionID, agentName string, bounty *store.Bounty, msg string) {
 
-	store.FailBounty(db, bounty.ID, msg)
+	_ = store.FailBounty(db, bounty.ID, msg) // TODO(Fix #8b): propagate error
 	telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, bounty.ID, msg))
 	store.LogAudit(db, agentName, "infra-fail", bounty.ID, msg)
 
 	// Don't spawn a Medic to investigate a Medic — that creates infinite chains.
 	// Infrastructure tasks that fail hard go straight to escalation instead.
 	if store.IsInfrastructureTask(bounty.Type) {
-		CreateEscalation(db, bounty.ID, store.SeverityMedium,
+		_, _ = CreateEscalation(db, bounty.ID, store.SeverityMedium, // TODO(Fix #8b): propagate error
 			fmt.Sprintf("Infrastructure task #%d (%s) failed permanently: %s", bounty.ID, bounty.Type, msg))
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[INFRA FAIL] Task #%d (%s) failed", bounty.ID, bounty.Type),
@@ -315,7 +315,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 	if repoPath == "" {
 		msg := fmt.Sprintf("DB Err: unknown target repository '%s'", bounty.TargetRepo)
 		logger.Printf("Task %d FAILED: %s", bounty.ID, msg)
-		store.FailBounty(db, bounty.ID, msg)
+		_ = store.FailBounty(db, bounty.ID, msg) // TODO(Fix #8b): propagate error
 		store.RecordTaskHistory(db, bounty.ID, name, sessionID, "", "Failed")
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, msg))
 		return
@@ -511,7 +511,7 @@ Do not re-do work that is already correctly committed.`
 			backoff := RateLimitBackoff(rlCount)
 			logger.Printf("Task %d: rate limit detected (hit %d), backing off %v", bounty.ID, rlCount+1, backoff)
 			telemetry.EmitEvent(telemetry.EventRateLimited(sessionID, name, bounty.ID, rlCount+1, backoff))
-			store.UpdateBountyStatus(db, bounty.ID, "Pending")
+			_ = store.UpdateBountyStatus(db, bounty.ID, "Pending") // TODO(Fix #8b): propagate error
 			// AUDIT-107: honour e-stop during the backoff. A blind time.Sleep
 			// leaves an emergency halt ineffective for up to 10 minutes while
 			// the agent sleeps; this helper short-sleeps and re-checks each
@@ -535,6 +535,10 @@ Do not re-do work that is already correctly committed.`
 		// calls autoShardIfNoCommits with kind="zero-commits" to Decompose
 		// shard the task rather than return-for-rework forever).
 		if strings.HasPrefix(err.Error(), "claude CLI timed out") && bounty.InfraFailures >= 2 {
+			// Fix #6: centralised auto-shard helper so the zero-commits branch
+			// and the timeout branch both route through the same decomposition
+			// logic. Error propagation of the inner FailBounty is a Fix #8b
+			// concern (marked in the helper).
 			if autoShardIfNoCommits(db, bounty, name, sessionID, repoPath, branchName, outputStr, injectedMemoryIDs, "timeout", logger) {
 				return
 			}
@@ -670,7 +674,7 @@ func processAstromechOutput(
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
 		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
 		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
-		store.UpdateBountyStatus(db, taskID, "Completed")
+		_ = store.UpdateBountyStatus(db, taskID, "Completed") // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, name, taskID))
 		store.SendMail(db, name, "operator",
 			fmt.Sprintf("[SHARD] Task #%d context-blown — re-queued for decomposition", taskID),
@@ -686,7 +690,7 @@ func processAstromechOutput(
 	if sev, msg, ok := ParseEscalationSignal(outputStr); ok {
 		logger.Printf("Task %d: escalated [%s] %s", taskID, sev, msg)
 		recordHist(outputStr, "Escalated")
-		CreateEscalation(db, taskID, sev, msg)
+		_, _ = CreateEscalation(db, taskID, sev, msg) // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, taskID, sev, msg))
 		store.SendMail(db, name, "operator",
 			fmt.Sprintf("[%s] Task #%d escalated — %s", string(sev), taskID, bounty.TargetRepo),
@@ -708,7 +712,7 @@ func processAstromechOutput(
 		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
 		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
 		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
-		store.UpdateBountyStatus(db, taskID, "Completed")
+		_ = store.UpdateBountyStatus(db, taskID, "Completed") // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskSharded(sessionID, name, taskID))
 		store.SendMail(db, name, "operator",
 			fmt.Sprintf("[SHARD] Task #%d too large — re-queued for decomposition", taskID),
@@ -729,7 +733,7 @@ func processAstromechOutput(
 		}
 		telemetry.EmitEvent(telemetry.EventTaskDoneSignal(sessionID, name, taskID))
 		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
-		store.UpdateBountyStatus(db, taskID, nextStatus)
+		_ = store.UpdateBountyStatus(db, taskID, nextStatus) // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -775,7 +779,7 @@ func processAstromechOutput(
 			}
 			if retryCount >= MaxRetries {
 				failMsg := fmt.Sprintf("Git Commit Err: Claude CLI finished but made zero file changes after %d attempts", MaxRetries)
-				store.FailBounty(db, taskID, failMsg)
+				_ = store.FailBounty(db, taskID, failMsg) // TODO(Fix #8b): propagate error
 				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, taskID, failMsg))
 			} else {
 				note := "\n\nNOTE (from orchestrator): A prior attempt of this task completed without making any file changes. " +
@@ -796,7 +800,7 @@ func processAstromechOutput(
 	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
 	nextStatus := nextReviewStatus(db, bounty.ConvoyID)
 	logger.Printf("Task %d: SUCCESS, status -> %s", taskID, nextStatus)
-	store.UpdateBountyStatus(db, taskID, nextStatus)
+	_ = store.UpdateBountyStatus(db, taskID, nextStatus) // TODO(Fix #8b): propagate error
 }
 
 // RunTaskForeground claims a specific task by ID and runs it in the foreground,

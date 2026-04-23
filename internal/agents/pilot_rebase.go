@@ -64,7 +64,7 @@ func QueueRebaseAskBranch(db *sql.DB, convoyID int, repo string) (int, error) {
 func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload rebasePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -73,12 +73,12 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		// Nothing to rebase — the ask-branch was cleaned up between queue and run.
 		logger.Printf("RebaseAskBranch #%d: convoy %d repo %s has no ask-branch — completing as no-op",
 			bounty.ID, payload.ConvoyID, payload.Repo)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 		return
 	}
 	repo := store.GetRepo(db, payload.Repo)
 	if repo == nil || repo.LocalPath == "" {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("repo %s not registered or missing local_path", payload.Repo))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("repo %s not registered or missing local_path", payload.Repo)) // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -102,7 +102,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 			store.SendMail(db, "Pilot", "operator",
 				fmt.Sprintf("[DRIFT LIMIT] Convoy #%d repo %s too far behind main", payload.ConvoyID, payload.Repo),
 				escMsg, bounty.ID, store.MailTypeAlert)
-			store.FailBounty(db, bounty.ID, escMsg)
+			_ = store.FailBounty(db, bounty.ID, escMsg) // TODO(Fix #8b): propagate error
 			return
 		}
 	}
@@ -116,7 +116,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		escMsg := fmt.Sprintf("Ask-branch %s on %s has exhausted the conflict-retry cap (%d failed rebase-conflict attempts) — human review required",
 			ab.AskBranch, payload.Repo, attempts)
 		logger.Printf("RebaseAskBranch #%d: %s", bounty.ID, escMsg)
-		CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg)
+		_, _ = CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg) // TODO(Fix #8b): propagate error
 		store.SendMail(db, "Pilot", "operator",
 			fmt.Sprintf("[REBASE CAP] Convoy #%d repo %s ask-branch rebase-conflict cap hit", payload.ConvoyID, payload.Repo),
 			escMsg, bounty.ID, store.MailTypeAlert)
@@ -148,7 +148,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 					bounty.ID, unionTip[:minInt(8, len(unionTip))])
 				store.LogAudit(db, "Pilot", "rebase-union-merge", bounty.ID,
 					fmt.Sprintf("auto-resolved conflict via union merge; saved %s", ab.AskBranch))
-				store.UpdateBountyStatus(db, bounty.ID, "Completed")
+				_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 				return
 			}
 		} else {
@@ -169,7 +169,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 			payload.ConvoyID, payload.Repo, ab.AskBranch, defaultBranch, defaultBranch, defaultBranch, ab.AskBranch)
 		conflictTaskID, existed, addErr := store.AddConvoyTaskIdempotent(db, idKey, bounty.ID, payload.Repo, conflictPayload, payload.ConvoyID, 5, "Pending")
 		if addErr != nil {
-			store.FailBounty(db, bounty.ID, fmt.Sprintf("queue ask-branch conflict: %v", addErr))
+			_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("queue ask-branch conflict: %v", addErr)) // TODO(Fix #8b): propagate error
 			return
 		}
 		// Fix #6 (AUDIT-028, AUDIT-119): count each serial attempt. The
@@ -180,7 +180,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 			bounty.ID, payload.ConvoyID, payload.Repo, newAttempts, maxAskBranchConflicts)
 		if existed {
 			logger.Printf("RebaseAskBranch #%d: conflict — reusing existing task #%d on %s", bounty.ID, conflictTaskID, ab.AskBranch)
-			store.UpdateBountyStatus(db, bounty.ID, "Completed")
+			_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 			return
 		}
 		// Stamp the branch name so the astromech resumes directly on the ask-branch.
@@ -191,7 +191,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 				ab.AskBranch, defaultBranch, defaultBranch, rebaseErr),
 			conflictTaskID, store.MailTypeFeedback)
 		// Pilot's job on conflict is done — astromech takes over.
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 		store.LogAudit(db, "Pilot", "rebase-conflict", bounty.ID,
 			fmt.Sprintf("spawned RebaseConflict task #%d", conflictTaskID))
 		return
@@ -208,18 +208,18 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 			if _, err := db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
 				fmt.Sprintf("transient push error (class=%s): %v", cls, pushErr), bounty.ID); err != nil {
 				logger.Printf("RebaseAskBranch #%d: requeue UPDATE failed (%v) — failing task instead", bounty.ID, err)
-				store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push failed and requeue failed: %v / %v", pushErr, err))
+				_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push failed and requeue failed: %v / %v", pushErr, err)) // TODO(Fix #8b): propagate error
 				return
 			}
 			logger.Printf("RebaseAskBranch #%d: transient push error (class=%s) — requeued", bounty.ID, cls)
 			return
 		}
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push failed (class=%s): %v", cls, pushErr))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push failed (class=%s): %v", cls, pushErr)) // TODO(Fix #8b): propagate error
 		return
 	}
 
 	if err := store.UpdateConvoyAskBranchBase(db, payload.ConvoyID, payload.Repo, newTip); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("failed to record new base SHA: %v", err))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("failed to record new base SHA: %v", err)) // TODO(Fix #8b): propagate error
 		return
 	}
 	// Fix #6: a clean rebase means the ask-branch caught up — any past
@@ -228,7 +228,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 	store.ResetFailedRebaseAttempts(db, payload.ConvoyID, payload.Repo)
 	logger.Printf("RebaseAskBranch #%d: convoy %d repo %s rebased onto %s, new tip %s",
 		bounty.ID, payload.ConvoyID, payload.Repo, defaultBranch, newTip[:minInt(8, len(newTip))])
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 }
 
 // countCommitsAheadBehind returns (behind, ahead, error) — how many commits

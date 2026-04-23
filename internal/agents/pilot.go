@@ -354,23 +354,23 @@ func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 func runFindPRTemplate(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload findPRTemplatePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
 		return
 	}
 	if payload.Repo == "" || payload.LocalPath == "" {
-		store.FailBounty(db, bounty.ID, "payload missing repo or local_path")
+		_ = store.FailBounty(db, bounty.ID, "payload missing repo or local_path") // TODO(Fix #8b): propagate error
 		return
 	}
 
 	path, err := FindPRTemplatePathLLM(payload.LocalPath, claude.AskClaudeCLI)
 	if err != nil {
 		// Directory-level failure (not-a-dir etc.) — escalate via normal retry path.
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("discovery failed: %v", err))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("discovery failed: %v", err)) // TODO(Fix #8b): propagate error
 		return
 	}
 
 	if storeErr := store.SetRepoPRTemplatePath(db, payload.Repo, path); storeErr != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("could not persist template path: %v", storeErr))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("could not persist template path: %v", storeErr)) // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -380,5 +380,5 @@ func runFindPRTemplate(db *sql.DB, bounty *store.Bounty, logger interface{ Print
 	} else {
 		logger.Printf("FindPRTemplate #%d: template for %s → %s", bounty.ID, payload.Repo, path)
 	}
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 }

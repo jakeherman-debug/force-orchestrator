@@ -92,17 +92,17 @@ func AskBranchNameForConvoy(convoyID int, convoyName string) string {
 func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload createAskBranchPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
 		return
 	}
 	if payload.ConvoyID <= 0 {
-		store.FailBounty(db, bounty.ID, "payload missing convoy_id")
+		_ = store.FailBounty(db, bounty.ID, "payload missing convoy_id") // TODO(Fix #8b): propagate error
 		return
 	}
 
 	convoy := store.GetConvoy(db, payload.ConvoyID)
 	if convoy == nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID)) // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -113,7 +113,7 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		// check will re-queue if needed.
 		logger.Printf("CreateAskBranch #%d: convoy %d has no CodeEdit tasks yet — completing as no-op",
 			bounty.ID, payload.ConvoyID)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -171,7 +171,7 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 				len(created), len(failures),
 				strings.Join(created, ","), strings.Join(failures, ";"))
 		}
-		store.FailBounty(db, bounty.ID, msg)
+		_ = store.FailBounty(db, bounty.ID, msg) // TODO(Fix #8b): propagate error
 		logger.Printf("CreateAskBranch #%d: %s", bounty.ID, msg)
 		return
 	}
@@ -188,7 +188,7 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 
 	logger.Printf("CreateAskBranch #%d: convoy %d → created=[%s] skipped=[%s]",
 		bounty.ID, payload.ConvoyID, strings.Join(created, ","), strings.Join(skipped, ","))
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 }
 
 // ── CleanupAskBranch ─────────────────────────────────────────────────────────
@@ -235,11 +235,11 @@ func QueueCleanupAskBranchTx(tx *sql.Tx, convoyID int) (int, error) {
 func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload cleanupAskBranchPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
 		return
 	}
 	if payload.ConvoyID <= 0 {
-		store.FailBounty(db, bounty.ID, "payload missing convoy_id")
+		_ = store.FailBounty(db, bounty.ID, "payload missing convoy_id") // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -262,12 +262,12 @@ func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pri
 		deleted = append(deleted, ab.Repo)
 	}
 	if len(failed) > 0 {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("cleanup failures: %s", strings.Join(failed, "; ")))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("cleanup failures: %s", strings.Join(failed, "; "))) // TODO(Fix #8b): propagate error
 		return
 	}
 	logger.Printf("CleanupAskBranch #%d: convoy %d → deleted=[%s]",
 		bounty.ID, payload.ConvoyID, strings.Join(deleted, ","))
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 }
 
 func minInt(a, b int) int {

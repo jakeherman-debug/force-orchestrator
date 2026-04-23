@@ -149,7 +149,7 @@ func handleInfraFailure(
 		if recordHistory {
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "", "Failed")
 		}
-		store.FailBounty(db, b.ID, msg)
+		_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		store.LogAudit(db, agentName, "infra-fail", b.ID, msg)
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
@@ -176,7 +176,7 @@ func handleInfraFailure(
 			// rather than silently letting the task die — this is a structural
 			// signal that further decomposition isn't going to help.
 			logger.Printf("Task %d: reshard refused (generation=%d >= cap=%d) — escalating", b.ID, b.ReshardGeneration, maxReshardGeneration)
-			CreateEscalation(db, b.ID, store.SeverityHigh,
+			_, _ = CreateEscalation(db, b.ID, store.SeverityHigh, // TODO(Fix #8b): propagate error
 				fmt.Sprintf("Reshard cascade reached generation cap (%d). Further decomposition is unlikely to help — this task needs human review. Last error: %s",
 					maxReshardGeneration, msg))
 			store.SendMail(db, agentName, "operator",
@@ -193,7 +193,7 @@ func handleInfraFailure(
 				b.ID, store.MailTypeAlert)
 		}
 	} else {
-		store.UpdateBountyStatus(db, b.ID, retryStatus)
+		_ = store.UpdateBountyStatus(db, b.ID, retryStatus) // TODO(Fix #8b): propagate error
 		backoff := InfraBackoff(count)
 		logger.Printf("Task %d: %s infra failure %d/%d, backing off %v", b.ID, stageName, count, MaxInfraFailures, backoff)
 		time.Sleep(backoff)

@@ -314,7 +314,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	repoPath := store.GetRepoPath(db, b.TargetRepo)
 	if repoPath == "" {
 		msg := fmt.Sprintf("DB Err: unknown target repository '%s'", b.TargetRepo)
-		store.FailBounty(db, b.ID, msg)
+		_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		return
 	}
@@ -332,7 +332,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		if reviewCommitsAhead(db, repoPath, b) == "" {
 			// No diff and no unique commits — work was already merged into main.
 			// Auto-complete rather than failing; unblock dependents and recover convoy.
-			store.UpdateBountyStatus(db, b.ID, "Completed")
+			_ = store.UpdateBountyStatus(db, b.ID, "Completed") // TODO(Fix #8b): propagate error
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "auto-completed: work already merged into main", "Completed")
 			store.LogAudit(db, agentName, "captain-auto-complete", b.ID, "diff empty, commits already in main")
 			store.UnblockDependentsOf(db, b.ID)
@@ -341,7 +341,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			return
 		}
 		msg := "Git Err: diff is empty — branch has commits but no net changes vs main"
-		store.FailBounty(db, b.ID, msg)
+		_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		return
 	}
@@ -400,7 +400,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		if !isKnownRepo(db, nt.Repo) {
 			msg := fmt.Sprintf("captain plan references unknown repository '%s' — convoy cannot proceed without human review", nt.Repo)
 			logger.Printf("Task %d: %s", b.ID, msg)
-			CreateEscalation(db, b.ID, store.SeverityMedium, msg)
+			_, _ = CreateEscalation(db, b.ID, store.SeverityMedium, msg) // TODO(Fix #8b): propagate error
 			return
 		}
 		newID, insertErr := store.AddConvoyTask(db, b.ParentID, nt.Repo, nt.Task, b.ConvoyID, b.Priority, "Pending")
@@ -446,7 +446,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	switch ruling.Decision {
 	case "approve":
 		logger.Printf("Task %d: captain APPROVED — forwarding to council", b.ID)
-		store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview")
+		_ = store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview") // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.TelemetryEvent{
 			SessionID: sessionID, Agent: agentName, TaskID: b.ID,
 			EventType: "captain_approved",
@@ -464,7 +464,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 
 		if retryCount >= MaxRetries {
 			msg := fmt.Sprintf("Captain: max retries (%d) exceeded. Final rejection: %s", MaxRetries, ruling.Feedback)
-			store.FailBounty(db, b.ID, msg)
+			_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
 
 			// Send rejection history to librarian for memory synthesis.
 			store.SendMail(db, agentName, "librarian",
@@ -494,7 +494,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 
 	case "escalate":
 		logger.Printf("Task %d: captain ESCALATED: %s", b.ID, ruling.Feedback)
-		CreateEscalation(db, b.ID, store.SeverityMedium, ruling.Feedback)
+		_, _ = CreateEscalation(db, b.ID, store.SeverityMedium, ruling.Feedback) // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, agentName, b.ID, store.SeverityMedium, ruling.Feedback))
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CAPTAIN ESCALATED] Task #%d — %s", b.ID, b.TargetRepo),
@@ -504,6 +504,6 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 
 	default:
 		logger.Printf("Task %d: captain returned unknown decision '%s' — defaulting to approve", b.ID, ruling.Decision)
-		store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview")
+		_ = store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview") // TODO(Fix #8b): propagate error
 	}
 }

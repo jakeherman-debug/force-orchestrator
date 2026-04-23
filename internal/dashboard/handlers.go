@@ -391,7 +391,7 @@ func approveTask(db *sql.DB, id int, w http.ResponseWriter) error {
 			http.StatusInternalServerError)
 		return mergeErr
 	}
-	store.UpdateBountyStatus(db, id, "Completed")
+	_ = store.UpdateBountyStatus(db, id, "Completed") // TODO(Fix #8b): propagate error
 	store.UnblockDependentsOf(db, id)
 	if diff != "" {
 		files := strings.Join(igit.ExtractDiffFiles(diff), ", ")
@@ -415,7 +415,7 @@ func rejectTask(db *sql.DB, id int, reason string, w http.ResponseWriter) {
 	}
 	retryCount := store.IncrementRetryCount(db, id)
 	if retryCount >= agents.MaxRetries {
-		store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason))
+		_ = store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason)) // TODO(Fix #8b): propagate error
 	} else {
 		newPayload := fmt.Sprintf("%s\n\nOPERATOR FEEDBACK (attempt %d/%d): %s",
 			b.Payload, retryCount, agents.MaxRetries, reason)

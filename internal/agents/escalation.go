@@ -27,25 +27,29 @@ func ParseEscalationSignal(output string) (store.EscalationSeverity, string, boo
 	return store.EscalationSeverity(matches[1]), strings.TrimSpace(matches[2]), true
 }
 
-// CreateEscalation records a new escalation for a task.
+// CreateEscalation records a new escalation for a task and marks the task
+// Escalated (which fires the webhook).
 //
 // Fix #3 (AUDIT-034): the Escalations table carries a partial UNIQUE on
-// (task_id) WHERE status='Open', so repeated self-healing paths firing
-// against the same task produce exactly one Open row rather than one per
-// trigger. On conflict we merge: message is refreshed with the most recent
-// context, and severity is raised to the max of the existing and incoming
-// levels (never downgraded under the hood).
+// (task_id) WHERE status='Open', so repeated self-healing paths firing against
+// the same task produce exactly one Open row. On conflict we merge: message
+// is refreshed with the most recent context, and severity is raised to the
+// max of the existing and incoming levels.
 //
 // Fix #10 (AUDIT-055): message is run through store.RedactSecrets so wrapped
 // gh stderr or Claude stdout containing a ghp_/Bearer/url-basic-auth token
-// cannot leak into Escalations.message (which renders on the dashboard).
-func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) int {
+// cannot leak into Escalations.message (rendered on the dashboard).
+//
+// Fix #8 Phase A (AUDIT-041): returns (int, error). A failed upsert previously
+// left the task Escalated with no Escalations row — permanently out of the
+// scheduler with nothing for the sweeper to sweep. Callers must now check the
+// error and fall back to FailBounty + operator mail when the insert fails.
+func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) (int, error) {
 	redacted := store.RedactSecrets(message)
-	// Severity ordering: LOW < MEDIUM < HIGH. Encode as integers for MAX().
-	// severity_rank is inlined via CASE so we don't need a lookup table.
-	// ON CONFLICT(task_id) WHERE status='Open' needs the predicate spelled out
-	// in the upsert target for SQLite to match the partial UNIQUE index.
 	var id int
+	// Severity ordering: LOW < MEDIUM < HIGH. The CASE expressions inline the
+	// rank so no lookup table is needed. ON CONFLICT(task_id) WHERE status='Open'
+	// must spell out the predicate to match the partial UNIQUE index.
 	err := db.QueryRow(
 		`INSERT INTO Escalations (task_id, severity, message, status)
 		 VALUES (?, ?, ?, 'Open')
@@ -62,17 +66,19 @@ func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity,
 		taskID, string(severity), redacted,
 	).Scan(&id)
 	if err != nil {
-		// If the scan fails for any reason, surface a zero id but keep the
-		// caller moving — escalations must never be a silent drop, so follow
-		// up with a best-effort mark of the task as Escalated.
-		id = 0
+		return 0, fmt.Errorf("CreateEscalation upsert (task=%d): %w", taskID, err)
 	}
 
 	// Mark the task as Escalated so it doesn't get retried automatically.
 	// Use UpdateBountyStatus so the webhook fires for this transition.
-	store.UpdateBountyStatus(db, taskID, "Escalated")
+	if updErr := store.UpdateBountyStatus(db, taskID, "Escalated"); updErr != nil {
+		// The escalation row is on disk but the task didn't transition. This
+		// is still better than the silent-failure original: the caller now
+		// knows something is wrong and can escalate further / fall back.
+		return id, fmt.Errorf("CreateEscalation: escalation %d recorded but task status update failed: %w", id, updErr)
+	}
 
-	return id
+	return id, nil
 }
 
 // ListEscalations returns escalations filtered by status ("Open", "Acknowledged", "Closed", or "" for all).

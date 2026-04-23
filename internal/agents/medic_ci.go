@@ -129,20 +129,26 @@ func QueueCIFailureTriageTx(tx *sql.Tx, payload ciTriagePayload) (int, error) {
 func runMedicCITriage(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload ciTriagePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
+			logger.Printf("CIFailureTriage #%d: FailBounty failed after payload parse error: %v", bounty.ID, fbErr)
+		}
 		return
 	}
 
 	pr := store.GetAskBranchPR(db, payload.SubPRRowID)
 	if pr == nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("sub-PR row %d not found", payload.SubPRRowID))
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("sub-PR row %d not found", payload.SubPRRowID)); fbErr != nil {
+			logger.Printf("CIFailureTriage #%d: FailBounty failed after missing sub-PR: %v", bounty.ID, fbErr)
+		}
 		return
 	}
 	if pr.State != "Open" {
 		// PR was already merged/closed in the window before we ran — no work to do.
 		logger.Printf("CIFailureTriage #%d: sub-PR #%d already in state %s — completing as no-op",
 			bounty.ID, pr.PRNumber, pr.State)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("CIFailureTriage #%d: Completed update failed: %v", bounty.ID, err)
+		}
 		return
 	}
 
@@ -175,7 +181,9 @@ func runMedicCITriage(db *sql.DB, agentName string, bounty *store.Bounty, logger
 	if claudeErr != nil {
 		logger.Printf("CIFailureTriage #%d: Claude failed (%v) — escalating parent task", bounty.ID, claudeErr)
 		escalateCITriage(db, agentName, pr, payload.TaskID, "Medic could not analyze the Jenkins log: "+claudeErr.Error(), logger)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("CIFailureTriage #%d: Completed update failed after Claude error: %v", bounty.ID, err)
+		}
 		return
 	}
 
@@ -209,7 +217,9 @@ func runMedicCITriage(db *sql.DB, agentName string, bounty *store.Bounty, logger
 			fmt.Sprintf("%s — %s", decision.Classification, decision.OperatorNote), logger)
 	}
 
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("CIFailureTriage #%d: final Completed update failed: %v", bounty.ID, err)
+	}
 }
 
 // applyCITriageFlaky: after medicRetriggerCap Flaky classifications on the same
@@ -322,7 +332,14 @@ func escalateCITriage(db *sql.DB, agentName string, pr *store.AskBranchPR, taskI
 	if _, err := db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '', error_log = ? WHERE id = ?`, msg, taskID); err != nil {
 		logger.Printf("CIFailureTriage: task %d status update failed (%v); escalation still recorded", taskID, err)
 	}
-	CreateEscalation(db, taskID, store.SeverityMedium, msg)
+	if _, err := CreateEscalation(db, taskID, store.SeverityMedium, msg); err != nil {
+		// AUDIT-041: escalation insert failed — fall back to FailBounty + operator mail
+		// so the task doesn't sit Escalated with no Escalations row.
+		logger.Printf("CIFailureTriage: CreateEscalation for task %d failed (%v); falling back to FailBounty", taskID, err)
+		if fbErr := store.FailBounty(db, taskID, msg+" (escalation insert failed: "+err.Error()+")"); fbErr != nil {
+			logger.Printf("CIFailureTriage: FailBounty fallback for task %d also failed: %v", taskID, fbErr)
+		}
+	}
 	store.SendMail(db, agentName, "operator",
 		fmt.Sprintf("[CI ESCALATED] Task #%d — sub-PR #%d requires attention", taskID, pr.PRNumber),
 		fmt.Sprintf("Task #%d's sub-PR (%s) needs human attention.\n\n%s", taskID, pr.PRURL, msg),

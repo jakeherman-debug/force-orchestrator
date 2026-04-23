@@ -125,7 +125,9 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 	repoPath := store.GetRepoPath(db, b.TargetRepo)
 	if repoPath == "" {
 		msg := fmt.Sprintf("DB Err: unknown target repository '%s'", b.TargetRepo)
-		store.FailBounty(db, b.ID, msg)
+		if err := store.FailBounty(db, b.ID, msg); err != nil {
+			logger.Printf("Task %d: FailBounty failed (%v); stale-lock detector will recover", b.ID, err)
+		}
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		return
 	}
@@ -167,7 +169,10 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 		if reviewCommitsAhead(db, repoPath, b) == "" {
 			// All commits already in main — auto-complete rather than fail.
 			logger.Printf("Task %d: diff empty and no unique commits — work already merged, auto-completing", b.ID)
-			store.UpdateBountyStatus(db, b.ID, "Completed")
+			if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
+				logger.Printf("Task %d: auto-complete status update failed (%v); stale-lock detector will recover", b.ID, err)
+				return
+			}
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "auto-completed: work already merged into main", "Completed")
 			store.LogAudit(db, agentName, "council-auto-complete", b.ID, "diff empty, commits already in main")
 			if n := store.UnblockDependentsOf(db, b.ID); n > 0 {
@@ -181,7 +186,9 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			})
 		} else {
 			msg := "Git Err: diff is empty — branch has commits but no net changes; may need manual inspection"
-			store.FailBounty(db, b.ID, msg)
+			if err := store.FailBounty(db, b.ID, msg); err != nil {
+				logger.Printf("Task %d: FailBounty failed (%v); stale-lock detector will recover", b.ID, err)
+			}
 			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		}
 		return
@@ -227,7 +234,7 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 		if nParse >= councilParseFailureCap {
 			escMsg := fmt.Sprintf("Council unable to parse LLM output for task %d after %d attempts — escalating to Medic", b.ID, nParse)
 			logger.Printf("Task %d: %s", b.ID, escMsg)
-			CreateEscalation(db, b.ID, store.SeverityMedium, escMsg)
+			_, _ = CreateEscalation(db, b.ID, store.SeverityMedium, escMsg) // TODO(Fix #8b): propagate error
 			store.FailBounty(db, b.ID, escMsg)
 			return
 		}
@@ -297,7 +304,18 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 				if _, uErr := db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '', error_log = ? WHERE id = ?`, escMsg, b.ID); uErr != nil {
 					logger.Printf("Task %d: status update failed (%v); escalation still recorded", b.ID, uErr)
 				}
-				CreateEscalation(db, b.ID, store.SeverityMedium, escMsg)
+				if _, cErr := CreateEscalation(db, b.ID, store.SeverityMedium, escMsg); cErr != nil {
+					// Escalation insert failed — fall back to FailBounty + operator mail so the
+					// task doesn't sit Escalated with no Escalations row (the AUDIT-041 defect).
+					logger.Printf("Task %d: CreateEscalation failed (%v); falling back to FailBounty", b.ID, cErr)
+					if fbErr := store.FailBounty(db, b.ID, escMsg+" (escalation insert failed: "+cErr.Error()+")"); fbErr != nil {
+						logger.Printf("Task %d: FailBounty fallback also failed: %v", b.ID, fbErr)
+					}
+					store.SendMail(db, agentName, "operator",
+						fmt.Sprintf("[ESCALATION FAILED] Task #%d — could not record escalation row", b.ID),
+						fmt.Sprintf("CreateEscalation failed for task #%d with error: %v\nOriginal escalation reason: %s", b.ID, cErr, escMsg),
+						b.ID, store.MailTypeAlert)
+				}
 				return
 			}
 			// Record history — the task is now AwaitingSubPRCI; sub-pr-ci-watch drives
@@ -397,7 +415,17 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 			}
 			return
 		}
-		store.UpdateBountyStatus(db, b.ID, "Completed")
+		if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
+			// Branch is merged — the DB row says otherwise, which is a genuine
+			// inconsistency. Log + escalate via operator mail; the stale-lock
+			// detector will also pick this up on the next tick.
+			logger.Printf("Task %d: Completed status update failed after successful merge (%v); mailing operator", b.ID, err)
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[DB INCONSISTENCY] Task #%d — merge succeeded but status update failed", b.ID),
+				fmt.Sprintf("Branch %s was merged but the task's status could not be updated: %v", branchName, err),
+				b.ID, store.MailTypeAlert)
+			return
+		}
 		histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Completed")
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
@@ -448,7 +476,10 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 					chain = append(chain, grandParentID)
 				}
 				for _, ancestorID := range chain {
-					store.UpdateBountyStatus(db, ancestorID, "Completed")
+					if err := store.UpdateBountyStatus(db, ancestorID, "Completed"); err != nil {
+						logger.Printf("Task %d: ancestor #%d status update failed (%v); conflict-chain completion partial", b.ID, ancestorID, err)
+						continue
+					}
 					if n := store.UnblockDependentsOf(db, ancestorID); n > 0 {
 						logger.Printf("Task %d: unblocked %d dependent(s) of #%d after conflict chain resolution", b.ID, n, ancestorID)
 					}
@@ -484,7 +515,9 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 		if retryCount >= MaxRetries {
 			msg := fmt.Sprintf("Max retries (%d) exceeded. Final rejection: %s", MaxRetries, ruling.Feedback)
-			store.FailBounty(db, b.ID, msg)
+			if err := store.FailBounty(db, b.ID, msg); err != nil {
+				logger.Printf("Task %d: FailBounty failed (%v); stale-lock detector will recover", b.ID, err)
+			}
 			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 
 			// Send rejection history to librarian for memory synthesis.

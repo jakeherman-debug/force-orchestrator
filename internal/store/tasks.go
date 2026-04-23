@@ -183,11 +183,24 @@ func SetConvoyCoordinated(db *sql.DB, convoyID int) {
 	db.Exec(`UPDATE Convoys SET coordinated = 1 WHERE id = ?`, convoyID)
 }
 
-func UpdateBountyStatus(db *sql.DB, id int, newStatus string) {
-	db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = '' WHERE id = ?`, newStatus, id)
+// UpdateBountyStatus transitions a task to newStatus, clearing owner/locked_at,
+// and fires the webhook on terminal transitions (Completed/Failed/Escalated).
+//
+// Fix #8 Phase A: Returns error so callers can observe DB failures instead of
+// silently believing the UPDATE succeeded. See CLAUDE.md's "No silent failures"
+// invariant — a dropped DB error here leaves the task in its prior state while
+// every downstream path (webhook listener, convoy-completion check, operator
+// dashboard) acts as though the transition happened. The webhook fires only
+// when the UPDATE itself returned no error; otherwise the caller gets the
+// error and can escalate / retry.
+func UpdateBountyStatus(db *sql.DB, id int, newStatus string) error {
+	if _, err := db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = '' WHERE id = ?`, newStatus, id); err != nil {
+		return fmt.Errorf("UpdateBountyStatus(id=%d, status=%s): %w", id, newStatus, err)
+	}
 	if newStatus == "Completed" || newStatus == "Failed" || newStatus == "Escalated" {
 		FireWebhook(db, id, newStatus)
 	}
+	return nil
 }
 
 // UpdateBountyStatusTx updates task status inside an existing transaction.
@@ -262,12 +275,25 @@ func AddBountyClassifying(db *sql.DB, repo, payload string, priority int, idempo
 	return int(id), nil
 }
 
-func FailBounty(db *sql.DB, id int, errorMsg string) {
-	// Defense in depth: scrub secrets even if the caller forgot to.
-	// AUDIT-055 / Fix #10.
-	db.Exec(`UPDATE BountyBoard SET status = 'Failed', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
-		RedactSecrets(errorMsg), id)
+// FailBounty marks a task Failed with an error_log, clears owner/locked_at,
+// and fires the Failed webhook.
+//
+// Fix #8 Phase A: Returns error — a silent failure here is especially
+// pathological because it leaves a task stuck in its prior status while
+// the rest of the fleet believes the failure was recorded. The webhook
+// fires only when the UPDATE actually succeeded.
+//
+// Fix #10 (AUDIT-055): errorMsg is scrubbed with RedactSecrets before the
+// write so a wrapped gh/claude error containing a ghp_/Bearer/URL-basic-auth
+// token cannot leak into BountyBoard.error_log (which renders on the
+// dashboard).
+func FailBounty(db *sql.DB, id int, errorMsg string) error {
+	if _, err := db.Exec(`UPDATE BountyBoard SET status = 'Failed', owner = '', locked_at = '', error_log = ? WHERE id = ?`,
+		RedactSecrets(errorMsg), id); err != nil {
+		return fmt.Errorf("FailBounty(id=%d): %w", id, err)
+	}
 	FireWebhook(db, id, "Failed")
+	return nil
 }
 
 // MarkConflictPending transitions a task to ConflictPending, indicating it was

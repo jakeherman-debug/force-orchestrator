@@ -164,7 +164,7 @@ func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, 
 			}
 		}
 		if convoyErr != nil {
-			store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr))
+			_ = store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr)) // TODO(Fix #8b): propagate error
 			return
 		}
 	}
@@ -172,12 +172,12 @@ func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, 
 
 	idMapping, err := insertConvoyAndTasks(db, tasks, feature, convoyID)
 	if err != nil {
-		store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error())
+		_ = store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error()) // TODO(Fix #8b): propagate error
 		return
 	}
 
 	store.SetProposedConvoyStatus(db, feature.ID, "approved")
-	store.UpdateBountyStatus(db, feature.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, feature.ID, "Completed") // TODO(Fix #8b): propagate error
 	logger.Printf("Feature #%d: convoy #%d created with %d task(s)", feature.ID, convoyID, len(tasks))
 
 	// Resolve any FeatureBlockers that were waiting on this Feature to get a convoy.
@@ -203,7 +203,7 @@ func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, 
 // rejectProposal resets the Feature to Pending and mails the rejection to Commander.
 func rejectProposal(db *sql.DB, feature *store.Bounty, reason string, logger interface{ Printf(string, ...any) }) {
 	store.SetProposedConvoyStatus(db, feature.ID, "rejected")
-	store.UpdateBountyStatus(db, feature.ID, "Pending")
+	_ = store.UpdateBountyStatus(db, feature.ID, "Pending") // TODO(Fix #8b): propagate error
 
 	store.SendMail(db, chancellorName, "commander",
 		fmt.Sprintf("[CHANCELLOR REJECTED] Feature #%d plan", feature.ID),
@@ -295,7 +295,7 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 			}
 		}
 		if convoyErr != nil {
-			store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr))
+			_ = store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr)) // TODO(Fix #8b): propagate error
 			return
 		}
 	}
@@ -303,7 +303,7 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 
 	idMapping, err := insertConvoyAndTasks(db, tasks, feature, convoyID)
 	if err != nil {
-		store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error())
+		_ = store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error()) // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -330,7 +330,7 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 	}
 
 	store.SetProposedConvoyStatus(db, feature.ID, "approved")
-	store.UpdateBountyStatus(db, feature.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, feature.ID, "Completed") // TODO(Fix #8b): propagate error
 	logger.Printf("Feature #%d: convoy #%d created (sequenced after convoy(s) %v, %d cross-convoy dep(s) injected, %d task(s))",
 		feature.ID, convoyID, blockingConvoyIDs, injected, len(tasks))
 
@@ -386,15 +386,15 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 
 	idMapping, err := insertConvoyAndTasks(db, mergedTasks, featureA, convoyID)
 	if err != nil {
-		store.FailBounty(db, featureA.ID, "Chancellor Err (merge): "+err.Error())
-		store.FailBounty(db, featureB.ID, "Chancellor Err (merge): "+err.Error())
+		_ = store.FailBounty(db, featureA.ID, "Chancellor Err (merge): "+err.Error()) // TODO(Fix #8b): propagate error
+		_ = store.FailBounty(db, featureB.ID, "Chancellor Err (merge): "+err.Error()) // TODO(Fix #8b): propagate error
 		return
 	}
 
 	store.SetProposedConvoyStatus(db, featureA.ID, "merged")
 	store.SetProposedConvoyStatus(db, featureB.ID, "merged")
-	store.UpdateBountyStatus(db, featureA.ID, "Completed")
-	store.UpdateBountyStatus(db, featureB.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, featureA.ID, "Completed") // TODO(Fix #8b): propagate error
+	_ = store.UpdateBountyStatus(db, featureB.ID, "Completed") // TODO(Fix #8b): propagate error
 
 	store.ResolveFeatureBlockers(db, featureA.ID, convoyID)
 	store.ResolveFeatureBlockers(db, featureB.ID, convoyID)
