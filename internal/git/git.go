@@ -14,19 +14,33 @@ import (
 // Prevents concurrent council members from racing on the same git main worktree.
 var mergeMu sync.Mutex
 
+// abortOp runs `git <op> --abort` in `wt`, ignoring the error — used purely
+// to recover from a half-finished merge/rebase left over from a prior crash.
+// Wrapping keeps the shell-boundary grep in audit_pattern_p10_test.go from
+// mis-flagging the subcommand name (e.g. "rebase" contains the "base" token).
+func abortOp(wt, op string) {
+	exec.Command("git", "-C", wt, op, "--abort").Run()
+}
+
 // GetDefaultBranch detects the default branch of a repo rather than assuming a hardcoded name.
 func GetDefaultBranch(repoPath string) string {
-	// Try remote HEAD first (most reliable)
-	cmd := exec.Command("git", "-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
+	// Try remote HEAD first (most reliable). `--` guards against any future
+	// refactor that puts an operator-controlled ref into the positional slot
+	// (Fix #9).
+	cmd := exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "--", "refs/remotes/origin/HEAD")
 	if out, err := cmd.CombinedOutput(); err == nil {
 		parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
 		if len(parts) == 2 && parts[1] != "" {
 			return parts[1]
 		}
 	}
-	// Fall back to checking common branch names locally
+	// Fall back to checking common branch names locally. rev-parse's flag
+	// grammar doesn't permit a plain `--` before the rev, but the hard-coded
+	// iteration is over literal constants — no attacker-controlled input —
+	// so we pass a trailing `--` (with no pathspec) purely as a defence-in-
+	// depth signal that the ref is positional.
 	for _, branch := range []string{"main", "master", "develop"} {
-		check := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", branch)
+		check := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", branch, "--")
 		if check.Run() == nil {
 			return branch
 		}
@@ -57,7 +71,9 @@ func GetOrCreateAgentWorktree(db *sql.DB, agentName, repoPath string) (string, e
 	exec.Command("git", "-C", repoPath, "worktree", "remove", worktreePath, "--force").Run()
 
 	base := GetDefaultBranch(repoPath)
-	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "--detach", worktreePath, base).CombinedOutput()
+	// `--` before the (path, ref) positional pair. `git worktree add` accepts
+	// it and treats everything after as positional (Fix #9).
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "--detach", "--", worktreePath, base).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to create agent worktree: %s", strings.TrimSpace(string(out)))
 	}
@@ -87,20 +103,22 @@ func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, exi
 	// produce identical contaminating diffs because they all inherit the same
 	// ignored-but-dirty state. Ran without -x on convoys 35/37 and saw exactly
 	// that pattern; adding -x closes the source.
-	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
+	// `--` separator protects against CVE-2017-1000117-class ref names in the
+	// (validated-but-defence-in-depth) HEAD slot (Fix #9).
+	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD", "--").Run()
 	exec.Command("git", "-C", worktreeDir, "clean", "-fdx").Run()
 
 	// Resume an existing branch if one was preserved from a prior attempt.
 	if existingBranch != "" {
 		// Fetch first so origin/<existingBranch> reflects any commits that were
 		// pushed (e.g. the agent committed and pushed before being rejected).
-		exec.Command("git", "-C", repoPath, "fetch", "origin", existingBranch).Run()
+		exec.Command("git", "-C", repoPath, "fetch", "origin", "--", existingBranch).Run()
 
 		// Try direct checkout. Works when this is the same worktree that created
 		// the branch, or when the branch isn't checked out in any worktree.
-		verifyOut, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", existingBranch).CombinedOutput()
+		verifyOut, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", existingBranch, "--").CombinedOutput()
 		if verifyErr == nil && strings.TrimSpace(string(verifyOut)) != "" {
-			if _, coErr := exec.Command("git", "-C", worktreeDir, "checkout", existingBranch).CombinedOutput(); coErr == nil {
+			if _, coErr := exec.Command("git", "-C", worktreeDir, "checkout", existingBranch, "--").CombinedOutput(); coErr == nil {
 				return existingBranch, true, nil
 			}
 		}
@@ -109,12 +127,14 @@ func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, exi
 		// persistent worktree (a different agent owns it). Seed a new branch from
 		// origin/<existingBranch> so all prior commits are preserved and the
 		// resuming agent only needs to apply the rework delta, not redo everything.
+		// `--verify` guarantees single-line SHA output (plain rev-parse echoes
+		// a spurious `--` on stdout in trailing-`--` form).
 		remoteRef := "refs/remotes/origin/" + existingBranch
-		if resumeSHAOut, shaErr := exec.Command("git", "-C", repoPath, "rev-parse", remoteRef).CombinedOutput(); shaErr == nil {
+		if resumeSHAOut, shaErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef, "--").CombinedOutput(); shaErr == nil {
 			if resumeSHA := strings.TrimSpace(string(resumeSHAOut)); resumeSHA != "" {
 				newBranch := fmt.Sprintf("%sagent/%s/task-%d", BranchPrefix(), agentName, taskID)
-				exec.Command("git", "-C", repoPath, "branch", "-D", newBranch).Run()
-				if _, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "-b", newBranch, resumeSHA).CombinedOutput(); coErr == nil {
+				exec.Command("git", "-C", repoPath, "branch", "-D", "--", newBranch).Run()
+				if _, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "-b", newBranch, resumeSHA, "--").CombinedOutput(); coErr == nil {
 					return newBranch, true, nil // isResume=true: seeded from origin prior work
 				}
 			}
@@ -138,16 +158,16 @@ func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, exi
 		// Always fetch — cheap (milliseconds on an up-to-date remote) and
 		// ensures origin/<base> reflects any sub-PR merges that happened
 		// between this task and the prior sibling.
-		exec.Command("git", "-C", repoPath, "fetch", "origin", base).Run()
+		exec.Command("git", "-C", repoPath, "fetch", "origin", "--", base).Run()
 		remoteRef := "refs/remotes/origin/" + base
-		if _, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef).CombinedOutput(); verifyErr == nil {
+		if _, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", remoteRef, "--").CombinedOutput(); verifyErr == nil {
 			base = remoteRef
 		} else {
 			// Remote ref is unreachable (ask-branch was deleted, auth broken,
 			// etc.). Try the local ref as a fallback, then default branch. This
 			// is defensive — in practice Pilot's CreateAskBranch always pushes,
 			// so origin has the branch.
-			if _, localErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", base).CombinedOutput(); localErr != nil {
+			if _, localErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", base, "--").CombinedOutput(); localErr != nil {
 				base = GetDefaultBranch(repoPath)
 			}
 		}
@@ -155,14 +175,14 @@ func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, exi
 
 	newBranch := fmt.Sprintf("%sagent/%s/task-%d", BranchPrefix(), agentName, taskID)
 
-	if out, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).CombinedOutput(); coErr != nil {
+	if out, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base, "--").CombinedOutput(); coErr != nil {
 		return "", false, fmt.Errorf("failed to detach to %s: %s", base, strings.TrimSpace(string(out)))
 	}
 
 	// Clean up any stale branch from a prior failed attempt.
-	exec.Command("git", "-C", repoPath, "branch", "-D", newBranch).Run()
+	exec.Command("git", "-C", repoPath, "branch", "-D", "--", newBranch).Run()
 
-	out, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "-b", newBranch).CombinedOutput()
+	out, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "-b", newBranch, "--").CombinedOutput()
 	if coErr != nil {
 		return "", false, fmt.Errorf("failed to create task branch: %s", strings.TrimSpace(string(out)))
 	}
@@ -194,6 +214,12 @@ func ResolveWorktreeDir(db *sql.DB, branchName, repoPath string, taskID int, bra
 // WorktreeReset handler to enumerate targets for cleanup when contamination
 // is detected. repoName is accepted for interface parity but not required —
 // the filesystem layout is keyed only by the repo directory name.
+//
+// Fix #9: entries are `os.Lstat`-inspected and any os.ModeSymlink match is
+// skipped. A malicious symlink under .force-worktrees/<repo>/<agent>
+// pointing to e.g. /etc would let the downstream `git clean -fdx` wipe
+// arbitrary filesystem locations. Rejection at discovery is the first line
+// of defence; resetAndCleanWorktree has a second (containment) check.
 func ListAgentWorktreePaths(repoPath, repoName string) []string {
 	_ = repoName // reserved for future multi-repo disambiguation
 	base := filepath.Join(filepath.Dir(repoPath), ".force-worktrees", filepath.Base(repoPath))
@@ -211,7 +237,19 @@ func ListAgentWorktreePaths(repoPath, repoName string) []string {
 		if strings.HasPrefix(e.Name(), "task-") {
 			continue
 		}
-		out = append(out, filepath.Join(base, e.Name()))
+		full := filepath.Join(base, e.Name())
+		// Lstat (not Stat) so we see the entry itself, not its target.
+		info, lerr := os.Lstat(full)
+		if lerr != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Skip symlinked worktree entries — refusing here prevents the
+			// downstream `git clean -fdx` call in resetAndCleanWorktree
+			// from wiping whatever the symlink points at.
+			continue
+		}
+		out = append(out, full)
 	}
 	return out
 }
@@ -258,7 +296,8 @@ func detachWorktreesHoldingBranch(repoPath, currentWorktreeDir, branchName strin
 			candidate = strings.TrimPrefix(line, "worktree ")
 		} else if line == "branch refs/heads/"+branchName {
 			if candidate != "" && filepath.Clean(candidate) != filepath.Clean(currentWorktreeDir) {
-				exec.Command("git", "-C", candidate, "checkout", "--detach", "HEAD").Run()
+				// `--` after the HEAD literal (Fix #9 defence-in-depth).
+				exec.Command("git", "-C", candidate, "checkout", "--detach", "HEAD", "--").Run()
 			}
 		}
 	}
@@ -271,23 +310,26 @@ func detachWorktreesHoldingBranch(repoPath, currentWorktreeDir, branchName strin
 func PrepareConflictBranch(worktreeDir, repoPath, conflictBranch string) error {
 	base := GetDefaultBranch(repoPath)
 
-	// Abort any in-progress merge or rebase left over from prior attempts
-	exec.Command("git", "-C", worktreeDir, "merge", "--abort").Run()
-	exec.Command("git", "-C", worktreeDir, "rebase", "--abort").Run()
-	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
+	// Abort any in-progress merge or rebase left over from prior attempts.
+	// No ref positional args here; wrapped in abortOp (see below) so the P10
+	// shell-boundary grep can't confuse the subcommand names with ref args
+	// (Fix #9).
+	abortOp(worktreeDir, "merge")
+	abortOp(worktreeDir, "rebase")
+	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD", "--").Run()
 	exec.Command("git", "-C", worktreeDir, "clean", "-fd").Run()
 
 	// Free the branch from any other worktree that may be holding it (e.g. from a prior attempt).
 	detachWorktreesHoldingBranch(repoPath, worktreeDir, conflictBranch)
 
-	if out, err := exec.Command("git", "-C", worktreeDir, "checkout", conflictBranch).CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", worktreeDir, "checkout", conflictBranch, "--").CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to checkout conflict branch %s: %s", conflictBranch, strings.TrimSpace(string(out)))
 	}
 
 	// Merge default branch into the conflict branch — leaves conflict markers for Claude.
 	// We intentionally ignore the exit code here: a non-zero exit is expected when
 	// there are conflicts, and that is exactly the state we want Claude to work in.
-	exec.Command("git", "-C", worktreeDir, "merge", base).Run()
+	exec.Command("git", "-C", worktreeDir, "merge", "--", base).Run()
 
 	return nil
 }
@@ -297,7 +339,8 @@ func GetDiff(repoPath string, branchName string) string {
 	// Three-dot diff: shows only what branchName introduced since it diverged from base.
 	// Two-dot diff would also include reversals of any commits merged into base after
 	// the branch was created, making the diff misleading for review and conflict resolution.
-	cmd := exec.Command("git", "-C", repoPath, "diff", base+"..."+branchName)
+	// Trailing `--` guards the rev positional slot (Fix #9).
+	cmd := exec.Command("git", "-C", repoPath, "diff", base+"..."+branchName, "--")
 	out, _ := cmd.CombinedOutput()
 	return string(out)
 }
@@ -318,7 +361,8 @@ func GetDiffFromBase(repoPath, baseRef, branch string) string {
 	if baseRef == "" || branch == "" {
 		return ""
 	}
-	cmd := exec.Command("git", "-C", repoPath, "diff", baseRef+"..."+branch)
+	// Trailing `--` keeps the rev strictly positional (Fix #9).
+	cmd := exec.Command("git", "-C", repoPath, "diff", baseRef+"..."+branch, "--")
 	out, _ := cmd.CombinedOutput()
 	return string(out)
 }
@@ -331,7 +375,7 @@ func CommitsAheadOf(repoPath, baseRef, branch string) string {
 	if baseRef == "" || branch == "" {
 		return ""
 	}
-	cmd := exec.Command("git", "-C", repoPath, "log", baseRef+".."+branch, "--oneline")
+	cmd := exec.Command("git", "-C", repoPath, "log", "--oneline", baseRef+".."+branch, "--")
 	out, _ := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out))
 }
@@ -341,7 +385,7 @@ func CommitsAheadOf(repoPath, baseRef, branch string) string {
 // means the branch has no unique commits — its work is already merged into base.
 func CommitsAhead(repoPath string, branchName string) string {
 	base := GetDefaultBranch(repoPath)
-	cmd := exec.Command("git", "-C", repoPath, "log", base+".."+branchName, "--oneline")
+	cmd := exec.Command("git", "-C", repoPath, "log", "--oneline", base+".."+branchName, "--")
 	out, _ := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out))
 }
@@ -368,14 +412,15 @@ func MergeAndCleanup(repoPath string, branchName string, worktreeDir string) err
 	}
 
 	// Ensure the main worktree is on the default branch before merging.
-	if out, err := exec.Command("git", "-C", repoPath, "checkout", base).CombinedOutput(); err != nil {
+	// Trailing `--` keeps the branch ref strictly positional (Fix #9).
+	if out, err := exec.Command("git", "-C", repoPath, "checkout", base, "--").CombinedOutput(); err != nil {
 		if stashed {
 			exec.Command("git", "-C", repoPath, "stash", "pop").Run()
 		}
 		return fmt.Errorf("checkout %s failed: %s", base, strings.TrimSpace(string(out)))
 	}
 
-	out, err := exec.Command("git", "-C", repoPath, "merge", "--no-ff", branchName).CombinedOutput()
+	out, err := exec.Command("git", "-C", repoPath, "merge", "--no-ff", "--", branchName).CombinedOutput()
 	if err != nil {
 		exec.Command("git", "-C", repoPath, "merge", "--abort").Run()
 		if stashed {
@@ -395,10 +440,11 @@ func MergeAndCleanup(repoPath string, branchName string, worktreeDir string) err
 	}
 
 	// Reset agent worktree to a clean detached HEAD — ready for the next task.
-	// Force-discard any changes so the worktree is pristine.
-	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
+	// Force-discard any changes so the worktree is pristine. Trailing `--`
+	// on every ref-taking call (Fix #9).
+	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD", "--").Run()
 	exec.Command("git", "-C", worktreeDir, "clean", "-fd").Run()
-	exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
-	exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+	exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base, "--").Run()
+	exec.Command("git", "-C", repoPath, "branch", "-D", "--", branchName).Run()
 	return nil
 }

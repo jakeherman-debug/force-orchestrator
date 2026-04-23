@@ -18,10 +18,13 @@ import (
 // the new HEAD SHA, or error.
 func FetchMain(repoPath string) (string, error) {
 	base := GetDefaultBranch(repoPath)
-	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", base).CombinedOutput(); err != nil {
+	// `--` after the remote name keeps the refspec positional (Fix #9).
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", "--", base).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
 	}
-	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "refs/remotes/origin/"+base).CombinedOutput()
+	// `--verify` + trailing `--` pins the arg to a single positional rev;
+	// plain `rev-parse <ref> --` would echo a spurious `--` line.
+	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/"+base, "--").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse: %s", strings.TrimSpace(string(out)))
 	}
@@ -33,7 +36,8 @@ func FetchMain(repoPath string) (string, error) {
 // event-detection call main-drift-watch uses every 15 minutes.
 func RemoteHeadSHA(repoPath string) (string, error) {
 	base := GetDefaultBranch(repoPath)
-	out, err := exec.Command("git", "-C", repoPath, "ls-remote", "origin", "refs/heads/"+base).CombinedOutput()
+	// `--` before the refspec keeps it positional (Fix #9).
+	out, err := exec.Command("git", "-C", repoPath, "ls-remote", "--", "origin", "refs/heads/"+base).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git ls-remote: %s", strings.TrimSpace(string(out)))
 	}
@@ -67,15 +71,16 @@ func CreateAskBranch(repoPath, branchName string) (string, error) {
 	}
 	base := GetDefaultBranch(repoPath)
 
-	// Step 1: fetch.
-	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", base).CombinedOutput(); err != nil {
+	// Step 1: fetch. `--` separator before the positional refspec (Fix #9).
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", "--", base).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
 	}
 
 	// Capture the base SHA BEFORE any branch work so it reflects the main tip
 	// we're branching from. Using refs/remotes/origin/<base> is what origin's
-	// current HEAD actually is.
-	shaOut, err := exec.Command("git", "-C", repoPath, "rev-parse", "refs/remotes/origin/"+base).CombinedOutput()
+	// current HEAD actually is. `--verify` + trailing `--` keeps the rev
+	// positional and suppresses the stray `--` echo line.
+	shaOut, err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/"+base, "--").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse origin/%s: %s", base, strings.TrimSpace(string(shaOut)))
 	}
@@ -85,12 +90,13 @@ func CreateAskBranch(repoPath, branchName string) (string, error) {
 	}
 
 	// Step 2: create the branch locally. If it already exists, force-update it
-	// to the same SHA so we're idempotent.
-	exec.Command("git", "-C", repoPath, "branch", "-f", branchName, baseSHA).Run()
+	// to the same SHA so we're idempotent. `--` after `-f` keeps (branch, sha)
+	// positional (Fix #9).
+	exec.Command("git", "-C", repoPath, "branch", "-f", "--", branchName, baseSHA).Run()
 
 	// Step 3: push to origin. Accepts the case where origin already has the
-	// branch at the same SHA (no-op push).
-	if out, err := exec.Command("git", "-C", repoPath, "push", "-u", "origin", branchName).CombinedOutput(); err != nil {
+	// branch at the same SHA (no-op push). `--` keeps the branch positional.
+	if out, err := exec.Command("git", "-C", repoPath, "push", "-u", "origin", "--", branchName).CombinedOutput(); err != nil {
 		// If the branch already exists on origin at a different SHA, do not
 		// force-push here — that's for the rebase flow, not initial create.
 		return "", fmt.Errorf("git push: %s", strings.TrimSpace(string(out)))
@@ -107,10 +113,12 @@ func DeleteAskBranch(repoPath, branchName string) error {
 	if err := AssertNotDefaultBranch(repoPath, branchName); err != nil {
 		return fmt.Errorf("DeleteAskBranch refused: %w", err)
 	}
-	// Local delete — ignore errors (branch may not exist locally).
-	exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
-	// Remote delete — a 404-style response is fine.
-	out, err := exec.Command("git", "-C", repoPath, "push", "origin", "--delete", branchName).CombinedOutput()
+	// Local delete — ignore errors (branch may not exist locally). `--` keeps
+	// the branch positional (Fix #9).
+	exec.Command("git", "-C", repoPath, "branch", "-D", "--", branchName).Run()
+	// Remote delete — a 404-style response is fine. `--` after `--delete`
+	// keeps the branch positional.
+	out, err := exec.Command("git", "-C", repoPath, "push", "origin", "--delete", "--", branchName).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if strings.Contains(msg, "remote ref does not exist") || strings.Contains(msg, "unable to delete") {
@@ -133,7 +141,8 @@ func DeleteAskBranch(repoPath, branchName string) error {
 func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err error) {
 	// Fetch both branches so origin refs are current. This updates
 	// refs/remotes/origin/<name>, but NOT the local refs/heads/<name>.
-	if out, fetchErr := exec.Command("git", "-C", repoPath, "fetch", "origin", onto, branch).CombinedOutput(); fetchErr != nil {
+	// `--` separator keeps the refspecs positional (Fix #9).
+	if out, fetchErr := exec.Command("git", "-C", repoPath, "fetch", "origin", "--", onto, branch).CombinedOutput(); fetchErr != nil {
 		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
 	}
 
@@ -158,20 +167,24 @@ func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err erro
 	// Force-with-lease doesn't guard against backwards moves from a stale
 	// starting point, only against concurrent writes — so this would have
 	// looked clean but was catastrophic.
+	// `--` separator before (branch, wtPath, ref) positionals (Fix #9).
 	if out, wtAddErr := exec.Command("git", "-C", repoPath, "worktree", "add",
-		"-B", branch, wtPath, "refs/remotes/origin/"+branch).CombinedOutput(); wtAddErr != nil {
+		"-B", branch, "--", wtPath, "refs/remotes/origin/"+branch).CombinedOutput(); wtAddErr != nil {
 		return "", fmt.Errorf("git worktree add: %s", strings.TrimSpace(string(out)))
 	}
 
 	// Rebase. Conflicts leave the worktree mid-rebase; we abort and return an
 	// error with conflict output so Pilot can spawn a RebaseConflict task.
-	if out, rbErr := exec.Command("git", "-C", wtPath, "rebase", "refs/remotes/origin/"+onto).CombinedOutput(); rbErr != nil {
-		exec.Command("git", "-C", wtPath, "rebase", "--abort").Run()
+	// `--` separator before the positional onto-ref (Fix #9).
+	if out, rbErr := exec.Command("git", "-C", wtPath, "rebase", "--", "refs/remotes/origin/"+onto).CombinedOutput(); rbErr != nil {
+		// Wrapped to keep shell-boundary grep clean — see abortOp doc.
+		abortOp(wtPath, "rebase")
 		return "", fmt.Errorf("git rebase: %s", strings.TrimSpace(string(out)))
 	}
 
-	// Capture the new tip SHA from the worktree.
-	shaOut, shaErr := exec.Command("git", "-C", wtPath, "rev-parse", "HEAD").CombinedOutput()
+	// Capture the new tip SHA from the worktree. `--verify` + trailing `--`
+	// pins the rev and suppresses the spurious `--` echo (Fix #9).
+	shaOut, shaErr := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "HEAD", "--").CombinedOutput()
 	if shaErr != nil {
 		return "", fmt.Errorf("git rev-parse HEAD: %s", strings.TrimSpace(string(shaOut)))
 	}
@@ -218,14 +231,15 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 	}
 
 	// Fetch both refs so we're merging against current origin state.
-	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", branch).CombinedOutput(); err != nil {
+	// `--` separator before the branch refspec (Fix #9).
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", "--", branch).CombinedOutput(); err != nil {
 		// Non-fatal — the branch may exist only locally. Record and continue.
 		_ = out
 	}
 	// For baseRef like "refs/remotes/origin/main", fetch the short name.
 	shortBase := strings.TrimPrefix(baseRef, "refs/remotes/origin/")
 	if shortBase != baseRef {
-		exec.Command("git", "-C", repoPath, "fetch", "origin", shortBase).Run()
+		exec.Command("git", "-C", repoPath, "fetch", "origin", "--", shortBase).Run()
 	}
 
 	wtPath, wtErr := os.MkdirTemp("", "force-union-merge-*")
@@ -238,8 +252,9 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 	}()
 
 	// Check out the branch in the temp worktree, resetting local ref from
-	// origin — same `-B` discipline as RebaseBranchOnto.
-	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-B", branch, wtPath,
+	// origin — same `-B` discipline as RebaseBranchOnto. `--` separator
+	// before positional (path, ref) pair (Fix #9).
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-B", branch, "--", wtPath,
 		"refs/remotes/origin/"+branch).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("worktree add %s: %s", branch, strings.TrimSpace(string(out)))
 	}
@@ -265,7 +280,8 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 	}
 
 	// Merge with identity env so git doesn't refuse on a missing global config.
-	cmd := exec.Command("git", "-C", wtPath, "merge", "--no-ff", "-m", message, baseRef)
+	// `--` separator before the positional baseRef (Fix #9).
+	cmd := exec.Command("git", "-C", wtPath, "merge", "--no-ff", "-m", message, "--", baseRef)
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=force-orchestrator",
 		"GIT_AUTHOR_EMAIL=force@localhost",
@@ -283,7 +299,9 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 		return "", fmt.Errorf("union merge left unresolved paths: %s", strings.TrimSpace(string(statusOut)))
 	}
 
-	tipOut, tipErr := exec.Command("git", "-C", wtPath, "rev-parse", "HEAD").Output()
+	// `--verify` + trailing `--` pins the rev and suppresses the spurious
+	// `--` echo that plain rev-parse prints (Fix #9).
+	tipOut, tipErr := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "HEAD", "--").Output()
 	if tipErr != nil {
 		return "", fmt.Errorf("rev-parse HEAD: %w", tipErr)
 	}
@@ -297,7 +315,8 @@ func ForcePushBranch(repoPath, branch string) error {
 	if err := AssertNotDefaultBranch(repoPath, branch); err != nil {
 		return fmt.Errorf("ForcePushBranch refused: %w", err)
 	}
-	out, err := exec.Command("git", "-C", repoPath, "push", "--force-with-lease", "origin", branch).CombinedOutput()
+	// `--` separator before the branch positional (Fix #9).
+	out, err := exec.Command("git", "-C", repoPath, "push", "--force-with-lease", "origin", "--", branch).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git push --force-with-lease: %s", strings.TrimSpace(string(out)))
 	}
@@ -333,11 +352,14 @@ func TriggerCIRerun(repoPath, branch, message string) error {
 	if message == "" {
 		message = "ci: trigger stalled check run"
 	}
-	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", branch).CombinedOutput(); err != nil {
+	// `--` separator before the branch refspec (Fix #9).
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", "--", branch).CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch %s: %s", branch, strings.TrimSpace(string(out)))
 	}
 
-	treeOut, err := exec.Command("git", "-C", repoPath, "rev-parse", "origin/"+branch+"^{tree}").Output()
+	// `--verify` + trailing `--` pins the rev positional and suppresses the
+	// spurious `--` echo plain rev-parse would print (Fix #9).
+	treeOut, err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "origin/"+branch+"^{tree}", "--").Output()
 	if err != nil {
 		stderr := ""
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -350,7 +372,8 @@ func TriggerCIRerun(repoPath, branch, message string) error {
 	// commit-tree reads the message from stdin — avoids shell-escape hazards
 	// when the caller passes arbitrary text. Parent is origin/<branch>^{0}
 	// (dereferenced commit OID) so the new commit FFs cleanly from the tip.
-	cmd := exec.Command("git", "-C", repoPath, "commit-tree", treeSHA, "-p", "origin/"+branch, "-m", message)
+	// Trailing `--` defence-in-depth on the positional tree SHA (Fix #9).
+	cmd := exec.Command("git", "-C", repoPath, "commit-tree", treeSHA, "-p", "origin/"+branch, "-m", message, "--")
 	// Inherit the real environment (PATH, HOME, etc.) and OVERRIDE just the
 	// author/committer identity — otherwise commit-tree refuses to run if no
 	// user.email is configured for the invoking shell.

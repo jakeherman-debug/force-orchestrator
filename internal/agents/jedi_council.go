@@ -315,7 +315,11 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
 					return
 				}
-				if err := store.SetBranchNameTx(tx, resTaskID, ""); err != nil {
+				// Explicit empty-clear path — Fix #9's SetBranchNameTx
+				// rejects empty strings as a store-ingress safety check,
+				// so the legitimate "no branch yet" case must use the
+				// dedicated ClearBranchNameTx.
+				if err := store.ClearBranchNameTx(tx, resTaskID); err != nil {
 					tx.Rollback()
 					logger.Printf("Task %d: set branch name on conflict task failed: %v", b.ID, err)
 					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)

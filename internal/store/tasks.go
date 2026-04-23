@@ -520,13 +520,53 @@ func UpdateCheckpoint(db *sql.DB, id int, checkpoint string) {
 	db.Exec(`UPDATE BountyBoard SET checkpoint = ? WHERE id = ?`, checkpoint, id)
 }
 
+// SetBranchName records the branch_name for a task. Validates via
+// validateRefName so a downstream `exec.Command("git", ..., branchName)`
+// never sees a CVE-2017-1000117-class string. On validation failure
+// (including empty string — which downstream is a "no branch yet"
+// sentinel that triggers fallback behaviour) the write is SKIPPED.
+//
+// Callers that need to know whether the write landed should use
+// SetBranchNameTx.
+//
+// NOTE: The "clear branch on WorktreeReset" path uses a direct db.Exec
+// rather than this setter, so the stricter empty-string rejection here
+// does not break that flow. Conflict-resolution task bootstrap in
+// jedi_council uses SetBranchNameTx which returns an error on empty;
+// callers there handle the error (converted to a sentinel branch name
+// in Fix #9 — see ClearBranchNameTx).
 func SetBranchName(db *sql.DB, id int, branchName string) {
+	if err := validateRefName(branchName); err != nil {
+		return
+	}
 	db.Exec(`UPDATE BountyBoard SET branch_name = ? WHERE id = ?`, branchName, id)
 }
 
-// SetBranchNameTx is the transactional sibling of SetBranchName.
+// SetBranchNameTx is the transactional sibling of SetBranchName. Fix #9
+// adds the ref validator at ingress so a corrupt branch name (CVE-
+// 2017-1000117 class: `--upload-pack=/tmp/evil`, `-rm`, control chars,
+// `..`, etc.) is rejected BEFORE landing in BountyBoard.branch_name.
+// Returns the validator error up so the caller rolls back the txn.
+//
+// Empty string is also rejected here. Callers that legitimately want to
+// clear the branch (e.g. spawn a fresh conflict-resolution task) must
+// use ClearBranchNameTx, which is a dedicated explicit-clear entry
+// point that skips the validator.
 func SetBranchNameTx(tx *sql.Tx, id int, branchName string) error {
+	if err := validateRefName(branchName); err != nil {
+		return err
+	}
 	_, err := tx.Exec(`UPDATE BountyBoard SET branch_name = ? WHERE id = ?`, branchName, id)
+	return err
+}
+
+// ClearBranchNameTx sets branch_name = '' for a task. Split from
+// SetBranchNameTx so Fix #9's strict validator can reject empty-string
+// inputs at that ingress while still allowing callers that DO need to
+// clear the branch (e.g. jedi_council when spawning a conflict-
+// resolution task) to do so via an explicit, audit-visible call.
+func ClearBranchNameTx(tx *sql.Tx, id int) error {
+	_, err := tx.Exec(`UPDATE BountyBoard SET branch_name = '' WHERE id = ?`, id)
 	return err
 }
 

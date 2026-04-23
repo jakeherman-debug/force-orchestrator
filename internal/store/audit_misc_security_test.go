@@ -85,12 +85,10 @@ func TestAUDIT_MiscSecurity(t *testing.T) {
 
 	// ── AUDIT-019 ────────────────────────────────────────────────────────
 	t.Run("AUDIT_019_worktree_symlink_follow", func(t *testing.T) {
-		t.Skip("AUDIT-019: remove when ListAgentWorktreePaths rejects symlinks (Fix #9). AUDIT-123 is DUPLICATE-OF-019.")
-		// Without skip, fails with: AUDIT-019: internal/git/git.go does NOT guard
-		// against symlinked worktree entries. Missing os.Lstat+ModeSymlink check in
-		// ListAgentWorktreePaths. A malicious symlink under
-		// .force-worktrees/<repo>/<agent> makes `git clean -fdx` in the reset path
-		// wipe arbitrary filesystem locations.
+		// Closed by Fix #9: ListAgentWorktreePaths now Lstats each entry and
+		// skips symlinks. This test is the permanent regression guard —
+		// removing either the Lstat call or the ModeSymlink reference will
+		// flip it back to red.
 		src := mustReadFile(t, gitPath)
 
 		// ListAgentWorktreePaths must exist — test anchor.
@@ -101,51 +99,26 @@ func TestAUDIT_MiscSecurity(t *testing.T) {
 			t.Fatalf("audit anchor lost: ResolveWorktreeDir not in %s", gitPath)
 		}
 
-		// (a) No Lstat+ModeSymlink gate anywhere in git.go. The fix needs
-		//     one of these to refuse symlinked entries during discovery.
+		// (a) Post-Fix-#9 invariant: Lstat + ModeSymlink gate MUST be
+		//     present in git.go so ListAgentWorktreePaths refuses symlinked
+		//     entries during discovery.
 		hasLstat := strings.Contains(src, "os.Lstat(") ||
 			strings.Contains(src, "Lstat(")
 		hasModeSymlink := strings.Contains(src, "ModeSymlink") ||
 			strings.Contains(src, "fs.ModeSymlink")
-		if hasLstat && hasModeSymlink {
-			t.Errorf("AUDIT-019 appears fixed in %s (Lstat+ModeSymlink "+
-				"both present). Update this test to assert the refusal "+
-				"semantics directly.", gitPath)
-		} else {
-			t.Errorf("AUDIT-019: %s does NOT guard against symlinked "+
-				"worktree entries. Missing os.Lstat+ModeSymlink check in "+
-				"ListAgentWorktreePaths. A malicious symlink under "+
-				".force-worktrees/<repo>/<agent> makes `git clean -fdx` "+
-				"in the reset path wipe arbitrary filesystem locations.",
-				gitPath)
-		}
-
-		// (b) No filepath.Rel-based containment check either. A real fix
-		//     would call filepath.Rel(base, candidate) and refuse on
-		//     strings.HasPrefix(rel, "..").
-		hasFilepathRel := strings.Contains(src, "filepath.Rel(")
-		hasRelDotDotRefusal := strings.Contains(src, `strings.HasPrefix(rel, "..")`) ||
-			strings.Contains(src, `strings.Contains(rel, "..")`)
-		if hasFilepathRel && hasRelDotDotRefusal {
-			t.Errorf("AUDIT-019 partial-fix: filepath.Rel + .. check "+
-				"present in %s — update test.", gitPath)
-		}
-
-		// (c) No filepath.EvalSymlinks containment check.
-		if strings.Contains(src, "filepath.EvalSymlinks(") {
-			t.Errorf("AUDIT-019 partial-fix: EvalSymlinks now present in "+
-				"%s — verify it's applied inside ListAgentWorktreePaths.", gitPath)
+		if !(hasLstat && hasModeSymlink) {
+			t.Errorf("AUDIT-019 regression: %s must contain Lstat+ModeSymlink "+
+				"to refuse symlinked worktree entries (Fix #9 invariant). "+
+				"Found Lstat=%v ModeSymlink=%v.", gitPath, hasLstat, hasModeSymlink)
 		}
 	})
 
 	// ── AUDIT-123 (DUPLICATE-OF-019) ─────────────────────────────────────
 	t.Run("AUDIT_123_worktree_reset_path_unverified_DUPLICATE_OF_019", func(t *testing.T) {
-		t.Skip("AUDIT-019: remove when ListAgentWorktreePaths rejects symlinks (Fix #9). AUDIT-123 is DUPLICATE-OF-019.")
-		// Without skip, fails with: AUDIT-123 (DUPLICATE-OF-019):
-		// internal/agents/pilot_worktree_reset.go does NOT re-verify that each
-		// worktree path resolves under the .force-worktrees base before running
-		// `git reset --hard` + `git clean -fdx`. Missing filepath.EvalSymlinks +
-		// HasPrefix containment check.
+		// Closed by Fix #9: resetAndCleanWorktree now calls
+		// filepath.EvalSymlinks and asserts the resolved path is still
+		// under the .force-worktrees base before running destructive
+		// operations. This test is the permanent regression guard.
 		src := mustReadFile(t, worktreeResetPath)
 
 		// Anchors.
@@ -158,24 +131,18 @@ func TestAUDIT_MiscSecurity(t *testing.T) {
 				worktreeResetPath)
 		}
 
-		// The fix needs EvalSymlinks(path) + HasPrefix(resolved,
-		// forceWorktreeBase). Neither is present today.
+		// Post-Fix-#9 invariant: EvalSymlinks + .force-worktrees containment
+		// check are BOTH present.
 		hasEvalSymlinks := strings.Contains(src, "filepath.EvalSymlinks(")
 		hasBaseContainment := strings.Contains(src, "forceWorktreeBase") ||
-			(strings.Contains(src, "strings.HasPrefix(") &&
+			(strings.Contains(src, "filepath.Rel(") &&
 				strings.Contains(src, ".force-worktrees"))
-		if hasEvalSymlinks && hasBaseContainment {
-			t.Errorf("AUDIT-123 appears fixed in %s. Update this test to "+
-				"assert the containment semantics directly.", worktreeResetPath)
-		} else {
-			t.Errorf("AUDIT-123 (DUPLICATE-OF-019): %s does NOT re-verify "+
-				"that each worktree path resolves under the "+
-				".force-worktrees base before running "+
-				"`git reset --hard` + `git clean -fdx`. Missing "+
-				"filepath.EvalSymlinks + HasPrefix containment check. "+
-				"DUPLICATE-OF-019 per AUDIT.md line 417; kept distinct "+
-				"because fix boundary is the operation dispatch, not "+
-				"path discovery.", worktreeResetPath)
+		if !(hasEvalSymlinks && hasBaseContainment) {
+			t.Errorf("AUDIT-123 regression: %s must call "+
+				"filepath.EvalSymlinks + containment-check the resolved "+
+				"path against .force-worktrees before reset/clean. "+
+				"Found EvalSymlinks=%v containment=%v.", worktreeResetPath,
+				hasEvalSymlinks, hasBaseContainment)
 		}
 	})
 

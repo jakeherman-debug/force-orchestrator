@@ -145,7 +145,10 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 	}
 	if filterPattern != "" {
 		if noFollow {
-			grepCmd := exec.Command("grep", "-i", filterPattern, "fleet.log")
+			// Fix #9 (AUDIT-098): `--` before the pattern so an operator
+			// filter like `-r` or `--include=...` can't be re-interpreted
+			// by grep as a flag.
+			grepCmd := exec.Command("grep", "-i", "--", filterPattern, "fleet.log")
 			grepOut, grepErr := grepCmd.Output()
 			if grepErr != nil {
 				fmt.Println("fleet.log not found — start the daemon first.")
@@ -157,12 +160,13 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 				fmt.Println(strings.Join(lines, "\n"))
 			}
 		} else {
-			tailCmd := exec.Command("tail", "-f", "fleet.log")
+			tailCmd := exec.Command("tail", "-f", "--", "fleet.log")
 			tailOut, pipeErr := tailCmd.StdoutPipe()
 			if pipeErr != nil {
 				fmt.Println("fleet.log not found — start the daemon first.")
 			} else {
-				grepCmd := exec.Command("grep", "--line-buffered", "-i", filterPattern)
+				// Fix #9 (AUDIT-098): `--` separator applied here too.
+				grepCmd := exec.Command("grep", "--line-buffered", "-i", "--", filterPattern)
 				grepCmd.Stdin = tailOut
 				grepCmd.Stdout = os.Stdout
 				grepCmd.Stderr = os.Stderr

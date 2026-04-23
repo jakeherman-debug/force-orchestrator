@@ -240,29 +240,41 @@ func completeAskBranchResolution(db *sql.DB, bounty *store.Bounty, ab *store.Con
 //
 // Handles: git@github.com:owner/repo.git, https://github.com/owner/repo.git,
 // file:///paths (for tests — returns "" so gh infers from cwd).
+//
+// Fix #9 (AUDIT-050): the returned spec is validated against the strict
+// `owner/repo` regex. An attacker-crafted remote URL like
+// `git@github.com:--upload-pack=/tmp/evil/foo.git` parses to
+// `--upload-pack=/tmp/evil/foo` by the naive splitter below — which would
+// then flow into `gh --repo` and be re-interpreted as a flag. The
+// post-parse validator rejects that by returning "".
 func deriveGHRepoFromRemoteURL(remoteURL string) string {
 	if remoteURL == "" {
 		return ""
 	}
+	var spec string
 	// SSH form: git@github.com:owner/repo.git
 	if strings.HasPrefix(remoteURL, "git@") {
 		if idx := strings.Index(remoteURL, ":"); idx > 0 {
 			path := remoteURL[idx+1:]
-			return strings.TrimSuffix(path, ".git")
+			spec = strings.TrimSuffix(path, ".git")
 		}
-		return ""
-	}
-	// HTTPS form: https://github.com/owner/repo(.git)
-	if strings.HasPrefix(remoteURL, "https://") || strings.HasPrefix(remoteURL, "http://") {
-		// Strip scheme and host.
+	} else if strings.HasPrefix(remoteURL, "https://") || strings.HasPrefix(remoteURL, "http://") {
+		// HTTPS form: https://github.com/owner/repo(.git)
 		u := strings.TrimPrefix(strings.TrimPrefix(remoteURL, "https://"), "http://")
 		if idx := strings.Index(u, "/"); idx > 0 {
-			return strings.TrimSuffix(u[idx+1:], ".git")
+			spec = strings.TrimSuffix(u[idx+1:], ".git")
 		}
-		return ""
 	}
 	// file:// and anything else — let gh infer from cwd.
-	return ""
+	if spec == "" {
+		return ""
+	}
+	// Final safety gate: if the parsed spec doesn't match strict
+	// owner/repo, refuse rather than hand a flag-injecting string to gh.
+	if err := igit.ValidateGHRepoSpec(spec); err != nil {
+		return ""
+	}
+	return spec
 }
 
 // ── sub-pr-ci-watch dog ──────────────────────────────────────────────────────

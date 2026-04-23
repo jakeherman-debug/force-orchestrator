@@ -12,7 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"path/filepath"
+
 	"force-orchestrator/internal/agents"
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
@@ -558,34 +561,57 @@ func cmdRepos(db *sql.DB, args []string) {
 }
 
 func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
-	// Verify the path exists and is a git repository
-	if _, statErr := os.Stat(repoRegPath); statErr != nil {
-		fmt.Printf("Path does not exist: %s\n", repoRegPath)
+	// Fix #9: validate the path BEFORE any shell call. Leading `-` / `..` /
+	// NUL / newline / non-absolute paths all fail here. Absolute form is
+	// resolved via filepath.Abs so a caller that passes a relative path
+	// from an unknown cwd still gets a meaningful check.
+	absPath, absErr := filepath.Abs(repoRegPath)
+	if absErr != nil {
+		fmt.Printf("Cannot resolve path %q: %v\n", repoRegPath, absErr)
 		os.Exit(1)
 	}
-	if out, gitErr := exec.Command("git", "-C", repoRegPath, "rev-parse", "--git-dir").CombinedOutput(); gitErr != nil {
-		fmt.Printf("'%s' does not appear to be a git repository: %s\n", repoRegPath, strings.TrimSpace(string(out)))
+	if err := igit.ValidateRepoPath(absPath, igit.RepoPathOptions{RejectSymlinks: false}); err != nil {
+		fmt.Printf("Invalid repo path: %v\n", err)
 		os.Exit(1)
 	}
-	store.AddRepo(db, name, repoRegPath, desc)
-	fmt.Printf("Repository '%s' registered at %s\n", name, repoRegPath)
+	// Verify the path exists and is a git repository.
+	if _, statErr := os.Stat(absPath); statErr != nil {
+		fmt.Printf("Path does not exist: %s\n", absPath)
+		os.Exit(1)
+	}
+	// Trailing `--` keeps the arg positional (Fix #9 defence-in-depth;
+	// absPath already passed the validator so this is belt-and-suspenders).
+	if out, gitErr := exec.Command("git", "-C", absPath, "rev-parse", "--git-dir", "--").CombinedOutput(); gitErr != nil {
+		fmt.Printf("'%s' does not appear to be a git repository: %s\n", absPath, strings.TrimSpace(string(out)))
+		os.Exit(1)
+	}
+	store.AddRepo(db, name, absPath, desc)
+	fmt.Printf("Repository '%s' registered at %s\n", name, absPath)
 
 	// Eagerly populate PR-flow fields (remote_url, default_branch) and queue
 	// FindPRTemplate so the repo is ready for the PR flow immediately. This
 	// saves operators from having to remember to run `force repo sync` after
 	// every add. A failure here is non-fatal — the repo is still registered,
 	// and the daemon's startup Layer B will retry on next boot.
-	if _, statErr := os.Stat(repoRegPath); statErr == nil {
-		remote, rErr := exec.Command("git", "-C", repoRegPath, "remote", "get-url", "origin").CombinedOutput()
+	if _, statErr := os.Stat(absPath); statErr == nil {
+		remote, rErr := exec.Command("git", "-C", absPath, "remote", "get-url", "origin").CombinedOutput()
 		remoteURL := strings.TrimSpace(string(remote))
-		if rErr != nil || remoteURL == "" {
-			fmt.Printf("  (note) no `origin` remote configured — PR flow will fall back to legacy local-merge for this repo.\n")
-			fmt.Printf("  Fix: `git -C %s remote add origin <url>` then `force repo sync`.\n", repoRegPath)
+		// Fix #9: validate the URL from `git remote get-url origin` BEFORE
+		// persisting. An attacker-crafted remote URL with embedded
+		// `--upload-pack=` would otherwise flow through to `gh --repo` etc.
+		urlErr := igit.ValidateRemoteURL(remoteURL)
+		if rErr != nil || remoteURL == "" || urlErr != nil {
+			reason := "no `origin` remote configured"
+			if urlErr != nil {
+				reason = fmt.Sprintf("origin URL rejected: %v", urlErr)
+			}
+			fmt.Printf("  (note) %s — PR flow will fall back to legacy local-merge for this repo.\n", reason)
+			fmt.Printf("  Fix: `git -C %s remote add origin <url>` then `force repo sync`.\n", absPath)
 			_ = store.SetRepoPRFlowEnabled(db, name, false)
 		} else {
 			// Detect default branch via symbolic-ref, fall back to common names.
 			var defaultBranch string
-			if out, symErr := exec.Command("git", "-C", repoRegPath, "symbolic-ref", "refs/remotes/origin/HEAD", "--short").CombinedOutput(); symErr == nil {
+			if out, symErr := exec.Command("git", "-C", absPath, "symbolic-ref", "--short", "--", "refs/remotes/origin/HEAD").CombinedOutput(); symErr == nil {
 				parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
 				if len(parts) == 2 {
 					defaultBranch = parts[1]
@@ -593,7 +619,7 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 			}
 			if defaultBranch == "" {
 				for _, b := range []string{"main", "master", "develop"} {
-					if exec.Command("git", "-C", repoRegPath, "rev-parse", "--verify", b).Run() == nil {
+					if exec.Command("git", "-C", absPath, "rev-parse", "--verify", b, "--").Run() == nil {
 						defaultBranch = b
 						break
 					}
@@ -605,7 +631,7 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 			if err := store.SetRepoRemoteInfo(db, name, remoteURL, defaultBranch); err == nil {
 				fmt.Printf("  remote=%s default=%s\n", remoteURL, defaultBranch)
 			}
-			if _, err := agents.QueueFindPRTemplate(db, name, repoRegPath); err == nil {
+			if _, err := agents.QueueFindPRTemplate(db, name, absPath); err == nil {
 				fmt.Printf("  queued FindPRTemplate task to locate the repo's PR template.\n")
 			}
 		}

@@ -19,7 +19,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | P7 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace`, `TestPattern_P7_ResetTaskResurrectsCompleted` | Fix #8/#5 (UpdateBountyStatusFrom) |
 | P8 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | Fix #2 (dashboard hardening) | Closed by: Fix #2 (`fix/dashboard-hardening`) |
 | P9 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels` (+ 3 subtests) | Fix #10 (RedactSecrets + webhook allow-list) | Closed by: Fix #10 (`fix/redact-and-outbound`) |
-| P10 | `internal/git/audit_pattern_p10_test.go` | `TestPattern_P10_BranchValidatorsMissing`, `TestPattern_P10_GitInvocationsLackDashDashSeparator` | Fix #9 (validRef + `--` separator) |
+| P10 | `internal/git/audit_pattern_p10_test.go` | `TestPattern_P10_BranchValidatorsMissing`, `TestPattern_P10_GitInvocationsLackDashDashSeparator` | Fix #9 (validRef + `--` separator) | Closed by: Fix #9 (`fix/ref-path-validators`) |
 | P11 | `internal/agents/audit_pattern_p11_test.go` | `TestPattern_P11_EstopDoesNotStopTheWorld` (+ 3 subtests A/B/C for AUDIT-105/106/107) | Fix #1 (effective e-stop) |
 | P12 | `internal/agents/audit_pattern_p12_test.go` | `TestPattern_P12_PromptInjectionSurface` (+ 6 subtests A-F) | Fix #8.5 (LLM boundary markers + DisallowUnknownFields) |
 
@@ -44,8 +44,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-015 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn` | static | Fix #8 |
 | AUDIT-016 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels/A_*` | behavioral (httptest) | Fix #10 | Closed by: Fix #10 (`fix/redact-and-outbound`) |
 | AUDIT-017 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_017_*` | static | Fix #10 | Closed by: Fix #10 |
-| AUDIT-018 | `internal/git/audit_pattern_p10_test.go` | `TestPattern_P10_BranchValidatorsMissing` | behavioral | Fix #9 |
-| AUDIT-019 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_019_*` | static | Fix #9 |
+| AUDIT-018 | `internal/git/audit_pattern_p10_test.go` | `TestPattern_P10_BranchValidatorsMissing` | behavioral | Fix #9 | Closed by: Fix #9 (`fix/ref-path-validators`) |
+| AUDIT-019 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_019_*` | static | Fix #9 | Closed by: Fix #9 |
 | AUDIT-020 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_020_*` | static | Fix #1 | Closed by: Fix #1 |
 | AUDIT-021 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace` | race (20 trials, 20/20 clobbers) | Fix #8 |
 | AUDIT-022 | `internal/store/audit_pattern_p1_test.go` | `TestPattern_P1_UpdateBountyStatusSwallowsDBError` | behavioral+static | Fix #8 |
@@ -93,10 +93,10 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-046 | `internal/store/audit_concurrency_test.go` | `.../AUDIT_046_*` | static | Fix #8 |
 | AUDIT-047 | `internal/store/audit_concurrency_test.go` | `.../AUDIT_047_*` | static | Fix #8 |
 | AUDIT-048 | `internal/store/audit_concurrency_test.go` | `.../AUDIT_048_*` | static | Fix #3/#4 |
-| AUDIT-049 | `internal/git/audit_pattern_p10_test.go` | P10 branch-validator coverage | static | Fix #9 |
-| AUDIT-050 | same | P10 `--` separator coverage | static | Fix #9 |
-| AUDIT-051 | same | P10 end-to-end chain | static | Fix #9 |
-| AUDIT-052 | same | P10 `--dangerously-skip-permissions` | static | Fix #9 |
+| AUDIT-049 | `internal/git/audit_pattern_p10_test.go` | P10 branch-validator coverage | static | Fix #9 | Closed by: Fix #9 |
+| AUDIT-050 | same | P10 `--` separator coverage | static | Fix #9 | Closed by: Fix #9 |
+| AUDIT-051 | same | P10 end-to-end chain | static | Fix #9 | Closed by: Fix #9 |
+| AUDIT-052 | same | P10 `--dangerously-skip-permissions` | static | Fix #9 | (pattern covers; operator sandboxing deferred) |
 | AUDIT-053 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 | Closed by: Fix #2 (`fix/dashboard-hardening`) |
 | AUDIT-054 | `internal/dashboard/audit_pattern_p8_test.go` | P8 | static | Fix #2 | Closed by: Fix #2 |
 | AUDIT-055 | `internal/store/audit_pattern_p9_test.go` | `.../C_GhStderrNotRedacted` | static grep | Fix #10 | Closed by: Fix #10 |
@@ -118,7 +118,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-120 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_120_FlakyRealBugConcurrentFixSpawns` | static | Fix #7 |
 | AUDIT-121 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-121/HardcodedMainFallback` | static | Fix #0 | Closed by: Fix #0 |
 | AUDIT-122 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-122/MergeAndCleanup` | static | Fix #0 | Closed by: Fix #0 |
-| AUDIT-123 | `internal/store/audit_misc_security_test.go` | `.../AUDIT_123_*` | DUPLICATE-OF-019 | Fix #9 |
+| AUDIT-123 | `internal/store/audit_misc_security_test.go` | `.../AUDIT_123_*` | DUPLICATE-OF-019 | Fix #9 | Closed by: Fix #9 |
 | AUDIT-124 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-124/DeleteAskBranch` | static | Fix #0 | Closed by: Fix #0 |
 | AUDIT-125 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_125_*` | static | Fix #8 |
 | AUDIT-126 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_126_*` | static | Fix #8 |
@@ -160,7 +160,7 @@ These are Medium findings where the pattern test in the table above structurally
 - **P2 (idempotency) covers:** AUDIT-075, -076
 - **P6 (state machine) covers:** AUDIT-083, -084, -087 — AUDIT-087 (convoy UPDATE source-status guard) *Closed by: Fix #5* via the new `AND status = 'Active'` clause on the mark-Completed / mark-Failed UPDATEs in `runStaleConvoysReport`. AUDIT-083 and -084 remain open (ConflictPending trap state + AwaitingChancellorReview stale-lock flow) — they need their own dog passes.
 - **P7 (unguarded transitions) covers:** AUDIT-072, -086
-- **P10 (shell injection) covers:** AUDIT-098, -099, -140, -153, -154
+- **P10 (shell injection) covers:** AUDIT-098, -099, -140, -153, -154 — Closed by: Fix #9 (`fix/ref-path-validators`). AUDIT-099 (.git/info/attributes atomic rewrite) still needs a signal handler; kept open for Fix #10.
 - **P12 (prompt injection) covers:** AUDIT-139, -141, -142, -143 (also time), -144, -145
 - **Concurrency batch covers:** AUDIT-092, -093, -096, -097
 - **Schema+time batch covers:** AUDIT-077, -078, -080, -082, -143, -146, -147, -148

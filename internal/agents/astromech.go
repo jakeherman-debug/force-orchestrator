@@ -121,14 +121,27 @@ func permanentInfraFail(db *sql.DB, logger interface{ Printf(string, ...any) },
 
 // conflictBranchFromPayload returns the branch name embedded in a [CONFLICT_BRANCH: name]
 // prefix, or empty string if the payload is not a conflict resolution task.
+//
+// Fix #9 (AUDIT-051): the extracted branch flows straight into `git checkout`.
+// An attacker who can post a GitHub review comment with a forged
+// `[CONFLICT_BRANCH: --upload-pack=/tmp/evil]` prefix would otherwise reach
+// git as a flag. The ref validator below rejects that — if the extracted
+// name fails ValidateRef, we return "" so the downstream path takes the
+// "not a conflict resolution task" branch.
 func conflictBranchFromPayload(payload string) string {
 	const prefix = "[CONFLICT_BRANCH: "
-	if strings.HasPrefix(payload, prefix) {
-		if end := strings.Index(payload, "]\n\n"); end != -1 {
-			return payload[len(prefix):end]
-		}
+	if !strings.HasPrefix(payload, prefix) {
+		return ""
 	}
-	return ""
+	end := strings.Index(payload, "]\n\n")
+	if end == -1 {
+		return ""
+	}
+	name := payload[len(prefix):end]
+	if err := igit.ValidateRef(name); err != nil {
+		return ""
+	}
+	return name
 }
 
 // directiveText returns the task-specific part of a payload, stripping any leading

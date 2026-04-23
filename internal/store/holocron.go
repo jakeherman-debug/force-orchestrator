@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -126,6 +127,17 @@ func ListRepos(db *sql.DB) []Repository {
 // callers that see an error should mark the repo pr_flow_enabled=0 instead of
 // storing empty strings here.
 func SetRepoRemoteInfo(db *sql.DB, name, remoteURL, defaultBranch string) error {
+	// Fix #9: validate both values before persisting. A corrupt
+	// `git remote get-url origin` output (e.g. an attacker-crafted URL
+	// like `git@github.com:--upload-pack=/tmp/evil/foo.git`) must not
+	// flow through AddRepo → SetRepoRemoteInfo → `gh --repo <derived>`
+	// where gh re-interprets the embedded flag.
+	if err := validateRemoteURL(remoteURL); err != nil {
+		return fmt.Errorf("SetRepoRemoteInfo: %w", err)
+	}
+	if err := validateRefName(defaultBranch); err != nil {
+		return fmt.Errorf("SetRepoRemoteInfo: defaultBranch: %w", err)
+	}
 	_, err := db.Exec(`UPDATE Repositories SET remote_url = ?, default_branch = ? WHERE name = ?`,
 		remoteURL, defaultBranch, name)
 	return err
