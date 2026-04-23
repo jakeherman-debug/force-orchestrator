@@ -3,7 +3,43 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
+
+// protectedAskBranchNames mirrors git.protectedBranchNames at the store
+// ingress. Kept in sync manually because store must not import internal/git
+// (that would break the existing layering). Any branch name that hits this
+// set is rejected at DB-write time, so Fix #0's destructive-op guards never
+// see a corrupt "main" row to begin with.
+var protectedAskBranchNames = map[string]struct{}{
+	"main":       {},
+	"master":     {},
+	"develop":    {},
+	"trunk":      {},
+	"production": {},
+	"prod":       {},
+	"head":       {},
+}
+
+// stripRefPrefix unwraps "refs/heads/<name>" / "origin/<name>" before
+// comparison so a caller that passes a fully-qualified ref is still caught.
+func stripRefPrefix(branch string) string {
+	out := strings.TrimSpace(branch)
+	for _, p := range []string{"refs/heads/", "refs/remotes/origin/", "origin/"} {
+		if strings.HasPrefix(out, p) {
+			out = out[len(p):]
+		}
+	}
+	return out
+}
+
+// isProtectedAskBranchName returns true for "main"/"master"/... names. See
+// protectedAskBranchNames for the authoritative list.
+func isProtectedAskBranchName(branch string) bool {
+	canonical := strings.ToLower(stripRefPrefix(branch))
+	_, denied := protectedAskBranchNames[canonical]
+	return denied
+}
 
 // ── ConvoyAskBranches CRUD ───────────────────────────────────────────────────
 //
@@ -24,6 +60,12 @@ func UpsertConvoyAskBranch(db *sql.DB, convoyID int, repo, askBranch, baseSHA st
 	if convoyID <= 0 || repo == "" || askBranch == "" || baseSHA == "" {
 		return fmt.Errorf("UpsertConvoyAskBranch: all fields required (convoy=%d repo=%q branch=%q sha=%q)",
 			convoyID, repo, askBranch, baseSHA)
+	}
+	// Fix #0: ingress guard. Reject ask_branch="main"/"master"/... at DB-write
+	// time so a single manual edit or corrupt migration can't become the
+	// DB-supplied input to completeAskBranchResolution's force-push.
+	if isProtectedAskBranchName(askBranch) {
+		return fmt.Errorf("UpsertConvoyAskBranch: refusing to store ask_branch=%q — matches protected/default branch denylist", askBranch)
 	}
 	// If a row exists with a different branch name, something is badly wrong —
 	// we'd be silently overwriting a branch that may still have open PRs against

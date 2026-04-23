@@ -85,6 +85,11 @@ func readSource(t *testing.T, rel string) string {
 
 // extractFuncBody returns the body of the named function (brace-matched)
 // from the given Go source. Returns "" if not found.
+//
+// The walker must skip over `{` characters that appear inside the function
+// signature's parameter list — Go permits inline interface types there, e.g.
+// `logger interface{ Printf(string, ...any) }`, whose braces would otherwise
+// be mistaken for the function body's opening brace.
 func extractFuncBody(src, funcName string) string {
 	// Match `func Name(` or `func (<recv>) Name(`.
 	re := regexp.MustCompile(`func\s+(?:\([^)]*\)\s+)?` + regexp.QuoteMeta(funcName) + `\s*\(`)
@@ -92,18 +97,44 @@ func extractFuncBody(src, funcName string) string {
 	if loc == nil {
 		return ""
 	}
-	// Find the opening brace of the function body.
-	i := loc[1]
-	for i < len(src) && src[i] != '{' {
-		i++
+	// Walk forward skipping matching parens so we land on the function body's
+	// opening `{`, not a brace nested inside an inline type declaration.
+	i := loc[1] - 1 // last char of match is `(`; step back to include it
+	parenDepth := 0
+	braceDepthInSig := 0
+	foundBodyOpen := -1
+	for ; i < len(src); i++ {
+		switch src[i] {
+		case '(':
+			parenDepth++
+		case ')':
+			parenDepth--
+		case '{':
+			if parenDepth > 0 {
+				braceDepthInSig++
+				continue
+			}
+			if braceDepthInSig > 0 {
+				// Inside a signature-level interface/struct type; keep counting.
+				braceDepthInSig++
+				continue
+			}
+			foundBodyOpen = i
+		case '}':
+			if braceDepthInSig > 0 {
+				braceDepthInSig--
+			}
+		}
+		if foundBodyOpen >= 0 {
+			break
+		}
 	}
-	if i == len(src) {
+	if foundBodyOpen < 0 {
 		return ""
 	}
-	// Walk braces to find the matching close.
 	depth := 0
-	start := i
-	for ; i < len(src); i++ {
+	start := foundBodyOpen
+	for i = foundBodyOpen; i < len(src); i++ {
 		switch src[i] {
 		case '{':
 			depth++
@@ -151,12 +182,12 @@ func hasProtectedBranchGuard(body string) (bool, string) {
 }
 
 func TestAUDIT_102_103_104_121_122_124_ProtectedBranchGuardsMissing(t *testing.T) {
-	t.Skip("AUDIT-102/103/104/121/122/124: remove when AssertNotDefaultBranch guard added to destructive git ops (Fix #0)")
-	// Without skip, fails with:
-	//   audit_protected_branch_test.go:198: AUDIT-102 REPRODUCED: completeAskBranchResolution in internal/agents/pr_flow.go has NO protected-branch guard (no guard markers found)
-	//   audit_protected_branch_test.go:198: AUDIT-103 REPRODUCED: ForcePushBranch in internal/git/askbranch.go has NO protected-branch guard (no guard markers found)
-	//   audit_protected_branch_test.go:198: AUDIT-104 REPRODUCED: TriggerCIRerun in internal/git/askbranch.go has NO protected-branch guard (no guard markers found)
-	//   audit_protected_branch_test.go:229: AUDIT-121 REPRODUCED: pilot_rebase.go has `defaultBranch = "main"` literal fallback
+	// Fix #0 landed: AssertNotDefaultBranch installed at ForcePushBranch,
+	// TriggerCIRerun, DeleteAskBranch, MergeAndCleanup, and
+	// completeAskBranchResolution. pilot_rebase.go calls GetDefaultBranch.
+	// UpsertConvoyAskBranch rejects protected names at the store ingress.
+	// The skip is removed; this test now acts as permanent regression
+	// protection.
 	// ── Static audit over each cited function ─────────────────────────────
 	type fnCite struct {
 		auditID  string
@@ -180,112 +211,84 @@ func TestAUDIT_102_103_104_121_122_124_ProtectedBranchGuardsMissing(t *testing.T
 	for _, fn := range fns {
 		fn := fn
 		t.Run(fn.auditID+"/"+fn.funcName, func(t *testing.T) {
-			t.Skip(fn.auditID + ": remove when AssertNotDefaultBranch guard added to destructive git ops (Fix #0)")
-			// Without skip, fails with (one sample line per audit ID in this loop):
-			//   audit_protected_branch_test.go:198: AUDIT-102 REPRODUCED: completeAskBranchResolution in internal/agents/pr_flow.go has NO protected-branch guard (no guard markers found). Note: force-pushes ab.AskBranch; DB-supplied; no default-branch reject
-			//   audit_protected_branch_test.go:198: AUDIT-103 REPRODUCED: ForcePushBranch in internal/git/askbranch.go has NO protected-branch guard (no guard markers found). Note: boundary helper; callers in pilot_rebase*.go pass DB values
-			//   audit_protected_branch_test.go:198: AUDIT-104 REPRODUCED: TriggerCIRerun in internal/git/askbranch.go has NO protected-branch guard (no guard markers found). Note: empty-commit push; branch arg can default to pr.Repo (pr_flow.go:709)
-			//   audit_protected_branch_test.go:198: AUDIT-122 REPRODUCED: MergeAndCleanup in internal/git/git.go has NO protected-branch guard (no guard markers found). Note: reset --hard / clean -fd / branch -D on caller-supplied branch+worktree
-			//   audit_protected_branch_test.go:198: AUDIT-124 REPRODUCED: DeleteAskBranch in internal/git/askbranch.go has NO protected-branch guard (no guard markers found). Note: branch -D + push origin --delete on caller-supplied ref
+			// Fix #0 inverts the assertion: post-fix, each destructive op MUST
+			// carry a protected-branch guard. hasProtectedBranchGuard returns
+			// true when AssertNotDefaultBranch(, a literal default-branch
+			// comparison, or GetDefaultBranch in a comparison context is
+			// present in the function body.
 			src := readSource(t, fn.file)
 			body := extractFuncBody(src, fn.funcName)
 			if body == "" {
 				t.Fatalf("%s: could not locate function %s in %s", fn.auditID, fn.funcName, fn.file)
 			}
 			guarded, reason := hasProtectedBranchGuard(body)
-			if guarded {
-				t.Errorf("%s: %s in %s NOW HAS a guard (%s) — finding may be fixed or needs restatement",
-					fn.auditID, fn.funcName, fn.file, reason)
+			if !guarded {
+				t.Errorf("%s REGRESSION: %s in %s lost its protected-branch guard (%s). Note: %s",
+					fn.auditID, fn.funcName, fn.file, reason, fn.note)
 				return
 			}
-			// Report the violation for visibility in the test log.
-			t.Errorf("%s REPRODUCED: %s in %s has NO protected-branch guard (%s). Note: %s",
-				fn.auditID, fn.funcName, fn.file, reason, fn.note)
+			t.Logf("%s guard present in %s (%s)", fn.auditID, fn.funcName, reason)
 		})
 	}
 
 	// ── AUDIT-121: hardcoded "main" fallback in pilot_rebase.go:77 ────────
 	t.Run("AUDIT-121/HardcodedMainFallback", func(t *testing.T) {
-		t.Skip("AUDIT-121: remove when AssertNotDefaultBranch guard added to destructive git ops (Fix #0)")
-		// Without skip, fails with:
-		//   audit_protected_branch_test.go:229: AUDIT-121 REPRODUCED: pilot_rebase.go has `defaultBranch = "main"` literal fallback; violates CLAUDE.md directive to call GetDefaultBranch(repoPath). Master-default repos → infinite REBASE_CONFLICT loop.
+		// Fix #0 replaced the `defaultBranch = "main"` literal with a call
+		// to igit.GetDefaultBranch(repo.LocalPath). Post-fix the literal is
+		// gone AND the discovery call is present inside runRebaseAskBranch.
 		src := readSource(t, "internal/agents/pilot_rebase.go")
-		// Look for the exact pattern: defaultBranch = "main" (assignment, not ==).
-		// CLAUDE.md demands GetDefaultBranch(repo.LocalPath) in this spot.
-		pat := regexp.MustCompile(`defaultBranch\s*=\s*"main"`)
-		if !pat.MatchString(src) {
-			t.Errorf("AUDIT-121 stale: could not find `defaultBranch = \"main\"` literal in pilot_rebase.go; citation may be outdated")
+		badPat := regexp.MustCompile(`defaultBranch\s*=\s*"main"`)
+		if badPat.MatchString(src) {
+			t.Errorf("AUDIT-121 REGRESSION: pilot_rebase.go still has `defaultBranch = \"main\"` literal fallback; must use GetDefaultBranch(repo.LocalPath)")
 			return
 		}
-		// Also confirm there is NO GetDefaultBranch(repo.LocalPath) call
-		// inside RunRebaseAskBranch before the literal. If there were, the
-		// literal might just be a no-op fallback.
 		body := extractFuncBody(src, "RunRebaseAskBranch")
 		if body == "" {
-			// Try alt name.
 			body = extractFuncBody(src, "runRebaseAskBranch")
 		}
-		if strings.Contains(body, "GetDefaultBranch(repo.LocalPath)") {
-			t.Errorf("AUDIT-121 may be mitigated: RunRebaseAskBranch calls GetDefaultBranch(repo.LocalPath); re-read citation")
+		if body == "" {
+			t.Fatalf("AUDIT-121: could not locate runRebaseAskBranch in pilot_rebase.go")
+		}
+		if !strings.Contains(body, "GetDefaultBranch(repo.LocalPath)") {
+			t.Errorf("AUDIT-121 REGRESSION: runRebaseAskBranch no longer calls GetDefaultBranch(repo.LocalPath); fallback path unreachable")
 			return
 		}
-		t.Errorf("AUDIT-121 REPRODUCED: pilot_rebase.go has `defaultBranch = \"main\"` literal fallback; violates CLAUDE.md directive to call GetDefaultBranch(repoPath). Master-default repos → infinite REBASE_CONFLICT loop.")
+		t.Logf("AUDIT-121 closed: runRebaseAskBranch uses GetDefaultBranch(repo.LocalPath)")
 	})
 
-	// ── AUDIT-102 extension: UpsertConvoyAskBranch has no default-branch
-	// validation. A DB-corrupt or manually-edited row with ask_branch="main"
-	// flows straight through to completeAskBranchResolution's force-push.
+	// ── AUDIT-102 extension: UpsertConvoyAskBranch rejects default-branch
+	// names at the store ingress. Post-Fix #0 this is an end-to-end check
+	// that a corrupt "main" row cannot be written and thus cannot flow into
+	// completeAskBranchResolution's force-push.
 	// ─────────────────────────────────────────────────────────────────────
-	t.Run("AUDIT-102/UpsertConvoyAskBranchAcceptsMain", func(t *testing.T) {
-		t.Skip("AUDIT-102: remove when AssertNotDefaultBranch guard added to destructive git ops (Fix #0)")
-		// Without skip, fails with:
-		//   audit_protected_branch_test.go:278: AUDIT-102 REPRODUCED (end-to-end): UpsertConvoyAskBranch accepts ask_branch="main" verbatim; combined with unguarded completeAskBranchResolution (force-push ab.AskBranch), one DB-corrupt value → force-push origin/main. No protected-branch guard anywhere in the chain.
-		src := readSource(t, "internal/store/convoy_ask_branches.go")
-		body := extractFuncBody(src, "UpsertConvoyAskBranch")
-		if body == "" {
-			t.Fatalf("could not locate UpsertConvoyAskBranch")
-		}
-		// Does it check against default branch names or call GetDefaultBranch?
-		if strings.Contains(body, "GetDefaultBranch(") ||
-			strings.Contains(body, `"main"`) ||
-			strings.Contains(body, `"master"`) {
-			t.Errorf("AUDIT-102 partial mitigation: UpsertConvoyAskBranch references default-branch names; verify it REJECTS them")
-			return
-		}
-		// Behavioral: actually insert "main" as the ask_branch.
+	t.Run("AUDIT-102/UpsertConvoyAskBranchRejectsMain", func(t *testing.T) {
 		db := store.InitHolocronDSN(":memory:")
 		defer db.Close()
 		convoyID, err := store.CreateConvoy(db, "audit-102-default-branch-test")
 		if err != nil {
 			t.Fatalf("CreateConvoy: %v", err)
 		}
-		// A repo label is sufficient for this test; no on-disk repo needed.
-		err = store.UpsertConvoyAskBranch(db, convoyID, "owner/repo", "main",
-			"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
-		if err != nil {
-			// Would be a fix — silent pass.
-			t.Errorf("unexpected: UpsertConvoyAskBranch rejected ask_branch=\"main\" with %v; may be mitigated", err)
-			return
+		for _, bad := range []string{"main", "master", "MAIN", "refs/heads/main", "origin/master"} {
+			err := store.UpsertConvoyAskBranch(db, convoyID, "owner/repo", bad,
+				"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+			if err == nil {
+				t.Errorf("AUDIT-102 REGRESSION: UpsertConvoyAskBranch accepted ask_branch=%q; guard missing", bad)
+			}
 		}
-		var stored string
-		if err := db.QueryRow(`SELECT ask_branch FROM ConvoyAskBranches WHERE convoy_id=? AND repo=?`,
-			convoyID, "owner/repo").Scan(&stored); err != nil {
-			t.Fatalf("read back: %v", err)
+		// Confirm nothing was written.
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ConvoyAskBranches WHERE convoy_id=?`, convoyID).Scan(&count); err != nil {
+			t.Fatalf("count: %v", err)
 		}
-		if stored != "main" {
-			t.Errorf("unexpected: stored ask_branch=%q (not \"main\"); something silently normalized", stored)
-			return
+		if count != 0 {
+			t.Errorf("AUDIT-102 REGRESSION: %d rows written despite protected-branch ingress; expected 0", count)
 		}
-		t.Errorf("AUDIT-102 REPRODUCED (end-to-end): UpsertConvoyAskBranch accepts ask_branch=\"main\" verbatim; " +
-			"combined with unguarded completeAskBranchResolution (force-push ab.AskBranch), " +
-			"one DB-corrupt value → force-push origin/main. No protected-branch guard anywhere in the chain.")
 	})
 
 	// ── Summary for log readers ───────────────────────────────────────────
-	t.Logf("All 6 findings (AUDIT-102, -103, -104, -121, -122, -124) REPRODUCED-STATIC. " +
-		"No destructive git op in the inspected set checks its branch argument against GetDefaultBranch(repoPath). " +
-		"Fix: add AssertNotDefaultBranch helper in internal/git and call it at the top of " +
-		"each cited function + at the store ingress for ConvoyAskBranches.ask_branch.")
+	t.Logf("Fix #0 landed: all 6 findings (AUDIT-102, -103, -104, -121, -122, -124) now have " +
+		"AssertNotDefaultBranch guards at destructive-op entry points plus a store-ingress " +
+		"denylist in UpsertConvoyAskBranch. This test acts as permanent regression protection.")
 	// Avoid unused import if tests all return early.
 	_ = fmt.Sprintf("%d", 0)
 }

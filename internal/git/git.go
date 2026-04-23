@@ -350,6 +350,9 @@ func CommitsAhead(repoPath string, branchName string) string {
 // the agent worktree to detached HEAD. Serialized with a mutex to prevent concurrent
 // council members from racing on the same main worktree. Returns error if merge fails.
 func MergeAndCleanup(repoPath string, branchName string, worktreeDir string) error {
+	if err := AssertNotDefaultBranch(repoPath, branchName); err != nil {
+		return fmt.Errorf("MergeAndCleanup refused: %w", err)
+	}
 	mergeMu.Lock()
 	defer mergeMu.Unlock()
 

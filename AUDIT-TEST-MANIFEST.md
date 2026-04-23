@@ -49,9 +49,9 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-020 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_020_*` | static | Fix #1 |
 | AUDIT-021 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace` | race (20 trials, 20/20 clobbers) | Fix #8 |
 | AUDIT-022 | `internal/store/audit_pattern_p1_test.go` | `TestPattern_P1_UpdateBountyStatusSwallowsDBError` | behavioral+static | Fix #8 |
-| AUDIT-102 | `internal/git/audit_protected_branch_test.go` | `TestAUDIT_102_103_104_121_122_124_ProtectedBranchGuardsMissing/AUDIT-102/*` | static | Fix #0 |
-| AUDIT-103 | same | `.../AUDIT-103/ForcePushBranch` | static | Fix #0 |
-| AUDIT-104 | same | `.../AUDIT-104/TriggerCIRerun` | static | Fix #0 |
+| AUDIT-102 | `internal/git/audit_protected_branch_test.go` | `TestAUDIT_102_103_104_121_122_124_ProtectedBranchGuardsMissing/AUDIT-102/*` | static | Fix #0 | Closed by: Fix #0 (`fix/protected-branch-guard`) |
+| AUDIT-103 | same | `.../AUDIT-103/ForcePushBranch` | static | Fix #0 | Closed by: Fix #0 |
+| AUDIT-104 | same | `.../AUDIT-104/TriggerCIRerun` | static | Fix #0 | Closed by: Fix #0 |
 | AUDIT-105 | `internal/agents/audit_pattern_p11_test.go` | `TestPattern_P11_EstopDoesNotStopTheWorld/AUDIT-105_*` | static | Fix #1 |
 | AUDIT-106 | same | `.../AUDIT-106_*` | static | Fix #1 |
 | AUDIT-107 | same | `.../AUDIT-107_*` | behavioral (3s budget) | Fix #1 |
@@ -116,10 +116,10 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-118 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_118_ReshardCascadeNoGenerationCap` | static | Fix #6 |
 | AUDIT-119 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_119_MainDriftWatchNoAttemptCounter` | static (≈AUDIT-028) | Fix #6 |
 | AUDIT-120 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_120_FlakyRealBugConcurrentFixSpawns` | static | Fix #7 |
-| AUDIT-121 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-121/HardcodedMainFallback` | static | Fix #0 |
-| AUDIT-122 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-122/MergeAndCleanup` | static | Fix #0 |
+| AUDIT-121 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-121/HardcodedMainFallback` | static | Fix #0 | Closed by: Fix #0 |
+| AUDIT-122 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-122/MergeAndCleanup` | static | Fix #0 | Closed by: Fix #0 |
 | AUDIT-123 | `internal/store/audit_misc_security_test.go` | `.../AUDIT_123_*` | DUPLICATE-OF-019 | Fix #9 |
-| AUDIT-124 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-124/DeleteAskBranch` | static | Fix #0 |
+| AUDIT-124 | `internal/git/audit_protected_branch_test.go` | `.../AUDIT-124/DeleteAskBranch` | static | Fix #0 | Closed by: Fix #0 |
 | AUDIT-125 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_125_*` | static | Fix #8 |
 | AUDIT-126 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_126_*` | static | Fix #8 |
 | AUDIT-127 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_127_*` | static | Fix #8 |

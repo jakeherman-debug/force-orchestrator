@@ -104,6 +104,9 @@ func DeleteAskBranch(repoPath, branchName string) error {
 	if branchName == "" {
 		return fmt.Errorf("DeleteAskBranch: branchName required")
 	}
+	if err := AssertNotDefaultBranch(repoPath, branchName); err != nil {
+		return fmt.Errorf("DeleteAskBranch refused: %w", err)
+	}
 	// Local delete — ignore errors (branch may not exist locally).
 	exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
 	// Remote delete — a 404-style response is fine.
@@ -291,6 +294,9 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 // rebase — --force-with-lease fails if the remote has advanced, preventing us
 // from clobbering another push that raced us.
 func ForcePushBranch(repoPath, branch string) error {
+	if err := AssertNotDefaultBranch(repoPath, branch); err != nil {
+		return fmt.Errorf("ForcePushBranch refused: %w", err)
+	}
 	out, err := exec.Command("git", "-C", repoPath, "push", "--force-with-lease", "origin", branch).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git push --force-with-lease: %s", strings.TrimSpace(string(out)))
@@ -321,6 +327,9 @@ func ForcePushBranch(repoPath, branch string) error {
 // None of those commands read or write the working tree. Safe regardless of
 // what else is checked out.
 func TriggerCIRerun(repoPath, branch, message string) error {
+	if err := AssertNotDefaultBranch(repoPath, branch); err != nil {
+		return fmt.Errorf("TriggerCIRerun refused: %w", err)
+	}
 	if message == "" {
 		message = "ci: trigger stalled check run"
 	}

@@ -72,9 +72,13 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		return
 	}
 
+	// Fix #0: CLAUDE.md's worktree-isolation invariant requires
+	// GetDefaultBranch(repo.LocalPath) here. Hardcoding "main" looped forever
+	// on master-default repos: a rebase onto a nonexistent "main" ref failed,
+	// main-drift-watch re-queued, repeat.
 	defaultBranch := repo.DefaultBranch
 	if defaultBranch == "" {
-		defaultBranch = "main"
+		defaultBranch = igit.GetDefaultBranch(repo.LocalPath)
 	}
 
 	// Drift guard: if the branch is dramatically behind main, escalate rather
