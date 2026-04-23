@@ -56,6 +56,18 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_parent_id      ON BountyBoard (parent_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_created_at     ON BountyBoard (created_at);`)
 
+	// Fix #3 (AUDIT-008/034/035/036): partial UNIQUE index on idempotency_key.
+	// Scoped to non-empty keys AND non-terminal statuses so:
+	//   - empty keys (the common case for non-idempotent inserts) are not constrained
+	//   - a terminal row (Completed/Cancelled/Failed) does NOT block a legitimate
+	//     retry under the same key — the dedup only suppresses parallel/live work.
+	// AddConvoyTaskIdempotent pairs this index with
+	// `INSERT ... ON CONFLICT(idempotency_key) WHERE ... DO NOTHING RETURNING id`
+	// so two concurrent callers with the same key cannot both insert.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bounty_idem
+		ON BountyBoard(idempotency_key)
+		WHERE idempotency_key != '' AND status NOT IN ('Completed','Cancelled','Failed')`)
+
 	// Task dependency graph — many-to-many; replaces the old blocked_by column.
 	// A task becomes claimable when all its depends_on tasks are Completed.
 	db.Exec(`CREATE TABLE IF NOT EXISTS TaskDependencies (
@@ -80,6 +92,14 @@ func createSchema(db *sql.DB) {
 	// by task_id.
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_escalations_status  ON Escalations (status);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_escalations_task_id ON Escalations (task_id);`)
+
+	// Fix #3 (AUDIT-034): partial UNIQUE so multiple Open escalations for the
+	// same task cannot accumulate. A task already has one Open row → the next
+	// CreateEscalation turns into a message/severity merge via ON CONFLICT.
+	// Terminal statuses (Acknowledged/Closed/Resolved) do not participate in
+	// the dedup — a legitimate re-escalation after resolution is allowed.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_open_task
+		ON Escalations(task_id) WHERE status = 'Open'`)
 
 	// Convoys — named groups of related tasks from a single feature request.
 	// PR-flow fields: ask_branch is the integration branch every sub-PR merges into;
@@ -236,6 +256,14 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_convoy  ON FeatureBlockers (blocked_convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_feature ON FeatureBlockers (blocking_feature_id)`)
 
+	// Fix #3 (AUDIT-036): partial UNIQUE on (blocked_convoy_id, blocking_feature_id)
+	// scoped to unresolved rows. `INSERT OR IGNORE` in CreateFeatureBlocker had
+	// nothing to conflict against without this — duplicates accumulated on every
+	// ResolveFeatureBlockers re-run. resolved_at IS NULL isolates live blockers;
+	// a historical (resolved) row does not block a brand-new blocker from landing.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_blockers_open
+		ON FeatureBlockers(blocked_convoy_id, blocking_feature_id) WHERE resolved_at IS NULL`)
+
 	// ConvoyHolds — hard rejection signal for Captain and Council.
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyHolds (
 		convoy_id  INTEGER PRIMARY KEY,
@@ -362,6 +390,16 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN medic_requeue_count INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN reshard_generation  INTEGER DEFAULT 0`)
 
+	// Fix #3: partial UNIQUE idempotency_key index for upgrade paths. See the
+	// createSchema copy of this index for the semantics and the rationale on
+	// why terminal statuses are excluded from the predicate.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bounty_idem
+		ON BountyBoard(idempotency_key)
+		WHERE idempotency_key != '' AND status NOT IN ('Completed','Cancelled','Failed')`)
+	// Partial UNIQUE on Escalations(task_id) WHERE status='Open'.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_open_task
+		ON Escalations(task_id) WHERE status = 'Open'`)
+
 	// TaskHistory column additions
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_in  INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_out INTEGER DEFAULT 0`)
@@ -436,6 +474,19 @@ func runMigrations(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_convoy  ON FeatureBlockers (blocked_convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_feature_blockers_feature ON FeatureBlockers (blocking_feature_id)`)
+	// Fix #3: partial UNIQUE on unresolved (blocked, blocking) pair.
+	// Dedupe any existing duplicates BEFORE creating the index — older DBs
+	// may have accumulated duplicate unresolved rows. We keep the lowest id
+	// of each group (stable, deterministic) and delete the rest.
+	db.Exec(`DELETE FROM FeatureBlockers
+	         WHERE id NOT IN (
+	             SELECT MIN(id) FROM FeatureBlockers
+	             WHERE resolved_at IS NULL
+	             GROUP BY blocked_convoy_id, blocking_feature_id
+	         )
+	         AND resolved_at IS NULL`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_blockers_open
+		ON FeatureBlockers(blocked_convoy_id, blocking_feature_id) WHERE resolved_at IS NULL`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyHolds (
 		convoy_id  INTEGER PRIMARY KEY,
 		reason     TEXT    NOT NULL,

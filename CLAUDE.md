@@ -142,11 +142,26 @@ If a new error path does not fit any of the above, stop and design the self-heal
 
 Spawned child tasks (rebase-conflict resolvers, ConvoyReview fix tasks) must be idempotent so that repeated dog ticks or racing code paths don't produce duplicate CodeEdits for the same underlying work.
 
-- Use `store.AddConvoyTaskIdempotent(db, key, ...)` (not plain `AddConvoyTask`) whenever the task is generated from a signal that may fire more than once for the same state. The key is written to `BountyBoard.idempotency_key`; a non-terminal row with the same key makes the call a no-op returning the existing ID.
-- Canonical keys:
+- Use `store.AddConvoyTaskIdempotent(db, key, ...)` or the typed sibling `store.AddIdempotentTask(db, key, parent, repo, taskType, payload, convoyID, priority, status)` (not plain `AddConvoyTask`) whenever the task is generated from a signal that may fire more than once for the same state. The key is written to `BountyBoard.idempotency_key`; a non-terminal row with the same key makes the call a no-op returning the existing ID. `store.AddIdempotentTaskTx` is the in-transaction variant for callers that need the dedup atomic with other writes (e.g. `onSubPRCIFailed`'s failure-count + triage-queue sequence).
+- **Fix #3 invariant — partial UNIQUE indexes.** Three partial UNIQUE indexes back the idempotent writers and must stay present:
+  - `idx_bounty_idem ON BountyBoard(idempotency_key) WHERE idempotency_key != '' AND status NOT IN ('Completed','Cancelled','Failed')`
+  - `idx_escalations_open_task ON Escalations(task_id) WHERE status = 'Open'`
+  - `idx_feature_blockers_open ON FeatureBlockers(blocked_convoy_id, blocking_feature_id) WHERE resolved_at IS NULL`
+  Every idempotent insert uses `INSERT ... ON CONFLICT(<col>) WHERE <predicate> DO NOTHING RETURNING id` (or `DO UPDATE` for `CreateEscalation`, which merges severity/message). The WHERE clause in the `ON CONFLICT` target MUST match the index predicate literally — SQLite rejects a bare `ON CONFLICT(col)` against a partial index with "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint." The post-conflict SELECT-existing fallback must include `<col> != ''` (or the equivalent partial predicate) so the planner picks up the partial index instead of falling back to `SCAN <table>`.
+- Canonical keys used by the fleet:
   - `rebase-conflict:branch:<agent_branch>` — Pilot's agent-branch conflict spawn (`pilot_rebase_agent.go`)
   - `rebase-conflict:askbranch:<ask_branch>` — Pilot's ask-branch conflict spawn (`pilot_rebase.go`)
+  - `convoy-review:<convoyID>` — `QueueConvoyReview`
+  - `worktree-reset:<parent_task_id>` — `QueueWorktreeReset`
+  - `rebase-agent:<sub_pr_row_id>` — `QueueRebaseAgentBranch`
+  - `create-askbranch:<convoyID>` — `QueueCreateAskBranch`
+  - `rebase-askbranch:<convoyID>:<repo>` — `QueueRebaseAskBranch`
+  - `pr-review-triage:<convoyID>` — `queuePRReviewTriageIfAbsent`
+  - `ci-failure-triage:<sub_pr_row_id>` — `QueueCIFailureTriage` / `QueueCIFailureTriageTx`
+- Any new spawner generating a task from a signal that can fire more than once MUST produce a canonical key off the entity ID it's bound to (convoy, task, repo, PR row — never timestamp, never random). If a spawner has no obvious identity to key off, design one before writing the Queue* helper.
 - Terminal statuses (Completed / Cancelled / Failed) do NOT dedup — a genuine retry is allowed after the prior attempt finished. The dedup only suppresses parallel spawns against the same open work.
+- `CreateEscalation` merges on conflict (severity becomes `MAX(existing, incoming)`; message refreshed). Three self-healing paths firing for the same task now produce exactly one Open row, not three. `CreateFeatureBlocker` uses `ON CONFLICT ... DO NOTHING` — `INSERT OR IGNORE` had nothing to conflict against before Fix #3 landed the partial UNIQUE.
+- `ReadInboxForAgent` is the single-statement sibling: an `UPDATE Fleet_Mail SET consumed_at = datetime('now') WHERE id IN (SELECT ...) RETURNING ...` so two agents whose role/name/task scopes overlap cannot both claim the same unconsumed row. Any new "claim-and-return" helper MUST follow the same single-statement shape — no SELECT-then-per-id-UPDATE loops.
 
 ## Captain scope guard
 

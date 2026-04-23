@@ -221,28 +221,19 @@ func hasUnclassifiedPRComments(db *sql.DB, convoyID int) bool {
 }
 
 // queuePRReviewTriageIfAbsent inserts a PRReviewTriage task for the convoy
-// unless one is already Pending or Locked (boundary-matched on convoy_id to
-// avoid dedup collisions between id=1 and id=10/100 etc.).
+// unless one is already Pending or Locked. Fix #3 (AUDIT-035): canonical
+// key `pr-review-triage:<convoyID>` via idx_bounty_idem replaces the old
+// payload-LIKE dedup — no more boundary-match ambiguity between id=1 / id=10.
 func queuePRReviewTriageIfAbsent(db *sql.DB, convoyID int, logger interface{ Printf(string, ...any) }) error {
-	var existing int
-	err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
-		WHERE type = 'PRReviewTriage' AND status IN ('Pending', 'Locked')
-		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-		    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&existing)
-	if err != nil {
-		return fmt.Errorf("dedup query: %w", err)
-	}
-	if existing > 0 {
-		return nil
-	}
 	payload, _ := json.Marshal(map[string]any{"convoy_id": convoyID})
-	_, err = db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (0, '', 'PRReviewTriage', 'Pending', ?, 4, datetime('now'))`,
-		string(payload))
+	key := fmt.Sprintf("pr-review-triage:%d", convoyID)
+	_, existed, err := store.AddIdempotentTask(db, key,
+		0, "", "PRReviewTriage", string(payload), convoyID, 4, "Pending")
 	if err != nil {
-		return fmt.Errorf("insert PRReviewTriage: %w", err)
+		return fmt.Errorf("queue PRReviewTriage: %w", err)
+	}
+	if existed {
+		return nil
 	}
 	logger.Printf("pr-review-poll: queued PRReviewTriage for convoy %d", convoyID)
 	return nil

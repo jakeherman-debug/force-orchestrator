@@ -30,19 +30,25 @@ type createAskBranchPayload struct {
 // every existing Pending/Planned CodeEdit task in the convoy on it. This
 // prevents astromechs from racing through the Council before the ask-branch
 // exists — ClaimBounty won't hand out a blocked task.
+//
+// Fix #3 (AUDIT-035): canonical idempotency key `create-askbranch:<convoyID>`
+// via idx_bounty_idem ensures at most one CreateAskBranch is live per convoy
+// at any moment. Dog re-triggers during in-flight execution become no-ops
+// rather than stacking duplicate CreateAskBranch tasks on the same convoy.
+// The dependency-wiring sweep always runs (idempotent via INSERT OR IGNORE
+// in AddDependency) so re-queue attempts still catch any newly-added
+// CodeEdit tasks that slipped in after the initial queue.
 func QueueCreateAskBranch(db *sql.DB, convoyID int) (int, error) {
 	if convoyID <= 0 {
 		return 0, fmt.Errorf("QueueCreateAskBranch: convoyID required")
 	}
 	payload, _ := json.Marshal(createAskBranchPayload{ConvoyID: convoyID})
-	res, err := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (0, '', 'CreateAskBranch', 'Pending', ?, 5, datetime('now'))`,
-		string(payload))
+	key := fmt.Sprintf("create-askbranch:%d", convoyID)
+	pilotTaskID, _, err := store.AddIdempotentTask(db, key,
+		0, "", "CreateAskBranch", string(payload), convoyID, 5, "Pending")
 	if err != nil {
 		return 0, err
 	}
-	pilotTaskID, _ := res.LastInsertId()
 
 	// Block all CodeEdit tasks in this convoy that haven't started yet.
 	// Collect IDs first, close the cursor, then write dependencies — keeping
@@ -53,7 +59,7 @@ func QueueCreateAskBranch(db *sql.DB, convoyID int) (int, error) {
 		 WHERE convoy_id = ? AND type = 'CodeEdit' AND status IN ('Pending', 'Planned')`,
 		convoyID)
 	if qErr != nil {
-		return int(pilotTaskID), nil // non-fatal; requeue fallback in Council still handles it
+		return pilotTaskID, nil // non-fatal; requeue fallback in Council still handles it
 	}
 	var codeEditIDs []int
 	for rows.Next() {
@@ -64,9 +70,9 @@ func QueueCreateAskBranch(db *sql.DB, convoyID int) (int, error) {
 	}
 	rows.Close()
 	for _, codeEditID := range codeEditIDs {
-		store.AddDependency(db, codeEditID, int(pilotTaskID))
+		store.AddDependency(db, codeEditID, pilotTaskID)
 	}
-	return int(pilotTaskID), nil
+	return pilotTaskID, nil
 }
 
 // AskBranchNameForConvoy generates the ask-branch name for a convoy.

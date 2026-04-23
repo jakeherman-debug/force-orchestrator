@@ -5,9 +5,17 @@ import "database/sql"
 // CreateFeatureBlocker records that blockedConvoyID cannot proceed until
 // blockingFeatureID has a completed convoy. Also sets a ConvoyHold so the
 // Captain and Council hard-reject in-flight tasks from the blocked convoy.
+//
+// Fix #3 (AUDIT-036): FeatureBlockers now carries a partial UNIQUE on
+// (blocked_convoy_id, blocking_feature_id) WHERE resolved_at IS NULL, backing
+// ON CONFLICT DO NOTHING so a retry of ResolveFeatureBlockers or any other
+// duplicate-wiring code path cannot land two unresolved rows for the same pair.
 func CreateFeatureBlocker(db *sql.DB, blockedConvoyID, blockingFeatureID int, reason string) {
-	db.Exec(`INSERT OR IGNORE INTO FeatureBlockers (blocked_convoy_id, blocking_feature_id)
-	         VALUES (?, ?)`, blockedConvoyID, blockingFeatureID)
+	db.Exec(`INSERT INTO FeatureBlockers (blocked_convoy_id, blocking_feature_id)
+	         VALUES (?, ?)
+	         ON CONFLICT(blocked_convoy_id, blocking_feature_id) WHERE resolved_at IS NULL
+	         DO NOTHING`,
+		blockedConvoyID, blockingFeatureID)
 	SetConvoyHold(db, blockedConvoyID, reason)
 }
 
