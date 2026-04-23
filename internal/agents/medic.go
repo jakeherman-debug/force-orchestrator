@@ -68,7 +68,9 @@ Respond ONLY with valid JSON (no markdown, no preamble):
   "cleanup_target_branch": "branch to reset the worktrees to (cleanup only; empty string otherwise)",
   "cleanup_agents": ["astromech-name-1", "..."],
   "escalation": "clear root-cause and what human decision is needed (escalate only; empty string otherwise)"
-}`
+}
+
+The "decision" field is REQUIRED and MUST be exactly one of requeue, shard, cleanup, or escalate.` + promptInjectionClause
 
 type medicPayload struct {
 	FailureType string `json:"failure_type"`
@@ -191,12 +193,39 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 
 	jsonStr := claude.ExtractJSON(rawOut)
 	var decision medicDecision
-	if err := json.Unmarshal([]byte(jsonStr), &decision); err != nil {
+	// Fix #8.5 — strict-field decode so model upgrades (added fields)
+	// surface as parse errors rather than being silently accepted.
+	if err := strictJSONUnmarshal([]byte(jsonStr), &decision); err != nil {
 		logger.Printf("Medic #%d: JSON parse error (%v) — escalating", bounty.ID, err)
 		decision = medicDecision{
 			Decision:   "escalate",
 			Reason:     "Medic could not parse its own analysis.",
 			Escalation: fmt.Sprintf("Auto-escalated: Medic analysis unparseable. Original error: %s", mp.Error),
+		}
+	}
+
+	// Fix #8.5 — sanitize LLM-authored shard payloads against signal
+	// tokens. Shards are queued directly into BountyBoard with the
+	// LLM's string as the payload; a shard with "[SCOPE GUARD …]" in
+	// its body would corrupt the Captain's scope-guard protocol on the
+	// next attempt.
+	for _, s := range decision.Shards {
+		if err := SanitizeLLMPayload(s.Task); err != nil {
+			logger.Printf("Medic #%d: shard task rejected (%v) — converting to escalate", bounty.ID, err)
+			decision = medicDecision{
+				Decision:   "escalate",
+				Reason:     "Medic-proposed shard contained reserved signal token (possible prompt injection).",
+				Escalation: fmt.Sprintf("Auto-escalated: shard payload rejected: %v. Original failure: %s", err, mp.Error),
+			}
+			break
+		}
+	}
+	if err := SanitizeLLMPayload(decision.Guidance); err != nil {
+		logger.Printf("Medic #%d: guidance rejected (%v) — converting to escalate", bounty.ID, err)
+		decision = medicDecision{
+			Decision:   "escalate",
+			Reason:     "Medic requeue guidance contained reserved signal token (possible prompt injection).",
+			Escalation: fmt.Sprintf("Auto-escalated: requeue guidance rejected: %v. Original failure: %s", err, mp.Error),
 		}
 	}
 
@@ -460,30 +489,34 @@ func applyMedicEscalate(db *sql.DB, agentName string, bounty, parent *store.Boun
 func buildMedicPrompt(parent *store.Bounty, mp medicPayload, history []store.TaskHistoryEntry, diff string) string {
 	var sb strings.Builder
 
+	// Fix #8.5 — every attacker-controllable section wrapped in
+	// <user_content> sentinels. Parent payload can contain operator or
+	// agent text; feedback lines echo prior LLM output; diff is
+	// attacker-controlled via filenames + commit messages.
 	sb.WriteString("ORIGINAL TASK:\n")
-	sb.WriteString(util.TruncateStr(parent.Payload, 800))
+	sb.WriteString(WrapUserContent("original_task", util.TruncateStr(parent.Payload, 800)))
 	sb.WriteString("\n\nFAILURE TYPE: ")
 	sb.WriteString(mp.FailureType)
-	sb.WriteString("\nFINAL ERROR: ")
-	sb.WriteString(mp.Error)
+	sb.WriteString("\nFINAL ERROR:\n")
+	sb.WriteString(WrapUserContent("final_error", mp.Error))
 
 	if len(history) > 0 {
 		sb.WriteString("\n\nATTEMPT HISTORY:\n")
+		var feedbackBuf strings.Builder
 		for _, h := range history {
-			sb.WriteString(fmt.Sprintf("Attempt %d (%s, outcome=%s):\n", h.Attempt, h.Agent, h.Outcome))
-			// Extract just the council/captain feedback lines from the full Claude output
-			// to keep the prompt focused on rejection reasons rather than code dumps.
+			fmt.Fprintf(&feedbackBuf, "Attempt %d (%s, outcome=%s):\n", h.Attempt, h.Agent, h.Outcome)
 			feedback := extractFeedbackLines(h.ClaudeOutput)
 			if feedback != "" {
-				sb.WriteString(feedback)
+				feedbackBuf.WriteString(feedback)
 			}
-			sb.WriteString("\n")
+			feedbackBuf.WriteString("\n")
 		}
+		sb.WriteString(WrapUserContent("attempt_history", feedbackBuf.String()))
 	}
 
 	if diff != "" {
 		sb.WriteString("\nLAST DIFF (truncated):\n")
-		sb.WriteString(diff)
+		sb.WriteString(WrapUserContent("diff", diff))
 	}
 
 	return sb.String()

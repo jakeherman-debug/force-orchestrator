@@ -65,7 +65,9 @@ Respond ONLY with valid JSON (no markdown, no preamble):
   "reasoning": "one short paragraph: why this classification, referencing the current comment and (for conflicted_loop) the prior thread direction",
   "reply_body": "the reply to post in the thread (bot) or to surface as a draft (human). Use {{TASK_ID}} or {{FEATURE_ID}} placeholder if you need to reference the spawned task/feature.",
   "fix_summary": "for in_scope_fix: specific, self-contained description of the code change the astromech should make. One paragraph. For all other classifications: empty string."
-}`
+}
+
+The "classification" field is REQUIRED and MUST be exactly one of the five values above.` + promptInjectionClause
 
 // prReviewDecision is the LLM's parsed response.
 type prReviewDecision struct {
@@ -174,17 +176,34 @@ func classifyPRReviewComment(
 	}
 	jsonStr := claude.ExtractJSON(raw)
 	var d prReviewDecision
-	if parseErr := json.Unmarshal([]byte(jsonStr), &d); parseErr != nil {
+	// Fix #8.5 — strict-field decode. A model that introduces new
+	// fields (model upgrade) surfaces as parse error rather than
+	// silently flowing through to the dispatch switch.
+	if parseErr := strictJSONUnmarshal([]byte(jsonStr), &d); parseErr != nil {
 		logger.Printf("PRReviewTriage: parse error %v; raw=%s", parseErr, util.TruncateStr(raw, 200))
 		return prReviewDecision{}, parseErr
 	}
 	if d.Classification == "" {
 		return prReviewDecision{}, fmt.Errorf("classifier returned empty classification")
 	}
+	// Fix #8.5 — sanitize LLM-authored fix_summary against signal
+	// tokens. fix_summary flows directly into a new CodeEdit task
+	// payload (see dispatchInScope); a summary containing
+	// `[SCOPE GUARD` or `[CONFLICT_BRANCH:` would corrupt downstream
+	// protocols. Reject rather than strip so the attempt is surfaced.
+	if err := SanitizeLLMPayload(d.FixSummary); err != nil {
+		return prReviewDecision{}, fmt.Errorf("fix_summary rejected: %w", err)
+	}
 	return d, nil
 }
 
 // buildPRReviewUserPrompt formats the classifier input.
+//
+// Fix #8.5 — every attacker-controllable field (comment body, diff hunk,
+// thread body, convoy task summary) is wrapped in <user_content>
+// sentinel tags. PR review comments are the canonical injection vector
+// (any GitHub user with repo read can post one), so the wrapping here
+// is load-bearing.
 func buildPRReviewUserPrompt(
 	c store.PRReviewComment,
 	thread []store.PRReviewComment,
@@ -203,9 +222,9 @@ func buildPRReviewUserPrompt(
 		b.WriteString("\n")
 	}
 	if c.DiffHunk != "" {
-		fmt.Fprintf(&b, "  diff_hunk:\n%s\n", indent(c.DiffHunk, "    "))
+		fmt.Fprintf(&b, "  diff_hunk:\n%s\n", WrapUserContent("diff_hunk", c.DiffHunk))
 	}
-	fmt.Fprintf(&b, "  body:\n%s\n\n", indent(c.Body, "    "))
+	fmt.Fprintf(&b, "  body:\n%s\n\n", WrapUserContent("pr_comment", c.Body))
 
 	fmt.Fprintf(&b, "THREAD CONTEXT\n")
 	fmt.Fprintf(&b, "  thread_id: %s\n", c.ReviewThreadID)
@@ -214,6 +233,7 @@ func buildPRReviewUserPrompt(
 
 	if len(thread) > 0 {
 		fmt.Fprintf(&b, "FULL THREAD HISTORY (oldest → newest, including the current comment at the end):\n")
+		var threadBuf strings.Builder
 		for _, t := range thread {
 			marker := "comment"
 			if t.AuthorKind == "bot" {
@@ -221,19 +241,20 @@ func buildPRReviewUserPrompt(
 			} else if t.AuthorKind == "human" {
 				marker = "human-comment"
 			}
-			fmt.Fprintf(&b, "- [%s] author=%s id=%d classification=%s\n", marker, t.Author, t.GitHubCommentID, t.Classification)
-			fmt.Fprintf(&b, "    body: %s\n", indent(util.TruncateStr(t.Body, 400), "    "))
+			fmt.Fprintf(&threadBuf, "- [%s] author=%s id=%d classification=%s\n", marker, t.Author, t.GitHubCommentID, t.Classification)
+			fmt.Fprintf(&threadBuf, "    body: %s\n", indent(util.TruncateStr(t.Body, 400), "    "))
 			if t.ReplyBody != "" && t.RepliedAt != "" {
-				fmt.Fprintf(&b, "    fleet-reply: %s\n", indent(util.TruncateStr(t.ReplyBody, 400), "    "))
+				fmt.Fprintf(&threadBuf, "    fleet-reply: %s\n", indent(util.TruncateStr(t.ReplyBody, 400), "    "))
 			}
 			if t.SpawnedTaskID > 0 {
-				fmt.Fprintf(&b, "    fleet-action: spawned task #%d\n", t.SpawnedTaskID)
+				fmt.Fprintf(&threadBuf, "    fleet-action: spawned task #%d\n", t.SpawnedTaskID)
 			}
 		}
-		b.WriteString("\n")
+		b.WriteString(WrapUserContent("thread_history", threadBuf.String()))
+		b.WriteString("\n\n")
 	}
 
-	fmt.Fprintf(&b, "CONVOY TASK CONTEXT\n%s\n", convoyTasks)
+	fmt.Fprintf(&b, "CONVOY TASK CONTEXT\n%s\n", WrapUserContent("convoy_tasks", convoyTasks))
 	return b.String()
 }
 

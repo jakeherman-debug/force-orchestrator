@@ -37,15 +37,11 @@ var remainingAuditSkips = map[string]string{
 	"AUDIT-025": "Fix #5 follow-up (Resolved→Closed normalization across sinks)",
 	"AUDIT-085": "Fix #2/#5 follow-up (dashboard ActiveCount correction)",
 
-	// AUDIT-030 duplicates AUDIT-116 which duplicates Fix #8.5 (prompt
-	// injection). 8.5 was not in the worktree batch.
-	"AUDIT-030": "Fix #8.5 (LLM prompt boundary markers + DisallowUnknownFields)",
-	"AUDIT-108": "Fix #8.5",
-	"AUDIT-109": "Fix #8.5",
-	"AUDIT-114": "Fix #8.5",
-	"AUDIT-115": "Fix #8.5",
-	"AUDIT-116": "Fix #8.5",
-	"AUDIT-139": "Fix #8.5",
+	// Fix #8.5 closed AUDIT-030, -108, -109, -110, -114, -115, -116, -139.
+	// Skip markers were removed from audit_pattern_p12_test.go; the
+	// pattern test now asserts the post-fix contract (boundary markers,
+	// DisallowUnknownFields, Approved *bool, Captain fail-closed,
+	// Chancellor fail-closed, signal-token sanitizer).
 
 	// Fix #8 Phase A closed the three self-heal terminator signatures and
 	// two one-liners. Phase B/C migrate the remaining ~108 call sites. Each

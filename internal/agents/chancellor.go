@@ -45,7 +45,9 @@ Set hold_convoy_ids to active convoy IDs that depend on THIS proposal's work and
   proposal introduces — it needs to be held and replanned once this convoy lands.
 
 sequence_after_feature_ids and hold_convoy_ids are independent of the main action — set them
-alongside APPROVE/SEQUENCE/REJECT/MERGE whenever the dependency situation warrants it.`
+alongside APPROVE/SEQUENCE/REJECT/MERGE whenever the dependency situation warrants it.
+
+The "action" field is REQUIRED and MUST be exactly one of APPROVE, SEQUENCE, REJECT, or MERGE.` + promptInjectionClause
 
 type chancellorRuling struct {
 	Action                  string `json:"action"`
@@ -95,21 +97,47 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 	pendingProposals := store.GetPendingProposals(db, feature.ID)
 	pendingFeatures := store.GetPendingFeatures(db, feature.ID)
 
-	userPrompt := buildChancellorPrompt(feature, tasks, activeConvoys, pendingProposals, pendingFeatures)
+	// Fix #8.5 — wrap the prompt body in <user_content> sentinels. The
+	// feature payload is operator-supplied; the tasks/active-convoys/
+	// pending-proposals sections may contain agent-authored text that
+	// originated from earlier LLM calls. The outer wrapper tells
+	// Chancellor to treat everything inside as data.
+	userPrompt := WrapUserContent("chancellor_context",
+		buildChancellorPrompt(feature, tasks, activeConvoys, pendingProposals, pendingFeatures))
 
 	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, userPrompt, "", 1)
 	if err != nil {
-		// On Claude failure, approve to avoid blocking the pipeline.
-		logger.Printf("Feature #%d: Chancellor Claude call failed (%v) — auto-approving", feature.ID, err)
-		approveProposal(db, feature, tasks, chancellorRuling{}, logger)
+		// Fix #8.5 (AUDIT-116) — fail CLOSED on Claude CLI failure.
+		// Pre-fix: "auto-approve to avoid blocking the pipeline" meant a
+		// systemic LLM outage silently approved every Feature. Now the
+		// Feature is routed to operator review via FailBounty + operator
+		// mail; approval requires a working LLM (or explicit operator
+		// action).
+		msg := fmt.Sprintf("Chancellor Claude call failed: %v — routing to operator review (fail-closed)", err)
+		logger.Printf("Feature #%d: %s", feature.ID, msg)
+		_ = store.FailBounty(db, feature.ID, msg) // TODO(Fix #8b): propagate error
+		store.SendMail(db, chancellorName, "operator",
+			fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — LLM unavailable, operator review required", feature.ID),
+			fmt.Sprintf("The Supreme Chancellor's LLM call failed. The Feature has been failed rather than auto-approved (Fix #8.5 fail-closed). Reset the Feature to Pending once the LLM outage is resolved.\n\nError: %v\n\nOriginal request:\n%s",
+				err, util.TruncateStr(feature.Payload, 500)),
+			feature.ID, store.MailTypeAlert)
 		return
 	}
 
 	jsonStr := claude.ExtractJSON(response)
 	var ruling chancellorRuling
-	if err := json.Unmarshal([]byte(jsonStr), &ruling); err != nil {
-		logger.Printf("Feature #%d: could not parse Chancellor ruling (%v) — auto-approving", feature.ID, err)
-		approveProposal(db, feature, tasks, chancellorRuling{}, logger)
+	// Fix #8.5 — strict-field decode so model-upgrade drift surfaces as
+	// a parse error rather than silently accepting new fields.
+	if err := strictJSONUnmarshal([]byte(jsonStr), &ruling); err != nil {
+		// Fix #8.5 (AUDIT-116) — fail CLOSED on parse failure.
+		msg := fmt.Sprintf("Chancellor ruling parse failed: %v — routing to operator review (fail-closed)", err)
+		logger.Printf("Feature #%d: %s", feature.ID, msg)
+		_ = store.FailBounty(db, feature.ID, msg) // TODO(Fix #8b): propagate error
+		store.SendMail(db, chancellorName, "operator",
+			fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — LLM returned unparseable ruling, operator review required", feature.ID),
+			fmt.Sprintf("The Supreme Chancellor's LLM produced a response that could not be parsed. The Feature has been failed rather than auto-approved (Fix #8.5 fail-closed).\n\nParse error: %v\n\nRaw response (first 500 bytes): %.500s\n\nOriginal request:\n%s",
+				err, jsonStr, util.TruncateStr(feature.Payload, 500)),
+			feature.ID, store.MailTypeAlert)
 		return
 	}
 
@@ -143,8 +171,18 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 		mergeProposals(db, feature, tasks, ruling, logger)
 
 	default:
-		logger.Printf("Feature #%d: unknown action %q — auto-approving", feature.ID, ruling.Action)
-		approveProposal(db, feature, tasks, chancellorRuling{}, logger)
+		// Fix #8.5 (AUDIT-116) — fail CLOSED on unknown action.
+		// Pre-fix: unknown action strings silently approved with a
+		// zero-value ruling; Chancellor's one job was gated on the LLM
+		// emitting an empty action field.
+		msg := fmt.Sprintf("Chancellor returned unknown action %q — routing to operator review (fail-closed)", ruling.Action)
+		logger.Printf("Feature #%d: %s", feature.ID, msg)
+		_ = store.FailBounty(db, feature.ID, msg) // TODO(Fix #8b): propagate error
+		store.SendMail(db, chancellorName, "operator",
+			fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — unknown action %q, operator review required", feature.ID, ruling.Action),
+			fmt.Sprintf("The Supreme Chancellor returned an action value not in the schema. The Feature has been failed rather than auto-approved (Fix #8.5 fail-closed).\n\nAction: %q\nReason: %s\n\nOriginal request:\n%s",
+				ruling.Action, ruling.Reason, util.TruncateStr(feature.Payload, 500)),
+			feature.ID, store.MailTypeAlert)
 	}
 }
 
@@ -419,6 +457,9 @@ func synthesizeMergedPlan(db *sql.DB, featureA *store.Bounty, tasksA []store.Tas
 	planAJSON, _ := json.MarshalIndent(tasksA, "", "  ")
 	planBJSON, _ := json.MarshalIndent(tasksB, "", "  ")
 
+	// Fix #8.5 — wrap the plan bodies (attacker-reachable via the
+	// operator-supplied Feature payloads + prior Commander LLM output)
+	// in <user_content> sentinel markers.
 	mergePrompt := fmt.Sprintf(`You are merging two feature plans into a single optimized convoy.
 
 FEATURE A (#%d): %s
@@ -436,8 +477,8 @@ Produce a single merged JSON array that:
 4. Numbers tasks starting from 1
 
 Respond with ONLY the raw JSON array — no explanation, no markdown, no code fences.`,
-		featureA.ID, util.TruncateStr(featureA.Payload, 200), string(planAJSON),
-		featureB.ID, util.TruncateStr(featureB.Payload, 200), string(planBJSON))
+		featureA.ID, WrapUserContent("feature_a", util.TruncateStr(featureA.Payload, 200)), WrapUserContent("plan_a", string(planAJSON)),
+		featureB.ID, WrapUserContent("feature_b", util.TruncateStr(featureB.Payload, 200)), WrapUserContent("plan_b", string(planBJSON)))
 
 	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, mergePrompt, "", 1)
 	if err != nil {
@@ -447,9 +488,17 @@ Respond with ONLY the raw JSON array — no explanation, no markdown, no code fe
 
 	jsonStr := claude.ExtractJSON(response)
 	var merged []store.TaskPlan
-	if err := json.Unmarshal([]byte(jsonStr), &merged); err != nil {
+	// Fix #8.5 — strict-field decode.
+	if err := strictJSONUnmarshal([]byte(jsonStr), &merged); err != nil {
 		logger.Printf("Merge synthesis parse failed: %v", err)
 		return nil
+	}
+	// Fix #8.5 — sanitize LLM-authored task strings in the merged plan.
+	for _, t := range merged {
+		if err := SanitizeLLMPayload(t.Task); err != nil {
+			logger.Printf("Merge synthesis task rejected (%v) — refusing merge", err)
+			return nil
+		}
 	}
 
 	knownRepos := loadKnownRepos(db)

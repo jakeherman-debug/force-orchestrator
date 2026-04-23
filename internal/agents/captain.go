@@ -3,7 +3,6 @@ package agents
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -76,7 +75,9 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
   "task_updates": [{"id": <task_id>, "new_payload": "<updated full description>"}],
   "new_tasks": [{"repo": "<repo_name>", "task": "<description>", "blocked_by": [<task_id>, ...]}],
   "rejected_files": ["path/one.go", "path/two.go"]
-}`
+}
+
+The "decision" field is REQUIRED and MUST be exactly one of approve, reject, or escalate. Any other value will be rejected as a parse failure and retried.` + promptInjectionClause
 
 // scopeGuardMarker delimits the auto-prepended "DO NOT MODIFY" block so
 // subsequent rejections can find and replace it instead of accumulating.
@@ -358,7 +359,13 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	inboxContext := buildInboxContext(db, agentName, "captain", b.ID, logger)
 
 	systemPrompt := captainSystemPrompt + directiveSection
-	reviewPrompt := fmt.Sprintf("%s\n# CURRENT TASK DIFF\n%s%s", convoyContext, diff, inboxContext)
+	// Fix #8.5 — wrap attacker-controllable inputs (convoy context
+	// includes other agents' payloads; diff is attacker-controlled via
+	// filenames / commit messages) in <user_content> sentinel tags.
+	reviewPrompt := fmt.Sprintf("%s\n# CURRENT TASK DIFF\n%s%s",
+		WrapUserContent("convoy_context", convoyContext),
+		WrapUserContent("diff", diff),
+		inboxContext)
 
 	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt, claude.CouncilTools, 5)
 	if err != nil {
@@ -370,11 +377,37 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 
 	cleanJSON := claude.ExtractJSON(response)
 	var ruling store.CaptainRuling
-	if err := json.Unmarshal([]byte(cleanJSON), &ruling); err != nil {
+	// Fix #8.5 — strict-field decode (DisallowUnknownFields). Unknown
+	// fields from model-upgrade drift surface as parse errors instead
+	// of silently being accepted.
+	if err := strictJSONUnmarshal([]byte(cleanJSON), &ruling); err != nil {
 		msg := fmt.Sprintf("JSON Parse Err: %v | Output: %.500s", err, cleanJSON)
 		logger.Printf("Task %d: captain JSON parse failed — returning to queue: %s", b.ID, msg)
 		handleInfraFailure(db, agentName, "captain", b, sessionID, msg, "AwaitingCaptainReview", true, logger)
 		return
+	}
+
+	// Fix #8.5 — sanitize LLM-authored new_tasks against signal tokens
+	// BEFORE any DB writes. An LLM that emits a task whose payload
+	// contains `[SCOPE GUARD`, `[CONFLICT_BRANCH:`, etc. could trick
+	// downstream agents into applying rules the operator never
+	// authorised. Rejecting (not silently stripping) surfaces the
+	// attempt via the existing parse-failure retry path.
+	for _, nt := range ruling.NewTasks {
+		if err := SanitizeLLMPayload(nt.Task); err != nil {
+			msg := fmt.Sprintf("LLM payload sanitization: %v | Output: %.500s", err, cleanJSON)
+			logger.Printf("Task %d: captain new_tasks rejected — %s", b.ID, msg)
+			handleInfraFailure(db, agentName, "captain", b, sessionID, msg, "AwaitingCaptainReview", true, logger)
+			return
+		}
+	}
+	for _, upd := range ruling.TaskUpdates {
+		if err := SanitizeLLMPayload(upd.NewPayload); err != nil {
+			msg := fmt.Sprintf("LLM payload sanitization: %v | Output: %.500s", err, cleanJSON)
+			logger.Printf("Task %d: captain task_updates rejected — %s", b.ID, msg)
+			handleInfraFailure(db, agentName, "captain", b, sessionID, msg, "AwaitingCaptainReview", true, logger)
+			return
+		}
 	}
 
 	// Apply downstream task payload updates before routing
@@ -435,7 +468,12 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	case "escalate":
 		captainOutcome = "Escalated"
 	default:
-		captainOutcome = "Completed"
+		// Fix #8.5 — fail-closed. An unknown/empty decision string used
+		// to default to "Completed" and silently route the task to
+		// Council, consuming the retry budget to approve unseen work.
+		// Treat as infra failure so handleInfraFailure consumes the
+		// retry budget and the operator sees the schema drift.
+		captainOutcome = "InfraRetry"
 	}
 	histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, captainOutcome)
 	tokIn, tokOut := claude.ParseTokenUsage(response)
@@ -503,7 +541,17 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			b.ID, store.MailTypeAlert)
 
 	default:
-		logger.Printf("Task %d: captain returned unknown decision '%s' — defaulting to approve", b.ID, ruling.Decision)
-		_ = store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview") // TODO(Fix #8b): propagate error
+		// Fix #8.5 — fail-closed on unknown decision.
+		//
+		// Pre-fix behaviour: unknown strings silently routed to
+		// AwaitingCouncilReview (approve path). A typo, LLM truncation,
+		// or an LLM that returned "unknown_value" bypassed the gate.
+		//
+		// Post-fix: treat as an infra failure so the retry budget
+		// applies. If the LLM keeps emitting garbage we hit
+		// MaxInfraFailures and escalate — never silently ship.
+		msg := fmt.Sprintf("captain LLM returned unknown decision %q — schema violation", ruling.Decision)
+		logger.Printf("Task %d: %s — routing to infra-retry (fail-closed)", b.ID, msg)
+		handleInfraFailure(db, agentName, "captain", b, sessionID, msg, "AwaitingCaptainReview", true, logger)
 	}
 }

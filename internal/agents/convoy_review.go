@@ -64,7 +64,9 @@ Respond ONLY with valid JSON (no markdown, no preamble):
       "repo": "repo-name"
     }
   ]
-}`
+}
+
+The "status" field is REQUIRED and MUST be exactly "clean" or "needs_work".` + promptInjectionClause
 
 type convoyReviewPayload struct {
 	ConvoyID int `json:"convoy_id"`
@@ -295,8 +297,14 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 
 	convoyTasks := summarizeConvoyTasks(db, payload.ConvoyID)
 
+	// Fix #8.5 — wrap attacker-controllable inputs (task payloads in the
+	// convoy-tasks summary, the full ask-branch diff) in <user_content>
+	// sentinel tags. The system prompt's promptInjectionClause tells the
+	// model to treat everything inside as data.
 	userPrompt := fmt.Sprintf("convoy_name: %s\n\nconvoy_tasks:\n%s\n\ndiff:\n%s",
-		convoy.Name, convoyTasks, diffBlocks.String())
+		convoy.Name,
+		WrapUserContent("convoy_tasks", convoyTasks),
+		WrapUserContent("diff", diffBlocks.String()))
 
 	logger.Printf("ConvoyReview #%d: running pass %d/%d for convoy %d (%s)",
 		bounty.ID, completedPasses+1, maxPasses, payload.ConvoyID, convoy.Name)
@@ -509,12 +517,28 @@ func runConvoyReviewLLM(userPrompt string, logger interface{ Printf(string, ...a
 	}
 	jsonStr := claude.ExtractJSON(raw)
 	var result convoyReviewResult
-	if parseErr := json.Unmarshal([]byte(jsonStr), &result); parseErr != nil {
+	// Fix #8.5 — strict-field decode. Model-upgrade drift (e.g. a new
+	// "severity" field on findings) surfaces as parse error rather than
+	// silently flowing through to spawned fix-task payloads.
+	if parseErr := strictJSONUnmarshal([]byte(jsonStr), &result); parseErr != nil {
 		logger.Printf("ConvoyReview LLM: parse error %v; raw=%s", parseErr, util.TruncateStr(raw, 200))
 		return convoyReviewResult{}, parseErr
 	}
 	if result.Status == "" {
 		return convoyReviewResult{}, fmt.Errorf("LLM returned empty status")
+	}
+	// Fix #8.5 — sanitize LLM-authored finding.Fix payloads against
+	// signal tokens BEFORE the spawning path. A finding whose "fix"
+	// field contained `[SCOPE GUARD` or `[CONFLICT_BRANCH:` would
+	// corrupt the Captain's scope-guard or Pilot's conflict-handling
+	// protocol on the spawned child task.
+	for _, f := range result.Findings {
+		if err := SanitizeLLMPayload(f.Fix); err != nil {
+			return convoyReviewResult{}, fmt.Errorf("finding fix rejected: %w", err)
+		}
+		if err := SanitizeLLMPayload(f.Description); err != nil {
+			return convoyReviewResult{}, fmt.Errorf("finding description rejected: %w", err)
+		}
 	}
 	return result, nil
 }

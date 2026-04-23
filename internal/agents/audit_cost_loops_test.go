@@ -226,9 +226,17 @@ func TestAUDIT_029_CouncilJSONParseRoutesToInfra5x(t *testing.T) {
 // consecutive-fallback counter.
 
 func TestAUDIT_030_ChancellorAutoApprovesOnClaudeError(t *testing.T) {
-	t.Skip("AUDIT-030: DUPLICATE-OF-116 — remove when Chancellor classifies Claude errors (Fix #8/#8.5)")
-	// Without skip, fails with: AUDIT-030: defective pattern still present — runChancellorReview auto-approves on both Claude error and parse error, no gh.ClassifyError/ShouldRetry/handleInfraFailure, no consecutive-fallback counter
-	// DUPLICATE-OF: AUDIT-116 (same function body, identical defect).
+	// Closed by Fix #8.5 (DUPLICATE-OF-116).
+	//
+	// runChancellorReview now fails CLOSED on Claude error AND JSON
+	// parse error: both paths call store.FailBounty + operator mail
+	// with a [CHANCELLOR FAIL-CLOSED] subject line. The two zero-value
+	// approveProposal fail-open sites (the AUDIT-116 defect) are gone.
+	//
+	// REGRESSION if any of the following reappears:
+	//   - a zero-value `approveProposal(db, feature, tasks, chancellorRuling{}, logger)`
+	//     call in the Claude-error or parse-error path
+	//   - the FAIL-CLOSED operator-mail sentinel missing from both paths
 	src := readCostLoopSource(t, "chancellor.go")
 
 	start := strings.Index(src, "func runChancellorReview(")
@@ -240,16 +248,16 @@ func TestAUDIT_030_ChancellorAutoApprovesOnClaudeError(t *testing.T) {
 		body = body[:nextFunc+10]
 	}
 
-	hasAutoApproveLog := strings.Contains(body, "auto-approving")
-	hasTwoApproveSites := strings.Count(body, "approveProposal(db, feature, tasks, chancellorRuling{}, logger)") >= 2
-	hasErrorClassification := strings.Contains(body, "gh.ClassifyError") ||
-		strings.Contains(body, "ShouldRetry") ||
-		strings.Contains(body, "handleInfraFailure")
-	hasFallbackCounter := strings.Contains(body, "chancellor_auto_approve_fallbacks") ||
-		strings.Contains(body, "AwaitingOperatorReview")
-
-	if hasAutoApproveLog && hasTwoApproveSites && !hasErrorClassification && !hasFallbackCounter {
-		t.Fatal("AUDIT-030: defective pattern still present — runChancellorReview auto-approves on both Claude error and parse error, no gh.ClassifyError/ShouldRetry/handleInfraFailure, no consecutive-fallback counter")
+	// Two zero-value approveProposal calls were the pre-fix AUDIT-116
+	// pattern in the Claude-error + parse-error handlers.
+	if strings.Count(body, "approveProposal(db, feature, tasks, chancellorRuling{}, logger)") > 0 {
+		t.Errorf("AUDIT-030 REGRESSION: runChancellorReview still contains zero-value approveProposal fail-open call")
+	}
+	// Positive assertion: the fail-closed sentinel must be present on
+	// both error handlers (Claude error + JSON parse error).
+	if strings.Count(body, "FAIL-CLOSED") < 2 {
+		t.Errorf("AUDIT-030 REGRESSION: runChancellorReview missing FAIL-CLOSED markers on error paths (count=%d, want >=2)",
+			strings.Count(body, "FAIL-CLOSED"))
 	}
 }
 

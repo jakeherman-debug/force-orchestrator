@@ -511,7 +511,8 @@ func TestBuildSubPRTitle_StripsGoalPrefixAndCaps(t *testing.T) {
 
 func TestBuildSubPRBody_IncludesRulingFeedback(t *testing.T) {
 	b := &store.Bounty{ID: 7, ConvoyID: 3, Payload: "Fix bug Y"}
-	body := buildSubPRBody(b, store.CouncilRuling{Approved: true, Feedback: "clean change"})
+	trueVal := true
+	body := buildSubPRBody(b, store.CouncilRuling{Approved: &trueVal, Feedback: "clean change"})
 	if !strings.Contains(body, "Fleet task: #7") {
 		t.Errorf("body missing task ref: %q", body)
 	}
