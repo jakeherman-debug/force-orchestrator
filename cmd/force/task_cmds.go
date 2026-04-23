@@ -309,7 +309,9 @@ Do not use markdown formatting. Write it as a clear feature request that a softw
 func cmdReset(db *sql.DB, id int, via string) {
 	store.ResetTask(db, id)
 	store.LogAudit(db, "operator", "reset", id, via)
-	fmt.Printf("Task %d reset to Pending.\n", id)
+	var status string
+	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&status)
+	fmt.Printf("Task %d reset to %s.\n", id, status)
 }
 
 func cmdCancel(db *sql.DB, args []string) {

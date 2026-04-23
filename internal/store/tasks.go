@@ -36,6 +36,7 @@ var InfrastructureTaskTypes = []string{
 	"CIFailureTriage",
 	"MedicReview",
 	"PRReviewTriage",
+	"ConvoyReview",
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {
@@ -285,10 +286,37 @@ func CancelTask(db *sql.DB, id int, reason string) bool {
 	return n > 0
 }
 
-// ResetTask resets a single task to Pending, clearing all error and lock state.
-// If the task belongs to a Failed convoy and no other problem tasks remain after
-// the reset, the convoy is automatically recovered to Active.
+// ResetTask resets an escalated/failed task, preserving committed coding work.
+// If the task has a branch_name set, coding work already exists on that branch —
+// the task is sent directly to AwaitingCouncilReview (or AwaitingCaptainReview
+// for coordinated convoys) so Jedi Council reviews the existing work rather than
+// an astromech redoing it from scratch.
+// If no branch_name is set (no coding work yet), it resets to Pending.
+// In both cases error/lock state is cleared and the convoy is auto-recovered.
 func ResetTask(db *sql.DB, id int) {
+	var convoyID int
+	var branchName string
+	db.QueryRow(`SELECT convoy_id, IFNULL(branch_name,'') FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID, &branchName)
+	if branchName != "" {
+		targetStatus := "AwaitingCouncilReview"
+		if IsConvoyCoordinated(db, convoyID) {
+			targetStatus = "AwaitingCaptainReview"
+		}
+		db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', error_log = '',
+			retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = ''
+			WHERE id = ?`, targetStatus, id)
+	} else {
+		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
+			retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = '', branch_name = ''
+			WHERE id = ?`, id)
+	}
+	AutoRecoverConvoy(db, convoyID, nil)
+}
+
+// ResetTaskFull always resets a task to Pending and clears branch_name regardless
+// of committed work. Used by Medic when re-running the coding phase with new
+// guidance — the astromech needs a fresh attempt, not a review of a bad branch.
+func ResetTaskFull(db *sql.DB, id int) {
 	var convoyID int
 	db.QueryRow(`SELECT convoy_id FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID)
 	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
@@ -339,6 +367,46 @@ func AddConvoyTask(db *sql.DB, parentID int, repo, payload string, convoyID, pri
 	}
 	id, _ := res.LastInsertId()
 	return int(id), nil
+}
+
+// AddConvoyTaskIdempotent is the dedup-aware sibling of AddConvoyTask. If a
+// non-terminal CodeEdit task already exists with the same idempotencyKey, it
+// returns that task's ID and (alreadyExisted=true) without inserting. Terminal
+// statuses (Completed / Cancelled / Failed) do not block a new insert — past
+// runs are "done" and the next pass is allowed to try again.
+//
+// Callers should use stable keys that describe the work, not the moment:
+//
+//	rebase-conflict:branch:<branch>         — one outstanding conflict per agent branch
+//	rebase-conflict:askbranch:<askbranch>   — one outstanding conflict per ask-branch
+//	convoy-review-fix:<convoyID>:<hash>     — one outstanding fix per review finding
+//
+// idempotencyKey must be non-empty; callers that can't produce a stable key
+// should use plain AddConvoyTask instead.
+func AddConvoyTaskIdempotent(db *sql.DB, idempotencyKey string, parentID int, repo, payload string, convoyID, priority int, status string) (id int, alreadyExisted bool, err error) {
+	if idempotencyKey == "" {
+		return 0, false, fmt.Errorf("AddConvoyTaskIdempotent: idempotencyKey required")
+	}
+	var existing int
+	qErr := db.QueryRow(`SELECT id FROM BountyBoard
+		WHERE idempotency_key = ?
+		  AND status NOT IN ('Completed','Cancelled','Failed')
+		LIMIT 1`, idempotencyKey).Scan(&existing)
+	if qErr == nil && existing > 0 {
+		return existing, true, nil
+	}
+	if qErr != nil && qErr != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("dedup query: %w", qErr)
+	}
+	res, execErr := db.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, idempotency_key, created_at)
+		 VALUES (?, ?, 'CodeEdit', ?, ?, ?, ?, ?, datetime('now'))`,
+		parentID, repo, status, payload, convoyID, priority, idempotencyKey)
+	if execErr != nil {
+		return 0, false, execErr
+	}
+	newID, _ := res.LastInsertId()
+	return int(newID), false, nil
 }
 
 // AddCodeEditTask creates a CodeEdit task with full field support. Returns the new task ID.

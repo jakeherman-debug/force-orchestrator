@@ -48,13 +48,13 @@ func GetAskBranchPR(db *sql.DB, id int) *AskBranchPR {
 	err := db.QueryRow(`SELECT id, task_id, convoy_id, repo,
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
-		IFNULL(failure_count, 0), IFNULL(merged_at, ''),
-		IFNULL(created_at, '')
+		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE id = ?`, id).
 		Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.MergedAt, &p.CreatedAt)
+			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt)
 	if err != nil {
 		return nil
 	}
@@ -69,13 +69,13 @@ func GetAskBranchPRByTask(db *sql.DB, taskID int) *AskBranchPR {
 	err := db.QueryRow(`SELECT id, task_id, convoy_id, repo,
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
-		IFNULL(failure_count, 0), IFNULL(merged_at, ''),
-		IFNULL(created_at, '')
+		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE task_id = ? ORDER BY id DESC LIMIT 1`, taskID).
 		Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.MergedAt, &p.CreatedAt)
+			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt)
 	if err != nil {
 		return nil
 	}
@@ -88,8 +88,8 @@ func ListOpenAskBranchPRs(db *sql.DB) []AskBranchPR {
 	rows, err := db.Query(`SELECT id, task_id, convoy_id, repo,
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
-		IFNULL(failure_count, 0), IFNULL(merged_at, ''),
-		IFNULL(created_at, '')
+		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE state = 'Open' ORDER BY id ASC`)
 	if err != nil {
 		return nil
@@ -101,7 +101,7 @@ func ListOpenAskBranchPRs(db *sql.DB) []AskBranchPR {
 		if err := rows.Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.MergedAt, &p.CreatedAt); err == nil {
+			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt); err == nil {
 			prs = append(prs, p)
 		}
 	}
@@ -114,8 +114,8 @@ func ListAskBranchPRsByConvoy(db *sql.DB, convoyID int) []AskBranchPR {
 	rows, err := db.Query(`SELECT id, task_id, convoy_id, repo,
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
-		IFNULL(failure_count, 0), IFNULL(merged_at, ''),
-		IFNULL(created_at, '')
+		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE convoy_id = ? ORDER BY id ASC`, convoyID)
 	if err != nil {
 		return nil
@@ -127,7 +127,7 @@ func ListAskBranchPRsByConvoy(db *sql.DB, convoyID int) []AskBranchPR {
 		if err := rows.Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.MergedAt, &p.CreatedAt); err == nil {
+			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt); err == nil {
 			prs = append(prs, p)
 		}
 	}
@@ -202,6 +202,20 @@ func MarkAskBranchPRClosed(db *sql.DB, id int) error {
 func MarkAskBranchPRClosedTx(tx *sql.Tx, id int) error {
 	_, err := tx.Exec(`UPDATE AskBranchPRs SET state = 'Closed' WHERE id = ?`, id)
 	return err
+}
+
+// IncrementStallRetriggerCount bumps stall_retrigger_count by 1 and returns the
+// new value. Used by sub-pr-ci-watch to cap the number of empty-commit re-trigger
+// attempts on a stuck CI run before falling through to escalation.
+func IncrementStallRetriggerCount(db *sql.DB, id int) (int, error) {
+	if _, err := db.Exec(`UPDATE AskBranchPRs SET stall_retrigger_count = stall_retrigger_count + 1 WHERE id = ?`, id); err != nil {
+		return 0, err
+	}
+	var count int
+	if err := db.QueryRow(`SELECT stall_retrigger_count FROM AskBranchPRs WHERE id = ?`, id).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // IncrementAskBranchPRFailureCountTx is the transactional sibling of IncrementAskBranchPRFailureCount.

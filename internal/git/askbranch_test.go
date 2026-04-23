@@ -304,6 +304,52 @@ func TestRebaseBranchOnto_StaleLocalBranchDoesNotLoseMergeCommits(t *testing.T) 
 	}
 }
 
+// ── TriggerCIRerun ───────────────────────────────────────────────────────────
+
+func TestTriggerCIRerun_PushesEmptyCommit(t *testing.T) {
+	wt, origin := makeOriginAndClone(t)
+	_, _ = CreateAskBranch(wt, "force/ask-1-rerun")
+
+	// Capture the SHA before the re-trigger.
+	beforeOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-rerun").Output()
+	before := strings.TrimSpace(string(beforeOut))
+
+	if err := TriggerCIRerun(wt, "force/ask-1-rerun", "ci: retrigger"); err != nil {
+		t.Fatalf("TriggerCIRerun: %v", err)
+	}
+
+	afterOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-rerun").Output()
+	after := strings.TrimSpace(string(afterOut))
+	if after == before {
+		t.Errorf("branch tip unchanged after re-trigger (before=%s after=%s)", before, after)
+	}
+
+	// Verify the new tip is an empty commit — tree should equal parent's tree.
+	treeOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%T", "force/ask-1-rerun").Output()
+	parentTreeOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%T", "force/ask-1-rerun^").Output()
+	if strings.TrimSpace(string(treeOut)) != strings.TrimSpace(string(parentTreeOut)) {
+		t.Errorf("new commit should be empty (same tree as parent): tip=%q parent=%q", treeOut, parentTreeOut)
+	}
+	// Message must match what we requested.
+	msgOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%s", "force/ask-1-rerun").Output()
+	if !strings.Contains(string(msgOut), "ci: retrigger") {
+		t.Errorf("commit message mismatch: %q", msgOut)
+	}
+}
+
+func TestTriggerCIRerun_DefaultMessageWhenEmpty(t *testing.T) {
+	wt, _ := makeOriginAndClone(t)
+	_, _ = CreateAskBranch(wt, "force/ask-1-default-msg")
+
+	if err := TriggerCIRerun(wt, "force/ask-1-default-msg", ""); err != nil {
+		t.Fatalf("TriggerCIRerun: %v", err)
+	}
+	msgOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%s", "force/ask-1-default-msg").Output()
+	if !strings.Contains(string(msgOut), "ci:") {
+		t.Errorf("default message should contain 'ci:' prefix; got %q", msgOut)
+	}
+}
+
 // ── ForcePushBranch ──────────────────────────────────────────────────────────
 
 func TestForcePushBranch_SucceedsAfterLocalCommit(t *testing.T) {

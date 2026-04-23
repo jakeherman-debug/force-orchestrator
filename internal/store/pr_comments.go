@@ -206,6 +206,11 @@ type PRReviewCommentRollup struct {
 	BotConflicted   int
 	HumanAwaiting   int
 	BotUnclassified int
+	// BotBlocking is the number of bot comments that are actively preventing a
+	// clean ship: unclassified rows + in_scope_fix rows whose spawned CodeEdit
+	// has not yet reached status=Completed. Resolved comments (thread_resolved_at
+	// set) do not count even if their task is Completed.
+	BotBlocking int
 }
 
 // ComputePRReviewRollup aggregates per-classification counts for a convoy.
@@ -245,6 +250,19 @@ func ComputePRReviewRollup(db *sql.DB, convoyID int) PRReviewCommentRollup {
 			r.HumanAwaiting += n
 		}
 	}
+
+	// BotBlocking: unclassified bots + in_scope_fix whose fix hasn't landed yet.
+	// A fix has landed when its spawned task is Completed (regardless of whether
+	// the GitHub thread has been resolved — the code is in; ship gate is clear).
+	r.BotBlocking = r.BotUnclassified
+	var inFlight int
+	db.QueryRow(`SELECT COUNT(*) FROM PRReviewComments p
+		WHERE p.convoy_id = ? AND p.classification = 'in_scope_fix'
+		AND (p.spawned_task_id = 0
+		     OR (SELECT status FROM BountyBoard WHERE id = p.spawned_task_id) != 'Completed')`,
+		convoyID).Scan(&inFlight)
+	r.BotBlocking += inFlight
+
 	return r
 }
 

@@ -1367,3 +1367,82 @@ func TestIncrementInfraFailures_BelowMax(t *testing.T) {
 		t.Errorf("expected infra_failures=1, got %d", b.InfraFailures)
 	}
 }
+
+// ── ResetTask ────────────────────────────────────────────────────────────────
+
+func TestResetTask_NoBranchResetsToPending(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	id := AddBounty(db, 0, "CodeEdit", "task")
+	db.Exec(`UPDATE BountyBoard SET status = 'Escalated', error_log = 'oops', retry_count = 2, infra_failures = 1 WHERE id = ?`, id)
+
+	ResetTask(db, id)
+
+	b, _ := GetBounty(db, id)
+	if b.Status != "Pending" {
+		t.Errorf("expected Pending, got %q", b.Status)
+	}
+	if b.BranchName != "" {
+		t.Errorf("expected empty branch_name, got %q", b.BranchName)
+	}
+}
+
+func TestResetTask_WithBranchResetsToCouncilReview(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	id := AddBounty(db, 0, "CodeEdit", "task")
+	db.Exec(`UPDATE BountyBoard SET status = 'Escalated', branch_name = 'force/ask-1/r2-d2', error_log = 'infra fail' WHERE id = ?`, id)
+
+	ResetTask(db, id)
+
+	b, _ := GetBounty(db, id)
+	if b.Status != "AwaitingCouncilReview" {
+		t.Errorf("expected AwaitingCouncilReview, got %q", b.Status)
+	}
+	if b.BranchName != "force/ask-1/r2-d2" {
+		t.Errorf("expected branch_name preserved, got %q", b.BranchName)
+	}
+}
+
+func TestResetTask_WithBranchCoordinatedConvoyRoutesToCaptain(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	cid, _ := CreateConvoy(db, "test convoy")
+	SetConvoyCoordinated(db, cid)
+
+	res, _ := db.Exec(`INSERT INTO BountyBoard (type, status, payload, convoy_id, branch_name, created_at)
+		VALUES ('CodeEdit', 'Escalated', '{}', ?, 'force/ask-1/r2-d2', datetime('now'))`, cid)
+	id64, _ := res.LastInsertId()
+	id := int(id64)
+
+	ResetTask(db, id)
+
+	b, _ := GetBounty(db, id)
+	if b.Status != "AwaitingCaptainReview" {
+		t.Errorf("expected AwaitingCaptainReview for coordinated convoy, got %q", b.Status)
+	}
+	if b.BranchName != "force/ask-1/r2-d2" {
+		t.Errorf("expected branch_name preserved, got %q", b.BranchName)
+	}
+}
+
+func TestResetTaskFull_AlwaysPending(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	id := AddBounty(db, 0, "CodeEdit", "task")
+	db.Exec(`UPDATE BountyBoard SET status = 'Escalated', branch_name = 'force/ask-1/r2-d2', error_log = 'bad code' WHERE id = ?`, id)
+
+	ResetTaskFull(db, id)
+
+	b, _ := GetBounty(db, id)
+	if b.Status != "Pending" {
+		t.Errorf("expected Pending, got %q", b.Status)
+	}
+	if b.BranchName != "" {
+		t.Errorf("expected branch_name cleared, got %q", b.BranchName)
+	}
+}

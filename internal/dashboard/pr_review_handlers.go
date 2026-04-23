@@ -31,6 +31,10 @@ func writeConvoyPRReviewComments(db *sql.DB, w http.ResponseWriter, convoyID int
 	rows := store.ListConvoyPRComments(db, convoyID)
 	out := make([]DashboardPRReviewComment, 0, len(rows))
 	for _, c := range rows {
+		taskStatus := ""
+		if c.SpawnedTaskID > 0 {
+			db.QueryRow(`SELECT IFNULL(status,'') FROM BountyBoard WHERE id = ?`, c.SpawnedTaskID).Scan(&taskStatus)
+		}
 		out = append(out, DashboardPRReviewComment{
 			ID:                   c.ID,
 			Repo:                 c.Repo,
@@ -45,6 +49,7 @@ func writeConvoyPRReviewComments(db *sql.DB, w http.ResponseWriter, convoyID int
 			Classification:       c.Classification,
 			ClassificationReason: c.ClassificationReason,
 			SpawnedTaskID:        c.SpawnedTaskID,
+			SpawnedTaskStatus:    taskStatus,
 			ReplyBody:            c.ReplyBody,
 			RepliedAt:            c.RepliedAt,
 			ThreadResolvedAt:     c.ThreadResolvedAt,

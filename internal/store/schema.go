@@ -213,17 +213,18 @@ func createSchema(db *sql.DB) {
 	// Tracks CI state, retry counters, and terminal state transitions. Unique on
 	// (repo, pr_number) so we never double-create a row for the same PR.
 	db.Exec(`CREATE TABLE IF NOT EXISTS AskBranchPRs (
-		id             INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id        INTEGER NOT NULL,
-		convoy_id      INTEGER NOT NULL,
-		repo           TEXT    NOT NULL,
-		pr_number      INTEGER DEFAULT 0,
-		pr_url         TEXT    DEFAULT '',
-		state          TEXT    DEFAULT 'Open',
-		checks_state   TEXT    DEFAULT 'Pending',
-		failure_count  INTEGER DEFAULT 0,
-		merged_at      TEXT    DEFAULT '',
-		created_at     TEXT    DEFAULT (datetime('now')),
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id                INTEGER NOT NULL,
+		convoy_id              INTEGER NOT NULL,
+		repo                   TEXT    NOT NULL,
+		pr_number              INTEGER DEFAULT 0,
+		pr_url                 TEXT    DEFAULT '',
+		state                  TEXT    DEFAULT 'Open',
+		checks_state           TEXT    DEFAULT 'Pending',
+		failure_count          INTEGER DEFAULT 0,
+		stall_retrigger_count  INTEGER DEFAULT 0,
+		merged_at              TEXT    DEFAULT '',
+		created_at             TEXT    DEFAULT (datetime('now')),
 		UNIQUE(repo, pr_number)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id   ON AskBranchPRs (task_id)`)
@@ -395,22 +396,26 @@ func runMigrations(db *sql.DB) {
 
 	// AskBranchPRs — new table in Layer A. idempotent via IF NOT EXISTS.
 	db.Exec(`CREATE TABLE IF NOT EXISTS AskBranchPRs (
-		id             INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id        INTEGER NOT NULL,
-		convoy_id      INTEGER NOT NULL,
-		repo           TEXT    NOT NULL,
-		pr_number      INTEGER DEFAULT 0,
-		pr_url         TEXT    DEFAULT '',
-		state          TEXT    DEFAULT 'Open',
-		checks_state   TEXT    DEFAULT 'Pending',
-		failure_count  INTEGER DEFAULT 0,
-		merged_at      TEXT    DEFAULT '',
-		created_at     TEXT    DEFAULT (datetime('now')),
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id                INTEGER NOT NULL,
+		convoy_id              INTEGER NOT NULL,
+		repo                   TEXT    NOT NULL,
+		pr_number              INTEGER DEFAULT 0,
+		pr_url                 TEXT    DEFAULT '',
+		state                  TEXT    DEFAULT 'Open',
+		checks_state           TEXT    DEFAULT 'Pending',
+		failure_count          INTEGER DEFAULT 0,
+		stall_retrigger_count  INTEGER DEFAULT 0,
+		merged_at              TEXT    DEFAULT '',
+		created_at             TEXT    DEFAULT (datetime('now')),
 		UNIQUE(repo, pr_number)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id   ON AskBranchPRs (task_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_convoy_id ON AskBranchPRs (convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_state     ON AskBranchPRs (state)`)
+	// Additive column for existing DBs — counts stuck-runner re-trigger attempts
+	// so sub-pr-ci-watch can cap the loop before escalating.
+	db.Exec(`ALTER TABLE AskBranchPRs ADD COLUMN stall_retrigger_count INTEGER DEFAULT 0`)
 
 	// ConvoyAskBranches — per-(convoy, repo) integration branch. Added as part of
 	// Phase 2; key on (convoy_id, repo) so convoys touching multiple repos work.

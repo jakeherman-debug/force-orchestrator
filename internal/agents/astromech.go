@@ -100,6 +100,18 @@ func permanentInfraFail(db *sql.DB, logger interface{ Printf(string, ...any) },
 	telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, bounty.ID, msg))
 	store.LogAudit(db, agentName, "infra-fail", bounty.ID, msg)
 
+	// Don't spawn a Medic to investigate a Medic — that creates infinite chains.
+	// Infrastructure tasks that fail hard go straight to escalation instead.
+	if store.IsInfrastructureTask(bounty.Type) {
+		CreateEscalation(db, bounty.ID, store.SeverityMedium,
+			fmt.Sprintf("Infrastructure task #%d (%s) failed permanently: %s", bounty.ID, bounty.Type, msg))
+		store.SendMail(db, agentName, "operator",
+			fmt.Sprintf("[INFRA FAIL] Task #%d (%s) failed", bounty.ID, bounty.Type),
+			msg, bounty.ID, store.MailTypeAlert)
+		logger.Printf("Task %d: infrastructure task failed permanently — escalated (no Medic cascade)", bounty.ID)
+		return
+	}
+
 	// Queue a MedicReview task — the Medic will analyze the failure and decide whether to
 	// requeue, shard, or escalate. No operator mail here; if human attention is needed
 	// the Medic sends one quality escalation rather than a raw error alert.

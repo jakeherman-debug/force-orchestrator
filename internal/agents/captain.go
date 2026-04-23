@@ -59,13 +59,72 @@ REJECTION GUIDELINES — reject (do NOT create new tasks to cover for) if:
 - The diff breaks downstream task assumptions in a way that cannot be fixed by updating their payloads
 Using new_tasks to paper over a broken implementation wastes the entire council review cycle. Reject instead and let the agent try again with the correct approach.
 
+SCOPE GUARD (for scope-violation rejections):
+When you reject for out-of-scope file changes, populate "rejected_files" with the EXACT list of file paths that were outside the task's scope. The fleet will programmatically prepend a [SCOPE GUARD — DO NOT MODIFY] section to the agent's next attempt listing exactly those paths. Getting this list right is the single highest-leverage thing you do — it prevents the same scope-creep loop from repeating on retry.
+- Use the file paths from the diff headers verbatim.
+- Include every file you reject, even if it's only one.
+- Leave rejected_files empty [] when the rejection is not about scope (e.g. wrong approach, broken logic).
+
 Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 {
   "decision": "approve" | "reject" | "escalate",
   "feedback": "reason if rejecting or escalating, empty string if approving",
   "task_updates": [{"id": <task_id>, "new_payload": "<updated full description>"}],
-  "new_tasks": [{"repo": "<repo_name>", "task": "<description>", "blocked_by": [<task_id>, ...]}]
+  "new_tasks": [{"repo": "<repo_name>", "task": "<description>", "blocked_by": [<task_id>, ...]}],
+  "rejected_files": ["path/one.go", "path/two.go"]
 }`
+
+// scopeGuardMarker delimits the auto-prepended "DO NOT MODIFY" block so
+// subsequent rejections can find and replace it instead of accumulating.
+const scopeGuardMarker = "[SCOPE GUARD — DO NOT MODIFY]"
+
+// stripScopeGuard removes any previously-prepended SCOPE GUARD block from a
+// payload. The guard (if present) is always the first block before the
+// original task body; we peel it off and return everything after.
+func stripScopeGuard(payload string) string {
+	if !strings.HasPrefix(payload, scopeGuardMarker) {
+		return payload
+	}
+	// The guard block ends at the terminating "---\n" separator.
+	sep := "\n---\n"
+	if idx := strings.Index(payload, sep); idx >= 0 {
+		return payload[idx+len(sep):]
+	}
+	return payload
+}
+
+// buildScopeGuardedPayload composes the next-attempt payload after a Captain
+// rejection. If ruling.RejectedFiles is non-empty, a [SCOPE GUARD — DO NOT
+// MODIFY] block is prepended listing exactly those paths; this converts a
+// Captain rejection into programmatic guardrails the next agent sees up-front
+// instead of relying on them to parse free-form feedback prose.
+//
+// Idempotent: strips any prior guard block before appending, so repeated
+// rejections produce a single (latest) guard rather than accumulating.
+func buildScopeGuardedPayload(rawPayload string, ruling store.CaptainRuling, attempt int) string {
+	body := stripScopeGuard(rawPayload)
+	feedbackBlock := fmt.Sprintf("%s\n\nCAPTAIN FEEDBACK (attempt %d/%d): %s",
+		body, attempt, MaxRetries, ruling.Feedback)
+
+	if len(ruling.RejectedFiles) == 0 {
+		return feedbackBlock
+	}
+
+	var guard strings.Builder
+	guard.WriteString(scopeGuardMarker)
+	guard.WriteString("\nThe Captain rejected a previous attempt because these files were changed outside the task's stated scope. Do NOT modify them in this attempt, even if they look related or you see an obvious improvement:\n\n")
+	for _, f := range ruling.RejectedFiles {
+		trimmed := strings.TrimSpace(f)
+		if trimmed == "" {
+			continue
+		}
+		guard.WriteString("  - ")
+		guard.WriteString(trimmed)
+		guard.WriteString("\n")
+	}
+	guard.WriteString("\nIf you believe any of these files NEED to change for this task, stop and escalate via mail instead of editing them. Out-of-scope work is queued as its own task by the Captain.\n---\n")
+	return guard.String() + feedbackBlock
+}
 
 // buildConvoyContext assembles a full convoy state summary for the Captain prompt.
 func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
@@ -187,7 +246,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	if reason, held := store.GetConvoyHold(db, b.ConvoyID); held {
 		retryCount := store.IncrementRetryCount(db, b.ID)
 		holdMsg := fmt.Sprintf("CONVOY HOLD: %s", reason)
-		newPayload := fmt.Sprintf("%s\n\nCAPTAIN FEEDBACK (attempt %d/%d): %s", b.Payload, retryCount, MaxRetries, holdMsg)
+		newPayload := fmt.Sprintf("%s\n\nCAPTAIN FEEDBACK (attempt %d/%d): %s", stripScopeGuard(b.Payload), retryCount, MaxRetries, holdMsg)
 		store.ReturnTaskForRework(db, b.ID, newPayload)
 		store.SendMail(db, agentName, "astromech",
 			fmt.Sprintf("[CAPTAIN REJECTED] Task #%d — convoy on hold", b.ID),
@@ -368,8 +427,7 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			return
 		}
 
-		newPayload := fmt.Sprintf("%s\n\nCAPTAIN FEEDBACK (attempt %d/%d): %s",
-			b.Payload, retryCount, MaxRetries, ruling.Feedback)
+		newPayload := buildScopeGuardedPayload(b.Payload, ruling, retryCount)
 		store.ReturnTaskForRework(db, b.ID, newPayload)
 		store.SendMail(db, agentName, "astromech",
 			fmt.Sprintf("[CAPTAIN REJECTED] Task #%d — attempt %d/%d", b.ID, retryCount, MaxRetries),

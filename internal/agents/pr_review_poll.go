@@ -21,6 +21,10 @@ import (
 // gh.IsBotAuthor(login, userType, allowlist) where allowlist = SystemConfig
 // key "pr_review_bot_logins" (CSV) or gh.DefaultBotLogins() if unset.
 //
+// Comments from logins in SystemConfig "pr_review_skip_logins" (CSV) are
+// silently ignored before insertion — set this to the operator's GitHub
+// username to prevent the fleet from triaging the operator's own replies.
+//
 // Thread grouping: GitHub's REST review comments carry in_reply_to_id. Rather
 // than fan out to GraphQL at poll time we derive review_thread_id as:
 //   - review_comment with in_reply_to_id = 0  → "review:<github_comment_id>"
@@ -38,6 +42,7 @@ func dogPRReviewPoll(db *sql.DB, logger interface{ Printf(string, ...any) }) err
 	}
 
 	allowlist := loadBotAllowlist(db)
+	skipLogins := loadSkipLogins(db)
 
 	rows, err := db.Query(`SELECT id, name FROM Convoys WHERE status = 'DraftPROpen'`)
 	if err != nil {
@@ -60,7 +65,7 @@ func dogPRReviewPoll(db *sql.DB, logger interface{ Printf(string, ...any) }) err
 
 	ghc := newGHClient()
 	for _, c := range convoys {
-		pollConvoyPRReviews(db, ghc, c.id, allowlist, logger)
+		pollConvoyPRReviews(db, ghc, c.id, allowlist, skipLogins, logger)
 	}
 	return nil
 }
@@ -73,6 +78,7 @@ func pollConvoyPRReviews(
 	ghc *gh.Client,
 	convoyID int,
 	allowlist []string,
+	skipLogins []string,
 	logger interface{ Printf(string, ...any) },
 ) {
 	branches := store.ListConvoyAskBranches(db, convoyID)
@@ -114,6 +120,9 @@ func pollConvoyPRReviews(
 		// Issue comments: synthesize one thread per PR.
 		issueThreadID := fmt.Sprintf("issue:%d", ab.DraftPRNumber)
 		for _, ic := range issueComments {
+			if isSkippedLogin(ic.User.Login, skipLogins) {
+				continue
+			}
 			kind := "human"
 			if gh.IsBotAuthor(ic.User.Login, ic.User.Type, allowlist) {
 				kind = "bot"
@@ -143,6 +152,9 @@ func pollConvoyPRReviews(
 
 		// Review comments: thread = inherit parent's thread or synthesize "review:<self_id>".
 		for _, rc := range reviewComments {
+			if isSkippedLogin(rc.User.Login, skipLogins) {
+				continue
+			}
 			threadID := fmt.Sprintf("review:%d", rc.ID)
 			if rc.InReplyToID > 0 {
 				// Inherit parent's review_thread_id if we have the parent.
@@ -234,6 +246,36 @@ func queuePRReviewTriageIfAbsent(db *sql.DB, convoyID int, logger interface{ Pri
 	}
 	logger.Printf("pr-review-poll: queued PRReviewTriage for convoy %d", convoyID)
 	return nil
+}
+
+// loadSkipLogins reads SystemConfig "pr_review_skip_logins" (CSV) and returns
+// the list of GitHub logins whose comments are silently ignored by the poll.
+// Set this to the operator's GitHub username to prevent the fleet from
+// triaging the operator's own replies on the draft PR thread.
+func loadSkipLogins(db *sql.DB) []string {
+	raw := strings.TrimSpace(store.GetConfig(db, "pr_review_skip_logins", ""))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, strings.ToLower(t))
+		}
+	}
+	return out
+}
+
+// isSkippedLogin reports whether login is in the skip list (case-insensitive).
+func isSkippedLogin(login string, skipLogins []string) bool {
+	lower := strings.ToLower(login)
+	for _, s := range skipLogins {
+		if s == lower {
+			return true
+		}
+	}
+	return false
 }
 
 // loadBotAllowlist reads SystemConfig "pr_review_bot_logins" (CSV) and returns
