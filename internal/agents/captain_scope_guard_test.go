@@ -88,6 +88,65 @@ func TestBuildScopeGuardedPayload_SkipsBlankFilePaths(t *testing.T) {
 	}
 }
 
+// TestBuildScopeGuardedPayload_FiltersHallucinatedInScopeFiles is the direct
+// regression test for task 449's failure mode. The Captain LLM listed
+// internal/claude/claude.go in rejected_files even though the task body
+// literally asks to modify it. Without this filter, Medic sees payload+guard
+// as contradictory and escalates — an entirely unnecessary operator burden.
+func TestBuildScopeGuardedPayload_FiltersHallucinatedInScopeFiles(t *testing.T) {
+	ruling := store.CaptainRuling{
+		Feedback: "dashboard changes are out of scope",
+		// Captain's LLM returned BOTH truly out-of-scope files AND the task's
+		// actual target — this is the hallucination we have to defend against.
+		RejectedFiles: []string{
+			"internal/dashboard/dashboard.go",
+			"internal/claude/claude.go",
+		},
+	}
+	body := "In internal/claude/claude.go, extend the rateLimitPatterns regex to match new substrings."
+
+	got := buildScopeGuardedPayload(body, ruling, 1)
+	if !strings.Contains(got, "internal/dashboard/dashboard.go") {
+		t.Error("truly out-of-scope file must remain in guard")
+	}
+	if strings.Contains(got, "- internal/claude/claude.go\n") {
+		t.Error("in-scope file (mentioned in task body) must be filtered from guard — otherwise the next attempt is unsatisfiable")
+	}
+}
+
+// TestBuildScopeGuardedPayload_AllRejectsHallucinated_NoGuard covers the
+// worst case: every file the Captain claimed was out-of-scope is actually
+// referenced in the task body. The guard would be empty; don't build one at
+// all. This avoids emitting a stub "[SCOPE GUARD — DO NOT MODIFY]" block
+// with zero entries, which would confuse both agents and future stripping.
+func TestBuildScopeGuardedPayload_AllRejectsHallucinated_NoGuard(t *testing.T) {
+	ruling := store.CaptainRuling{
+		Feedback:      "your approach broke the tests",
+		RejectedFiles: []string{"internal/claude/claude.go", "internal/claude/claude_test.go"},
+	}
+	body := "In internal/claude/claude.go and internal/claude/claude_test.go, add a regex."
+
+	got := buildScopeGuardedPayload(body, ruling, 1)
+	if strings.Contains(got, scopeGuardMarker) {
+		t.Error("when every rejected file is in-scope, no guard block should be emitted")
+	}
+	if !strings.Contains(got, "CAPTAIN FEEDBACK") {
+		t.Error("must still append the feedback line")
+	}
+}
+
+func TestFilterHallucinatedRejections(t *testing.T) {
+	body := "Modify internal/claude/claude.go and test it in internal/claude/claude_test.go."
+	got := filterHallucinatedRejections(
+		[]string{"internal/claude/claude.go", "internal/dashboard/app.js", "", "  ", "internal/claude/claude_test.go"},
+		body,
+	)
+	want := []string{"internal/dashboard/app.js"}
+	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
+		t.Errorf("filterHallucinatedRejections = %v, want %v", got, want)
+	}
+}
+
 func TestStripScopeGuard_NoGuard_ReturnsPayloadUnchanged(t *testing.T) {
 	payload := "ordinary task description"
 	if stripScopeGuard(payload) != payload {

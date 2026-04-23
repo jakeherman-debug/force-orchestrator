@@ -99,7 +99,10 @@ Every new `fmt.Errorf(...)` or `FailBounty(...)` added during a PR-flow change m
 - **Auto-bypass:** repo marked `pr_flow_enabled=0` or `quarantined_at` stamped, so future tasks take the legacy path.
 - **Auto-reshard:** permanent infra failures bubble a `Decompose` bounty to Commander via `queueReshardDecompose` in `util.go`. Commander re-plans the oversized task into smaller shards instead of failing to the operator. Idempotent per failed task.
 - **Auto-retrigger:** CI stalls in `handleSubPRPoll` diagnose per-check state first. All-QUEUED (stuck runner) → push empty commit via `igit.TriggerCIRerun` to force a new check suite, capped at `subPRMaxStallRetriggers` attempts. Any IN_PROGRESS → wait (slow CI, not stuck). Only past `subPRCIHardLimit` or the retrigger cap do we escalate.
-- **Operator escalation:** `CreateEscalation(...)` + operator mail. Reserved for cases where self-healing is genuinely not possible (auth expired, branch protection, unfixable bug, loop caps hit).
+- **Auto-complete-on-empty-diff:** Medic checks `GetDiff` + `CommitsAhead` BEFORE calling Claude. If the branch has no net change vs main, the work already landed via a sibling — mark the task Completed, unblock dependents, resolve the parent's Open escalations (`autoCompletedMedicTask` in `medic.go`).
+- **Auto-cleanup on contamination:** When Medic's LLM emits `decision=cleanup`, the fleet spawns a `WorktreeReset` infra task for Pilot (`pilot_worktree_reset.go`). Pilot fetches the target branch, runs `git reset --hard origin/<target> && git clean -fdx` on every astromech worktree, then re-queues the parent as Pending with `branch_name = ''`. No operator intervention for worktree hygiene — the system executes the same commands a human would.
+- **Auto-resolve stale escalations:** The `escalation-sweeper` dog (10 min cadence) closes Open escalations whose task has transitioned to `Completed`/`Cancelled` OR whose referenced sub-PR is now `Merged`/`Closed`. Both mean "the thing we escalated about is no longer the thing."
+- **Operator escalation:** `CreateEscalation(...)` + operator mail. Reserved for cases where self-healing is genuinely not possible (auth expired, branch protection, security concern, novel architectural decision). **If the remedy can be written as a sequence of shell commands, it is NOT an escalation** — Medic's prompt explicitly forbids escalating for worktree hygiene or already-completed work.
 
 If a new error path does not fit any of the above, stop and design the self-healing path before writing the code.
 
@@ -120,6 +123,7 @@ When the Captain rejects a task for out-of-scope file changes, it populates `Cap
 - The guard is marked with `scopeGuardMarker` at the top of the payload and terminates with `\n---\n`. `stripScopeGuard` peels it off so repeated rejections produce a single (latest) guard rather than accumulating.
 - The convoy-hold rejection path also strips any prior guard before re-appending its own feedback, keeping the payload clean.
 - Captain's system prompt instructs: populate `rejected_files` on scope-violation rejections; leave it `[]` on non-scope rejections (wrong approach, broken logic, etc.).
+- **Hallucination defense (`filterHallucinatedRejections`):** the Captain's LLM sometimes includes in-scope files in `rejected_files` when an agent changes both in-scope AND out-of-scope files in one attempt. Before building the guard, every entry is cross-referenced against the stripped task body — a file that appears in the payload is IN-scope by definition and silently dropped. Without this filter, the next attempt's payload would say "modify X" while the guard says "don't touch X," and Medic correctly escalates the contradiction. The filter keeps the fleet out of that trap.
 
 ## Ask-branch conflict gating
 

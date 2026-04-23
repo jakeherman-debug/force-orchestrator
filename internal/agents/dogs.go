@@ -53,6 +53,11 @@ var dogCooldowns = map[string]time.Duration{
 	// Completed, calling the GraphQL resolveReviewThread mutation. Runs on every
 	// inquisitor tick — batches are small and cost is two gh calls per resolve.
 	"pr-review-resolve":     0,
+	// escalation-sweeper auto-resolves Open escalations whose referenced sub-PR
+	// is now terminal (Merged/Closed). Cheap — one JOIN query — and stops stale
+	// operator burden when our own terminal-task-exit or an external merge has
+	// already made the problem moot.
+	"escalation-sweeper":    10 * time.Minute,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -61,6 +66,7 @@ var dogOrder = []string{
 	"stalled-reviews", "priority-aging", "daily-digest", "stale-convoys-report",
 	"sub-pr-ci-watch", "main-drift-watch", "draft-pr-watch", "ship-it-nag",
 	"repo-config-check", "pr-review-poll", "pr-review-resolve", "convoy-review-watch",
+	"escalation-sweeper",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -149,6 +155,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogPRReviewResolve(db, logger)
 	case "convoy-review-watch":
 		return dogConvoyReviewWatch(db, logger)
+	case "escalation-sweeper":
+		return dogEscalationSweeper(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

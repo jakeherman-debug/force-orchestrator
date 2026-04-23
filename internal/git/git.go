@@ -182,6 +182,33 @@ func ResolveWorktreeDir(db *sql.DB, branchName, repoPath string, taskID int, bra
 	return filepath.Join(filepath.Dir(repoPath), ".force-worktrees", filepath.Base(repoPath), fmt.Sprintf("task-%d", taskID))
 }
 
+// ListAgentWorktreePaths returns every astromech worktree directory that
+// exists on disk for the given repo, as absolute paths. Used by the
+// WorktreeReset handler to enumerate targets for cleanup when contamination
+// is detected. repoName is accepted for interface parity but not required —
+// the filesystem layout is keyed only by the repo directory name.
+func ListAgentWorktreePaths(repoPath, repoName string) []string {
+	_ = repoName // reserved for future multi-repo disambiguation
+	base := filepath.Join(filepath.Dir(repoPath), ".force-worktrees", filepath.Base(repoPath))
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// Skip the per-task fallback directories (task-NNN) — those are
+		// short-lived and not persistent-agent contamination targets.
+		if strings.HasPrefix(e.Name(), "task-") {
+			continue
+		}
+		out = append(out, filepath.Join(base, e.Name()))
+	}
+	return out
+}
+
 // RunCmd runs a git subcommand in repoPath and returns combined output.
 func RunCmd(repoPath string, args ...string) (string, error) {
 	fullArgs := append([]string{"-C", repoPath}, args...)

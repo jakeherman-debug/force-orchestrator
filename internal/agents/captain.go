@@ -93,11 +93,48 @@ func stripScopeGuard(payload string) string {
 	return payload
 }
 
+// filterHallucinatedRejections drops files from ruling.RejectedFiles that are
+// explicitly mentioned in the task body — those are IN-scope by definition and
+// should never appear on a DO-NOT-MODIFY list. The Captain's LLM sometimes
+// produces this hallucination when an agent touches both in-scope and
+// out-of-scope files in a single attempt: the Captain's prose reasoning is
+// correct ("revert dashboard changes") but the structured rejected_files list
+// naively contains every path that appeared in the diff, including the
+// in-scope target of the task.
+//
+// Without this filter, the next attempt's SCOPE GUARD forbids the agent from
+// modifying the very file the task is about, and Medic correctly detects the
+// contradiction and escalates — forcing the operator to intervene on what is
+// actually an LLM output error the fleet can programmatically correct.
+//
+// We conservatively match on exact path substring. A stripped task body must
+// literally contain the path (e.g. "internal/claude/claude.go") for that file
+// to be considered in-scope; quoted/escaped variants still match because
+// the strings package is bytewise.
+func filterHallucinatedRejections(rejectedFiles []string, taskBody string) []string {
+	if len(rejectedFiles) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rejectedFiles))
+	for _, f := range rejectedFiles {
+		trimmed := strings.TrimSpace(f)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(taskBody, trimmed) {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
 // buildScopeGuardedPayload composes the next-attempt payload after a Captain
-// rejection. If ruling.RejectedFiles is non-empty, a [SCOPE GUARD — DO NOT
-// MODIFY] block is prepended listing exactly those paths; this converts a
-// Captain rejection into programmatic guardrails the next agent sees up-front
-// instead of relying on them to parse free-form feedback prose.
+// rejection. If ruling.RejectedFiles contains truly out-of-scope files (after
+// filtering hallucinated in-scope entries), a [SCOPE GUARD — DO NOT MODIFY]
+// block is prepended listing exactly those paths; this converts a Captain
+// rejection into programmatic guardrails the next agent sees up-front instead
+// of relying on them to parse free-form feedback prose.
 //
 // Idempotent: strips any prior guard block before appending, so repeated
 // rejections produce a single (latest) guard rather than accumulating.
@@ -106,20 +143,20 @@ func buildScopeGuardedPayload(rawPayload string, ruling store.CaptainRuling, att
 	feedbackBlock := fmt.Sprintf("%s\n\nCAPTAIN FEEDBACK (attempt %d/%d): %s",
 		body, attempt, MaxRetries, ruling.Feedback)
 
-	if len(ruling.RejectedFiles) == 0 {
+	// Cross-reference rejected files against the task body. A Captain that
+	// listed every changed file (including in-scope ones) would otherwise
+	// produce a guard that contradicts the task itself.
+	safeRejects := filterHallucinatedRejections(ruling.RejectedFiles, body)
+	if len(safeRejects) == 0 {
 		return feedbackBlock
 	}
 
 	var guard strings.Builder
 	guard.WriteString(scopeGuardMarker)
 	guard.WriteString("\nThe Captain rejected a previous attempt because these files were changed outside the task's stated scope. Do NOT modify them in this attempt, even if they look related or you see an obvious improvement:\n\n")
-	for _, f := range ruling.RejectedFiles {
-		trimmed := strings.TrimSpace(f)
-		if trimmed == "" {
-			continue
-		}
+	for _, f := range safeRejects {
 		guard.WriteString("  - ")
-		guard.WriteString(trimmed)
+		guard.WriteString(f)
 		guard.WriteString("\n")
 	}
 	guard.WriteString("\nIf you believe any of these files NEED to change for this task, stop and escalate via mail instead of editing them. Out-of-scope work is queued as its own task by the Captain.\n---\n")
