@@ -18,11 +18,13 @@ const S = {
   selectedID:         null,
   detail:             null,
   rejectID:           null,
+  shipConvoyID:       null,
   activeTab:          'tasks',
   sortBy:             'id',
   sortDir:            'desc',
   showInfra:          false,     // toggle — hide fleet plumbing (Pilot, Librarian, Medic triage) by default
   openTimelinePanels: new Set(), // convoy IDs whose timeline panel is expanded
+  openPRReviewPanels: new Set(), // convoy IDs whose PR review panel is expanded
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -177,6 +179,28 @@ function renderStats() {
 
   $('tbadge-mail').textContent = s.unread_mail || '';
   $('tbadge-mail').className = 'tab-badge' + (s.unread_mail > 0 ? ' hot' : '');
+
+  // Ship-ready banner: show when any convoy is DraftPROpen, hide otherwise.
+  // Visible from every tab so the operator can't miss it — the fleet is
+  // literally blocked on their Ship It click.
+  const shipCount = s.ready_to_ship || 0;
+  const banner = $('ship-banner');
+  if (banner) {
+    $('ship-banner-count').textContent = shipCount;
+    banner.classList.toggle('hidden', shipCount === 0);
+  }
+  const convoysBadge = $('tbadge-convoys');
+  if (convoysBadge) {
+    convoysBadge.textContent = shipCount > 0 ? String(shipCount) : '';
+    convoysBadge.className = 'tab-badge' + (shipCount > 0 ? ' hot' : '');
+  }
+}
+
+// jumpToShipReady switches to the Convoys tab and sets the filter so the
+// ship-ready convoys are visible immediately. Wired to the top banner click.
+function jumpToShipReady() {
+  setConvoyStatusFilter('active');
+  switchTab('convoys');
 }
 
 // ── URL sync ──────────────────────────────────────────────────────────────────
@@ -468,6 +492,13 @@ function renderPanel(d) {
   if (CANCELLABLE.includes(d.status)) {
     btns.push(`<button class="action-btn cancel-btn" onclick="cancelTask(${d.id})">Cancel</button>`);
   }
+  // Ship It shortcut: only when the parent convoy has genuinely finished
+  // (ConvoyReadyToShip = DraftPROpen + no active tasks + no pending review).
+  // Offering the button while fix tasks or rebase conflicts are still in
+  // flight would let an operator ship a half-finished convoy.
+  if (d.convoy_id > 0 && d.convoy_ready_to_ship) {
+    btns.push(`<button class="action-btn ship-btn" onclick="showShip(${d.convoy_id})">🚢 Ship Convoy #${d.convoy_id}</button>`);
+  }
   $('panel-actions').innerHTML = btns.join('');
 
   // Body
@@ -478,13 +509,35 @@ function renderPanel(d) {
   const blockedByLinks = (d.blocked_by && d.blocked_by.length > 0)
     ? d.blocked_by.map(id => `<a onclick="openPanel(${id})" style="cursor:pointer">#${id}</a>`).join(', ')
     : '';
+
+  // Branch cell: if the server returned a web URL (resolved from the repo's
+  // remote), render as a clickable link; otherwise plain text. Keeps legacy
+  // repos (no remote_url) and test DBs working without special casing.
+  const branchCell = d.branch_name
+    ? (d.branch_url
+        ? `<a href="${escHtml(d.branch_url)}" target="_blank" rel="noopener">${escHtml(d.branch_name)}</a>`
+        : escHtml(d.branch_name))
+    : '—';
+
+  // PR cell: only rendered when a sub-PR was opened for this task. The state
+  // badge mirrors the usual status-pill semantics (Open/Merged/Closed).
+  let prRow = '';
+  if (d.pr_number) {
+    const label = `#${d.pr_number}` + (d.pr_state ? ` <span class="dim">(${escHtml(d.pr_state)})</span>` : '');
+    const prCell = d.pr_url
+      ? `<a href="${escHtml(d.pr_url)}" target="_blank" rel="noopener">${label}</a>`
+      : label;
+    prRow = `<span class="meta-key">PR</span><span class="meta-val">${prCell}</span>`;
+  }
+
   sections.push(`
     <div class="panel-section">
       <h3>Details</h3>
       <div class="meta-grid">
         <span class="meta-key">Repo</span>      <span class="meta-val">${escHtml(d.repo || '—')}</span>
         <span class="meta-key">Owner</span>     <span class="meta-val">${escHtml(d.owner || '—')}</span>
-        <span class="meta-key">Branch</span>    <span class="meta-val">${escHtml(d.branch_name || '—')}</span>
+        <span class="meta-key">Branch</span>    <span class="meta-val">${branchCell}</span>
+        ${prRow}
         <span class="meta-key">Convoy</span>    <span class="meta-val">${d.convoy_id || '—'}</span>
         <span class="meta-key">Retries</span>   <span class="meta-val">${d.retry_count} / infra:${d.infra_failures}</span>
         <span class="meta-key">Priority</span>  <span class="meta-val">${d.priority}</span>
@@ -855,11 +908,18 @@ function renderConvoys(convoys) {
 
   let list = convoys || [];
 
-  // Status filter: 'active' matches Active and Failed; 'completed' matches only Completed
+  // Status filter:
+  //   'active'    — anything NOT in a terminal state (Active, Failed, AwaitingDraftPR,
+  //                 DraftPROpen, Shipping, etc.). Old versions of this filter hid
+  //                 DraftPROpen convoys, which is exactly when the Ship It button
+  //                 appears — so ops couldn't find convoys that needed their action.
+  //   'completed' — terminal-success states (Completed, Shipped).
+  const TERMINAL_CONVOY = new Set(['completed','shipped','cancelled','archived']);
   if (S.convoyStatusFilter !== 'all') {
     list = list.filter(c => {
       const st = (c.status || '').toLowerCase();
-      if (S.convoyStatusFilter === 'active') return st === 'active' || st === 'failed';
+      if (S.convoyStatusFilter === 'active')    return !TERMINAL_CONVOY.has(st);
+      if (S.convoyStatusFilter === 'completed') return st === 'completed' || st === 'shipped';
       return st === S.convoyStatusFilter;
     });
   }
@@ -891,6 +951,13 @@ function renderConvoys(convoys) {
     const cancelBtn = c.status === 'Active'
       ? `<button class="action-btn cancel-btn" onclick="cancelConvoy(${c.id})">Cancel Convoy</button>`
       : '';
+    // Ship It: only when the fleet has truly quiesced (no pending tasks, no
+    // in-flight ConvoyReview). Relying on status='DraftPROpen' alone was a bug —
+    // the draft PR exists well before fix tasks, rebase conflicts, and review
+    // comments are resolved.
+    const shipBtn = c.ready_to_ship
+      ? `<button class="action-btn ship-btn" onclick="showShip(${c.id})">Ship It</button>`
+      : '';
     const reviewBadge = renderPRReviewBadge(c);
     return `
       <div class="convoy-card">
@@ -910,6 +977,7 @@ function renderConvoys(convoys) {
           <button class="action-btn" onclick="toggleConvoyTimeline(${c.id})">Timeline</button>
           ${approveBtn}
           ${cancelBtn}
+          ${shipBtn}
         </div>
         <div id="pr-review-panel-${c.id}" class="pr-review-panel" style="display:none"></div>
         <div id="timeline-panel-${c.id}" class="convoy-timeline" style="display:none"></div>
@@ -926,6 +994,11 @@ function renderConvoys(convoys) {
       S.openTimelinePanels.delete(convoyID);
     }
   });
+  // Re-open any PR review panels that were open before the DOM was rebuilt.
+  S.openPRReviewPanels.forEach(id => {
+    if ($(`pr-review-panel-${id}`)) togglePRReviewPanel(id, true);
+    else S.openPRReviewPanels.delete(id); // convoy no longer in list
+  });
 }
 
 // renderPRReviewBadge returns a clickable summary badge when the convoy has
@@ -934,11 +1007,14 @@ function renderPRReviewBadge(c) {
   const r = c.pr_review_rollup;
   if (!r || !r.total) return '';
   const parts = [];
-  if (r.bot_in_scope)      parts.push(`<span title="Bot fixes queued">🔧 ${r.bot_in_scope}</span>`);
-  if (r.bot_out_of_scope)  parts.push(`<span title="Follow-up features">📌 ${r.bot_out_of_scope}</span>`);
-  if (r.bot_not_actionable)parts.push(`<span title="Explained to bot">💬 ${r.bot_not_actionable}</span>`);
+  // Blocking indicator shown first — this is what the operator needs to know
+  // before deciding whether to ship.
+  if (r.bot_blocking)       parts.push(`<span title="${r.bot_blocking} bot issue(s) still in progress — fixes must land before shipping" style="color:var(--red);font-weight:600">⛔ ${r.bot_blocking} blocking</span>`);
+  if (r.bot_in_scope)       parts.push(`<span title="Bot in-scope fixes (${r.bot_in_scope} total)">🔧 ${r.bot_in_scope}</span>`);
+  if (r.bot_out_of_scope)   parts.push(`<span title="Follow-up features">📌 ${r.bot_out_of_scope}</span>`);
+  if (r.bot_not_actionable) parts.push(`<span title="Explained to bot">💬 ${r.bot_not_actionable}</span>`);
   if (r.bot_conflicted_loop)parts.push(`<span title="Bot loop escalated" style="color:var(--red)">⚠️ ${r.bot_conflicted_loop}</span>`);
-  if (r.human_awaiting)    parts.push(`<span title="Human comments awaiting operator" style="color:var(--accent)">👤 ${r.human_awaiting}</span>`);
+  if (r.human_awaiting)     parts.push(`<span title="Human comments awaiting operator" style="color:var(--accent)">👤 ${r.human_awaiting}</span>`);
   if (!parts.length) return '';
   return `<button class="pr-review-badge" onclick="togglePRReviewPanel(${c.id})" title="Click to view PR review comments">
     ${parts.join(' ')}
@@ -1014,14 +1090,18 @@ function fmtConvoyEventType(et) {
 }
 
 // togglePRReviewPanel lazy-loads the convoy's PR review comments inline.
-async function togglePRReviewPanel(convoyID) {
+// Pass forceOpen=true to open (or refresh) without toggling — used by
+// renderConvoys to restore panels that were open before a list refresh.
+async function togglePRReviewPanel(convoyID, forceOpen) {
   const el = $(`pr-review-panel-${convoyID}`);
   if (!el) return;
-  if (el.style.display === 'block') {
+  if (!forceOpen && el.style.display === 'block') {
     el.style.display = 'none';
+    S.openPRReviewPanels.delete(convoyID);
     return;
   }
   el.style.display = 'block';
+  S.openPRReviewPanels.add(convoyID);
   el.innerHTML = `<div class="dim" style="padding:10px">Loading comments…</div>`;
   try {
     const data = await api(`/api/convoys/${convoyID}/pr-review-comments`);
@@ -1071,9 +1151,14 @@ function renderPRReviewRow(c) {
     reply = `<div class="pr-review-reply">${escHtml(truncate(c.reply_body || '', 200))}</div>
              <div class="dim" style="font-size:11px">replied ${fmtShortDate(c.replied_at)}</div>`;
   } else if (c.classification === 'in_scope_fix' && c.spawned_task_id) {
-    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ task #${c.spawned_task_id}</a>`;
+    const taskPill = c.spawned_task_status ? statusPill(c.spawned_task_status) : '';
+    const resolvedNote = c.thread_resolved_at
+      ? `<div class="dim" style="font-size:10px">✓ resolved ${fmtShortDate(c.thread_resolved_at)}</div>`
+      : '';
+    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ task #${c.spawned_task_id}</a> ${taskPill}${resolvedNote}`;
   } else if (c.classification === 'out_of_scope' && c.spawned_task_id) {
-    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ feature #${c.spawned_task_id}</a>`;
+    const taskPill = c.spawned_task_status ? statusPill(c.spawned_task_status) : '';
+    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ feature #${c.spawned_task_id}</a> ${taskPill}`;
   } else if (c.classification === 'conflicted_loop') {
     reply = `<span style="color:var(--red)">loop escalated — operator required</span>`;
   } else {
@@ -1174,6 +1259,67 @@ async function confirmCancelConvoy() {
     loadConvoys();
   } catch(e) {
     showToast('Cancel failed: ' + e.message, 'err');
+  }
+}
+
+function showShip(id) {
+  S.shipConvoyID = id;
+  $('ship-modal-convoy').textContent = `#${id}`;
+  $('ship-branch-list').innerHTML = '<div class="dim" style="padding:10px">Loading diff…</div>';
+  $('ship-summary-line').innerHTML = '';
+  $('ship-modal').classList.remove('hidden');
+  api(`/api/convoys/${id}/diff-summary`)
+    .then(data => renderShipDiff(data))
+    .catch(e => {
+      $('ship-branch-list').innerHTML = `<div style="padding:10px;color:var(--red)">Failed to load diff: ${escHtml(e.message)}</div>`;
+    });
+}
+
+function renderShipDiff(data) {
+  const branches = data.ask_branches || [];
+  if (!branches.length) {
+    $('ship-branch-list').innerHTML = '<div class="dim" style="padding:10px">No pending diffs — all branches are clean.</div>';
+    $('ship-summary-line').innerHTML = '';
+    return;
+  }
+  let totalAdd = 0, totalDel = 0;
+  $('ship-branch-list').innerHTML = branches.map(ab => {
+    totalAdd += ab.total_additions || 0;
+    totalDel += ab.total_deletions || 0;
+    const prLink = ab.draft_pr_url
+      ? `<a href="${escHtml(ab.draft_pr_url)}" target="_blank" rel="noopener">PR #${ab.draft_pr_number}</a>`
+      : `PR #${ab.draft_pr_number}`;
+    const fileRows = (ab.files || []).map(f =>
+      `<tr><td class="ship-diff-file">${escHtml(f.path)}</td>` +
+      `<td class="ship-diff-add">+${f.additions}</td>` +
+      `<td class="ship-diff-del">-${f.deletions}</td></tr>`
+    ).join('');
+    const body = fileRows
+      ? `<table class="ship-diff-table"><tbody>${fileRows}</tbody></table>`
+      : '<div class="dim" style="padding:8px 10px;font-size:12px">No changed files.</div>';
+    return `
+      <div class="ship-branch">
+        <div class="ship-branch-hdr">
+          ${prLink}
+          <span class="ship-branch-name">${escHtml(ab.ask_branch)}</span>
+        </div>
+        ${body}
+      </div>`;
+  }).join('');
+  $('ship-summary-line').innerHTML =
+    `<span>Total: <strong>+${totalAdd}</strong> additions, <strong>-${totalDel}</strong> deletions` +
+    ` across ${branches.length} branch${branches.length === 1 ? '' : 'es'}</span>`;
+}
+
+async function confirmShip() {
+  const id = S.shipConvoyID;
+  try {
+    const r = await api(`/api/convoys/${id}/ship`, { method: 'POST' });
+    showToast(`Convoy #${id} shipped (${r.promoted} PR(s) promoted)`, 'ok');
+    closeModal('ship-modal');
+    loadConvoys();
+  } catch(e) {
+    showToast('Ship failed: ' + e.message, 'err');
   }
 }
 

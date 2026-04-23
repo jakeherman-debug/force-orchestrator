@@ -100,6 +100,10 @@ func SpawnDiplomat(db *sql.DB, name string) {
 			runPRReviewTriage(db, name, bounty, logger)
 			continue
 		}
+		if bounty, claimed := store.ClaimBounty(db, "ConvoyReview", name); claimed {
+			runConvoyReview(db, name, bounty, logger)
+			continue
+		}
 		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
 	}
 }
@@ -158,9 +162,17 @@ func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger in
 
 	// All per-repo draft PRs are open. Transition convoy to DraftPROpen.
 	_ = store.SetConvoyStatus(db, payload.ConvoyID, "DraftPROpen")
+
+	// Queue a ConvoyReview to verify the ask-branch diff delivers everything commissioned.
+	// The dog re-triggers it after each round of fix tasks completes.
+	if reviewID, err := QueueConvoyReview(db, payload.ConvoyID); err == nil && reviewID > 0 {
+		logger.Printf("ShipConvoy #%d: queued ConvoyReview #%d for convoy %d",
+			bounty.ID, reviewID, payload.ConvoyID)
+	}
+
 	store.SendMail(db, agentName, "operator",
 		fmt.Sprintf("[READY TO SHIP] Convoy '%s' — draft PR(s) open", convoy.Name),
-		buildShipItMailBody(db, convoy, branches),
+		buildShipItMailBody(db, convoy, branches)+"\n\nA ConvoyReview is running to verify completeness. You will receive a follow-up when it passes.",
 		0, store.MailTypeAlert)
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
 	logger.Printf("ShipConvoy #%d: convoy %d → DraftPROpen; repos=%v", bounty.ID, payload.ConvoyID, created)

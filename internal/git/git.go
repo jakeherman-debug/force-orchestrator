@@ -85,13 +85,34 @@ func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, exi
 
 	// Resume an existing branch if one was preserved from a prior attempt.
 	if existingBranch != "" {
+		// Fetch first so origin/<existingBranch> reflects any commits that were
+		// pushed (e.g. the agent committed and pushed before being rejected).
+		exec.Command("git", "-C", repoPath, "fetch", "origin", existingBranch).Run()
+
+		// Try direct checkout. Works when this is the same worktree that created
+		// the branch, or when the branch isn't checked out in any worktree.
 		verifyOut, verifyErr := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", existingBranch).CombinedOutput()
 		if verifyErr == nil && strings.TrimSpace(string(verifyOut)) != "" {
 			if _, coErr := exec.Command("git", "-C", worktreeDir, "checkout", existingBranch).CombinedOutput(); coErr == nil {
 				return existingBranch, true, nil
 			}
-			// Checkout failed (e.g. worktree conflict) — fall through to fresh branch.
 		}
+
+		// Direct checkout failed — the branch is checked out in a different
+		// persistent worktree (a different agent owns it). Seed a new branch from
+		// origin/<existingBranch> so all prior commits are preserved and the
+		// resuming agent only needs to apply the rework delta, not redo everything.
+		remoteRef := "refs/remotes/origin/" + existingBranch
+		if resumeSHAOut, shaErr := exec.Command("git", "-C", repoPath, "rev-parse", remoteRef).CombinedOutput(); shaErr == nil {
+			if resumeSHA := strings.TrimSpace(string(resumeSHAOut)); resumeSHA != "" {
+				newBranch := fmt.Sprintf("%sagent/%s/task-%d", BranchPrefix(), agentName, taskID)
+				exec.Command("git", "-C", repoPath, "branch", "-D", newBranch).Run()
+				if _, coErr := exec.Command("git", "-C", worktreeDir, "checkout", "-b", newBranch, resumeSHA).CombinedOutput(); coErr == nil {
+					return newBranch, true, nil // isResume=true: seeded from origin prior work
+				}
+			}
+		}
+		// Neither worked — fall through to fresh branch.
 	}
 
 	// Pick the base for the new branch: convoy ask-branch if supplied, else the

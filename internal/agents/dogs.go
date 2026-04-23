@@ -48,6 +48,7 @@ var dogCooldowns = map[string]time.Duration{
 	// 5-min cadence mirrors draft-pr-watch — bot comments typically arrive in
 	// bursts minutes after the draft PR opens, so this matches their arrival pattern.
 	"pr-review-poll":        5 * time.Minute,
+	"convoy-review-watch":   5 * time.Minute,
 	// pr-review-resolve sweeps in_scope_fix comments whose spawned CodeEdit has
 	// Completed, calling the GraphQL resolveReviewThread mutation. Runs on every
 	// inquisitor tick — batches are small and cost is two gh calls per resolve.
@@ -59,7 +60,7 @@ var dogOrder = []string{
 	"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene",
 	"stalled-reviews", "priority-aging", "daily-digest", "stale-convoys-report",
 	"sub-pr-ci-watch", "main-drift-watch", "draft-pr-watch", "ship-it-nag",
-	"repo-config-check", "pr-review-poll", "pr-review-resolve",
+	"repo-config-check", "pr-review-poll", "pr-review-resolve", "convoy-review-watch",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -146,6 +147,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogPRReviewPoll(db, logger)
 	case "pr-review-resolve":
 		return dogPRReviewResolve(db, logger)
+	case "convoy-review-watch":
+		return dogConvoyReviewWatch(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

@@ -180,6 +180,109 @@ func DeleteConvoyAskBranch(db *sql.DB, convoyID int, repo string) error {
 // CodeEdit tasks — the set of repos that need ask-branches. Excludes empty
 // repos (non-code tasks) and Cancelled tasks. Used by Pilot's CreateAskBranch
 // handler to fan out per-repo branch creation.
+// ConvoyReadyToShip returns true iff the convoy is actually waiting on an
+// operator "Ship It" click — not merely that the draft PR exists.
+//
+// The distinction matters: `Convoys.status = 'DraftPROpen'` is set the moment
+// Diplomat opens the draft PR against main, which is usually BEFORE the
+// fleet's self-healing work (ConvoyReview fix tasks, rebase conflicts, bot
+// review comments) has finished. A convoy with 8 pending CodeEdits is
+// technically DraftPROpen but is obviously not ready to ship.
+//
+// Ready iff ALL of:
+//   1. Convoys.status = 'DraftPROpen'
+//   2. Zero non-terminal tasks with convoy_id = convoyID (catches CodeEdits,
+//      REBASE_CONFLICT resolvers, ConvoyReview fix tasks, CIFailureTriage,
+//      etc.)
+//   3. Zero Pending/Locked ConvoyReview tasks whose payload references this
+//      convoy (ConvoyReview rows carry convoy_id=0, keyed by payload)
+//
+// Condition (3) is separate because ConvoyReview inserts convoy_id=0 on its
+// own row — the dog decides the convoy is quiescent AND fires a new review,
+// and between those events the convoy is briefly "no tasks + no review",
+// which we correctly treat as not-ready until the review completes.
+func ConvoyReadyToShip(db *sql.DB, convoyID int) bool {
+	if convoyID <= 0 {
+		return false
+	}
+	var status string
+	if err := db.QueryRow(`SELECT IFNULL(status,'') FROM Convoys WHERE id = ?`, convoyID).Scan(&status); err != nil {
+		return false
+	}
+	if status != "DraftPROpen" {
+		return false
+	}
+	var active int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE convoy_id = ?
+		  AND status NOT IN ('Completed','Cancelled','Failed')`, convoyID).Scan(&active)
+	if active > 0 {
+		return false
+	}
+	var reviewPending int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'ConvoyReview'
+		  AND status IN ('Pending','Locked')
+		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
+		    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
+		convoyID, convoyID).Scan(&reviewPending)
+	return reviewPending == 0
+}
+
+// ListReadyToShipConvoyIDs returns the IDs of every convoy whose self-healing
+// work is done and which is waiting on an operator Ship It click. Batch form
+// of ConvoyReadyToShip used by the dashboard's /api/status count.
+func ListReadyToShipConvoyIDs(db *sql.DB) []int {
+	rows, err := db.Query(`
+		SELECT c.id FROM Convoys c
+		WHERE c.status = 'DraftPROpen'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM BountyBoard b
+		    WHERE b.convoy_id = c.id
+		      AND b.status NOT IN ('Completed','Cancelled','Failed')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM BountyBoard r
+		    WHERE r.type = 'ConvoyReview'
+		      AND r.status IN ('Pending','Locked')
+		      AND (r.payload LIKE '%"convoy_id":' || c.id || ',%'
+		        OR r.payload LIKE '%"convoy_id":' || c.id || '}%')
+		  )
+		ORDER BY c.id ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// HasActiveAskBranchConflict returns true when the convoy has a non-terminal
+// REBASE_CONFLICT CodeEdit pinned to the ask-branch itself (spawned by Pilot
+// in pilot_rebase.go, payload starts with "[REBASE_CONFLICT for convoy #N").
+// Callers that spawn new CodeEdits into a convoy should gate on this — piling
+// work onto an ask-branch whose tip is still broken creates cascading conflicts
+// for every task that touches the same files.
+func HasActiveAskBranchConflict(db *sql.DB, convoyID int) bool {
+	if convoyID <= 0 {
+		return false
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE convoy_id = ?
+		  AND type = 'CodeEdit'
+		  AND status NOT IN ('Completed','Cancelled','Failed')
+		  AND payload LIKE '[REBASE_CONFLICT for convoy #' || ? || ' %'`,
+		convoyID, convoyID).Scan(&n)
+	return n > 0
+}
+
 func ConvoyReposTouched(db *sql.DB, convoyID int) []string {
 	rows, err := db.Query(`SELECT DISTINCT target_repo FROM BountyBoard
 		WHERE convoy_id = ? AND type = 'CodeEdit' AND IFNULL(target_repo, '') != '' AND status != 'Cancelled'

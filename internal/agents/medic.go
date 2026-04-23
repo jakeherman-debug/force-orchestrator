@@ -164,7 +164,7 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 }
 
 func applyMedicRequeue(db *sql.DB, agentName string, bounty, parent *store.Bounty, d medicDecision, logger *log.Logger) {
-	store.ResetTask(db, parent.ID)
+	store.ResetTaskFull(db, parent.ID)
 	store.SendMail(db, agentName, "astromech",
 		fmt.Sprintf("[MEDIC GUIDANCE] Task #%d — requeued with updated guidance", parent.ID),
 		fmt.Sprintf("The Fleet Medic has analyzed this task's failure history and requeued it.\n\nRoot cause: %s\n\nGuidance for your next attempt:\n%s",

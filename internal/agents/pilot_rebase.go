@@ -103,9 +103,19 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		// no sub-PR). Pilot's job ends here; the follow-up is driven through
 		// the normal astromech → council flow.
 		logger.Printf("RebaseAskBranch #%d: rebase conflict — spawning RebaseConflict task", bounty.ID)
+		idKey := "rebase-conflict:askbranch:" + ab.AskBranch
 		conflictPayload := fmt.Sprintf("[REBASE_CONFLICT for convoy #%d repo %s]\n\nAsk-branch: %s\nBase branch: %s\n\nThe rebase onto %s conflicted. Merge %s into %s, resolve conflict markers, and commit. The ask-branch will be force-pushed after council review.",
 			payload.ConvoyID, payload.Repo, ab.AskBranch, defaultBranch, defaultBranch, defaultBranch, ab.AskBranch)
-		conflictTaskID, _ := store.AddConvoyTask(db, bounty.ID, payload.Repo, conflictPayload, payload.ConvoyID, 5, "Pending")
+		conflictTaskID, existed, addErr := store.AddConvoyTaskIdempotent(db, idKey, bounty.ID, payload.Repo, conflictPayload, payload.ConvoyID, 5, "Pending")
+		if addErr != nil {
+			store.FailBounty(db, bounty.ID, fmt.Sprintf("queue ask-branch conflict: %v", addErr))
+			return
+		}
+		if existed {
+			logger.Printf("RebaseAskBranch #%d: conflict — reusing existing task #%d on %s", bounty.ID, conflictTaskID, ab.AskBranch)
+			store.UpdateBountyStatus(db, bounty.ID, "Completed")
+			return
+		}
 		// Stamp the branch name so the astromech resumes directly on the ask-branch.
 		store.SetBranchName(db, conflictTaskID, ab.AskBranch)
 		store.SendMail(db, "Pilot", "astromech",

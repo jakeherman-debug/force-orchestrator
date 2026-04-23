@@ -914,6 +914,289 @@ func TestDogSubPRCIWatch_BlockedWithCIRunning(t *testing.T) {
 	}
 }
 
+// ── Rebase loop fixes ────────────────────────────────────────────────────────
+
+// TestDogSubPRCIWatch_EscalatedTask_ClosesPRAndStopsTracking verifies that
+// handleSubPRPoll exits early for tasks in a terminal state, closes the PR on
+// GitHub, and marks the AskBranchPRs row Closed so the dog stops processing it.
+func TestDogSubPRCIWatch_EscalatedTask_ClosesPRAndStopsTracking(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	prRowID, err := store.CreateAskBranchPR(db, taskID, convoyID, "api", "https://github.com/acme/api/pull/77", 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Put the task in Escalated state — the dog should stop processing PR 77.
+	db.Exec(`UPDATE BountyBoard SET status = 'Escalated' WHERE id = ?`, taskID)
+
+	stub := installGHStub(t, map[string]ghStubResp{
+		"pr close 77": {stdout: ""},
+	})
+
+	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// GitHub PR close must have been called with the correct PR number.
+	var closeCalled bool
+	for _, call := range stub.calls {
+		if len(call.args) >= 3 && call.args[0] == "pr" && call.args[1] == "close" && call.args[2] == "77" {
+			closeCalled = true
+		}
+	}
+	if !closeCalled {
+		t.Errorf("expected 'gh pr close 77' for escalated task's sub-PR; calls: %v", stub.calls)
+	}
+
+	// AskBranchPRs row must be Closed so the dog ignores it on subsequent ticks.
+	var state string
+	db.QueryRow(`SELECT state FROM AskBranchPRs WHERE id = ?`, prRowID).Scan(&state)
+	if state != "Closed" {
+		t.Errorf("expected AskBranchPRs.state=Closed, got %q", state)
+	}
+}
+
+// TestDogSubPRCIWatch_FailedTask_ClosesPR verifies the same early-exit path
+// fires for Failed tasks (not just Escalated).
+func TestDogSubPRCIWatch_FailedTask_ClosesPR(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	prRowID, err := store.CreateAskBranchPR(db, taskID, convoyID, "api", "https://github.com/acme/api/pull/78", 78)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`UPDATE BountyBoard SET status = 'Failed' WHERE id = ?`, taskID)
+
+	stub := installGHStub(t, map[string]ghStubResp{
+		"pr close 78": {stdout: ""},
+	})
+	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var closedPR int
+	for _, call := range stub.calls {
+		if len(call.args) >= 3 && call.args[0] == "pr" && call.args[1] == "close" && call.args[2] == "78" {
+			closedPR++
+		}
+	}
+	if closedPR != 1 {
+		t.Errorf("expected exactly 1 'pr close 78' call, got %d", closedPR)
+	}
+	var state string
+	db.QueryRow(`SELECT state FROM AskBranchPRs WHERE id = ?`, prRowID).Scan(&state)
+	if state != "Closed" {
+		t.Errorf("expected AskBranchPRs.state=Closed for Failed task, got %q", state)
+	}
+}
+
+// TestDogSubPRCIWatch_CancelledTask_ClosesPR verifies the early-exit path for
+// Cancelled tasks.
+func TestDogSubPRCIWatch_CancelledTask_ClosesPR(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	prRowID, err := store.CreateAskBranchPR(db, taskID, convoyID, "api", "https://github.com/acme/api/pull/79", 79)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`UPDATE BountyBoard SET status = 'Cancelled' WHERE id = ?`, taskID)
+
+	installGHStub(t, map[string]ghStubResp{
+		"pr close 79": {stdout: ""},
+	})
+	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var state string
+	db.QueryRow(`SELECT state FROM AskBranchPRs WHERE id = ?`, prRowID).Scan(&state)
+	if state != "Closed" {
+		t.Errorf("expected AskBranchPRs.state=Closed for Cancelled task, got %q", state)
+	}
+}
+
+// TestDogSubPRCIWatch_TerminalTask_NoPRView verifies that pr view is never
+// called after the early-exit fires for a terminal task.
+func TestDogSubPRCIWatch_TerminalTask_NoPRView(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	_, err := store.CreateAskBranchPR(db, taskID, convoyID, "api", "https://github.com/acme/api/pull/80", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`UPDATE BountyBoard SET status = 'Escalated' WHERE id = ?`, taskID)
+
+	stub := installGHStub(t, map[string]ghStubResp{
+		"pr close 80": {stdout: ""},
+	})
+	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, call := range stub.calls {
+		if len(call.args) >= 2 && call.args[0] == "pr" && call.args[1] == "view" {
+			t.Errorf("pr view should not be called after early-exit for terminal task, got: %v", call.args)
+		}
+	}
+}
+
+// TestQueueRebaseAgentBranch_LoopCap_ReturnsError verifies that
+// QueueRebaseAgentBranch returns an error (instead of silently no-op-ing) once
+// 5 REBASE_CONFLICT tasks have already been spawned for the same task, whether
+// those tasks are completed, cancelled, or in any other state.
+func TestQueueRebaseAgentBranch_LoopCap_ReturnsError(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	_ = convoyID
+	agentBranch := fmt.Sprintf("agent/R2-D2/task-%d", taskID)
+
+	// Seed 5 cancelled REBASE_CONFLICT tasks for this task — all terminal.
+	for i := 0; i < 5; i++ {
+		db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+			VALUES (0, 'api', 'CodeEdit', 'Cancelled',
+			  '[REBASE_CONFLICT for task #' || ? || ' repo api] Agent branch: ' || ? || ' ...', 5, datetime('now'))`,
+			taskID, agentBranch)
+	}
+
+	_, err := QueueRebaseAgentBranch(db, rebaseAgentPayload{
+		SubPRRowID: 1,
+		TaskID:     taskID,
+		Branch:     agentBranch,
+		AskBranch:  "force/ask-1-test",
+		ConvoyID:   convoyID,
+		Repo:       "api",
+	})
+	if err == nil {
+		t.Error("expected error from rebase loop cap, got nil")
+	}
+}
+
+// TestQueueRebaseAgentBranch_LoopCap_BelowThreshold verifies that 4 prior
+// REBASE_CONFLICT tasks do NOT trigger the cap — the 5th attempt must succeed.
+func TestQueueRebaseAgentBranch_LoopCap_BelowThreshold(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	_ = convoyID
+	agentBranch := fmt.Sprintf("agent/R2-D2/task-%d", taskID)
+
+	for i := 0; i < 4; i++ {
+		db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+			VALUES (0, 'api', 'CodeEdit', 'Cancelled',
+			  '[REBASE_CONFLICT for task #' || ? || ' repo api] ...', 5, datetime('now'))`, taskID)
+	}
+
+	id, err := QueueRebaseAgentBranch(db, rebaseAgentPayload{
+		SubPRRowID: 1,
+		TaskID:     taskID,
+		Branch:     agentBranch,
+		AskBranch:  "force/ask-1-test",
+		ConvoyID:   convoyID,
+		Repo:       "api",
+	})
+	if err != nil {
+		t.Errorf("expected success at 4 prior conflicts, got: %v", err)
+	}
+	if id == 0 {
+		t.Error("expected a non-zero task ID at 4 prior conflicts")
+	}
+}
+
+// TestQueueRebaseAgentBranch_LoopCap_MixedStatuses verifies the cap counts
+// all-time conflicts regardless of their terminal status (completed + cancelled
+// together must trigger the cap at 5 total).
+func TestQueueRebaseAgentBranch_LoopCap_MixedStatuses(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	_ = convoyID
+	agentBranch := fmt.Sprintf("agent/R2-D2/task-%d", taskID)
+
+	statuses := []string{"Completed", "Cancelled", "Completed", "Cancelled", "Completed"}
+	for _, s := range statuses {
+		db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+			VALUES (0, 'api', 'CodeEdit', ?,
+			  '[REBASE_CONFLICT for task #' || ? || ' repo api] ...', 5, datetime('now'))`, s, taskID)
+	}
+
+	_, err := QueueRebaseAgentBranch(db, rebaseAgentPayload{
+		SubPRRowID: 1,
+		TaskID:     taskID,
+		Branch:     agentBranch,
+		AskBranch:  "force/ask-1-test",
+		ConvoyID:   convoyID,
+		Repo:       "api",
+	})
+	if err == nil {
+		t.Error("expected loop cap error for 5 mixed-status conflicts, got nil")
+	}
+}
+
+// TestDogSubPRCIWatch_Dirty_LoopCapEscalates verifies the full chain: a DIRTY
+// sub-PR whose QueueRebaseAgentBranch hits the loop cap causes the task to be
+// escalated and the AskBranchPRs row to be closed (via escalateSubPR).
+func TestDogSubPRCIWatch_Dirty_LoopCapEscalates(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, taskID, _, _ := setupSubPRScenario(t, db)
+	db.Exec(`UPDATE BountyBoard SET branch_name = 'agent/R2-D2/task-loop' WHERE id = ?`, taskID)
+	db.Exec(`INSERT OR REPLACE INTO ConvoyAskBranches (convoy_id, repo, ask_branch, ask_branch_base_sha)
+		VALUES (?, 'api', 'force/ask-loop-test', 'abc')`, convoyID)
+	_, err := store.CreateAskBranchPR(db, taskID, convoyID, "api", "https://github.com/acme/api/pull/88", 88)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed 5 cancelled REBASE_CONFLICT tasks so the loop cap fires.
+	for i := 0; i < 5; i++ {
+		db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+			VALUES (0, 'api', 'CodeEdit', 'Cancelled',
+			  '[REBASE_CONFLICT for task #' || ? || ' repo api] Agent branch: agent/R2-D2/task-loop ...', 5, datetime('now'))`,
+			taskID)
+	}
+
+	installGHStub(t, map[string]ghStubResp{
+		"pr view 88": {stdout: `{"number":88,"url":"u","state":"OPEN","isDraft":false,"merged":false,"mergedAt":"","closedAt":"","reviews":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}`},
+	})
+
+	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Task must be escalated when the loop cap fires.
+	after, _ := store.GetBounty(db, taskID)
+	if after.Status != "Escalated" {
+		t.Errorf("expected Escalated after loop cap, got %s", after.Status)
+	}
+
+	var escCount int
+	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, taskID).Scan(&escCount)
+	if escCount != 1 {
+		t.Errorf("expected 1 escalation, got %d", escCount)
+	}
+
+	// AskBranchPRs row should be Closed (escalateSubPR closes it atomically).
+	var prState string
+	db.QueryRow(`SELECT state FROM AskBranchPRs WHERE convoy_id = ?`, convoyID).Scan(&prState)
+	if prState != "Closed" {
+		t.Errorf("expected AskBranchPRs.state=Closed after escalation, got %q", prState)
+	}
+}
+
 // Silence unused-package warnings when the test file is built but not run.
 var _ = claude.SetCLIRunner
 var _ = time.Now

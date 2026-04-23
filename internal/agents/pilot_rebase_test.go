@@ -252,6 +252,74 @@ func TestRunRebaseAskBranch_NoAskBranchIsNoOp(t *testing.T) {
 	}
 }
 
+// TestRunRebaseAskBranch_Conflict_Idempotent verifies that two sequential
+// RebaseAskBranch runs that each detect a conflict on the same ask-branch
+// produce exactly ONE REBASE_CONFLICT child task, not two. Regression guard
+// for the duplicate 476/485-style artifacts we saw in production.
+func TestRunRebaseAskBranch_Conflict_Idempotent(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	origin := t.TempDir()
+	exec.Command("git", "init", "-q", "--bare", "-b", "main", origin).Run()
+	repoDir := t.TempDir()
+	exec.Command("git", "clone", "-q", origin, repoDir).Run()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=T", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=T", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, string(out))
+		}
+	}
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "Test")
+	os.WriteFile(filepath.Join(repoDir, "file.txt"), []byte("original"), 0644)
+	run("add", ".")
+	run("commit", "-m", "initial")
+	run("push", "-u", "origin", "main")
+	run("remote", "set-head", "origin", "main")
+	shaOut, _ := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	baseSHA := strings.TrimSpace(string(shaOut))
+
+	run("checkout", "-b", "force/ask-idem")
+	os.WriteFile(filepath.Join(repoDir, "file.txt"), []byte("ask version"), 0644)
+	run("add", ".")
+	run("commit", "-m", "ask change")
+	run("push", "-u", "origin", "force/ask-idem")
+
+	run("checkout", "main")
+	os.WriteFile(filepath.Join(repoDir, "file.txt"), []byte("main version"), 0644)
+	run("add", ".")
+	run("commit", "-m", "main change")
+	run("push", "origin", "main")
+
+	store.AddRepo(db, "api", repoDir, "")
+	_ = store.SetRepoRemoteInfo(db, "api", "https://github.com/acme/api.git", "main")
+	convoyID, _ := store.CreateConvoy(db, "[1] idem")
+	_ = store.UpsertConvoyAskBranch(db, convoyID, "api", "force/ask-idem", baseSHA)
+
+	// First run spawns the conflict task.
+	id1, _ := QueueRebaseAskBranch(db, convoyID, "api")
+	b1, _ := store.GetBounty(db, id1)
+	runRebaseAskBranch(db, b1, testLogger{})
+
+	// Second run (as if main-drift-watch re-queued before the first conflict
+	// was resolved) must reuse the existing conflict task, not create a second.
+	id2, _ := QueueRebaseAskBranch(db, convoyID, "api")
+	b2, _ := store.GetBounty(db, id2)
+	runRebaseAskBranch(db, b2, testLogger{})
+
+	var conflictCount int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'CodeEdit' AND payload LIKE '%REBASE_CONFLICT%'
+		  AND status NOT IN ('Completed','Cancelled','Failed')`).Scan(&conflictCount)
+	if conflictCount != 1 {
+		t.Errorf("expected exactly 1 outstanding REBASE_CONFLICT task, got %d", conflictCount)
+	}
+}
+
 func TestRunRebaseAskBranch_InvalidPayloadFails(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()

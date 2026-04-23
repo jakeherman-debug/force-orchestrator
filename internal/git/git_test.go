@@ -343,6 +343,77 @@ func TestPrepareAgentBranch_InNonGitDir(t *testing.T) {
 	}
 }
 
+// TestPrepareAgentBranch_CrossWorktreeResume covers the captain-rework scenario:
+// agent A creates a branch, commits, pushes to origin, then gets sent back for
+// rework. A different agent (B) picks up the task. B's worktree can't checkout
+// A's branch because git rejects it ("already checked out at A's worktree").
+// PrepareAgentBranch should seed B's new branch from origin/<existingBranch> and
+// return isResume=true so Claude sees the prior work and makes only the rework delta.
+func TestPrepareAgentBranch_CrossWorktreeResume(t *testing.T) {
+	// Use makeOriginAndClone from askbranch_test.go (same package) to get a repo
+	// with a real remote so we can push/fetch.
+	wt, _ := makeOriginAndClone(t)
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	gitEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=t@t.com",
+		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=t@t.com")
+	gitRun := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+
+	// Agent A (R5-D4) creates a branch, commits work, and pushes to origin.
+	wtA, err := GetOrCreateAgentWorktree(db, "R5-D4", wt)
+	if err != nil {
+		t.Fatalf("worktree A: %v", err)
+	}
+	branchA, _, err := PrepareAgentBranch(wtA, wt, 311, "R5-D4", "", "")
+	if err != nil {
+		t.Fatalf("PrepareAgentBranch A: %v", err)
+	}
+	os.WriteFile(filepath.Join(wtA, "work.txt"), []byte("prior work"), 0644)
+	gitRun(wtA, "add", "work.txt")
+	gitRun(wtA, "commit", "-m", "prior work by R5-D4")
+	gitRun(wtA, "push", "-u", "origin", branchA)
+
+	// Verify R5-D4's worktree still has branchA checked out (it was never released).
+	headOut, _ := exec.Command("git", "-C", wtA, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if strings.TrimSpace(string(headOut)) != branchA {
+		t.Fatalf("expected R5-D4 worktree still on %s, got %s", branchA, headOut)
+	}
+
+	// Agent B (K-2SO) picks up the same task for rework. It tries to resume branchA.
+	wtB, err := GetOrCreateAgentWorktree(db, "K-2SO", wt)
+	if err != nil {
+		t.Fatalf("worktree B: %v", err)
+	}
+	newBranch, isResume, err := PrepareAgentBranch(wtB, wt, 311, "K-2SO", branchA, "")
+	if err != nil {
+		t.Fatalf("PrepareAgentBranch B (cross-worktree resume): %v", err)
+	}
+	if !isResume {
+		t.Error("expected isResume=true: prior work should be seeded from origin")
+	}
+
+	// The new branch should contain the prior work commit.
+	logOut, _ := exec.Command("git", "-C", wtB, "log", "--oneline").Output()
+	if !strings.Contains(string(logOut), "prior work by R5-D4") {
+		t.Errorf("new branch should include prior work commit; log: %s", logOut)
+	}
+
+	// A new branch name should have been used (since branchA was occupied).
+	if newBranch == branchA {
+		t.Errorf("expected a new branch name (branchA occupied), got same: %s", newBranch)
+	}
+}
+
 // ── GetDiff ───────────────────────────────────────────────────────────────────
 
 func TestGetDiffAndMerge(t *testing.T) {

@@ -52,6 +52,44 @@ bot and human review comments into `PRReviewComments` and Diplomat's
    entirely. Both switches check in `dogPRReviewPoll` and
    `dogPRReviewResolve` before any gh calls.
 
+## ConvoyReview invariants
+
+`ConvoyReview` is the convoy-level completeness gate. It runs one LLM pass over the full
+ask-branch diff vs main, finds gaps/regressions/incorrectness, and spawns CodeEdit fix tasks.
+A `convoy-review-watch` dog re-triggers it once those fix tasks complete, creating a
+self-healing loop that terminates when a pass returns `"clean"`.
+
+1. **Triggered on DraftPROpen (two paths).** Diplomat calls `QueueConvoyReview` immediately
+   after `SetConvoyStatus(db, convoyID, "DraftPROpen")`. The `convoy-review-watch` dog (5 min
+   cadence) acts as a safety net: it queues a ConvoyReview for any `DraftPROpen` convoy that
+   has no pending review and no active fix tasks.
+2. **Idempotent queue.** `QueueConvoyReview` returns `0, nil` (no-op) if a ConvoyReview is
+   already `Pending` or `Locked` for that convoy. Always call it freely; it will not double-queue.
+3. **Loop cap at 5 passes.** If a convoy has already completed ≥ 5 ConvoyReview passes,
+   `runConvoyReview` escalates (SeverityHigh) and fails the task instead of spawning more fix
+   tasks. The loop cap check runs BEFORE the LLM call.
+4. **Fix tasks are pinned to the ask-branch.** Each CodeEdit spawned by a ConvoyReview has its
+   `branch_name` set to the convoy's ask-branch via `store.SetBranchName`. This ensures the
+   Jedi Council's `completeAskBranchResolution` path applies (force-push to ask-branch, no
+   redundant sub-PR).
+5. **Max findings cap.** Each pass spawns at most `convoy_review_max_findings` fix tasks
+   (SystemConfig, default 5). Remaining findings are picked up in the next pass.
+6. **ConvoyReview is an infrastructure task.** It is registered in `InfrastructureTaskTypes`
+   and is hidden from the dashboard. It never spawns another ConvoyReview (only CodeEdit fix
+   tasks). The dog handles re-triggering.
+7. **On LLM parse failure.** One retry with a critic note appended. Second failure → mark
+   Completed (not Failed) so the dog retries on the next 5-min tick rather than leaving a
+   stuck Locked task.
+8. **Dog re-trigger condition.** `dogConvoyReviewWatch` queues a new ConvoyReview only when
+   ALL of the following hold: convoy status is `DraftPROpen`, no ConvoyReview is
+   `Pending`/`Locked`, no child CodeEdit task (whose parent is a ConvoyReview for this
+   convoy) is in a non-terminal status, AND no non-infrastructure task in the convoy is
+   in a non-terminal status. Reviewing against a moving diff produces fix tasks that
+   duplicate in-progress work — wait for the convoy to quiesce first.
+9. **Never spawn fix tasks against a moving diff.** `runConvoyReview` checks for active
+   non-infrastructure tasks in the convoy before spawning any fix tasks. If any exist,
+   it completes without spawning and lets the dog re-trigger once the convoy is quiescent.
+
 ## Self-healing is the default; escalation is the last step
 
 Every new `fmt.Errorf(...)` or `FailBounty(...)` added during a PR-flow change must fall into one of these buckets:
@@ -59,9 +97,49 @@ Every new `fmt.Errorf(...)` or `FailBounty(...)` added during a PR-flow change m
 - **Auto-retry:** the error is `ErrClassTransient` or `ErrClassRateLimited` (see `internal/gh/gh.go`). Pilot's retry wrapper handles these automatically.
 - **Auto-fix:** Medic `CIFailureTriage` spawns a CodeEdit task on the astromech branch. Fix loops cap at 3 attempts per PR.
 - **Auto-bypass:** repo marked `pr_flow_enabled=0` or `quarantined_at` stamped, so future tasks take the legacy path.
-- **Operator escalation:** `CreateEscalation(...)` + operator mail. Reserved for cases where self-healing is genuinely not possible (auth expired, branch protection, unfixable bug).
+- **Auto-reshard:** permanent infra failures bubble a `Decompose` bounty to Commander via `queueReshardDecompose` in `util.go`. Commander re-plans the oversized task into smaller shards instead of failing to the operator. Idempotent per failed task.
+- **Auto-retrigger:** CI stalls in `handleSubPRPoll` diagnose per-check state first. All-QUEUED (stuck runner) → push empty commit via `igit.TriggerCIRerun` to force a new check suite, capped at `subPRMaxStallRetriggers` attempts. Any IN_PROGRESS → wait (slow CI, not stuck). Only past `subPRCIHardLimit` or the retrigger cap do we escalate.
+- **Operator escalation:** `CreateEscalation(...)` + operator mail. Reserved for cases where self-healing is genuinely not possible (auth expired, branch protection, unfixable bug, loop caps hit).
 
 If a new error path does not fit any of the above, stop and design the self-healing path before writing the code.
+
+## Duplicate task prevention
+
+Spawned child tasks (rebase-conflict resolvers, ConvoyReview fix tasks) must be idempotent so that repeated dog ticks or racing code paths don't produce duplicate CodeEdits for the same underlying work.
+
+- Use `store.AddConvoyTaskIdempotent(db, key, ...)` (not plain `AddConvoyTask`) whenever the task is generated from a signal that may fire more than once for the same state. The key is written to `BountyBoard.idempotency_key`; a non-terminal row with the same key makes the call a no-op returning the existing ID.
+- Canonical keys:
+  - `rebase-conflict:branch:<agent_branch>` — Pilot's agent-branch conflict spawn (`pilot_rebase_agent.go`)
+  - `rebase-conflict:askbranch:<ask_branch>` — Pilot's ask-branch conflict spawn (`pilot_rebase.go`)
+- Terminal statuses (Completed / Cancelled / Failed) do NOT dedup — a genuine retry is allowed after the prior attempt finished. The dedup only suppresses parallel spawns against the same open work.
+
+## Captain scope guard
+
+When the Captain rejects a task for out-of-scope file changes, it populates `CaptainRuling.RejectedFiles` with the verbatim list of paths. On requeue, `buildScopeGuardedPayload` prepends a `[SCOPE GUARD — DO NOT MODIFY]` block listing exactly those paths. The next agent attempt sees the rules in the payload up front instead of having to parse free-form feedback prose.
+
+- The guard is marked with `scopeGuardMarker` at the top of the payload and terminates with `\n---\n`. `stripScopeGuard` peels it off so repeated rejections produce a single (latest) guard rather than accumulating.
+- The convoy-hold rejection path also strips any prior guard before re-appending its own feedback, keeping the payload clean.
+- Captain's system prompt instructs: populate `rejected_files` on scope-violation rejections; leave it `[]` on non-scope rejections (wrong approach, broken logic, etc.).
+
+## Ask-branch conflict gating
+
+When a convoy's ask-branch itself has an unresolved `REBASE_CONFLICT` CodeEdit (Pilot-spawned, payload starts with `[REBASE_CONFLICT for convoy #<convoyID>`), other fleet spawners must defer:
+
+- `runConvoyReview` gates fix-task spawning on `store.HasActiveAskBranchConflict(db, convoyID)`. A conflicted ask-branch tip means any new fix task would inherit the conflict and pile on.
+- `dogConvoyReviewWatch` gates queuing new ConvoyReview tasks on the same check.
+- The helper `HasActiveAskBranchConflict` uses boundary-safe LIKE matching (`[REBASE_CONFLICT for convoy #N ` with trailing space) so convoy 1's conflict doesn't mask convoy 10.
+
+## CI stall self-healing
+
+`onSubPRStalled` in `internal/agents/pr_flow.go` runs when a sub-PR has been in Pending CI longer than `subPRCIStaleLimit` (2h). It diagnoses the root cause before any escalation:
+
+1. **Past `subPRCIHardLimit` (6h)** — escalate unconditionally. GitHub isn't recovering.
+2. **Retrigger cap reached (`StallRetriggerCount >= subPRMaxStallRetriggers`)** — escalate. We tried and it didn't help.
+3. **Any check `IN_PROGRESS`** — wait another tick. CI is slow, not stuck.
+4. **All checks `QUEUED`/`PENDING` or zero checks reported** — push an empty commit via `igit.TriggerCIRerun` to force a new check suite, increment `stall_retrigger_count`. This is how we recover from stuck GitHub runners without operator intervention.
+5. **Retrigger push itself fails** — escalate with the git error.
+
+Tests inject a stub via `SetTriggerStalledRerunForTest` rather than running real `git push` in unit tests.
 
 ## Testing rules
 

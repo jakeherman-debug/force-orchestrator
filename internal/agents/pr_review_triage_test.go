@@ -380,3 +380,49 @@ func TestPRReviewTriage_BatchCapRespected(t *testing.T) {
 		t.Errorf("remaining unclassified should be 3 (for next tick), got %d", unclassified)
 	}
 }
+
+// ── pollConvoyPRReviews skip-login tests ─────────────────────────────────────
+
+// TestPollConvoyPRReviews_SkipsOperatorLogin ensures that comments from logins
+// listed in pr_review_skip_logins are not inserted into PRReviewComments.
+func TestPollConvoyPRReviews_SkipsOperatorLogin(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID, _ := store.CreateConvoy(db, "test")
+	db.Exec(`INSERT INTO Repositories (name, local_path, remote_url, pr_flow_enabled, pr_review_enabled)
+		VALUES ('api', '/tmp/api', 'git@github.com:acme/api.git', 1, 1)`)
+	db.Exec(`UPDATE Convoys SET status = 'DraftPROpen' WHERE id = ?`, convoyID)
+	store.UpsertConvoyAskBranch(db, convoyID, "api", "force/ask-1", "abc123")
+	store.SetConvoyAskBranchDraftPR(db, convoyID, "api", "https://github.com/acme/api/pull/42", 42, "Open")
+
+	// pr_review_skip_logins = the operator's login
+	store.SetConfig(db, "pr_review_skip_logins", "jake-operator")
+
+	// Issue comment from the operator + one from a bot.
+	issueComments := []map[string]any{
+		{"id": 1, "body": "I already replied", "user": map[string]any{"login": "jake-operator", "type": "User"}},
+		{"id": 2, "body": "Bot says: fix this", "user": map[string]any{"login": "gemini-code-assist[bot]", "type": "Bot"}},
+	}
+	issueJSON, _ := json.Marshal(issueComments)
+
+	installGHStub(t, map[string]ghStubResp{
+		"api --paginate repos/acme/api/issues/42/comments": {stdout: string(issueJSON)},
+		"api --paginate repos/acme/api/pulls/42/comments":  {stdout: "[]"},
+	})
+
+	ghc := newGHClient()
+	pollConvoyPRReviews(db, ghc, convoyID, loadBotAllowlist(db), loadSkipLogins(db), testLogger{})
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM PRReviewComments WHERE convoy_id = ?`, convoyID).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row (operator comment skipped), got %d", count)
+	}
+
+	var author string
+	db.QueryRow(`SELECT author FROM PRReviewComments WHERE convoy_id = ?`, convoyID).Scan(&author)
+	if author == "jake-operator" {
+		t.Error("operator comment should have been skipped, but was recorded")
+	}
+}
