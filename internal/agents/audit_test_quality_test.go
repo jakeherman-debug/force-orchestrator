@@ -108,8 +108,7 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 
 	// ── AUDIT-133 — no retry_count preservation across auto-complete ────────
 	t.Run("AUDIT_133_RetryCountPreservation_Untested", func(t *testing.T) {
-		t.Skip("AUDIT-133: remove when TestResetTaskFull_PreservesRetryCount added (Fix #6)")
-		// Without skip, fails with: audit_test_quality_test.go:127: AUDIT-133: TestResetTaskFull_PreservesRetryCount missing still present
+		// Closed by Fix #6: TestResetTaskFull_PreservesRetryCount lives in internal/store.
 		// RGR inversion: fail if no sibling test in internal/store covers ResetTaskFull's counter preservation.
 		storeFiles, err := os.ReadDir(storeDir)
 		if err != nil {

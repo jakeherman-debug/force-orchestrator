@@ -105,6 +105,17 @@ Every new `fmt.Errorf(...)` or `FailBounty(...)` added during a PR-flow change m
 - **Auto-resolve stale escalations:** The `escalation-sweeper` dog (10 min cadence) closes Open escalations whose task has transitioned to `Completed`/`Cancelled` OR whose referenced sub-PR is now `Merged`/`Closed`. Both mean "the thing we escalated about is no longer the thing."
 - **Operator escalation:** `CreateEscalation(...)` + operator mail. Reserved for cases where self-healing is genuinely not possible (auth expired, branch protection, security concern, novel architectural decision). **If the remedy can be written as a sequence of shell commands, it is NOT an escalation** — Medic's prompt explicitly forbids escalating for worktree hygiene or already-completed work.
 
+### Bounded self-healing invariants (Fix #6)
+
+Every self-healing loop that re-invokes the same agent on the same object MUST carry a numeric cap so a stuck LLM or a permanent upstream issue cannot burn Claude cycles indefinitely. Current caps:
+
+- **Medic requeue** — `BountyBoard.medic_requeue_count` ≤ `maxMedicRequeues` (2). `applyMedicRequeue` short-circuits to `applyMedicEscalate` when the cap is hit, regardless of the LLM's recommendation. `ResetTaskFull` deliberately PRESERVES `retry_count` and `infra_failures` so the auto-shard and permanent-fail gates keep accumulating across Medic cycles — zeroing them was the original cause of the unbounded loop (AUDIT-005).
+- **Auto-shard on zero commits** — `autoShardIfNoCommits` fires from both the timeout gate AND the non-error zero-changes path once `retry_count >= 2`. A task that produces three zero-commit sessions (regardless of exit status) is Decompose-sharded instead of re-run (AUDIT-033).
+- **Auto-reshard cascade** — `BountyBoard.reshard_generation` ≤ `maxReshardGeneration` (2). `queueReshardDecompose` refuses past the cap and the caller escalates. Each `autoInsertReshardTasks` stamps `gen=N+1` on every shard so the counter propagates down the tree (AUDIT-118).
+- **Ask-branch rebase conflict** — `ConvoyAskBranches.failed_rebase_attempts` ≤ `maxAskBranchConflicts` (3). Past the cap, `runRebaseAskBranch` escalates and `dogMainDriftWatch` stops queueing new rebases for that ask-branch; a clean rebase resets the counter (AUDIT-028, AUDIT-119).
+
+When you add a new self-healing loop, add a cap. Caps go on a stable object (BountyBoard row, ConvoyAskBranches row, etc.) — never on an in-flight process. The cap value lives next to the const; the check lives as early in the code path as possible so the cycle doesn't pay for work it's about to refuse.
+
 If a new error path does not fit any of the above, stop and design the self-healing path before writing the code.
 
 ## Duplicate task prevention

@@ -27,6 +27,16 @@ import (
 // far behind has a scoping problem.
 const maxDriftBehind = 50
 
+// maxAskBranchConflicts caps the serial ask-branch rebase-conflict retries per
+// (convoy, repo) pair. Idempotency dedup alone only suppresses concurrent
+// spawns; nothing stopped a conflict CodeEdit from terminating Failed, freeing
+// the key, and letting the next 15-min main-drift-watch tick queue ANOTHER
+// rebase that produced the same conflict. Past this cap, Pilot stops spawning
+// rebases and escalates — each Claude cycle costs real money and the
+// idempotency-key-only path burned hourly cycles per stuck convoy
+// (Fix #6, AUDIT-028, AUDIT-119).
+const maxAskBranchConflicts = 3
+
 type rebasePayload struct {
 	ConvoyID int    `json:"convoy_id"`
 	Repo     string `json:"repo"`
@@ -97,6 +107,23 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		}
 	}
 
+	// Fix #6 (AUDIT-028): refuse to burn another Claude conflict-resolution
+	// cycle if we've already spent maxAskBranchConflicts on this ask-branch.
+	// Escalate once; subsequent main-drift-watch ticks will see the same
+	// counter value and dogMainDriftWatch's cap check (also Fix #6) keeps
+	// them from enqueueing duplicate Pilot tasks.
+	if attempts := store.GetFailedRebaseAttempts(db, payload.ConvoyID, payload.Repo); attempts >= maxAskBranchConflicts {
+		escMsg := fmt.Sprintf("Ask-branch %s on %s has exhausted the conflict-retry cap (%d failed rebase-conflict attempts) — human review required",
+			ab.AskBranch, payload.Repo, attempts)
+		logger.Printf("RebaseAskBranch #%d: %s", bounty.ID, escMsg)
+		CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg)
+		store.SendMail(db, "Pilot", "operator",
+			fmt.Sprintf("[REBASE CAP] Convoy #%d repo %s ask-branch rebase-conflict cap hit", payload.ConvoyID, payload.Repo),
+			escMsg, bounty.ID, store.MailTypeAlert)
+		store.FailBounty(db, bounty.ID, escMsg)
+		return
+	}
+
 	newTip, rebaseErr := igit.RebaseBranchOnto(repo.LocalPath, ab.AskBranch, defaultBranch)
 	if rebaseErr != nil {
 		// Before escalating to an astromech, try a non-LLM fallback: merge
@@ -145,6 +172,12 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 			store.FailBounty(db, bounty.ID, fmt.Sprintf("queue ask-branch conflict: %v", addErr))
 			return
 		}
+		// Fix #6 (AUDIT-028, AUDIT-119): count each serial attempt. The
+		// cap check at the top of this function refuses subsequent runs
+		// past maxAskBranchConflicts.
+		newAttempts := store.IncrementFailedRebaseAttempts(db, payload.ConvoyID, payload.Repo)
+		logger.Printf("RebaseAskBranch #%d: convoy %d repo %s — failed_rebase_attempts=%d/%d",
+			bounty.ID, payload.ConvoyID, payload.Repo, newAttempts, maxAskBranchConflicts)
 		if existed {
 			logger.Printf("RebaseAskBranch #%d: conflict — reusing existing task #%d on %s", bounty.ID, conflictTaskID, ab.AskBranch)
 			store.UpdateBountyStatus(db, bounty.ID, "Completed")
@@ -189,6 +222,10 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		store.FailBounty(db, bounty.ID, fmt.Sprintf("failed to record new base SHA: %v", err))
 		return
 	}
+	// Fix #6: a clean rebase means the ask-branch caught up — any past
+	// conflict-retry history is irrelevant. Reset the counter so a future
+	// drift that happens to conflict gets a fresh budget.
+	store.ResetFailedRebaseAttempts(db, payload.ConvoyID, payload.Repo)
 	logger.Printf("RebaseAskBranch #%d: convoy %d repo %s rebased onto %s, new tip %s",
 		bounty.ID, payload.ConvoyID, payload.Repo, defaultBranch, newTip[:minInt(8, len(newTip))])
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
@@ -250,6 +287,13 @@ func dogMainDriftWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 		}
 		if headSHA == ab.AskBranchBaseSHA {
 			continue // no drift
+		}
+		// Fix #6 (AUDIT-119): skip queueing for ask-branches that have hit
+		// the failed-rebase-attempts cap. The conflict-retry budget lives on
+		// ConvoyAskBranches; once exhausted, main-drift-watch must stand
+		// down rather than re-queueing every 15 minutes forever.
+		if attempts := store.GetFailedRebaseAttempts(db, ab.ConvoyID, ab.Repo); attempts >= maxAskBranchConflicts {
+			continue
 		}
 		// Drift detected — but only queue if not already queued/in-flight.
 		// Boundary-match on convoy_id so id=1 doesn't dedup against 10, 100, etc.

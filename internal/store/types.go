@@ -3,20 +3,22 @@ package store
 // ── Core work item ────────────────────────────────────────────────────────────
 
 type Bounty struct {
-	ID            int
-	ParentID      int
-	TargetRepo    string
-	Type          string
-	Status        string
-	Payload       string
-	Owner         string
-	RetryCount    int
-	InfraFailures int
-	ConvoyID      int
-	Checkpoint    string
-	BranchName    string
-	Priority      int
-	TaskTimeout   int // seconds; 0 means use AstromechTimeoutForAttempt progressive default
+	ID                int
+	ParentID          int
+	TargetRepo        string
+	Type              string
+	Status            string
+	Payload           string
+	Owner             string
+	RetryCount        int
+	InfraFailures     int
+	ConvoyID          int
+	Checkpoint        string
+	BranchName        string
+	Priority          int
+	TaskTimeout       int // seconds; 0 means use AstromechTimeoutForAttempt progressive default
+	MedicRequeueCount int // Fix #6: number of times Medic has requeued this task; hard-capped to bound the A→C→M→A loop
+	ReshardGeneration int // Fix #6: generation number for auto-reshard cascade; refuses past cap to bound 1→3→9→27 fanout
 }
 
 // ── Planning ──────────────────────────────────────────────────────────────────

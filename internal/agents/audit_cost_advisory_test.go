@@ -115,8 +115,7 @@ func TestAUDIT_CostAdvisory(t *testing.T) {
 
 	// ── AUDIT-033 — Auto-shard gate only trips on timeouts ───────────────
 	t.Run("TestAUDIT_033_auto_shard_gate_timeout_only", func(t *testing.T) {
-		t.Skip("AUDIT-033: remove when thread_depth hard-guard / classify_attempts / auto-shard-on-zero-commit land (Fix #7)")
-		// Without skip, fails with: AUDIT-033: defective pattern still present — auto-shard gate requires `timeout prefix && InfraFailures>=2`, no CommitsAhead/zero-commit branch near the gate, zero-commit path uses IncrementRetryCount/ReturnTaskForRework which never feed InfraFailures
+		// Closed by Fix #6: auto-shard gate now also fires on the zero-commit path via autoShardIfNoCommits("zero-commits", ...).
 		src, err := os.ReadFile("astromech.go")
 		if err != nil {
 			t.Fatalf("read astromech.go: %v", err)

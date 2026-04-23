@@ -476,21 +476,18 @@ Do not re-do work that is already correctly committed.`
 
 		// Auto-shard check: if this is a timeout and the agent has failed repeatedly
 		// without making any commits, re-queue as Decompose instead of retrying.
+		// Fix #6 (AUDIT-033): the prior gate only tripped on literal timeouts,
+		// but "Claude CLI exit 1, no commits" and "Claude exits 0 with zero
+		// commits" both look identical from the cost-vector perspective —
+		// three cycles of zero commits is three Astromech sessions burned.
+		// The `autoShardIfNoCommits` helper inspects CommitsAhead (via `git
+		// log base..branch --oneline` which is the cheap equivalent of
+		// `CommitsAhead > 0`) and is now also invoked from the zero-commits
+		// branch in the non-error path (see `if retryCount >= 2` below, which
+		// calls autoShardIfNoCommits with kind="zero-commits" to Decompose
+		// shard the task rather than return-for-rework forever).
 		if strings.HasPrefix(err.Error(), "claude CLI timed out") && bounty.InfraFailures >= 2 {
-			base := igit.GetDefaultBranch(repoPath)
-			logOut, _ := igit.RunCmd(repoPath, "log", base+".."+branchName, "--oneline")
-			if strings.TrimSpace(logOut) == "" {
-				newID := store.AddBounty(db, bounty.ID, "Decompose", bounty.Payload)
-				failMsg := fmt.Sprintf("Auto-sharded after %d timeout failures with no commits — re-queued as Decompose #%d", bounty.InfraFailures, newID)
-				shardHistID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
-				store.StampHistoryMemoryIDs(db, shardHistID, injectedMemoryIDs)
-				store.FailBounty(db, bounty.ID, failMsg)
-				telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, failMsg))
-				store.SendMail(db, name, "operator",
-					fmt.Sprintf("[AUTO-SHARDED] Task #%d — re-queued as Decompose #%d after repeated timeouts with no progress", bounty.ID, newID),
-					fmt.Sprintf("Task #%d has timed out %d times without making any commits on branch %s in repo %s.\n\nThis indicates the task is too large for a single session. It has been automatically re-queued as Decompose #%d so Commander can break it into smaller pieces.\n\nOriginal task:\n%s",
-						bounty.ID, bounty.InfraFailures, branchName, bounty.TargetRepo, newID, util.TruncateStr(bounty.Payload, 500)),
-					bounty.ID, store.MailTypeAlert)
+			if autoShardIfNoCommits(db, bounty, name, sessionID, repoPath, branchName, outputStr, injectedMemoryIDs, "timeout", logger) {
 				return
 			}
 		}
@@ -512,6 +509,42 @@ Do not re-do work that is already correctly committed.`
 	claude.ClearRateLimitHits(db, name)
 
 	processAstromechOutput(db, name, bounty, sessionID, outputStr, worktreeDir, branchName, repoPath, logger, true, injectedMemoryIDs)
+}
+
+// autoShardIfNoCommits fails the current bounty and spawns a Decompose shard
+// if the agent's branch has no CommitsAhead vs the base. Returns true iff
+// the shard fired (caller should return immediately). kind is a short label
+// ("timeout", "zero-commits") interpolated into the audit record so the
+// dashboard distinguishes the failure signature.
+//
+// Fix #6 (AUDIT-033): zero-commit loops now auto-shard to Decompose (prior
+// code only sharded on timeouts; zero-commit paths burned tokens forever
+// via IncrementRetryCount/ReturnTaskForRework). The helper is called with
+// kind="timeout" from the error branch and kind="zero-commits" from the
+// non-error retry-path once retry_count >= 2, giving both failure modes
+// the same bounded Decompose shard handling.
+func autoShardIfNoCommits(db *sql.DB, bounty *store.Bounty, name, sessionID, repoPath, branchName, outputStr string, injectedMemoryIDs []int, kind string, logger interface{ Printf(string, ...any) }) bool {
+	_ = logger // reserved for future diagnostics; kept on the signature so callers don't have to decide.
+	base := igit.GetDefaultBranch(repoPath)
+	logOut, _ := igit.RunCmd(repoPath, "log", base+".."+branchName, "--oneline")
+	if strings.TrimSpace(logOut) != "" {
+		return false
+	}
+	newID := store.AddBounty(db, bounty.ID, "Decompose", bounty.Payload)
+	failMsg := fmt.Sprintf("Auto-sharded after repeated %s failures with no commits — re-queued as Decompose #%d (infra=%d retry=%d)",
+		kind, newID, bounty.InfraFailures, bounty.RetryCount)
+	shardHistID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
+	store.StampHistoryMemoryIDs(db, shardHistID, injectedMemoryIDs)
+	store.FailBounty(db, bounty.ID, failMsg)
+	telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, failMsg))
+	store.SendMail(db, name, "operator",
+		fmt.Sprintf("[AUTO-SHARDED] Task #%d — re-queued as Decompose #%d after repeated %s failures with no progress",
+			bounty.ID, newID, kind),
+		fmt.Sprintf("Task #%d has %s-failed %d times (%d infra-failures, %d retries) without making any commits on branch %s in repo %s.\n\nThis indicates the task is too large for a single session. It has been automatically re-queued as Decompose #%d so Commander can break it into smaller pieces.\n\nOriginal task:\n%s",
+			bounty.ID, kind, bounty.InfraFailures+bounty.RetryCount, bounty.InfraFailures, bounty.RetryCount,
+			branchName, bounty.TargetRepo, newID, util.TruncateStr(bounty.Payload, 500)),
+		bounty.ID, store.MailTypeAlert)
+	return true
 }
 
 // processAstromechOutput handles all post-Claude-run logic shared between the daemon
@@ -681,6 +714,17 @@ func processAstromechOutput(
 			msg := fmt.Sprintf("Zero file changes (attempt %d/%d) — re-queuing for retry", retryCount, MaxRetries)
 			logger.Printf("Task %d: %s", taskID, msg)
 			recordHist(outputStr, "ZeroChanges")
+			// Fix #6 (AUDIT-033): two successive zero-commit attempts are the
+			// non-timeout equivalent of the timeout-based auto-shard gate
+			// above. Both mean "the scope is too big for a single session" —
+			// the dashboard can't see the difference and Claude's exit status
+			// doesn't change the diagnosis. Promote to auto-shard at the same
+			// threshold (retryCount >= 2) before burning a third cycle.
+			if retryCount >= 2 {
+				if autoShardIfNoCommits(db, bounty, name, sessionID, repoPath, branchName, outputStr, injectedMemoryIDs, "zero-commits", logger) {
+					return
+				}
+			}
 			if retryCount >= MaxRetries {
 				failMsg := fmt.Sprintf("Git Commit Err: Claude CLI finished but made zero file changes after %d attempts", MaxRetries)
 				store.FailBounty(db, taskID, failMsg)
