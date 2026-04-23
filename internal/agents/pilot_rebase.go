@@ -95,9 +95,39 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 
 	newTip, rebaseErr := igit.RebaseBranchOnto(repo.LocalPath, ab.AskBranch, defaultBranch)
 	if rebaseErr != nil {
-		// Conflict — spawn a RebaseConflict CodeEdit task on the ask-branch
-		// itself (not an agent branch). The astromech resolves conflict
-		// markers and commits directly onto the ask-branch. When Jedi Council
+		// Before escalating to an astromech, try a non-LLM fallback: merge
+		// the default branch into the ask-branch with `-X union` strategy.
+		// For the common "both sides appended text" case (CLAUDE.md, README,
+		// lockfiles, release notes — the exact files that blocked the fleet
+		// on tasks 519/537 with 5 Claude CLI infra failures each), union
+		// merge produces a clean resolution deterministically. LLM conflict
+		// resolution is reserved for structural conflicts that genuinely
+		// need judgement.
+		logger.Printf("RebaseAskBranch #%d: rebase conflicted — attempting union-merge fallback", bounty.ID)
+		unionTip, unionErr := igit.MergeWithUnionStrategy(repo.LocalPath, ab.AskBranch, "refs/remotes/origin/"+defaultBranch,
+			fmt.Sprintf("merge %s into %s via union strategy (auto-recovery from rebase conflict)", defaultBranch, ab.AskBranch))
+		if unionErr == nil {
+			// Union merge succeeded in a temp worktree; the local ref now
+			// points at the merge commit. Push it.
+			if pushErr := igit.ForcePushBranch(repo.LocalPath, ab.AskBranch); pushErr != nil {
+				logger.Printf("RebaseAskBranch #%d: union merge succeeded but push failed: %v — falling through to astromech", bounty.ID, pushErr)
+			} else {
+				_ = store.UpdateConvoyAskBranchBase(db, payload.ConvoyID, payload.Repo, unionTip)
+				logger.Printf("RebaseAskBranch #%d: union-merge fallback recovered ask-branch; new tip=%s",
+					bounty.ID, unionTip[:minInt(8, len(unionTip))])
+				store.LogAudit(db, "Pilot", "rebase-union-merge", bounty.ID,
+					fmt.Sprintf("auto-resolved conflict via union merge; saved %s", ab.AskBranch))
+				store.UpdateBountyStatus(db, bounty.ID, "Completed")
+				return
+			}
+		} else {
+			logger.Printf("RebaseAskBranch #%d: union merge also failed (%v) — spawning astromech resolution", bounty.ID, unionErr)
+		}
+
+		// Both rebase and union merge failed — conflicts are structural.
+		// Spawn a RebaseConflict CodeEdit task on the ask-branch itself
+		// (not an agent branch). The astromech resolves conflict markers
+		// and commits directly onto the ask-branch. When Jedi Council
 		// approves, openSubPRForApprovedTask detects branch_name == ask-branch
 		// and takes the ask-branch-resolution path (force-push + SHA update,
 		// no sub-PR). Pilot's job ends here; the follow-up is driven through

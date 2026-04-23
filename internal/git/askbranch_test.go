@@ -382,6 +382,117 @@ func TestTriggerCIRerun_DefaultMessageWhenEmpty(t *testing.T) {
 	}
 }
 
+// ── MergeWithUnionStrategy ───────────────────────────────────────────────────
+
+// TestMergeWithUnionStrategy_AppendOnlyConflictResolves is the direct
+// regression for tasks 519 and 537 — both Claude-CLI-failed 5 times trying
+// to resolve a CLAUDE.md conflict where both sides appended new content.
+// Union strategy concatenates those additions deterministically, no LLM.
+func TestMergeWithUnionStrategy_AppendOnlyConflictResolves(t *testing.T) {
+	wt, _ := makeOriginAndClone(t)
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=T", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=T", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, string(out))
+		}
+	}
+
+	// Create a file both branches will append to (simulates CLAUDE.md).
+	os.WriteFile(filepath.Join(wt, "DOC.md"), []byte("shared\n"), 0644)
+	run("add", ".")
+	run("commit", "-q", "-m", "base")
+	run("push", "origin", "main")
+
+	// Branch: appends a line at the bottom.
+	run("checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(wt, "DOC.md"), []byte("shared\nfeature line\n"), 0644)
+	run("add", ".")
+	run("commit", "-q", "-m", "feature: append")
+
+	// main: appends a different line.
+	run("checkout", "main")
+	os.WriteFile(filepath.Join(wt, "DOC.md"), []byte("shared\nmain line\n"), 0644)
+	run("add", ".")
+	run("commit", "-q", "-m", "main: append")
+	run("push", "origin", "main")
+
+	// Push the feature branch too so origin has it (temp worktree needs
+	// origin/<branch> as the reset source).
+	run("push", "-u", "origin", "feature")
+
+	tipSHA, err := MergeWithUnionStrategy(wt, "feature", "refs/remotes/origin/main", "union integrate")
+	if err != nil {
+		t.Fatalf("expected union merge to resolve append-only conflict, got: %v", err)
+	}
+	if tipSHA == "" {
+		t.Error("expected non-empty tip SHA on success")
+	}
+
+	// The local `feature` ref should now point at the merge tip, and the
+	// merged tree should contain both sides' additions.
+	refOut, _ := exec.Command("git", "-C", wt, "rev-parse", "feature").Output()
+	if strings.TrimSpace(string(refOut)) != tipSHA {
+		t.Errorf("local feature ref (%s) doesn't match returned tip (%s)",
+			strings.TrimSpace(string(refOut)), tipSHA)
+	}
+	contents, _ := exec.Command("git", "-C", wt, "show", tipSHA+":DOC.md").Output()
+	if !strings.Contains(string(contents), "feature line") {
+		t.Error("feature's line missing from union-merged file")
+	}
+	if !strings.Contains(string(contents), "main line") {
+		t.Error("main's line missing from union-merged file")
+	}
+	if strings.Contains(string(contents), "<<<<<<<") {
+		t.Error("merge should have completed cleanly, not left conflict markers")
+	}
+}
+
+// TestMergeWithUnionStrategy_StructuralConflictStillFails verifies we do NOT
+// silently resolve binary conflicts or concurrent same-function edits via
+// union — the caller must still fall through to LLM-driven resolution for
+// anything genuinely needing judgement.
+func TestMergeWithUnionStrategy_StructuralConflictStillFails(t *testing.T) {
+	wt, _ := makeOriginAndClone(t)
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=T", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=T", "GIT_COMMITTER_EMAIL=t@t")
+		cmd.Run()
+	}
+	// Binary conflict: both sides write fully-different bytes to the same
+	// file. Union can't resolve this — it's not append-only.
+	os.WriteFile(filepath.Join(wt, "bin.dat"), []byte{0, 1, 2, 3}, 0644)
+	run("add", ".")
+	run("commit", "-q", "-m", "base bin")
+	run("push", "origin", "main")
+
+	run("checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(wt, "bin.dat"), []byte{9, 9, 9, 9}, 0644)
+	run("add", ".")
+	run("commit", "-q", "-m", "feature: overwrite bin")
+
+	run("checkout", "main")
+	os.WriteFile(filepath.Join(wt, "bin.dat"), []byte{7, 7, 7, 7}, 0644)
+	run("add", ".")
+	run("commit", "-q", "-m", "main: overwrite bin")
+	run("push", "origin", "main")
+
+	run("checkout", "feature")
+	run("push", "-u", "origin", "feature")
+	if _, err := MergeWithUnionStrategy(wt, "feature", "refs/remotes/origin/main", ""); err == nil {
+		t.Error("binary conflict should NOT be silently resolved by union merge")
+	}
+	// The caller's main worktree should be untouched (temp worktree pattern).
+	out, _ := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
+	if strings.Contains(string(out), "UU") {
+		t.Error("failed union merge should not have leaked state into caller's worktree: " + string(out))
+	}
+}
+
 // ── ForcePushBranch ──────────────────────────────────────────────────────────
 
 func TestForcePushBranch_SucceedsAfterLocalCommit(t *testing.T) {

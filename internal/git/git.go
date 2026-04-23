@@ -79,9 +79,16 @@ func GetOrCreateAgentWorktree(db *sql.DB, agentName, repoPath string) (string, e
 // branch off the integration branch rather than main. Pass "" to use the default
 // branch (legacy path + tasks with no ask-branch).
 func PrepareAgentBranch(worktreeDir, repoPath string, taskID int, agentName, existingBranch, baseBranch string) (branchName string, isResume bool, err error) {
-	// Force-discard any uncommitted changes before switching branches.
+	// Nuclear pre-flight: every astromech claim starts from a provably clean
+	// worktree. `-fdx` (vs -fd) is critical — `-x` removes gitignored files
+	// too, which is where contamination survives between agents (build
+	// artifacts, stale .force-worktrees/*, generated files, partial checkouts
+	// from a killed prior agent). Without -x, 12 different astromechs can
+	// produce identical contaminating diffs because they all inherit the same
+	// ignored-but-dirty state. Ran without -x on convoys 35/37 and saw exactly
+	// that pattern; adding -x closes the source.
 	exec.Command("git", "-C", worktreeDir, "reset", "--hard", "HEAD").Run()
-	exec.Command("git", "-C", worktreeDir, "clean", "-fd").Run()
+	exec.Command("git", "-C", worktreeDir, "clean", "-fdx").Run()
 
 	// Resume an existing branch if one was preserved from a prior attempt.
 	if existingBranch != "" {
@@ -293,6 +300,40 @@ func GetDiff(repoPath string, branchName string) string {
 	cmd := exec.Command("git", "-C", repoPath, "diff", base+"..."+branchName)
 	out, _ := cmd.CombinedOutput()
 	return string(out)
+}
+
+// GetDiffFromBase returns the three-dot diff between `baseRef` and `branch` —
+// only what `branch` has added since it diverged from `baseRef`. Reviewers
+// must use this (not GetDiff) when the astromech branch was cut from an
+// ask-branch rather than main, otherwise the diff includes every commit
+// main has made since the ask-branch was created (as "phantom additions"
+// from the ask-branch's perspective). Those phantom files look like
+// out-of-scope changes to the Captain and like missing work to the
+// ConvoyReview, producing the scope-violation avalanche we observed on
+// convoys 35 and 37.
+//
+// baseRef can be any ref understood by git — a SHA, "origin/main",
+// "origin/force/ask-37-...", etc. branch is resolved normally.
+func GetDiffFromBase(repoPath, baseRef, branch string) string {
+	if baseRef == "" || branch == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", repoPath, "diff", baseRef+"..."+branch)
+	out, _ := cmd.CombinedOutput()
+	return string(out)
+}
+
+// CommitsAheadOf returns the one-line log of commits unique to `branch`
+// against `baseRef`. Mirrors CommitsAhead but with an explicit base for
+// use by reviewers that need to check "does this astromech branch have
+// any net-new work relative to the ask-branch." Empty = no unique commits.
+func CommitsAheadOf(repoPath, baseRef, branch string) string {
+	if baseRef == "" || branch == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", repoPath, "log", baseRef+".."+branch, "--oneline")
+	out, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out))
 }
 
 // CommitsAhead returns the one-line log of commits on branchName that are not

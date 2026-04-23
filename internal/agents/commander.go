@@ -238,6 +238,69 @@ func SpawnCommander(db *sql.DB, name string) {
 	}
 }
 
+// autoInsertReshardTasks is the fast path for auto-reshard Decompose bounties
+// produced by queueReshardDecompose when a task hits MaxInfraFailures. It
+// bypasses the Chancellor entirely because:
+//
+//  1. Chancellor exists to serialize and gate OPERATOR-commissioned features,
+//     not fleet-internal recovery paths. Auto-reshards are always subordinate
+//     to an already-approved convoy.
+//  2. ClaimChancellorTask (proposed_convoy.go) only claims type='Feature',
+//     so Decompose bounties routed through Chancellor sit in
+//     AwaitingChancellorReview indefinitely — observed in production with
+//     tasks 533 and 541 parked for hours while main-drift-watch degraded.
+//
+// Shards inherit the parent's convoy_id and priority. Each shard gets a
+// [RESHARD from task #N] payload prefix for auditability.
+func autoInsertReshardTasks(db *sql.DB, bounty, parent *store.Bounty, tasks []store.TaskPlan,
+	rawResponse, agentName, sessionID string, logger *log.Logger) error {
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var shardIDs []int
+	prefix := fmt.Sprintf("[RESHARD from task #%d]\n\n", parent.ID)
+	for _, t := range tasks {
+		repo := t.Repo
+		if repo == "" {
+			repo = parent.TargetRepo
+		}
+		id, addErr := store.AddConvoyTaskTx(tx, bounty.ID, repo, prefix+t.Task, parent.ConvoyID, parent.Priority, "Pending")
+		if addErr != nil {
+			return fmt.Errorf("add shard: %w", addErr)
+		}
+		shardIDs = append(shardIDs, id)
+	}
+	if _, err := tx.Exec(`UPDATE BountyBoard SET status = 'Completed', error_log = ?
+		WHERE id = ?`,
+		fmt.Sprintf("auto-reshard: inserted %d shard(s) into convoy %d", len(shardIDs), parent.ConvoyID),
+		bounty.ID); err != nil {
+		return fmt.Errorf("complete decompose: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, rawResponse, "Completed")
+	if tokIn, tokOut := claude.ParseTokenUsage(rawResponse); tokIn > 0 || tokOut > 0 {
+		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
+	}
+	store.LogAudit(db, agentName, "auto-reshard", parent.ID,
+		fmt.Sprintf("inserted %d shard(s) %v into convoy %d; Decompose #%d completed",
+			len(shardIDs), shardIDs, parent.ConvoyID, bounty.ID))
+	store.SendMail(db, agentName, "operator",
+		fmt.Sprintf("[AUTO-RESHARD] Task #%d → %d shard(s)", parent.ID, len(shardIDs)),
+		fmt.Sprintf("Commander auto-resharded task #%d into %d smaller shard(s) on convoy %d (no Chancellor review — this is a fleet recovery path).\n\nShard IDs: %v",
+			parent.ID, len(shardIDs), parent.ConvoyID, shardIDs),
+		parent.ID, store.MailTypeInfo)
+	logger.Printf("Task %d: auto-reshard inserted %d shard(s) into convoy %d — Decompose Completed",
+		bounty.ID, len(shardIDs), parent.ConvoyID)
+	return nil
+}
+
 // runCommanderTask decomposes a single Feature or Decompose bounty into CodeEdit subtasks.
 func runCommanderTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
@@ -365,6 +428,26 @@ EXAMPLE:
 	if err := validateTaskPlan(tasks, knownRepos); err != nil {
 		store.FailBounty(db, bounty.ID, "Commander Err: "+err.Error())
 		return
+	}
+
+	// Auto-reshard bypass: when Medic spawned this Decompose in response to
+	// an infra-failure cap (queueReshardDecompose in util.go), the task has
+	// a clear marker and a parent_id pointing at the failed convoy task.
+	// Chancellor review is designed for OPERATOR-commissioned Features, not
+	// fleet-generated recovery — it expects type='Feature' (see
+	// ClaimChancellorTask in proposed_convoy.go) and would sit forever on a
+	// Decompose bounty anyway. Insert the shards directly into the parent's
+	// convoy and complete the Decompose.
+	if bounty.Type == "Decompose" && strings.Contains(bounty.Payload, "[INFRA_FAILURE_RESHARD") && bounty.ParentID > 0 {
+		parent, perr := store.GetBounty(db, bounty.ParentID)
+		if perr == nil && parent != nil && parent.ConvoyID > 0 {
+			if err := autoInsertReshardTasks(db, bounty, parent, tasks, response, agentName, sessionID, logger); err != nil {
+				store.FailBounty(db, bounty.ID, "auto-reshard insert: "+err.Error())
+				return
+			}
+			return
+		}
+		logger.Printf("Task %d: auto-reshard marker present but no convoy_id on parent — falling through to Chancellor", bounty.ID)
 	}
 
 	// Submit plan to the Supreme Chancellor for conflict review before creating a convoy.

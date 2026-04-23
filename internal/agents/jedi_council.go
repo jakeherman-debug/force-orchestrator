@@ -138,12 +138,15 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 
 	worktreeDir := igit.ResolveWorktreeDir(db, branchName, repoPath, b.ID, BranchAgentName)
 
-	diff := igit.GetDiff(repoPath, branchName)
+	// Diff against ask-branch tip when this task is part of a convoy with an
+	// ask-branch; otherwise main. See review_diff.go for the scope-violation
+	// avalanche this prevents.
+	diff := reviewDiff(db, repoPath, b)
 	if diff == "" {
 		// Check whether the branch's commits are already in main — this happens when
 		// multiple convoy tasks touch overlapping files and one agent merges first,
 		// making subsequent agents' three-dot diffs empty.
-		if igit.CommitsAhead(repoPath, branchName) == "" {
+		if reviewCommitsAhead(db, repoPath, b) == "" {
 			// All commits already in main — auto-complete rather than fail.
 			logger.Printf("Task %d: diff empty and no unique commits — work already merged, auto-completing", b.ID)
 			store.UpdateBountyStatus(db, b.ID, "Completed")

@@ -161,15 +161,27 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 			logger.Printf("ConvoyReview #%d: repo %s not registered — skipping", bounty.ID, ab.Repo)
 			continue
 		}
-		diff := igit.GetDiff(repoCfg.LocalPath, ab.AskBranch)
+		// Diff against the recorded ask_branch_base_sha instead of main's
+		// current tip. The base is the commit main was at when the ask-branch
+		// was cut; diffing against it shows only what the convoy has added
+		// since. Diffing against main's live HEAD would show main's drift as
+		// phantom additions (the root cause behind tasks like 449 being flagged
+		// as "missing work" even after the work had merged to the ask-branch).
+		base := ab.AskBranchBaseSHA
+		if base == "" {
+			base = igit.GetDefaultBranch(repoCfg.LocalPath)
+		}
+		diff := igit.GetDiffFromBase(repoCfg.LocalPath, base, ab.AskBranch)
 		if diff == "" {
-			fmt.Fprintf(&diffBlocks, "=== %s/%s ===\n(no changes vs main)\n\n", ab.Repo, ab.AskBranch)
+			fmt.Fprintf(&diffBlocks, "=== %s/%s ===\n(no changes vs base %s)\n\n",
+				ab.Repo, ab.AskBranch, util.TruncateStr(base, 12))
 			continue
 		}
 		if len(diff) > diffCapBytes {
 			diff = diff[:diffCapBytes] + "\n... (truncated — diff exceeds cap)\n"
 		}
-		fmt.Fprintf(&diffBlocks, "=== %s/%s ===\n%s\n", ab.Repo, ab.AskBranch, diff)
+		fmt.Fprintf(&diffBlocks, "=== %s/%s (vs base %s) ===\n%s\n",
+			ab.Repo, ab.AskBranch, util.TruncateStr(base, 12), diff)
 	}
 
 	convoyTasks := summarizeConvoyTasks(db, payload.ConvoyID)

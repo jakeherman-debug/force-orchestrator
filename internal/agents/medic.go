@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"force-orchestrator/internal/claude"
-	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
 )
@@ -131,12 +130,14 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 	// Collect all attempt history for the original task.
 	history := store.GetTaskHistory(db, parent.ID)
 
-	// Fetch the last diff if a branch exists.
+	// Fetch the last diff if a branch exists. Use ask-branch baseline when
+	// present so Medic's LLM analysis doesn't see main's phantom drift as
+	// "the agent's work."
 	var diff string
 	if parent.BranchName != "" {
 		repoPath := store.GetRepoPath(db, parent.TargetRepo)
 		if repoPath != "" {
-			diff = util.TruncateStr(igit.GetDiff(repoPath, parent.BranchName), 4000)
+			diff = util.TruncateStr(reviewDiff(db, repoPath, parent), 4000)
 		}
 	}
 
@@ -155,16 +156,16 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 
 	rawOut, claudeErr := claude.AskClaudeCLI(medicSystemPrompt, userPrompt, "", 1)
 	if claudeErr != nil {
-		// Claude itself failed — escalate directly without looping.
-		logger.Printf("Medic #%d: Claude failed (%v) — escalating task #%d to operator", bounty.ID, claudeErr, parent.ID)
-		CreateEscalation(db, parent.ID, store.SeverityMedium,
-			fmt.Sprintf("Medic could not analyze failure (Claude error: %v). Original error: %s", claudeErr, mp.Error))
-		store.SendMail(db, agentName, "operator",
-			fmt.Sprintf("[ESCALATED] Task #%d requires attention — %s", parent.ID, parent.TargetRepo),
-			fmt.Sprintf("Task #%d permanently failed and the Medic could not analyze it (Claude unavailable).\n\nRepo: %s\nOriginal error: %s\n\nTask:\n%s",
-				parent.ID, parent.TargetRepo, mp.Error, util.TruncateStr(parent.Payload, 500)),
-			parent.ID, store.MailTypeAlert)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		// Claude CLI flakes are infra-class failures, not task-analysis
+		// failures. Route through handleInfraFailure (same backoff + retry
+		// treatment as every other agent's Claude call) so transient
+		// unavailability doesn't produce a premature operator escalation.
+		// Only after MaxInfraFailures consecutive flakes does this path
+		// escalate to the operator — and by then, something is genuinely
+		// wrong with the Claude CLI itself.
+		logger.Printf("Medic #%d: Claude infra failure (%v) — retrying via handleInfraFailure", bounty.ID, claudeErr)
+		handleInfraFailure(db, agentName, "medic-analysis", bounty, "",
+			fmt.Sprintf("Claude CLI Err: %v", claudeErr), "Pending", false, logger)
 		return
 	}
 
@@ -212,15 +213,19 @@ func autoCompletedMedicTask(db *sql.DB, agentName string, medicBounty, parent *s
 		return false
 	}
 	// Two orthogonal signals, both meaning "nothing to land":
-	//   1. No diff vs main — whatever the agent produced is a net-zero change.
-	//   2. No commits ahead of main — the branch never diverged (or the change
-	//      already rode into main via a sibling merge).
-	// If both are true, the parent is done even if its task row says Failed/
-	// Escalated. This mirrors Captain's own auto-complete path at captain.go:221.
-	if igit.GetDiff(repoPath, parent.BranchName) != "" {
+	//   1. No diff vs its base (ask-branch tip or main) — whatever the agent
+	//      produced is a net-zero change against the work that's already been
+	//      integrated into the convoy's ask-branch (or main).
+	//   2. No commits ahead of that base — the branch never diverged, or the
+	//      change already rode into the ask-branch via a sibling merge.
+	// Using the ask-branch baseline (via reviewDiff/reviewCommitsAhead) rather
+	// than main is critical: main drifts independently, so "no diff vs main"
+	// would incorrectly fail for convoys whose ask-branch hasn't been rebased
+	// in hours.
+	if reviewDiff(db, repoPath, parent) != "" {
 		return false
 	}
-	if igit.CommitsAhead(repoPath, parent.BranchName) != "" {
+	if reviewCommitsAhead(db, repoPath, parent) != "" {
 		return false
 	}
 

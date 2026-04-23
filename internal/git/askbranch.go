@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -172,6 +173,118 @@ func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err erro
 		return "", fmt.Errorf("git rev-parse HEAD: %s", strings.TrimSpace(string(shaOut)))
 	}
 	return strings.TrimSpace(string(shaOut)), nil
+}
+
+// unionMergeableGlobs enumerates file patterns where "both sides appended
+// text" is the overwhelmingly common conflict shape AND where concatenation
+// is the semantically correct resolution. Deliberately narrow: markdown
+// docs and machine-generated lockfiles only. We do NOT include *.txt or
+// *.go — those can contain arbitrary content where concatenation would
+// produce semantic nonsense (garbled prose, invalid Go). CLAUDE.md is the
+// observed blocker from the production convoys 35/37 failure; the lockfile
+// entries are preemptive for the same append-only conflict shape.
+var unionMergeableGlobs = []string{
+	"*.md merge=union",
+	"CLAUDE.md merge=union",
+	"go.sum merge=union",
+	"package-lock.json merge=union",
+	"yarn.lock merge=union",
+	"Cargo.lock merge=union",
+}
+
+// MergeWithUnionStrategy merges `baseRef` into `branch` in a temporary
+// worktree, with union-strategy resolution installed for markdown/docs/lock
+// files via LOCAL (uncommitted) .git/info/attributes. Both sides' additions
+// in those files are concatenated rather than producing conflict markers —
+// the exact pattern that blocked main-drift-watch on convoys 35/37 (tasks
+// 519 and 537 both hit 5 Claude CLI infra failures trying to LLM-resolve
+// identical CLAUDE.md append-vs-append conflicts).
+//
+// Uses a throwaway worktree so the main checkout's HEAD is never moved
+// (same discipline as RebaseBranchOnto). The local ref `refs/heads/<branch>`
+// IS updated to point at the new merge commit — callers then push that
+// branch normally. The attributes file is written before and restored after,
+// so ask-branch history never records any attributes change.
+//
+// Returns the new merge-commit SHA on success. Returns error when conflicts
+// are structural (binary files, concurrent edits to same function body) —
+// caller should fall through to LLM-driven astromech resolution.
+func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, error) {
+	if branch == "" || baseRef == "" {
+		return "", fmt.Errorf("branch and baseRef required")
+	}
+
+	// Fetch both refs so we're merging against current origin state.
+	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", branch).CombinedOutput(); err != nil {
+		// Non-fatal — the branch may exist only locally. Record and continue.
+		_ = out
+	}
+	// For baseRef like "refs/remotes/origin/main", fetch the short name.
+	shortBase := strings.TrimPrefix(baseRef, "refs/remotes/origin/")
+	if shortBase != baseRef {
+		exec.Command("git", "-C", repoPath, "fetch", "origin", shortBase).Run()
+	}
+
+	wtPath, wtErr := os.MkdirTemp("", "force-union-merge-*")
+	if wtErr != nil {
+		return "", fmt.Errorf("mktemp: %w", wtErr)
+	}
+	defer func() {
+		exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", wtPath).Run()
+		os.RemoveAll(wtPath)
+	}()
+
+	// Check out the branch in the temp worktree, resetting local ref from
+	// origin — same `-B` discipline as RebaseBranchOnto.
+	if out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-B", branch, wtPath,
+		"refs/remotes/origin/"+branch).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("worktree add %s: %s", branch, strings.TrimSpace(string(out)))
+	}
+
+	// Install union attributes locally. Written to .git/info/attributes —
+	// a working-copy-only file never committed.
+	attrPath := filepath.Join(repoPath, ".git", "info", "attributes")
+	existing, _ := os.ReadFile(attrPath)
+	content := strings.Join(unionMergeableGlobs, "\n") + "\n" + string(existing)
+	if err := os.WriteFile(attrPath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("write local attributes: %w", err)
+	}
+	defer func() {
+		if len(existing) == 0 {
+			os.Remove(attrPath) //nolint:errcheck
+		} else {
+			os.WriteFile(attrPath, existing, 0644) //nolint:errcheck
+		}
+	}()
+
+	if message == "" {
+		message = "merge: pull " + baseRef + " into " + branch + " via union strategy"
+	}
+
+	// Merge with identity env so git doesn't refuse on a missing global config.
+	cmd := exec.Command("git", "-C", wtPath, "merge", "--no-ff", "-m", message, baseRef)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=force-orchestrator",
+		"GIT_AUTHOR_EMAIL=force@localhost",
+		"GIT_COMMITTER_NAME=force-orchestrator",
+		"GIT_COMMITTER_EMAIL=force@localhost",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		exec.Command("git", "-C", wtPath, "merge", "--abort").Run()
+		return "", fmt.Errorf("union merge %s into %s: %s", baseRef, branch, strings.TrimSpace(string(out)))
+	}
+	// Paranoid: verify no unresolved paths even when git exits 0.
+	if statusOut, _ := exec.Command("git", "-C", wtPath, "diff", "--name-only", "--diff-filter=U").Output(); strings.TrimSpace(string(statusOut)) != "" {
+		exec.Command("git", "-C", wtPath, "merge", "--abort").Run()
+		return "", fmt.Errorf("union merge left unresolved paths: %s", strings.TrimSpace(string(statusOut)))
+	}
+
+	tipOut, tipErr := exec.Command("git", "-C", wtPath, "rev-parse", "HEAD").Output()
+	if tipErr != nil {
+		return "", fmt.Errorf("rev-parse HEAD: %w", tipErr)
+	}
+	return strings.TrimSpace(string(tipOut)), nil
 }
 
 // ForcePushBranch force-pushes a branch to origin with lease. Used after a

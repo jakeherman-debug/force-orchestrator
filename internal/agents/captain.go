@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -60,10 +59,14 @@ REJECTION GUIDELINES — reject (do NOT create new tasks to cover for) if:
 Using new_tasks to paper over a broken implementation wastes the entire council review cycle. Reject instead and let the agent try again with the correct approach.
 
 SCOPE GUARD (for scope-violation rejections):
-When you reject for out-of-scope file changes, populate "rejected_files" with the EXACT list of file paths that were outside the task's scope. The fleet will programmatically prepend a [SCOPE GUARD — DO NOT MODIFY] section to the agent's next attempt listing exactly those paths. Getting this list right is the single highest-leverage thing you do — it prevents the same scope-creep loop from repeating on retry.
+When you reject for out-of-scope file changes, populate "rejected_files" with ONLY the file paths that are OUTSIDE the task's stated scope. The fleet will programmatically prepend a [SCOPE GUARD — DO NOT MODIFY] section to the agent's next attempt listing exactly those paths. Getting this list right is the single highest-leverage thing you do — it prevents the same scope-creep loop from repeating on retry.
+
+CRITICAL: A file is IN-scope if the task description asks to modify it — even if the agent's attempt on that file is wrong. Do NOT list in-scope files in rejected_files. If the entire problem is that the agent modified the right files in the wrong way, rejected_files MUST be empty [] and the rejection is about approach, not scope.
 - Use the file paths from the diff headers verbatim.
-- Include every file you reject, even if it's only one.
-- Leave rejected_files empty [] when the rejection is not about scope (e.g. wrong approach, broken logic).
+- Include only OUT-of-scope paths — files not mentioned anywhere in the task body.
+- Leave rejected_files empty [] when the rejection is not about scope (wrong approach, broken logic, regressions to already-merged code, etc.).
+
+Counter-example: if the task says "extend rateLimitPatterns in internal/claude/claude.go" and the agent modifies claude.go AND dashboard.go, rejected_files = ["internal/dashboard/dashboard.go"] — NOT ["internal/claude/claude.go", "internal/dashboard/dashboard.go"]. Listing claude.go would forbid the next attempt from doing the task.
 
 Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 {
@@ -312,9 +315,12 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		branchName = fmt.Sprintf("agent/task-%d", b.ID)
 	}
 
-	diff := igit.GetDiff(repoPath, branchName)
+	// Diff against the ask-branch tip (not main) when this task is part of a
+	// convoy with an ask-branch. See review_diff.go for rationale — reviewing
+	// against main produces phantom "scope violations" from main's drift.
+	diff := reviewDiff(db, repoPath, b)
 	if diff == "" {
-		if igit.CommitsAhead(repoPath, branchName) == "" {
+		if reviewCommitsAhead(db, repoPath, b) == "" {
 			// No diff and no unique commits — work was already merged into main.
 			// Auto-complete rather than failing; unblock dependents and recover convoy.
 			store.UpdateBountyStatus(db, b.ID, "Completed")
