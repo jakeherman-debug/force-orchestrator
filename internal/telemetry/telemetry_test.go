@@ -76,6 +76,12 @@ func TestEmitEvent_WithOTLPEndpoint(t *testing.T) {
 	os.Chdir(dir)
 	defer func() {
 		os.Chdir(orig)
+		// Drain the async POST goroutine BEFORE resetting the globals.
+		// Without this wait, -race flags the deferred nil assignment as
+		// a write racing sendOTLPLog's read of the endpoint/client. The
+		// race pre-dates Fix #10 but was fixed alongside it since this
+		// file was already being touched.
+		WaitForOTLPDrain()
 		telemetryMu.Lock()
 		if telemetryFile != nil {
 			telemetryFile.Close()
@@ -101,9 +107,6 @@ func TestEmitEvent_WithOTLPEndpoint(t *testing.T) {
 		TaskID:    1,
 		SessionID: "abc123",
 	})
-
-	// Let the goroutine attempt (and fail) its HTTP POST
-	time.Sleep(100 * time.Millisecond)
 }
 
 func TestEmitEvent_MarshalError(t *testing.T) {
@@ -260,9 +263,16 @@ func TestInitTelemetry_OTLPEnabled(t *testing.T) {
 	dir := t.TempDir()
 	orig, _ := os.Getwd()
 	os.Chdir(dir)
+	// Loopback is normally rejected by ValidateOutboundURL, but the
+	// localhost collector flow is the single legitimate same-host use
+	// case. Open the test-only escape hatch so the init path can be
+	// exercised without pointing FORCE_OTEL_LOGS_URL at a real public
+	// host in unit tests.
+	defer store.SetAllowLoopbackForTest(true)()
 	t.Setenv("FORCE_OTEL_LOGS_URL", "http://localhost:4318/v1/logs")
 	defer func() {
 		os.Chdir(orig)
+		WaitForOTLPDrain()
 		telemetryMu.Lock()
 		if telemetryFile != nil {
 			telemetryFile.Close()
@@ -349,7 +359,7 @@ func TestSendOTLPLog_WithServer(t *testing.T) {
 		otlpEndpoint = oldEndpoint
 	}()
 
-	sendOTLPLog(event, rawEvent)
+	sendOTLPLog(event, rawEvent, otlpEndpoint, otlpHTTPClient)
 
 	select {
 	case <-received:

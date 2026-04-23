@@ -36,11 +36,18 @@ func NewSessionID() string {
 }
 
 var (
-	telemetryFile   *os.File
-	telemetryMu     sync.Mutex
-	telemetryLog    *log.Logger
-	otlpEndpoint    string       // set from FORCE_OTEL_LOGS_URL at init time
-	otlpHTTPClient  *http.Client // shared, reused across goroutines
+	telemetryFile  *os.File
+	telemetryMu    sync.Mutex
+	telemetryLog   *log.Logger
+	otlpEndpoint   string       // set from FORCE_OTEL_LOGS_URL at init time
+	otlpHTTPClient *http.Client // shared, reused across goroutines
+	// otlpInFlight tracks async OTLP POST goroutines launched by EmitEvent so
+	// tests can wait for them to drain before resetting the globals. Without
+	// this wait, -race flags a read-vs-write on otlpEndpoint / otlpHTTPClient
+	// between the deferred cleanup and the tail of sendOTLPLog (AUDIT prep
+	// note: pre-existing race predates Fix #10; fixed here because Fix #10
+	// is the first change to touch the OTLP path).
+	otlpInFlight sync.WaitGroup
 )
 
 func InitTelemetry() {
@@ -53,19 +60,49 @@ func InitTelemetry() {
 	}
 	telemetryLog = log.New(os.Stderr, "[telemetry] ", log.LstdFlags)
 
-	if url := os.Getenv("FORCE_OTEL_LOGS_URL"); url != "" {
-		otlpEndpoint = url
-		otlpHTTPClient = &http.Client{Timeout: 5 * time.Second}
+	if rawURL := os.Getenv("FORCE_OTEL_LOGS_URL"); rawURL != "" {
+		// Validate at init. An attacker with env access must not be able
+		// to redirect every task_claimed payload preview to an arbitrary
+		// endpoint — in particular not to 169.254.169.254 (AWS/GCP
+		// metadata) or a 10.x.x.x service on the daemon host.
+		if err := store.ValidateOutboundURL(rawURL); err != nil {
+			telemetryLog.Printf("REFUSING FORCE_OTEL_LOGS_URL=%q: %v", rawURL, err)
+			return
+		}
+		otlpEndpoint = rawURL
+		otlpHTTPClient = newOTLPClient()
 		telemetryLog.Printf("OTLP export enabled → %s", otlpEndpoint)
+	}
+}
+
+// newOTLPClient builds the http.Client used for OTLP POSTs. The CheckRedirect
+// policy revalidates the target on every hop — an attacker who somehow got
+// the env var past init (e.g., DNS result changed after startup) cannot
+// 302-bounce the telemetry stream to an internal address.
+func newOTLPClient() *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("otlp: too many redirects")
+			}
+			return store.ValidateOutboundURL(req.URL.String())
+		},
 	}
 }
 
 // EmitEvent writes a structured event to holonet.jsonl and optionally to an
 // OTLP HTTP endpoint if FORCE_OTEL_LOGS_URL is set. Thread-safe.
+//
+// Outbound-channel hardening (Fix #10): event payloads are redacted via
+// store.RedactSecrets before either the holonet.jsonl write or the OTLP
+// POST, so ghp_/Bearer/url-basic-auth tokens that leaked into a task
+// payload preview don't escape via the telemetry stream.
 func EmitEvent(event TelemetryEvent) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
+	event = redactEventPayload(event)
 
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -76,16 +113,59 @@ func EmitEvent(event TelemetryEvent) {
 	if telemetryFile != nil {
 		fmt.Fprintf(telemetryFile, "%s\n", data)
 	}
+	endpoint := otlpEndpoint
+	client := otlpHTTPClient
 	telemetryMu.Unlock()
 
-	if otlpEndpoint != "" {
-		go sendOTLPLog(event, data)
+	if endpoint != "" && client != nil {
+		otlpInFlight.Add(1)
+		go func() {
+			defer otlpInFlight.Done()
+			sendOTLPLog(event, data, endpoint, client)
+		}()
 	}
+}
+
+// WaitForOTLPDrain blocks until every in-flight OTLP POST goroutine has
+// returned. Production code never needs this — EmitEvent is fire-and-
+// forget — but tests that reset otlpEndpoint / otlpHTTPClient must wait
+// to avoid racing the teardown against sendOTLPLog's tail.
+func WaitForOTLPDrain() { otlpInFlight.Wait() }
+
+// redactEventPayload walks the event's Payload map and scrubs string values
+// through store.RedactSecrets. Non-string values pass through unchanged —
+// structured fields like ints, durations, and ID lists cannot encode a
+// secret. The function is cheap on events with no payload.
+func redactEventPayload(e TelemetryEvent) TelemetryEvent {
+	if e.Payload == nil {
+		return e
+	}
+	out := make(map[string]any, len(e.Payload))
+	for k, v := range e.Payload {
+		switch vv := v.(type) {
+		case string:
+			out[k] = store.RedactSecrets(vv)
+		case []string:
+			rs := make([]string, len(vv))
+			for i, s := range vv {
+				rs[i] = store.RedactSecrets(s)
+			}
+			out[k] = rs
+		default:
+			out[k] = v
+		}
+	}
+	e.Payload = out
+	return e
 }
 
 // sendOTLPLog ships a single event to an OTLP HTTP/JSON logs endpoint.
 // The OTLP Logs JSON format: https://opentelemetry.io/docs/specs/otlp/#otlphttp
-func sendOTLPLog(event TelemetryEvent, rawEvent []byte) {
+//
+// endpoint and client are captured by the caller under telemetryMu so a
+// concurrent test teardown cannot null the globals mid-POST (pre-existing
+// race — see otlpInFlight).
+func sendOTLPLog(event TelemetryEvent, rawEvent []byte, endpoint string, client *http.Client) {
 	// Build attribute list from event fields
 	attrs := []map[string]any{
 		{"key": "event.type", "value": map[string]any{"stringValue": event.EventType}},
@@ -116,7 +196,7 @@ func sendOTLPLog(event TelemetryEvent, rawEvent []byte) {
 								"timeUnixNano":   fmt.Sprintf("%d", event.Timestamp.UnixNano()),
 								"severityNumber": 9, // INFO
 								"severityText":   "INFO",
-								"body":           map[string]any{"stringValue": string(rawEvent)},
+								"body":           map[string]any{"stringValue": store.RedactSecrets(string(rawEvent))},
 								"attributes":     attrs,
 							},
 						},
@@ -131,7 +211,7 @@ func sendOTLPLog(event TelemetryEvent, rawEvent []byte) {
 		return
 	}
 
-	resp, err := otlpHTTPClient.Post(otlpEndpoint, "application/json", bytes.NewReader(payload))
+	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		// Silent failure — telemetry should never crash the agent
 		return
@@ -236,4 +316,3 @@ func EventStallDetected(taskID int, agent, repo string, lockedMinutes float64) T
 		Payload:   map[string]any{"agent": agent, "repo": repo, "locked_minutes": lockedMinutes},
 	}
 }
-

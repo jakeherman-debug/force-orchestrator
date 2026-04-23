@@ -49,6 +49,18 @@ func cmdConfig(db *sql.DB, args []string) {
 				os.Exit(1)
 			}
 		}
+		// Outbound URL keys must pass the shared allow-list (scheme is
+		// http/https; host does NOT resolve to loopback, link-local,
+		// private, or metadata space). This is the write-time gate for
+		// AUDIT-016 / AUDIT-056 — the daemon re-validates before every
+		// POST (defense in depth), but catching it here fails fast for
+		// the operator instead of silently dropping webhooks at runtime.
+		if cfgKey == "webhook_url" && cfgVal != "" {
+			if err := store.ValidateOutboundURL(cfgVal); err != nil {
+				fmt.Printf("Error: webhook_url failed validation: %v\n", err)
+				os.Exit(1)
+			}
+		}
 		knownKeys := map[string]string{
 			"num_astromechs": "integer (number of astromech agents to spawn)",
 			"num_captain":    "integer (number of captain agents to spawn, default 1)",

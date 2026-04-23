@@ -26,27 +26,19 @@ import (
 //   - AUDIT-056: webhook payload includes raw task payload, unredacted
 //   - AUDIT-017/-057 are documented but not asserted here (env-var + OOM shape)
 func TestPattern_P9_SecretLeaksInOutboundChannels(t *testing.T) {
-	t.Skip("AUDIT-016/055/056: remove when RedactSecrets + webhook allow-list + CheckRedirect land (Fix #10)")
-	// Without skip, fails with:
-	//   --- FAIL: TestPattern_P9_SecretLeaksInOutboundChannels (0.01s)
-	//       --- FAIL: .../A_WebhookFollowsRedirectToLinkLocal (0.01s)
-	//       --- FAIL: .../B_WebhookBodyLeaksTokens (0.00s)
-	//       --- FAIL: .../C_GhStderrNotRedacted (0.00s)
+	// Fix #10 has landed: RedactSecrets + webhook allow-list + CheckRedirect
+	// are all wired. Sub-tests below assert the post-fix behaviour directly.
+	// Closed by: Fix #10.
 
 	// ── Sub-test A: AUDIT-016 — webhook follows redirects to link-local ────
-	// Stand up a test server playing the role of "cloud metadata". Set
-	// webhook_url to it directly → assert the POST lands (no allow-list).
-	// Then stand up a redirector that 302s to the metadata server → assert
-	// the default http.Client follows the redirect (no CheckRedirect policy).
+	// Post-fix assertion (Fix #10): FireWebhook refuses to POST to loopback
+	// or link-local hosts. The httptest server here stands in for
+	// 169.254.169.254; the allow-list refuses it AND refuses a 302-redirect
+	// hop to the same host via CheckRedirect. We do NOT enable the
+	// SetAllowLoopbackForTest escape hatch — the whole point of this
+	// sub-test is that the production allow-list is effective.
 	t.Run("A_WebhookFollowsRedirectToLinkLocal", func(t *testing.T) {
-		t.Skip("AUDIT-016: remove when RedactSecrets + webhook allow-list + CheckRedirect land (Fix #10)")
-		// Without skip, fails with:
-		//   audit_pattern_p9_test.go:67: AUDIT-016: webhook POST reached http://127.0.0.1:<port>
-		//   with no scheme/host allow-list. A malicious or misconfigured webhook_url can exfil
-		//   task payloads to http://169.254.169.254/... (cloud metadata).
-		//   audit_pattern_p9_test.go:89: AUDIT-016: webhook followed a 302 redirect from
-		//   http://127.0.0.1:<redirector> to http://127.0.0.1:<metadata>. FireWebhook uses a
-		//   default http.Client with no CheckRedirect policy...
+		// Closed by: Fix #10.
 		db := InitHolocronDSN(":memory:")
 		defer db.Close()
 
@@ -60,9 +52,10 @@ func TestPattern_P9_SecretLeaksInOutboundChannels(t *testing.T) {
 		id64, _ := res.LastInsertId()
 		taskID := int(id64)
 
-		// Stand-in for 169.254.169.254 — any httptest server will do; the
-		// point is that nothing in sendWebhook says "this host is RFC1918 /
-		// link-local / loopback; refuse to POST."
+		// Stand-in for 169.254.169.254 — the test server binds to 127.0.0.1
+		// which is loopback; ValidateOutboundURL refuses both loopback and
+		// link-local for the same reason (cloud-metadata / daemon-local
+		// exfil vectors). Either rejection class counts as "the fix works."
 		metadataHits := make(chan struct{}, 2)
 		metadata := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			metadataHits <- struct{}{}
@@ -71,25 +64,24 @@ func TestPattern_P9_SecretLeaksInOutboundChannels(t *testing.T) {
 		}))
 		defer metadata.Close()
 
-		// Direct POST: no allow-list means we reach the (pretend) metadata host.
+		// Direct POST: allow-list must block it before the POST goroutine
+		// even reaches the HTTP client.
 		SetConfig(db, "webhook_url", metadata.URL)
 		FireWebhook(db, taskID, "Completed")
 
 		select {
 		case <-metadataHits:
-			// Current (broken) behavior: webhook reached link-local stand-in.
-			t.Errorf("AUDIT-016: webhook POST reached %s with no scheme/host allow-list. "+
-				"A malicious or misconfigured webhook_url can exfil task payloads to "+
-				"http://169.254.169.254/... (cloud metadata). Fix: validate scheme/host "+
-				"against an RFC1918/link-local/loopback blocklist before POSTing.",
+			t.Errorf("AUDIT-016 regression: webhook POST reached %s. "+
+				"ValidateOutboundURL should reject loopback/link-local.",
 				metadata.URL)
-		case <-time.After(3 * time.Second):
-			// Would be the desired post-fix state: allow-list blocked the POST.
-			t.Log("webhook POST was blocked — allow-list appears to be in place")
+		case <-time.After(300 * time.Millisecond):
+			// Desired: allow-list blocked the POST before it happened.
 		}
 
-		// Redirector: 302 → metadata. Default http.Client follows up to 10
-		// redirects with no CheckRedirect, so the final POST still lands.
+		// Redirector: 302 → metadata. CheckRedirect must revalidate the
+		// target on each hop. Even if the first URL were allowed (e.g.,
+		// a legitimate public host bouncing to an attacker-controlled
+		// redirect), the second hop back to 127.0.0.1 is refused.
 		redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, metadata.URL, http.StatusFound)
 		}))
@@ -100,26 +92,26 @@ func TestPattern_P9_SecretLeaksInOutboundChannels(t *testing.T) {
 
 		select {
 		case <-metadataHits:
-			t.Errorf("AUDIT-016: webhook followed a 302 redirect from %s to %s. "+
-				"FireWebhook uses a default http.Client with no CheckRedirect policy, "+
-				"so an attacker who controls any allowed host can bounce us to "+
-				"link-local. Fix: install a CheckRedirect that re-validates every hop.",
+			t.Errorf("AUDIT-016 regression: webhook followed a 302 from %s to %s. "+
+				"CheckRedirect must re-validate each hop against the allow-list.",
 				redirector.URL, metadata.URL)
-		case <-time.After(3 * time.Second):
-			t.Log("302 redirect was not followed — CheckRedirect policy appears to be in place")
+		case <-time.After(300 * time.Millisecond):
+			// Desired: allow-list blocked the redirector URL itself
+			// (loopback), or CheckRedirect caught the second hop.
 		}
 	})
 
-	// ── Sub-test B: AUDIT-056 — webhook payload is not redacted ────────────
-	// The task payload goes out verbatim (truncated to 500 chars). A payload
-	// containing what looks like a GitHub PAT is POSTed unchanged.
+	// ── Sub-test B: AUDIT-056 — webhook payload is redacted ────────────────
+	// Post-fix assertion (Fix #10): FireWebhook feeds the task payload
+	// through store.RedactSecrets before marshaling, so a fake PAT embedded
+	// in the payload never leaves the daemon verbatim. Uses the
+	// SetAllowLoopbackForTest escape hatch so we can actually hit the
+	// httptest server and inspect the body.
 	t.Run("B_WebhookBodyLeaksTokens", func(t *testing.T) {
-		t.Skip("AUDIT-056: remove when RedactSecrets + webhook allow-list + CheckRedirect land (Fix #10)")
-		// Without skip, fails with:
-		//   audit_pattern_p9_test.go:133: AUDIT-056: webhook POST body contained the raw fake
-		//   PAT "ghp_testFakeTokenABC123". FireWebhook ships the first 500 chars of
-		//   BountyBoard.payload with no redaction pass. Operator-pasted tokens, Claude stdout
-		//   echoing secrets, and PR-review-comment bodies all exfil.
+		// Closed by: Fix #10.
+		restore := SetAllowLoopbackForTest(true)
+		t.Cleanup(restore)
+		t.Cleanup(WaitForWebhookDrain)
 		db := InitHolocronDSN(":memory:")
 		defer db.Close()
 
@@ -150,14 +142,12 @@ func TestPattern_P9_SecretLeaksInOutboundChannels(t *testing.T) {
 		select {
 		case body := <-received:
 			if strings.Contains(string(body), fakeToken) {
-				t.Errorf("AUDIT-056: webhook POST body contained the raw fake PAT %q. "+
-					"FireWebhook ships the first 500 chars of BountyBoard.payload with no "+
-					"redaction pass. Operator-pasted tokens, Claude stdout echoing secrets, "+
-					"and PR-review-comment bodies all exfil. Fix: route payload through "+
-					"a central store.RedactSecrets helper (ghp_/gho_/ghu_/ghs_/github_pat_/"+
-					"Bearer/url-basic-auth) before marshaling. Body=%q", fakeToken, string(body))
-			} else {
-				t.Log("webhook body redacted the fake PAT — redaction helper appears to be in place")
+				t.Errorf("AUDIT-056 regression: webhook body contained the raw fake PAT %q. "+
+					"Body=%q", fakeToken, string(body))
+			}
+			if !strings.Contains(string(body), "[REDACTED]") {
+				t.Errorf("AUDIT-056 regression: redaction placeholder missing — "+
+					"RedactSecrets may have changed replacement token. Body=%q", string(body))
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatal("timed out waiting for webhook POST")
@@ -165,19 +155,11 @@ func TestPattern_P9_SecretLeaksInOutboundChannels(t *testing.T) {
 	})
 
 	// ── Sub-test C: AUDIT-055 — gh stderr wrapped unredacted ───────────────
-	// Static source check: gh.go wraps stderr straight into the returned
-	// error via `fmt.Errorf("...: %w: %s", err, strings.TrimSpace(string(stderr)))`.
-	// Assert there is no redaction regex applied to stderr (ghp_, gho_, etc.)
-	// anywhere in the file before that wrap happens.
+	// Post-fix assertion (Fix #10): gh.go wraps stderr through
+	// redactGHError (which calls store.RedactSecrets) or the literal
+	// helper name is otherwise referenced in the file.
 	t.Run("C_GhStderrNotRedacted", func(t *testing.T) {
-		t.Skip("AUDIT-055: remove when RedactSecrets + webhook allow-list + CheckRedirect land (Fix #10)")
-		// Without skip, fails with:
-		//   audit_pattern_p9_test.go:207: AUDIT-055: internal/gh/gh.go wraps `stderr` into 14
-		//   returned errors via `fmt.Errorf("...: %w: %s", err, strings.TrimSpace(string(stderr)))`
-		//   with no redaction regex or helper applied before the wrap. `gh` auth-failure stderr
-		//   can contain ghp_/gho_/ghu_/ghs_/github_pat_ token prefixes and URL-embedded basic
-		//   auth; those errors land in BountyBoard.error_log, Escalations.message, and
-		//   Fleet_Mail.body — all visible via the unauth dashboard.
+		// Closed by: Fix #10.
 		// Locate gh.go relative to this test file.
 		_, thisFile, _, ok := runtime.Caller(0)
 		if !ok {
@@ -232,16 +214,11 @@ func TestPattern_P9_SecretLeaksInOutboundChannels(t *testing.T) {
 		wrapCount := strings.Count(src, "string(stderr)")
 
 		if !redactionFound {
-			t.Errorf("AUDIT-055: internal/gh/gh.go wraps `stderr` into %d returned errors via "+
-				"`fmt.Errorf(\"...: %%w: %%s\", err, strings.TrimSpace(string(stderr)))` with no "+
-				"redaction regex or helper applied before the wrap. `gh` auth-failure stderr can "+
-				"contain ghp_/gho_/ghu_/ghs_/github_pat_ token prefixes and URL-embedded basic "+
-				"auth; those errors land in BountyBoard.error_log, Escalations.message, and "+
-				"Fleet_Mail.body — all visible via the unauth dashboard. "+
-				"Fix: redact stderr inside ExecRunner.Run (or via a central store.RedactSecrets) "+
-				"before returning. Path=%s", wrapCount, ghPath)
-		} else {
-			t.Log("a redaction regex / helper was found in gh.go — AUDIT-055 appears addressed")
+			t.Errorf("AUDIT-055 regression: internal/gh/gh.go wraps `stderr` into %d "+
+				"returned errors with no redaction regex or helper visible. Fix #10 "+
+				"introduced redactGHError / store.RedactSecrets — if either name was "+
+				"renamed, update this static check to track the new helper. Path=%s",
+				wrapCount, ghPath)
 		}
 	})
 
