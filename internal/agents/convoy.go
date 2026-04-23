@@ -52,13 +52,13 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 			askBranches := store.ListConvoyAskBranches(db, c.id)
 			if len(askBranches) > 0 {
 				// Don't duplicate if one is already queued or in flight.
-				// Boundary-match on JSON token so convoy id=1 doesn't dedup against 10, 100.
+				// Fix A (AUDIT-011 read-side): QueueShipConvoy stamps convoy_id on
+				// the row so this index probe replaces the brittle LIKE scan.
 				var existing int
 				db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 					WHERE type = 'ShipConvoy' AND status IN ('Pending', 'Locked')
-					  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-					    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-					c.id, c.id).Scan(&existing)
+					  AND convoy_id = ?`,
+					c.id).Scan(&existing)
 				if existing == 0 {
 					db.Exec(`UPDATE Convoys SET status = 'AwaitingDraftPR' WHERE id = ?`, c.id)
 					if _, err := QueueShipConvoy(db, c.id); err != nil {

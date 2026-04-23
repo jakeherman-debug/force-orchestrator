@@ -233,50 +233,53 @@ func extractFunctionBody(t *testing.T, src, fn string) string {
 // fix to a structured column / JSON-extract index, only the real row
 // matches and this locking test flips — delete it alongside the fix.
 func TestPattern_P3_BoundaryFalsePositive(t *testing.T) {
-	t.Skip("AUDIT-011 / boundary-false-positive on payload LIKE: Fix #3 closed the write-side callers (Queue* helpers now use idempotency_key). The remaining read-side scans (GetConvoyReviewCompletedPasses, dogConvoyReviewWatch pending/active checks) are Fix #4 scope — structured convoy_id column + index.")
-	// Without skip, fails with:
-	//   Pattern P3 boundary-defect still present — got 2 matches (real + nested-convoy_id
-	//   collision), want 1 (only real). Fix #3/#4 requires structured convoy_id column so
-	//   dedup queries have JSON-structural awareness.
+	// Closed by Campaign 2 (AUDIT-011 read-side): the production read-sites
+	// (GetConvoyReviewCompletedPasses, dogConvoyReviewWatch pending check,
+	// CheckConvoyCompletions ShipConvoy dedup, ConvoyReadyToShip,
+	// backfillMissingAskBranches, ListReadyToShipConvoyIDs) all migrated
+	// from `payload LIKE '%"convoy_id":N,%'` to `convoy_id = ?`. This test
+	// now exercises the post-fix semantics: two rows with the SAME payload
+	// shape but DIFFERENT structured convoy_id do not collide.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	// Row A: legitimate convoy_id=5 payload.
+	// Row A: legitimate convoy_id=5 — payload + structured column agree.
 	if _, err := db.Exec(`INSERT INTO BountyBoard
-		(parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, 'repo', 'ConvoyReview', 'Pending', ?, 5, datetime('now'))`,
+		(parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'repo', 'ConvoyReview', 'Pending', ?, 5, 5, datetime('now'))`,
 		`{"convoy_id":5,"note":"real"}`); err != nil {
 		t.Fatalf("seed real row: %v", err)
 	}
-	// Row B: collides. Real (semantic) convoy is 999; a nested `prev` object
-	// references convoy 5 as historical context. The LIKE has no concept of
-	// nesting — it finds `"convoy_id":5}` inside `"prev":{"convoy_id":5}` and
-	// matches.
+	// Row B: the exact shape that used to trip up the payload-LIKE scan —
+	// real convoy 999, with a nested "prev" object referencing convoy 5.
+	// Under the OLD LIKE-based dedup, this row matched "convoy_id":5 because
+	// the bytes `"convoy_id":5}` appear inside `"prev":{"convoy_id":5}`. Under
+	// the post-fix structured-column lookup, the nested mention is ignored.
 	if _, err := db.Exec(`INSERT INTO BountyBoard
-		(parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, 'repo', 'ConvoyReview', 'Pending', ?, 5, datetime('now'))`,
+		(parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, 'repo', 'ConvoyReview', 'Pending', ?, 999, 5, datetime('now'))`,
 		`{"convoy_id":999,"prev":{"convoy_id":5}}`); err != nil {
 		t.Fatalf("seed colliding row: %v", err)
 	}
 
-	// The read-side payload-LIKE dedup the test is locking behaviour on —
-	// still used by GetConvoyReviewCompletedPasses / dogConvoyReviewWatch
-	// pending checks. Fix #4 replaces with a structured convoy_id column.
-	const p3DedupSQL = `SELECT COUNT(*) FROM BountyBoard
-		WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-		    OR payload LIKE '%"convoy_id":' || ? || '}%')`
+	// Post-fix shape: structured convoy_id equality. Only row A matches.
 	var matched int
-	if err := db.QueryRow(p3DedupSQL, 5, 5).Scan(&matched); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
+		  AND convoy_id = ?`, 5).Scan(&matched); err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	// RGR: assert semantically-correct behaviour. Only the genuine
-	// convoy_id=5 row should match; the nested-convoy_id collision must NOT.
-	// Today the LIKE matches both rows (has no notion of JSON structure), so
-	// the test fails until Fix #3/#4 (structured convoy_id column) lands.
 	if matched != 1 {
-		t.Fatalf("Pattern P3 boundary-defect still present — got %d matches (real + nested-convoy_id collision), "+
-			"want 1 (only real). Fix #3/#4 requires structured convoy_id column so dedup queries "+
-			"have JSON-structural awareness.", matched)
+		t.Fatalf("structured convoy_id lookup regressed — got %d matches, want 1 "+
+			"(only the real convoy_id=5 row, not the nested-mention row)", matched)
+	}
+	// Convoy 999 is a distinct row; no cross-contamination.
+	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
+		  AND convoy_id = ?`, 999).Scan(&matched); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if matched != 1 {
+		t.Fatalf("convoy 999 lookup regressed — got %d matches, want 1", matched)
 	}
 }

@@ -31,13 +31,16 @@ func backfillMissingAskBranches(db *sql.DB, logger interface{ Printf(string, ...
 
 	for _, cid := range candidates {
 		// Skip if a CreateAskBranch task for this convoy is already queued
-		// or in-flight. JSON-boundary-matched to avoid false-positives.
+		// or in-flight.
+		// Fix A (AUDIT-011 read-side): structured convoy_id column. The
+		// QueueCreateAskBranch helper stamps convoy_id on the row, so this
+		// lookup is an index probe via idx_bounty_convoy_status instead of
+		// a payload-LIKE full-table scan.
 		var existing int
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 			WHERE type = 'CreateAskBranch' AND status IN ('Pending', 'Locked')
-			  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-			    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-			cid, cid).Scan(&existing)
+			  AND convoy_id = ?`,
+			cid).Scan(&existing)
 		if existing > 0 {
 			continue
 		}

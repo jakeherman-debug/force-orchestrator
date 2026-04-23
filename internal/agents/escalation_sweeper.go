@@ -50,15 +50,33 @@ func dogEscalationSweeper(db *sql.DB, logger interface{ Printf(string, ...any) }
 	rows.Close()
 
 	for _, r := range taskTargets {
-		if _, err := db.Exec(`UPDATE Escalations
-			SET status = 'Resolved', acknowledged_at = datetime('now')
-			WHERE id = ? AND status = 'Open'`, r.escID); err != nil {
-			logger.Printf("escalation-sweeper: failed to resolve #%d: %v", r.escID, err)
+		// Fix D (AUDIT-149): gate auto-close on auto_resolve_count < 1.
+		// An operator who re-opens a previously-auto-closed escalation
+		// (sets status back to Open after the sweeper closed it) must
+		// not have it silently re-closed on the next tick. The counter
+		// is a one-time budget: we auto-close exactly once per row.
+		//
+		// Fix B (AUDIT-025): terminal status is 'Closed', not 'Resolved'.
+		// 'Resolved' was written by three sinks but recognised by none —
+		// a legacy mis-spelling. State machine: Open → Acknowledged → Closed.
+		res, err := db.Exec(`UPDATE Escalations
+			SET status = 'Closed',
+			    acknowledged_at = datetime('now'),
+			    auto_resolve_count = auto_resolve_count + 1
+			WHERE id = ? AND status = 'Open' AND auto_resolve_count < 1`, r.escID)
+		if err != nil {
+			logger.Printf("escalation-sweeper: failed to close #%d: %v", r.escID, err)
 			continue
 		}
-		logger.Printf("escalation-sweeper: auto-resolved escalation #%d (task %d transitioned to %s)",
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			// Already auto-closed once (operator may have re-opened for
+			// deeper investigation); respect that and skip.
+			continue
+		}
+		logger.Printf("escalation-sweeper: auto-closed escalation #%d (task %d transitioned to %s)",
 			r.escID, r.taskID, r.newStat)
-		store.LogAudit(db, "escalation-sweeper", "auto-resolve", r.taskID,
+		store.LogAudit(db, "escalation-sweeper", "auto-close", r.taskID,
 			"task transitioned to "+r.newStat+" — escalation condition no longer present")
 	}
 
@@ -99,15 +117,25 @@ func dogEscalationSweeper(db *sql.DB, logger interface{ Printf(string, ...any) }
 	rows.Close()
 
 	for _, r := range prTargets {
-		if _, err := db.Exec(`UPDATE Escalations
-			SET status = 'Resolved', acknowledged_at = datetime('now')
-			WHERE id = ? AND status = 'Open'`, r.escID); err != nil {
-			logger.Printf("escalation-sweeper: failed to resolve #%d: %v", r.escID, err)
+		// Fix D (AUDIT-149): same one-shot gate as rule 1. Fix B (AUDIT-025):
+		// terminal status is 'Closed', not 'Resolved'.
+		res, err := db.Exec(`UPDATE Escalations
+			SET status = 'Closed',
+			    acknowledged_at = datetime('now'),
+			    auto_resolve_count = auto_resolve_count + 1
+			WHERE id = ? AND status = 'Open' AND auto_resolve_count < 1`, r.escID)
+		if err != nil {
+			logger.Printf("escalation-sweeper: failed to close #%d: %v", r.escID, err)
 			continue
 		}
-		logger.Printf("escalation-sweeper: auto-resolved escalation #%d (task %d, sub-PR #%d state=%s)",
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			// Already auto-closed once; operator likely re-opened.
+			continue
+		}
+		logger.Printf("escalation-sweeper: auto-closed escalation #%d (task %d, sub-PR #%d state=%s)",
 			r.escID, r.taskID, r.prNumber, r.prState)
-		store.LogAudit(db, "escalation-sweeper", "auto-resolve", r.taskID,
+		store.LogAudit(db, "escalation-sweeper", "auto-close", r.taskID,
 			"sub-PR transitioned to "+r.prState+" — escalation condition no longer present")
 	}
 	return nil

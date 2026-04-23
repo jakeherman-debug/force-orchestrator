@@ -66,8 +66,8 @@ func TestRunConvoyReview_MaxFindingsDefaultIsTwo(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 1001, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (1001, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (1001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -108,8 +108,8 @@ func TestRunConvoyReview_OperatorOverrideStillHonoured(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 1002, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (1002, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (1002, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -138,8 +138,8 @@ func TestRunConvoyReview_ParseFailure_EscalatesAfterCap(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 1003, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (1003, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (1003, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -194,8 +194,8 @@ func TestRunConvoyReview_FingerprintDedup_SpawnIsSuppressed(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty1 := &store.Bounty{ID: 2001, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (2001, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (2001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty1, testLogger{})
 
@@ -221,8 +221,8 @@ func TestRunConvoyReview_FingerprintDedup_SpawnIsSuppressed(t *testing.T) {
 	stub := stubConvoyReviewLLM(t, convoyReviewResult{Status: "needs_work", Findings: sameFindings})
 
 	bounty2 := &store.Bounty{ID: 2002, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (2002, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (2002, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty2, testLogger{})
 
@@ -275,8 +275,8 @@ func TestRunConvoyReview_DifferentFindings_NoDedup(t *testing.T) {
 	})
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty1 := &store.Bounty{ID: 2101, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (2101, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (2101, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 	runConvoyReview(db, "Diplomat-1", bounty1, testLogger{})
 	db.Exec(`UPDATE BountyBoard SET status = 'Completed' WHERE parent_id = 2101`)
 
@@ -288,8 +288,8 @@ func TestRunConvoyReview_DifferentFindings_NoDedup(t *testing.T) {
 		},
 	})
 	bounty2 := &store.Bounty{ID: 2102, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (2102, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (2102, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 	runConvoyReview(db, "Diplomat-1", bounty2, testLogger{})
 
 	// Pass 2 must have spawned the new finding's fix task (no false-positive dedup).
@@ -368,19 +368,17 @@ func TestConvoyReview_TotalClaudeCallsBounded(t *testing.T) {
 
 		// If the convoy hit the loop cap OR an escalation landed, we're done.
 		var pendingReview int
+		// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview'
 			AND status = 'Pending'
-			AND (payload LIKE '%"convoy_id":' || ? || ',%'
-			  OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-			convoyID, convoyID).Scan(&pendingReview)
+			AND convoy_id = ?`, convoyID).Scan(&pendingReview)
 
 		var escCount int
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations
 			WHERE task_id IN (
 				SELECT id FROM BountyBoard WHERE type = 'ConvoyReview'
-				  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-				    OR payload LIKE '%"convoy_id":' || ? || '}%')
-			)`, convoyID, convoyID).Scan(&escCount)
+				  AND convoy_id = ?
+			)`, convoyID).Scan(&escCount)
 
 		if escCount > 0 {
 			// Escalated — terminal state, stop iterating.
@@ -429,12 +427,12 @@ func TestFullConvoyLifecycle_AdversarialLLM(t *testing.T) {
 		runConvoyReview(db, "Diplomat-1", b, testLogger{})
 
 		var escCount int
+		// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations
 			WHERE task_id IN (
 				SELECT id FROM BountyBoard WHERE type = 'ConvoyReview'
-				  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-				    OR payload LIKE '%"convoy_id":' || ? || '}%')
-			)`, convoyID, convoyID).Scan(&escCount)
+				  AND convoy_id = ?
+			)`, convoyID).Scan(&escCount)
 		if escCount > 0 {
 			terminatedOK = true
 			break
@@ -522,8 +520,8 @@ func TestRunConvoyReview_AfterCleanPass_NewFindingsEscalate(t *testing.T) {
 	// ── Pass 1 — clean ──
 	stubConvoyReviewLLM(t, convoyReviewResult{Status: "clean"})
 	bounty1 := &store.Bounty{ID: 3001, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (3001, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (3001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 	runConvoyReview(db, "Diplomat-1", bounty1, testLogger{})
 
 	var status string
@@ -541,8 +539,8 @@ func TestRunConvoyReview_AfterCleanPass_NewFindingsEscalate(t *testing.T) {
 		},
 	})
 	bounty2 := &store.Bounty{ID: 3002, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (3002, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (3002, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 	runConvoyReview(db, "Diplomat-1", bounty2, testLogger{})
 
 	// Pass 2 after clean must escalate, NOT spawn new fix tasks.
@@ -580,8 +578,8 @@ func TestStubConvoyReviewLLM_CapturesPrompt(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 4001, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (4001, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (4001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 

@@ -96,8 +96,8 @@ func TestRunConvoyReview_CleanPass_Completes(t *testing.T) {
 		Type:    "ConvoyReview",
 		Payload: string(payload),
 	}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (999, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (999, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -137,8 +137,8 @@ func TestRunConvoyReview_NeedsWork_SpawnsFixTasks(t *testing.T) {
 		Type:    "ConvoyReview",
 		Payload: string(payload),
 	}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (998, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (998, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -183,8 +183,8 @@ func TestRunConvoyReview_ActiveConvoyTasks_NoSpawn(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 994, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (994, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (994, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -214,9 +214,9 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveConvoyTasks(t *testing.T) {
 	dogConvoyReviewWatch(db, testLogger{})
 
 	var count int
+	// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-		AND (payload LIKE '%"convoy_id":' || ? || ',%' OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&count)
+		AND convoy_id = ?`, convoyID).Scan(&count)
 	if count != 0 {
 		t.Errorf("expected no ConvoyReview queued while active tasks exist, got %d", count)
 	}
@@ -248,8 +248,8 @@ func TestRunConvoyReview_MaxFindingsCap(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 997, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (997, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (997, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -271,14 +271,14 @@ func TestRunConvoyReview_LoopCapEscalates(t *testing.T) {
 	// Seed 5 prior completed ConvoyReview tasks for this convoy.
 	for i := 0; i < 5; i++ {
 		p, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
-		db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-			VALUES (0, '', 'ConvoyReview', 'Completed', ?, 5, datetime('now'))`, string(p))
+		db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+			VALUES (0, '', 'ConvoyReview', 'Completed', ?, ?, 5, datetime('now'))`, string(p), convoyID)
 	}
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 996, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (996, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (996, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	// No LLM stub needed — loop cap check fires before LLM call.
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
@@ -309,9 +309,9 @@ func TestDogConvoyReviewWatch_QueuesForDraftPROpen(t *testing.T) {
 	}
 
 	var count int
+	// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-		AND (payload LIKE '%"convoy_id":' || ? || ',%' OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&count)
+		AND convoy_id = ?`, convoyID).Scan(&count)
 	if count != 1 {
 		t.Errorf("expected 1 ConvoyReview queued, got %d", count)
 	}
@@ -329,8 +329,7 @@ func TestDogConvoyReviewWatch_SkipsWhenPendingExists(t *testing.T) {
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview'
-		AND (payload LIKE '%"convoy_id":' || ? || ',%' OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&count)
+		AND convoy_id = ?`, convoyID).Scan(&count)
 	if count != 1 {
 		t.Errorf("expected exactly 1 ConvoyReview (dedup), got %d", count)
 	}
@@ -358,8 +357,8 @@ func TestRunConvoyReview_ActiveAskBranchConflict_NoSpawn(t *testing.T) {
 
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
 	bounty := &store.Bounty{ID: 993, Type: "ConvoyReview", Payload: string(payload)}
-	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (993, 0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`, string(payload))
+	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (993, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
 
@@ -391,9 +390,9 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveAskBranchConflict(t *testing.T) {
 	}
 
 	var count int
+	// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-		AND (payload LIKE '%"convoy_id":' || ? || ',%' OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&count)
+		AND convoy_id = ?`, convoyID).Scan(&count)
 	if count != 0 {
 		t.Errorf("dog must not queue ConvoyReview while ask-branch conflict unresolved, got %d", count)
 	}
@@ -439,8 +438,8 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveFixTasks(t *testing.T) {
 
 	// Simulate a completed ConvoyReview that spawned a still-active fix task.
 	p, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
-	res, _ := db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, '', 'ConvoyReview', 'Completed', ?, 5, datetime('now'))`, string(p))
+	res, _ := db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, '', 'ConvoyReview', 'Completed', ?, ?, 5, datetime('now'))`, string(p), convoyID)
 	reviewID, _ := res.LastInsertId()
 
 	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
@@ -450,9 +449,9 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveFixTasks(t *testing.T) {
 
 	// No new ConvoyReview should be queued while fix task is still running.
 	var count int
+	// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-		AND (payload LIKE '%"convoy_id":' || ? || ',%' OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&count)
+		AND convoy_id = ?`, convoyID).Scan(&count)
 	if count != 0 {
 		t.Errorf("expected 0 new ConvoyReview while fix tasks active, got %d", count)
 	}

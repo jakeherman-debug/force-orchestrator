@@ -204,15 +204,25 @@ CREATE INDEX IF NOT EXISTS idx_taskhistory_created_at    ON TaskHistory (created
 CREATE INDEX IF NOT EXISTS idx_taskhistory_outcome_agent ON TaskHistory (outcome, agent);
 
 -- ── Escalations ───────────────────────────────────────────────────────────────
+-- State machine: Open → Acknowledged → Closed.
+-- 'Resolved' is a legacy value that three self-healing sinks used to write;
+-- no read-side consumer recognised it, so rows accumulated invisibly. Campaign 2
+-- (AUDIT-025) collapsed every writer onto 'Closed' and added a migration that
+-- UPDATEs any lingering 'Resolved' rows → 'Closed'. Do not reintroduce 'Resolved'.
+-- auto_resolve_count (AUDIT-149) is incremented exactly once when the
+-- escalation-sweeper auto-closes a row; a gate (count < 1) on the sweeper's
+-- UPDATE skips rows the operator has re-opened for deeper investigation so
+-- they aren't silently re-closed on the next 10-min tick.
 
 CREATE TABLE IF NOT EXISTS Escalations (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id          INTEGER NOT NULL,
-    severity         TEXT    NOT NULL,  -- 'LOW' | 'MEDIUM' | 'HIGH'
-    message          TEXT    NOT NULL,
-    status           TEXT    DEFAULT 'Open',  -- 'Open' | 'Acknowledged' | 'Closed'
-    created_at       TEXT    DEFAULT (datetime('now')),
-    acknowledged_at  TEXT    DEFAULT ''
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id            INTEGER NOT NULL,
+    severity           TEXT    NOT NULL,  -- 'LOW' | 'MEDIUM' | 'HIGH'
+    message            TEXT    NOT NULL,
+    status             TEXT    DEFAULT 'Open',  -- 'Open' | 'Acknowledged' | 'Closed'
+    auto_resolve_count INTEGER DEFAULT 0,       -- AUDIT-149: one-shot auto-close budget
+    created_at         TEXT    DEFAULT (datetime('now')),
+    acknowledged_at    TEXT    DEFAULT ''
 );
 -- Hot-table indexes (AUDIT-024, Fix #4). Sweeper runs `WHERE status='Open'`
 -- every 10 minutes + joins back to BountyBoard by task_id.

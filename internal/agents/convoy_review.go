@@ -151,13 +151,16 @@ func findingSetFingerprint(findings []convoyReviewFinding) string {
 // short-circuit pass-N-matches-pass-(N-1) loops.
 func lastCompletedFindingsFingerprint(db *sql.DB, convoyID int) string {
 	var fp string
+	// Fix A (AUDIT-011 read-side): use the structured convoy_id column instead
+	// of payload-LIKE. QueueConvoyReview stamps convoy_id on the row, so this
+	// lookup is an O(log n) index probe via idx_bounty_convoy_status instead of
+	// a full-table scan with brittle JSON-boundary matching.
 	db.QueryRow(`SELECT IFNULL(last_findings_fingerprint, '') FROM BountyBoard
 		WHERE type = 'ConvoyReview' AND status = 'Completed'
+		  AND convoy_id = ?
 		  AND IFNULL(last_findings_fingerprint, '') NOT IN ('', ?)
-		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-		    OR payload LIKE '%"convoy_id":' || ? || '}%')
 		ORDER BY id DESC LIMIT 1`,
-		convoyReviewCleanMarker, convoyID, convoyID).Scan(&fp)
+		convoyID, convoyReviewCleanMarker).Scan(&fp)
 	return fp
 }
 
@@ -169,12 +172,12 @@ func lastCompletedFindingsFingerprint(db *sql.DB, convoyID int) string {
 // first clean pass.
 func hasPriorCleanPass(db *sql.DB, convoyID int) bool {
 	var n int
+	// Fix A (AUDIT-011 read-side): structured convoy_id column.
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 		WHERE type = 'ConvoyReview' AND status = 'Completed'
-		  AND IFNULL(last_findings_fingerprint, '') = ?
-		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-		    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyReviewCleanMarker, convoyID, convoyID).Scan(&n)
+		  AND convoy_id = ?
+		  AND IFNULL(last_findings_fingerprint, '') = ?`,
+		convoyID, convoyReviewCleanMarker).Scan(&n)
 	return n > 0
 }
 
@@ -228,13 +231,13 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 
 	// Loop-detection: if this convoy has already completed too many review passes,
 	// escalate rather than spawning indefinitely.
+	// Fix A (AUDIT-011 read-side): structured convoy_id column.
 	const maxPasses = 5
 	var completedPasses int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 		WHERE type = 'ConvoyReview' AND status = 'Completed'
-		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-		    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		payload.ConvoyID, payload.ConvoyID).Scan(&completedPasses)
+		  AND convoy_id = ?`,
+		payload.ConvoyID).Scan(&completedPasses)
 	if completedPasses >= maxPasses {
 		escMsg := fmt.Sprintf("Convoy #%d has required %d+ ConvoyReview passes — manual inspection needed",
 			payload.ConvoyID, maxPasses)
@@ -539,12 +542,12 @@ func dogConvoyReviewWatch(db *sql.DB, logger interface{ Printf(string, ...any) }
 
 	for _, c := range convoys {
 		// Skip if a ConvoyReview is already pending or running.
+		// Fix A (AUDIT-011 read-side): structured convoy_id column.
 		var pending int
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 			WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-			  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-			    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-			c.id, c.id).Scan(&pending)
+			  AND convoy_id = ?`,
+			c.id).Scan(&pending)
 		if pending > 0 {
 			continue
 		}

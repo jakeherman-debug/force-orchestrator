@@ -41,11 +41,11 @@ func TestDogEscalationSweeper_ClosesWhenSubPRClosed(t *testing.T) {
 
 	var status, ack string
 	db.QueryRow(`SELECT status, acknowledged_at FROM Escalations WHERE id = ?`, escID).Scan(&status, &ack)
-	if status != "Resolved" {
-		t.Errorf("expected escalation Resolved, got %q", status)
+	if status != "Closed" {
+		t.Errorf("expected escalation Closed, got %q", status)
 	}
 	if ack == "" {
-		t.Error("acknowledged_at should be stamped when auto-resolved")
+		t.Error("acknowledged_at should be stamped when auto-closed")
 	}
 }
 
@@ -61,8 +61,8 @@ func TestDogEscalationSweeper_ClosesWhenSubPRMerged(t *testing.T) {
 
 	var status string
 	db.QueryRow(`SELECT status FROM Escalations WHERE id = ?`, escID).Scan(&status)
-	if status != "Resolved" {
-		t.Errorf("expected Resolved for merged PR, got %q", status)
+	if status != "Closed" {
+		t.Errorf("expected Closed for merged PR, got %q", status)
 	}
 }
 
@@ -148,8 +148,8 @@ func TestDogEscalationSweeper_ResolvesWhenTaskCompleted(t *testing.T) {
 
 	var status string
 	db.QueryRow(`SELECT status FROM Escalations WHERE id = ?`, escID).Scan(&status)
-	if status != "Resolved" {
-		t.Errorf("escalation for a Completed task must auto-resolve; got %q", status)
+	if status != "Closed" {
+		t.Errorf("escalation for a Completed task must auto-close; got %q", status)
 	}
 }
 
@@ -177,21 +177,72 @@ func TestDogEscalationSweeper_LeavesOpenWhenTaskFailed(t *testing.T) {
 	}
 }
 
-// TestDogEscalationSweeper_IgnoresAlreadyResolved confirms the UPDATE guard
-// against double-resolving (status must be Open to flip). Prevents mangled
-// acknowledged_at timestamps on hand-resolved rows.
-func TestDogEscalationSweeper_IgnoresAlreadyResolved(t *testing.T) {
+// TestDogEscalationSweeper_RespectsOperatorReopen is the headline AUDIT-149
+// regression test. Flow:
+//   1. Sweeper auto-closes an Escalation (auto_resolve_count 0→1).
+//   2. Operator re-opens it for deeper investigation
+//      (UPDATE Escalations SET status='Open' WHERE id=X).
+//   3. Sweeper runs again on the same tick conditions that originally fired.
+//   4. Assert: status stays Open, auto_resolve_count stays at 1, no rewrite.
+//
+// Without the `auto_resolve_count < 1` gate, the sweeper would silently
+// re-close the operator's re-opened row every 10 minutes — the exact
+// behaviour the audit flagged.
+func TestDogEscalationSweeper_RespectsOperatorReopen(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
 	escID, _, _ := seedEscalatedTaskWithPR(t, db, "Closed")
-	db.Exec(`UPDATE Escalations SET status = 'Resolved', acknowledged_at = '2025-01-01 00:00:00' WHERE id = ?`, escID)
+
+	// First tick — closes.
+	if err := dogEscalationSweeper(db, testLogger{}); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	var status string
+	var count int
+	db.QueryRow(`SELECT status, auto_resolve_count FROM Escalations WHERE id = ?`, escID).
+		Scan(&status, &count)
+	if status != "Closed" || count != 1 {
+		t.Fatalf("tick 1: expected Closed + count=1, got status=%q count=%d", status, count)
+	}
+
+	// Operator re-opens — represents "I want to look at this again".
+	// Acknowledged_at deliberately left stamped — don't assume operators clear it.
+	if _, err := db.Exec(`UPDATE Escalations SET status='Open' WHERE id = ?`, escID); err != nil {
+		t.Fatalf("operator reopen: %v", err)
+	}
+
+	// Second tick — must NOT re-close.
+	if err := dogEscalationSweeper(db, testLogger{}); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	db.QueryRow(`SELECT status, auto_resolve_count FROM Escalations WHERE id = ?`, escID).
+		Scan(&status, &count)
+	if status != "Open" {
+		t.Errorf("AUDIT-149 regression: sweeper silently re-closed operator-reopened "+
+			"escalation (got status=%q, want Open)", status)
+	}
+	if count != 1 {
+		t.Errorf("AUDIT-149 regression: auto_resolve_count incremented past 1 on "+
+			"re-open (got %d, want 1) — the one-shot budget is not enforced", count)
+	}
+}
+
+// TestDogEscalationSweeper_IgnoresAlreadyClosed confirms the UPDATE guard
+// against double-closing (status must be Open to flip). Prevents mangled
+// acknowledged_at timestamps on hand-closed rows.
+func TestDogEscalationSweeper_IgnoresAlreadyClosed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	escID, _, _ := seedEscalatedTaskWithPR(t, db, "Closed")
+	db.Exec(`UPDATE Escalations SET status = 'Closed', acknowledged_at = '2025-01-01 00:00:00' WHERE id = ?`, escID)
 
 	_ = dogEscalationSweeper(db, testLogger{})
 
 	var ack string
 	db.QueryRow(`SELECT acknowledged_at FROM Escalations WHERE id = ?`, escID).Scan(&ack)
 	if ack != "2025-01-01 00:00:00" {
-		t.Errorf("sweeper rewrote acknowledged_at on already-Resolved row: %q", ack)
+		t.Errorf("sweeper rewrote acknowledged_at on already-Closed row: %q", ack)
 	}
 }

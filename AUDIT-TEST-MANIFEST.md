@@ -15,7 +15,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | P3 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan`, `TestPattern_P3_BoundaryFalsePositive` | Fix #3/#4 (structured convoy_id + index) |
 | P4 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes`, `TestPattern_P4_ClaimQueryUsesIndex` | Fix #4 (hot-table indexes) | Closed by: Fix #4 (`fix/hot-table-indexes`) |
 | P5 | `internal/agents/spend_cap_test.go` | `TestSpendCap_*`, `TestSpendBurnPattern_*` — feature now exists | Closed by: Fix #1 |
-| P6 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues` (+ 3 subtests) | Fix #5 (state machine sweepers + Resolved normalization) — **Closed by: Fix #5 (outer + A subtest); B remains pending Fix #5 AUDIT-025 follow-up; C remains pending AUDIT-085** |
+| P6 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues` (+ 3 subtests) | Fix #5 (state machine sweepers + Resolved normalization) — **Closed by: Fix #5 (outer + A subtest); B+C closed by: Scope Deferrals (Campaign 2)** |
 | P7 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace`, `TestPattern_P7_ResetTaskResurrectsCompleted` | Fix #8/#5 (UpdateBountyStatusFrom) |
 | P8 | `internal/dashboard/audit_pattern_p8_test.go` | `TestPattern_P8_DashboardBindsAllInterfaces_ServesWildcardCORS` | Fix #2 (dashboard hardening) | Closed by: Fix #2 (`fix/dashboard-hardening`) |
 | P9 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels` (+ 3 subtests) | Fix #10 (RedactSecrets + webhook allow-list) | Closed by: Fix #10 (`fix/redact-and-outbound`) |
@@ -37,7 +37,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-008 | `internal/store/audit_pattern_p2_test.go` | `TestPattern_P2_IdempotencyKeyRace` | race (50 goroutines) | Fix #3 | Closed by: Fix #3 (`fix/idempotency-unique`) |
 | AUDIT-009 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static (PRAGMA) | Fix #4 | Closed by: Fix #4 |
 | AUDIT-010 | `internal/store/audit_pattern_p4_test.go` | same | static | Fix #4 | Closed by: Fix #4 |
-| AUDIT-011 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan` | static (EXPLAIN QUERY PLAN) | Fix #3/#4 | Write-side closed by: Fix #3 (Queue* helpers → idempotency_key + idx_bounty_idem). Read-side (`TestPattern_P3_BoundaryFalsePositive`) remains for Fix #4. |
+| AUDIT-011 | `internal/agents/audit_pattern_p3_test.go` + `internal/agents/convoy_id_read_path_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan`, `TestPattern_P3_BoundaryFalsePositive`, `TestAUDIT_011_ReadSide_QueriesUseIndex`, `TestAUDIT_011_ListReadyToShipConvoyIDs_UsesIndex` | static (EXPLAIN QUERY PLAN) | Fix #3/#4 | Write-side closed by: Fix #3 (Queue* helpers → idempotency_key + idx_bounty_idem). Read-side closed by: Scope Deferrals (Campaign 2). Every production JSON-field payload-LIKE dedup migrated to `convoy_id = ?` (structured-column equality); table-driven EXPLAIN QUERY PLAN test asserts every migrated site uses an index, not SCAN BountyBoard. |
 | AUDIT-012 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues/A_*` | static (AST grep) | Fix #5 | Closed by: Fix #5 |
 | AUDIT-013 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_013_MedicPayloadJSONSwallow` | static | Fix #8 | Closed by: Fix #8a (medicPayload unmarshal guarded) |
 | AUDIT-014 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_014_WorktreeResetParentRequeueSilent` | static | Fix #8 | Closed by: Fix #8a (parent-requeue + escalation-resolve checked) |
@@ -69,7 +69,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 |---|---|---|---|---|
 | AUDIT-023 | `internal/store/audit_schema_time_test.go` | `TestAUDIT_023_createSchema_drift` | static (PRAGMA) | Fix #4 companion | Closed by: Fix #4 |
 | AUDIT-024 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes` | static | Fix #4 | Closed by: Fix #4 |
-| AUDIT-025 | `internal/store/audit_pattern_p6_test.go` | `.../B_*` | static grep | Fix #5 | **Still pending** — requires Resolved→Closed normalization pass, not covered by Fix #5's stale-convoys change. Sub-test B skip remains. |
+| AUDIT-025 | `internal/store/audit_pattern_p6_test.go` + `internal/store/campaign2_migration_test.go` | `.../B_*`, `TestAUDIT_025_ResolvedToClosedMigration` | static grep + migration | Fix #5 | Closed by: Scope Deferrals (Campaign 2). All three sinks (escalation_sweeper, medic, pilot_worktree_reset) now write `status='Closed'`; schema migration UPDATEs legacy 'Resolved' rows → 'Closed' on startup. |
 | AUDIT-026 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ResetTaskResurrectsCompleted` | behavioral | Fix #8 |
 | AUDIT-027 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace` | race | Fix #8 |
 | AUDIT-028 | `internal/agents/audit_cost_loops_test.go` | `TestAUDIT_028_AskBranchRebaseConflictNoCap` | static (≈AUDIT-119) | Fix #6/#7 | Closed by: Fix #6 |
@@ -145,7 +145,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-074 | `internal/store/audit_medium_spotcheck_b_test.go` | `TestAUDIT_MediumSpotcheckB/AUDIT_074_*` | static | Fix #3 | Closed by: Fix #3 (`ReadInboxForAgent` rewritten as single-statement `UPDATE ... RETURNING` — no SELECT-then-per-id UPDATE race window) |
 | AUDIT-079 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_079_*` | static grep + live PRAGMA | Fix #4 companion | Closed by: Fix #4 |
 | AUDIT-081 | `internal/store/audit_medium_spotcheck_b_test.go` | `.../AUDIT_081_*` | static grep + behavioural | Fix #4 companion | Closed by: Fix #4 |
-| AUDIT-149 | `internal/agents/audit_medium_spotcheck_c_test.go` | `TestAuditMediumSpotcheckC/TestAUDIT_149_*` | static | Fix #5 | **Still pending** — requires `Escalations.auto_resolve_count` column + sweeper gate, not covered by Fix #5's stale-convoys change. |
+| AUDIT-149 | `internal/agents/audit_medium_spotcheck_c_test.go` + `internal/agents/escalation_sweeper_test.go` + `internal/store/campaign2_migration_test.go` | `TestAuditMediumSpotcheckC/TestAUDIT_149_sweeper_respects_operator_reopen`, `TestDogEscalationSweeper_RespectsOperatorReopen`, `TestAUDIT_149_AutoResolveCountColumnAdded` | static + behavioural + migration | Fix #5 | Closed by: Scope Deferrals (Campaign 2). `Escalations.auto_resolve_count` column added; sweeper increments exactly once and the `auto_resolve_count < 1` gate prevents silent re-close of operator-re-opened escalations. |
 | AUDIT-151 | `internal/agents/audit_medium_spotcheck_c_test.go` | `.../TestAUDIT_151_*` | static | Fix #8 |
 | AUDIT-152 | `internal/agents/audit_medium_spotcheck_c_test.go` | `.../TestAUDIT_152_*` | static | Fix #1 | Closed by: Fix #1 |
 | AUDIT-155 | `internal/agents/audit_medium_spotcheck_d_test.go` | `TestAuditMedium155_UnionMergeNoRepoLock` | static | Fix #8 |

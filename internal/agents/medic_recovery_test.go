@@ -93,11 +93,11 @@ func TestAutoCompletedMedicTask_BranchHasNoDiff(t *testing.T) {
 	if medic.Status != "Completed" {
 		t.Errorf("expected Medic review Completed, got %q", medic.Status)
 	}
-	// The Open escalation should have been resolved by the same path.
+	// The Open escalation should have been closed by the same path.
 	var escStatus string
 	db.QueryRow(`SELECT status FROM Escalations WHERE task_id = ?`, taskID).Scan(&escStatus)
-	if escStatus != "Resolved" {
-		t.Errorf("escalation for auto-completed task should be Resolved, got %q", escStatus)
+	if escStatus != "Closed" {
+		t.Errorf("escalation for auto-completed task should be Closed, got %q", escStatus)
 	}
 }
 
@@ -298,11 +298,11 @@ func TestRunWorktreeReset_CleansAndRequeuesParent(t *testing.T) {
 	if parent.BranchName != "" {
 		t.Errorf("branch_name should be cleared for fresh start, got %q", parent.BranchName)
 	}
-	// Escalation should be resolved.
+	// Escalation should be closed.
 	var escStatus string
 	db.QueryRow(`SELECT status FROM Escalations WHERE task_id = ?`, taskID).Scan(&escStatus)
-	if escStatus != "Resolved" {
-		t.Errorf("escalation should auto-resolve after cleanup; got %q", escStatus)
+	if escStatus != "Closed" {
+		t.Errorf("escalation should auto-close after cleanup; got %q", escStatus)
 	}
 }
 
