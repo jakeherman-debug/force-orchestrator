@@ -25,8 +25,20 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     branch_name    TEXT    DEFAULT '',   -- 'agent/<name>/task-<id>' persistent branch
     priority       INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
     task_timeout   INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
-    idempotency_key TEXT    DEFAULT ''  -- client-supplied UUID; duplicate submissions within 60s return the existing task
+    idempotency_key TEXT    DEFAULT ''  -- Fix #3: see idx_bounty_idem below
 );
+
+-- Fix #3 (AUDIT-008/034/035/036): partial UNIQUE index on idempotency_key.
+-- Scoped to non-empty keys AND non-terminal statuses so:
+--   * empty keys (the default for non-idempotent inserts) are not constrained
+--   * a terminal row (Completed/Cancelled/Failed) does NOT block a legitimate
+--     retry under the same key — the dedup only suppresses parallel/live work
+-- Queue* helpers in the fleet pair this with
+--   INSERT ... ON CONFLICT(idempotency_key) WHERE ... DO NOTHING RETURNING id
+-- so two concurrent callers with the same key cannot both insert.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bounty_idem
+    ON BountyBoard(idempotency_key)
+    WHERE idempotency_key != '' AND status NOT IN ('Completed','Cancelled','Failed');
 
 -- Status lifecycle:
 --   Pending → Locked (Astromech claims)
@@ -180,6 +192,13 @@ CREATE TABLE IF NOT EXISTS Escalations (
     acknowledged_at  TEXT    DEFAULT ''
 );
 
+-- Fix #3 (AUDIT-034): at most one Open escalation per task. CreateEscalation
+-- uses ON CONFLICT DO UPDATE SET severity=MAX(old,new), message=excluded.message
+-- so repeated self-healing paths merge into one row instead of spamming
+-- the operator inbox with N identical alerts.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_open_task
+    ON Escalations(task_id) WHERE status = 'Open';
+
 -- ── Fleet mail ────────────────────────────────────────────────────────────────
 -- Structured inter-agent messaging. Agents read their inbox at the start of each task.
 
@@ -275,6 +294,13 @@ CREATE TABLE IF NOT EXISTS FeatureBlockers (
 
 CREATE INDEX IF NOT EXISTS idx_feature_blockers_convoy   ON FeatureBlockers (blocked_convoy_id);
 CREATE INDEX IF NOT EXISTS idx_feature_blockers_feature  ON FeatureBlockers (blocking_feature_id);
+
+-- Fix #3 (AUDIT-036): partial UNIQUE on unresolved (blocked, blocking) pair.
+-- Before Fix #3, CreateFeatureBlocker used INSERT OR IGNORE against no UNIQUE
+-- constraint — ResolveFeatureBlockers re-runs produced duplicate rows that
+-- its own iteration then re-injected as cross-convoy dependencies twice.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_blockers_open
+    ON FeatureBlockers(blocked_convoy_id, blocking_feature_id) WHERE resolved_at IS NULL;
 
 -- ConvoyHolds: hard stop for Captain and Council — reject any task from a held convoy.
 -- Set alongside FeatureBlockers (or standalone for retroactive holds).

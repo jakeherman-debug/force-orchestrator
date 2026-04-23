@@ -74,40 +74,55 @@ type ciTriageDecision struct {
 // the failure to RealBug. Three failures of "just flaky" strongly imply it isn't.
 const medicRetriggerCap = 3
 
+// ciFailureTriageKey builds the canonical idempotency key for a sub-PR row.
+// Fix #3 (AUDIT-035, AUDIT-048): one outstanding triage per sub-PR row, keyed
+// via idx_bounty_idem rather than payload-LIKE scans inside the tx.
+func ciFailureTriageKey(subPRRowID int) string {
+	return fmt.Sprintf("ci-failure-triage:%d", subPRRowID)
+}
+
 // QueueCIFailureTriage enqueues a CIFailureTriage task for Medic. Returns the
 // task ID. Payload carries everything Medic needs to fetch the Jenkins log
 // and spawn a fix task if needed.
+//
+// Fix #3: dedup via the canonical `ci-failure-triage:<sub_pr_row_id>` key.
+// A concurrent second caller with the same sub-PR row gets the existing id
+// back rather than inserting a duplicate CIFailureTriage.
 func QueueCIFailureTriage(db *sql.DB, payload ciTriagePayload) (int, error) {
 	if payload.Repo == "" || payload.PRNumber == 0 || payload.TaskID == 0 {
 		return 0, fmt.Errorf("QueueCIFailureTriage: repo, pr_number, task_id required (got %+v)", payload)
 	}
+	if payload.SubPRRowID <= 0 {
+		return 0, fmt.Errorf("QueueCIFailureTriage: sub_pr_row_id required for canonical idempotency key (got %+v)", payload)
+	}
 	body, _ := json.Marshal(payload)
-	res, err := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (?, ?, 'CIFailureTriage', 'Pending', ?, 5, datetime('now'))`,
-		payload.TaskID, payload.Repo, string(body))
+	id, _, err := store.AddIdempotentTask(db, ciFailureTriageKey(payload.SubPRRowID),
+		payload.TaskID, payload.Repo, "CIFailureTriage", string(body), 0, 5, "Pending")
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	return id, nil
 }
 
 // QueueCIFailureTriageTx is the transactional sibling of QueueCIFailureTriage.
+// Uses store.AddIdempotentTaskTx so the atomic increment-count + queue-triage
+// sequence in onSubPRCIFailed retains its dedup guarantee without doing a
+// payload-LIKE scan inside the tx (the old shape pinned the single-connection
+// pool and scanned BountyBoard on every failure burst — see AUDIT-048).
 func QueueCIFailureTriageTx(tx *sql.Tx, payload ciTriagePayload) (int, error) {
 	if payload.Repo == "" || payload.PRNumber == 0 || payload.TaskID == 0 {
 		return 0, fmt.Errorf("QueueCIFailureTriageTx: repo, pr_number, task_id required (got %+v)", payload)
 	}
+	if payload.SubPRRowID <= 0 {
+		return 0, fmt.Errorf("QueueCIFailureTriageTx: sub_pr_row_id required for canonical idempotency key (got %+v)", payload)
+	}
 	body, _ := json.Marshal(payload)
-	res, err := tx.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (?, ?, 'CIFailureTriage', 'Pending', ?, 5, datetime('now'))`,
-		payload.TaskID, payload.Repo, string(body))
+	id, _, err := store.AddIdempotentTaskTx(tx, ciFailureTriageKey(payload.SubPRRowID),
+		payload.TaskID, payload.Repo, "CIFailureTriage", string(body), 0, 5, "Pending")
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	return id, nil
 }
 
 // runMedicCITriage is the handler for a single CIFailureTriage task.

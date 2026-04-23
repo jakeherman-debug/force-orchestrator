@@ -32,28 +32,25 @@ type rebaseAgentPayload struct {
 // QueueRebaseAgentBranch enqueues a Pilot task to rebase an agent branch onto
 // its convoy's ask-branch. Idempotent: returns existing task ID if a Pending or
 // Locked RebaseAgentBranch task for the same sub_pr_row_id already exists.
+//
+// Fix #3 (AUDIT-035): canonical idempotency key `rebase-agent:<sub_pr_row_id>`
+// gated by idx_bounty_idem replaces the previous payload-LIKE dedup. The
+// REBASE_CONFLICT sibling-task check still uses branch_name lookup (that's
+// the column's primary purpose) and stays on its own gate below.
 func QueueRebaseAgentBranch(db *sql.DB, p rebaseAgentPayload) (int, error) {
 	if p.Branch == "" || p.AskBranch == "" || p.Repo == "" {
 		return 0, fmt.Errorf("QueueRebaseAgentBranch: branch, ask_branch, and repo required")
 	}
-
-	// Dedup: only one outstanding rebase per sub-PR row.
-	var existing int
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
-		WHERE type = 'RebaseAgentBranch' AND status IN ('Pending', 'Locked')
-		  AND (payload LIKE '%"sub_pr_row_id":' || ? || ',%'
-		    OR payload LIKE '%"sub_pr_row_id":' || ? || '}%')`,
-		p.SubPRRowID, p.SubPRRowID).Scan(&existing)
-	if existing > 0 {
-		return 0, nil // already queued
+	if p.SubPRRowID <= 0 {
+		return 0, fmt.Errorf("QueueRebaseAgentBranch: sub_pr_row_id required for canonical idempotency key")
 	}
 
 	// Also dedup if there's an active REBASE_CONFLICT resolution task for the
 	// same agent branch. RebaseAgentBranch marks itself Completed after spawning
-	// the child, so the check above misses the escalated-child case and lets
-	// sub-pr-ci-watch spawn duplicate rebase chains. Block until the conflict
-	// task is resolved (Completed or Cancelled) — if it escalated, the operator
-	// must dismiss it before the system retries.
+	// the child, so the key-based dedup above misses the escalated-child case
+	// and lets sub-pr-ci-watch spawn duplicate rebase chains. Block until the
+	// conflict task is resolved (Completed or Cancelled) — if it escalated, the
+	// operator must dismiss it before the system retries.
 	if p.Branch != "" {
 		var existingConflict int
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
@@ -81,15 +78,16 @@ func QueueRebaseAgentBranch(db *sql.DB, p rebaseAgentPayload) (int, error) {
 	}
 
 	payload, _ := json.Marshal(p)
-	res, err := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (0, ?, 'RebaseAgentBranch', 'Pending', ?, 4, datetime('now'))`,
-		p.Repo, string(payload))
+	key := fmt.Sprintf("rebase-agent:%d", p.SubPRRowID)
+	id, existed, err := store.AddIdempotentTask(db, key,
+		0, p.Repo, "RebaseAgentBranch", string(payload), p.ConvoyID, 4, "Pending")
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	if existed {
+		return 0, nil // already queued under this canonical key
+	}
+	return id, nil
 }
 
 func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {

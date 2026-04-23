@@ -33,22 +33,22 @@ type rebasePayload struct {
 }
 
 // QueueRebaseAskBranch enqueues a Pilot rebase task for a (convoy, repo).
-// Idempotent at the caller level: main-drift-watch checks for existing
-// Pending/Locked tasks before queueing another.
+// Idempotent (Fix #3, AUDIT-035): canonical key `rebase-askbranch:<convoy>:<repo>`
+// via idx_bounty_idem. Two concurrent main-drift-watch ticks observing the
+// same drift window cannot both insert a task — the loser sees DO NOTHING
+// fire and picks up the existing row.
 func QueueRebaseAskBranch(db *sql.DB, convoyID int, repo string) (int, error) {
 	if convoyID <= 0 || repo == "" {
 		return 0, fmt.Errorf("QueueRebaseAskBranch: convoyID and repo required")
 	}
 	payload, _ := json.Marshal(rebasePayload{ConvoyID: convoyID, Repo: repo})
-	res, err := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (0, ?, 'RebaseAskBranch', 'Pending', ?, 3, datetime('now'))`,
-		repo, string(payload))
+	key := fmt.Sprintf("rebase-askbranch:%d:%s", convoyID, repo)
+	id, _, err := store.AddIdempotentTask(db, key,
+		0, repo, "RebaseAskBranch", string(payload), convoyID, 3, "Pending")
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	return id, nil
 }
 
 func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
@@ -251,18 +251,10 @@ func dogMainDriftWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 		if headSHA == ab.AskBranchBaseSHA {
 			continue // no drift
 		}
-		// Drift detected — but only queue if not already queued/in-flight.
-		// Boundary-match on convoy_id so id=1 doesn't dedup against 10, 100, etc.
-		var existing int
-		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
-			WHERE type = 'RebaseAskBranch' AND status IN ('Pending', 'Locked')
-			  AND target_repo = ?
-			  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-			    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-			ab.Repo, ab.ConvoyID, ab.ConvoyID).Scan(&existing)
-		if existing > 0 {
-			continue
-		}
+		// Drift detected — QueueRebaseAskBranch is now race-safe via the
+		// `rebase-askbranch:<convoy>:<repo>` canonical idempotency key +
+		// idx_bounty_idem (Fix #3), so we no longer need a pre-check. A second
+		// tick finding the same drift just gets the existing row back.
 		id, qErr := QueueRebaseAskBranch(db, ab.ConvoyID, ab.Repo)
 		if qErr != nil {
 			logger.Printf("main-drift-watch: queue failed for convoy %d repo %s: %v",

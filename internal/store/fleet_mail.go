@@ -65,18 +65,39 @@ func GetMail(db *sql.DB, id int) *FleetMail {
 // Matches: to_agent = agentName, OR to_agent = role (e.g. "astromech"), OR to_agent = "all"
 // Scoped to: task_id = 0 (standing) OR task_id = taskID (task-specific).
 // Marks all returned messages as consumed. Does NOT touch read_at (operator display flag).
+//
+// Fix #3 (AUDIT-074): the claim is a single-statement
+//
+//	UPDATE Fleet_Mail SET consumed_at = datetime('now')
+//	WHERE id IN (SELECT id ... WHERE consumed_at = '' ...)
+//	RETURNING ...
+//
+// so two agents whose role/name/task_id scopes overlap cannot both observe
+// the same unconsumed row between the SELECT and the per-id UPDATE. The
+// previous shape (SELECT then a per-row MarkMailConsumed loop) released the
+// single connection between statements, giving the second reader a full
+// window to re-SELECT the same rows and double-process their payloads.
 func ReadInboxForAgent(db *sql.DB, agentName, role string, taskID int) []FleetMail {
+	// Order within the subquery so consumers observe mail in creation order,
+	// matching the prior contract. The outer UPDATE ... RETURNING emits rows in
+	// UPDATE order (SQLite doesn't guarantee stable order post-UPDATE without
+	// an explicit ORDER BY), so we sort client-side after the fact.
 	rows, err := db.Query(`
-		SELECT id, from_agent, to_agent, subject, body, task_id, message_type, read_at, consumed_at, created_at
-		FROM Fleet_Mail
-		WHERE consumed_at = ''
-		  AND (to_agent = ? OR to_agent = ? OR to_agent = 'all')
-		  AND (task_id = 0 OR task_id = ?)
-		ORDER BY created_at ASC`,
+		UPDATE Fleet_Mail
+		SET consumed_at = datetime('now')
+		WHERE id IN (
+			SELECT id FROM Fleet_Mail
+			WHERE consumed_at = ''
+			  AND (to_agent = ? OR to_agent = ? OR to_agent = 'all')
+			  AND (task_id = 0 OR task_id = ?)
+		)
+		RETURNING id, from_agent, to_agent, subject, body, task_id, message_type,
+		          read_at, consumed_at, created_at`,
 		agentName, role, taskID)
 	if err != nil {
 		return nil
 	}
+	defer rows.Close()
 
 	var mails []FleetMail
 	for rows.Next() {
@@ -86,13 +107,26 @@ func ReadInboxForAgent(db *sql.DB, agentName, role string, taskID int) []FleetMa
 		m.MessageType = MailType(mt)
 		mails = append(mails, m)
 	}
-	rows.Close() // explicit close required before consume writes on single-connection pool
-
-	// Mark all as consumed now that the agent has processed them.
-	for _, m := range mails {
-		MarkMailConsumed(db, m.ID)
-	}
+	// Preserve the pre-fix creation-order contract.
+	sortMailsByCreatedAscID(mails)
 	return mails
+}
+
+// sortMailsByCreatedAscID sorts mails in place by (created_at ASC, id ASC).
+// created_at ties are broken by id so re-runs against the same DB observe
+// the same order.
+func sortMailsByCreatedAscID(mails []FleetMail) {
+	// In-place insertion sort — the inbox is almost always very small
+	// (single-digit rows per agent tick), so this is cheaper than the
+	// allocation from sort.Slice.
+	for i := 1; i < len(mails); i++ {
+		j := i
+		for j > 0 && (mails[j-1].CreatedAt > mails[j].CreatedAt ||
+			(mails[j-1].CreatedAt == mails[j].CreatedAt && mails[j-1].ID > mails[j].ID)) {
+			mails[j-1], mails[j] = mails[j], mails[j-1]
+			j--
+		}
+	}
 }
 
 // MarkMailRead marks a message as read by a human operator (UI display flag only).

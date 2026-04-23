@@ -542,27 +542,10 @@ func onSubPRCIFailed(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(
 		return
 	}
 
-	// Dedup check: boundary-match on JSON token so sub_pr_row_id=1 doesn't dedup
-	// against 10, 11, 100, etc. JSON always follows the ID with `,` or `}`.
-	var existing int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM BountyBoard
-		WHERE type = 'CIFailureTriage' AND status IN ('Pending', 'Locked')
-		  AND (payload LIKE '%"sub_pr_row_id":' || ? || ',%'
-		    OR payload LIKE '%"sub_pr_row_id":' || ? || '}%')`,
-		pr.ID, pr.ID).Scan(&existing); err != nil {
-		logger.Printf("sub-pr-ci-watch: dedup query failed for sub-PR #%d: %v", pr.PRNumber, err)
-		return
-	}
-	if existing > 0 {
-		// Commit so the failure_count increment lands even though no triage was queued.
-		if err := tx.Commit(); err != nil {
-			logger.Printf("sub-pr-ci-watch: commit failure count for #%d failed: %v", pr.PRNumber, err)
-			return
-		}
-		logger.Printf("sub-pr-ci-watch: sub-PR #%d CI failed (count=%d) — triage already queued", pr.PRNumber, newCount)
-		return
-	}
-
+	// Dedup is now handled atomically inside QueueCIFailureTriageTx via the
+	// `ci-failure-triage:<sub_pr_row_id>` canonical key + idx_bounty_idem (Fix
+	// #3 / AUDIT-048). No payload-LIKE scan against the single connection in
+	// the tx — the unique-index conflict is the source of truth.
 	triageID, qErr := QueueCIFailureTriageTx(tx, ciTriagePayload{
 		SubPRRowID: pr.ID, Repo: pr.Repo, PRNumber: pr.PRNumber,
 		Branch: branch, TaskID: pr.TaskID,

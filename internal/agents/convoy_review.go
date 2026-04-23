@@ -81,29 +81,29 @@ type convoyReviewFinding struct {
 
 // QueueConvoyReview enqueues a ConvoyReview task for the convoy.
 // Idempotent: returns 0, nil if one is already Pending or Locked.
+//
+// Fix #3 (AUDIT-035): the dedup is backed by the canonical idempotency key
+// `convoy-review:<convoyID>` and the partial UNIQUE idx_bounty_idem, replacing
+// the previous brittle payload-LIKE dedup. Two concurrent callers for the
+// same convoy cannot both land a row.
 func QueueConvoyReview(db *sql.DB, convoyID int) (int, error) {
 	if convoyID <= 0 {
 		return 0, fmt.Errorf("QueueConvoyReview: convoyID required")
 	}
-	var existing int
-	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
-		WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-		    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&existing)
-	if existing > 0 {
-		return 0, nil
-	}
 	payload, _ := json.Marshal(convoyReviewPayload{ConvoyID: convoyID})
-	res, err := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (0, '', 'ConvoyReview', 'Pending', ?, 5, datetime('now'))`,
-		string(payload))
+	key := fmt.Sprintf("convoy-review:%d", convoyID)
+	id, existed, err := store.AddIdempotentTask(db, key,
+		0, "", "ConvoyReview", string(payload), convoyID, 5, "Pending")
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	if existed {
+		// Preserve the pre-fix contract: "already queued" returns (0, nil)
+		// rather than the existing id, matching the existing callers in
+		// Diplomat / dogConvoyReviewWatch which only care about new work.
+		return 0, nil
+	}
+	return id, nil
 }
 
 func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {

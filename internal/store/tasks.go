@@ -381,33 +381,135 @@ func AddConvoyTask(db *sql.DB, parentID int, repo, payload string, convoyID, pri
 //	rebase-conflict:branch:<branch>         — one outstanding conflict per agent branch
 //	rebase-conflict:askbranch:<askbranch>   — one outstanding conflict per ask-branch
 //	convoy-review-fix:<convoyID>:<hash>     — one outstanding fix per review finding
+//	convoy-review:<convoyID>                — one outstanding ConvoyReview per convoy
+//	worktree-reset:<parent_task_id>         — one outstanding WorktreeReset per parent
+//	rebase-agent:<sub_pr_row_id>            — one outstanding RebaseAgentBranch per sub-PR
+//	create-askbranch:<convoyID>             — one outstanding CreateAskBranch per convoy
+//	rebase-askbranch:<convoyID>:<repo>      — one outstanding RebaseAskBranch per (convoy,repo)
+//	pr-review-triage:<convoyID>             — one outstanding PRReviewTriage per convoy
+//	ci-failure-triage:<sub_pr_row_id>       — one outstanding CIFailureTriage per sub-PR row
 //
 // idempotencyKey must be non-empty; callers that can't produce a stable key
 // should use plain AddConvoyTask instead.
+//
+// Race-safety (Fix #3, AUDIT-008): backed by the partial UNIQUE index
+// idx_bounty_idem on BountyBoard(idempotency_key) WHERE idempotency_key != ''
+// AND status NOT IN ('Completed','Cancelled','Failed'). The insert uses
+// INSERT ... ON CONFLICT(idempotency_key) ... DO NOTHING RETURNING id so that
+// under concurrent callers the second insert is rejected atomically and we
+// fall back to SELECT-ing the row that won the race. No TOCTOU window.
 func AddConvoyTaskIdempotent(db *sql.DB, idempotencyKey string, parentID int, repo, payload string, convoyID, priority int, status string) (id int, alreadyExisted bool, err error) {
 	if idempotencyKey == "" {
 		return 0, false, fmt.Errorf("AddConvoyTaskIdempotent: idempotencyKey required")
 	}
+	return addTaskIdempotent(db, idempotencyKey, parentID, repo, "CodeEdit", payload, convoyID, priority, status)
+}
+
+// AddIdempotentTask is the typed sibling of AddConvoyTaskIdempotent: same
+// race-safe plumbing via the partial UNIQUE idx_bounty_idem, but with taskType
+// as a parameter so callers outside the CodeEdit path (Queue* helpers for
+// infrastructure tasks like ConvoyReview, WorktreeReset, RebaseAgentBranch,
+// PRReviewTriage, etc.) can share the same atomic insert.
+//
+// Returns (existingID, true, nil) when a live non-terminal row already claims
+// the key; (newID, false, nil) on a fresh insert. idempotencyKey must be
+// non-empty; callers that can't produce a canonical key should use the
+// non-idempotent inserters instead.
+func AddIdempotentTask(db *sql.DB, idempotencyKey string, parentID int, repo, taskType, payload string, convoyID, priority int, status string) (id int, alreadyExisted bool, err error) {
+	if idempotencyKey == "" {
+		return 0, false, fmt.Errorf("AddIdempotentTask: idempotencyKey required")
+	}
+	if taskType == "" {
+		return 0, false, fmt.Errorf("AddIdempotentTask: taskType required")
+	}
+	return addTaskIdempotent(db, idempotencyKey, parentID, repo, taskType, payload, convoyID, priority, status)
+}
+
+// AddIdempotentTaskTx is the transactional sibling of AddIdempotentTask. Uses
+// the same partial UNIQUE idx_bounty_idem-backed INSERT ... ON CONFLICT DO
+// NOTHING RETURNING id, so a caller already inside a transaction (e.g.
+// onSubPRCIFailed's failure-count + triage-queue atomic block) still benefits
+// from the dedup. On conflict (DO NOTHING), falls back to SELECT-existing via
+// the same tx.
+func AddIdempotentTaskTx(tx *sql.Tx, idempotencyKey string, parentID int, repo, taskType, payload string, convoyID, priority int, status string) (id int, alreadyExisted bool, err error) {
+	if idempotencyKey == "" {
+		return 0, false, fmt.Errorf("AddIdempotentTaskTx: idempotencyKey required")
+	}
+	if taskType == "" {
+		return 0, false, fmt.Errorf("AddIdempotentTaskTx: taskType required")
+	}
+	var newID int
+	scanErr := tx.QueryRow(
+		`INSERT INTO BountyBoard
+		    (parent_id, target_repo, type, status, payload, convoy_id, priority, idempotency_key, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		 ON CONFLICT(idempotency_key)
+		 WHERE idempotency_key != '' AND status NOT IN ('Completed','Cancelled','Failed')
+		 DO NOTHING
+		 RETURNING id`,
+		parentID, repo, taskType, status, payload, convoyID, priority, idempotencyKey,
+	).Scan(&newID)
+	if scanErr == nil {
+		return newID, false, nil
+	}
+	if scanErr != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("idempotent insert (tx): %w", scanErr)
+	}
 	var existing int
-	qErr := db.QueryRow(`SELECT id FROM BountyBoard
-		WHERE idempotency_key = ?
-		  AND status NOT IN ('Completed','Cancelled','Failed')
-		LIMIT 1`, idempotencyKey).Scan(&existing)
-	if qErr == nil && existing > 0 {
-		return existing, true, nil
+	// `idempotency_key != ''` is required for SQLite's partial-index planner
+	// to pick up idx_bounty_idem. See the addTaskIdempotent comment.
+	if sErr := tx.QueryRow(
+		`SELECT id FROM BountyBoard
+		 WHERE idempotency_key = ?
+		   AND idempotency_key != ''
+		   AND status NOT IN ('Completed','Cancelled','Failed')
+		 LIMIT 1`, idempotencyKey).Scan(&existing); sErr != nil {
+		return 0, false, fmt.Errorf("post-conflict lookup (tx): %w", sErr)
 	}
-	if qErr != nil && qErr != sql.ErrNoRows {
-		return 0, false, fmt.Errorf("dedup query: %w", qErr)
+	return existing, true, nil
+}
+
+// addTaskIdempotent inserts a BountyBoard row gated on idempotency_key via the
+// partial UNIQUE idx_bounty_idem. Returns (existingID, true, nil) when another
+// caller won the race under the same key; (newID, false, nil) on fresh insert.
+//
+// taskType is parameterised so the different Queue* helpers (WorktreeReset,
+// ConvoyReview, RebaseAgentBranch, etc.) can share the same race-safe plumbing.
+func addTaskIdempotent(db *sql.DB, idempotencyKey string, parentID int, repo, taskType, payload string, convoyID, priority int, status string) (id int, alreadyExisted bool, err error) {
+	var newID int
+	scanErr := db.QueryRow(
+		`INSERT INTO BountyBoard
+		    (parent_id, target_repo, type, status, payload, convoy_id, priority, idempotency_key, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		 ON CONFLICT(idempotency_key)
+		 WHERE idempotency_key != '' AND status NOT IN ('Completed','Cancelled','Failed')
+		 DO NOTHING
+		 RETURNING id`,
+		parentID, repo, taskType, status, payload, convoyID, priority, idempotencyKey,
+	).Scan(&newID)
+	if scanErr == nil {
+		return newID, false, nil
 	}
-	res, execErr := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, idempotency_key, created_at)
-		 VALUES (?, ?, 'CodeEdit', ?, ?, ?, ?, ?, datetime('now'))`,
-		parentID, repo, status, payload, convoyID, priority, idempotencyKey)
-	if execErr != nil {
-		return 0, false, execErr
+	if scanErr != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("idempotent insert: %w", scanErr)
 	}
-	newID, _ := res.LastInsertId()
-	return int(newID), false, nil
+	// DO NOTHING fired — some other caller won the race (or we saw an existing
+	// live row). Look up the existing row; scope to non-terminal statuses so we
+	// only return the row that actually blocked the insert.
+	var existing int
+	// The `idempotency_key != ''` predicate below is redundant with the
+	// equality match when idempotencyKey is non-empty (we enforce that above),
+	// but it's required for SQLite's partial-index planner to pick up
+	// idx_bounty_idem — without it, the planner falls back to SCAN BountyBoard.
+	if sErr := db.QueryRow(
+		`SELECT id FROM BountyBoard
+		 WHERE idempotency_key = ?
+		   AND idempotency_key != ''
+		   AND status NOT IN ('Completed','Cancelled','Failed')
+		 LIMIT 1`, idempotencyKey).Scan(&existing); sErr != nil {
+		return 0, false, fmt.Errorf("post-conflict lookup: %w", sErr)
+	}
+	return existing, true, nil
 }
 
 // AddCodeEditTask creates a CodeEdit task with full field support. Returns the new task ID.

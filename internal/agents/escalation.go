@@ -27,19 +27,45 @@ func ParseEscalationSignal(output string) (store.EscalationSeverity, string, boo
 	return store.EscalationSeverity(matches[1]), strings.TrimSpace(matches[2]), true
 }
 
-// CreateEscalation records a new escalation for a task.
+// CreateEscalation records a new escalation for a task. Fix #3 (AUDIT-034):
+// the Escalations table carries a partial UNIQUE on (task_id) WHERE status='Open',
+// so repeated self-healing paths firing against the same task produce exactly
+// one Open row rather than one per trigger. On conflict we merge: message is
+// refreshed with the most recent context, and severity is raised to the max of
+// the existing and incoming levels (never downgraded under the hood).
 func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) int {
-	res, _ := db.Exec(
-		`INSERT INTO Escalations (task_id, severity, message, status) VALUES (?, ?, ?, 'Open')`,
+	// Severity ordering: LOW < MEDIUM < HIGH. Encode as integers for MAX().
+	// severity_rank is inlined via CASE so we don't need a lookup table.
+	var id int
+	// ON CONFLICT(task_id) WHERE status='Open' needs the predicate spelled out
+	// in the upsert target for SQLite to match the partial UNIQUE index.
+	err := db.QueryRow(
+		`INSERT INTO Escalations (task_id, severity, message, status)
+		 VALUES (?, ?, ?, 'Open')
+		 ON CONFLICT(task_id) WHERE status = 'Open'
+		 DO UPDATE SET
+		     severity = CASE
+		         WHEN (CASE excluded.severity WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END)
+		            > (CASE Escalations.severity WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END)
+		         THEN excluded.severity
+		         ELSE Escalations.severity
+		     END,
+		     message = excluded.message
+		 RETURNING id`,
 		taskID, string(severity), message,
-	)
-	id, _ := res.LastInsertId()
+	).Scan(&id)
+	if err != nil {
+		// If the scan fails for any reason, surface a zero id but keep the
+		// caller moving — escalations must never be a silent drop, so follow
+		// up with a best-effort mark of the task as Escalated.
+		id = 0
+	}
 
 	// Mark the task as Escalated so it doesn't get retried automatically.
 	// Use UpdateBountyStatus so the webhook fires for this transition.
 	store.UpdateBountyStatus(db, taskID, "Escalated")
 
-	return int(id)
+	return id
 }
 
 // ListEscalations returns escalations filtered by status ("Open", "Acknowledged", "Closed", or "" for all).

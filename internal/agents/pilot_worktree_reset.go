@@ -38,29 +38,24 @@ type worktreeResetPayload struct {
 // QueueWorktreeReset enqueues a WorktreeReset task. Idempotent: returns the
 // existing task ID if a Pending/Locked WorktreeReset for the same parent task
 // is already queued.
+//
+// Fix #3 (AUDIT-035): canonical idempotency key `worktree-reset:<parent_task_id>`
+// gated by idx_bounty_idem replaces the previous payload-LIKE dedup.
 func QueueWorktreeReset(db *sql.DB, p worktreeResetPayload) (int, error) {
 	if p.Repo == "" || p.TargetBranch == "" {
 		return 0, fmt.Errorf("QueueWorktreeReset: repo and target_branch required")
 	}
-	var existing int
-	db.QueryRow(`SELECT id FROM BountyBoard
-		WHERE type = 'WorktreeReset' AND status IN ('Pending','Locked')
-		  AND (payload LIKE '%"parent_task_id":' || ? || ',%'
-		    OR payload LIKE '%"parent_task_id":' || ? || '}%')`,
-		p.ParentTaskID, p.ParentTaskID).Scan(&existing)
-	if existing > 0 {
-		return existing, nil
+	if p.ParentTaskID <= 0 {
+		return 0, fmt.Errorf("QueueWorktreeReset: parent_task_id required for canonical idempotency key")
 	}
 	payload, _ := json.Marshal(p)
-	res, err := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (?, ?, 'WorktreeReset', 'Pending', ?, 4, datetime('now'))`,
-		p.ParentTaskID, p.Repo, string(payload))
+	key := fmt.Sprintf("worktree-reset:%d", p.ParentTaskID)
+	id, _, err := store.AddIdempotentTask(db, key,
+		p.ParentTaskID, p.Repo, "WorktreeReset", string(payload), 0, 4, "Pending")
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	return id, nil
 }
 
 func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
