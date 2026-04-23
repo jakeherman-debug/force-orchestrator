@@ -3,6 +3,7 @@ package dashboard
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -137,8 +138,21 @@ func handlePostHumanReply(db *sql.DB, w http.ResponseWriter, r *http.Request, ro
 	// Operator may override the draft with their own text.
 	body := row.ReplyBody
 	if r.Body != nil {
-		raw, _ := io.ReadAll(r.Body)
+		// AUDIT-054: 256 KB body cap (securityMiddleware wraps r.Body in
+		// MaxBytesReader). An oversize body surfaces as *http.MaxBytesError
+		// from io.ReadAll — translate to 413 and return.
+		raw, readErr := io.ReadAll(r.Body)
 		_ = r.Body.Close()
+		if readErr != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(readErr, &mbe) {
+				http.Error(w,
+					fmt.Sprintf(`{"error":"request body exceeds %d-byte limit"}`, maxRequestBodyBytes),
+					http.StatusRequestEntityTooLarge)
+				return
+			}
+			// Non-size read failures fall through to the no-override path.
+		}
 		if len(raw) > 0 {
 			var req struct {
 				Body string `json:"body"`

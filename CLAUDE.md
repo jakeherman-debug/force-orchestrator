@@ -10,6 +10,18 @@ This file captures invariants that are easy to violate without noticing. Read it
 - **Worktree isolation.** Astromechs work in persistent per-agent git worktrees (`.force-worktrees/<repo>/<agent>`). They branch off HEAD of the repo (or the convoy's ask-branch under the PR flow). Never hardcode `main` or `master` — use `GetDefaultBranch(repoPath)`.
 - **Protected-branch guard (Fix #0).** Every destructive git op — `ForcePushBranch`, `TriggerCIRerun`, `DeleteAskBranch`, `MergeAndCleanup`, `completeAskBranchResolution` — MUST call `igit.AssertNotDefaultBranch(repoPath, branch)` as its first statement. Never add a new destructive git op without the guard. The store ingress (`UpsertConvoyAskBranch`) additionally rejects protected branch names at write time so DB-corrupt rows can't flow downstream. If you need to rewrite a protected branch for a legitimate reason, create a new entry point with an explicit opt-in — do NOT relax the denylist.
 
+## Dashboard invariants (Fix #2)
+
+The command-center dashboard has no auth. It is a single-user local tool, and every directive below keeps it that way.
+
+1. **Bind 127.0.0.1 only.** `RunDashboard` uses `loopbackBindAddr(port)` (returns `127.0.0.1:PORT`). Never construct the bind address with `fmt.Sprintf(":%d", port)` — that binds every interface and re-opens AUDIT-001. If remote access is needed, the supported path is an SSH tunnel (`ssh -L 8080:localhost:8080`), not relaxing the bind.
+2. **Same-origin allow-list on every mutation.** `securityMiddleware` wraps the mux globally; every POST / PUT / PATCH / DELETE is gated by `originAllowed` (with `refererAllowed` as a fallback for browsers that omit Origin). A new mutating handler inherits the gate automatically as long as it lives on the wrapped mux — never bypass by constructing a second `http.Server`.
+3. **256 KB body cap on every mutation.** `securityMiddleware` wraps `r.Body` in `http.MaxBytesReader(w, r.Body, 256<<10)` for mutating methods. Handlers that decode JSON or `io.ReadAll` the body MUST translate `*http.MaxBytesError` to 413 via `writeBodyReadError` (or the inline `errors.As` pattern). Do not unwrap and recreate `r.Body` — that removes the cap.
+4. **No wildcard CORS, ever.** `jsonCORS` stamps the content type only. SSE handlers stamp no CORS header either. A `w.Header().Set("Access-Control-Allow-Origin", "*")` line in any new handler is a regression — the P8 audit test greps for it.
+5. **CSP + security headers on every response.** `setSecurityHeaders` (called by the middleware) writes `Content-Security-Policy: default-src 'self'; …`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. The `index.html` additionally carries a CSP `<meta http-equiv>` tag as belt-and-suspenders. Both must stay; remove neither.
+6. **Attacker-writable strings render as text, not HTML.** Mail bodies, task payloads, PR-review comment bodies, and any other string that can flow from an agent, a GitHub user, or the operator's paste buffer must be assigned to `.textContent`, never `.innerHTML`. `marked.parse` is banned; if rich rendering is ever needed back, bundle marked + DOMPurify locally (no CDN, integrity= SRI attr, every call wrapped in `DOMPurify.sanitize`).
+7. **High-escalation banner threshold.** The `#high-esc-banner` element becomes visible when `status.high_escalations >= 3`. That threshold is documented in AUDIT-064 and wired in `app.js`; if it ever needs to change, update both the UI logic and CLAUDE.md in the same commit.
+
 ## PR flow invariants
 
 The fleet delivers via GitHub PRs by default (`pr_flow_enabled = true`). Code touching the approval, merge, or branch-creation paths must respect the following:

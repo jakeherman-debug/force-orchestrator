@@ -3,6 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- AUDIT-002 / AUDIT-003 (Fix #2): CSP locks script/style execution to same-origin.
+       The server also emits this as a response header via securityMiddleware; the
+       meta tag here is belt-and-suspenders for offline / file:// viewing. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
   <title>Fleet Command Center</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -59,14 +63,24 @@
   </div>
 </div>
 
+<!-- ── High-escalations banner (AUDIT-064 / Fix #2) ─────────────────────────
+     Visible when >=3 Open escalations exist, from any tab. The fleet is
+     failing in ways that self-healing couldn't resolve — the operator is
+     the bottleneck. Red, loud, unmistakable. -->
+<div id="high-esc-banner" class="high-esc-banner hidden" onclick="jumpToEscalations()" role="button" tabindex="0">
+  <span class="high-esc-banner-icon">&#9888;</span>
+  <span class="high-esc-banner-msg"><span id="high-esc-banner-count">0</span> HIGH-severity escalation(s) open — fleet self-healing exhausted</span>
+  <span class="high-esc-banner-cta">Go to Escalations &rarr;</span>
+</div>
+
 <!-- ── Ready-to-ship banner ─────────────────────────────────────────────────── -->
 <!-- Shows whenever one or more convoys are in DraftPROpen state. The fleet has
      done its job and is waiting on the operator to click Ship It — this is the
      only state where the operator is the bottleneck, so it needs to be loud. -->
 <div id="ship-banner" class="ship-banner hidden" onclick="jumpToShipReady()" role="button" tabindex="0">
-  <span class="ship-banner-icon">🚢</span>
-  <span class="ship-banner-msg"><span id="ship-banner-count">0</span> convoy(s) ready to ship — click to review</span>
-  <span class="ship-banner-cta">Go to Convoys →</span>
+  <span class="ship-banner-icon">&#128674;</span>
+  <span class="ship-banner-msg"><span id="ship-banner-count">0</span> convoy(s) ready to ship &mdash; click to review</span>
+  <span class="ship-banner-cta">Go to Convoys &rarr;</span>
 </div>
 
 <!-- ── Tab bar ──────────────────────────────────────────────────────────────── -->
@@ -417,7 +431,11 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<!-- AUDIT-002 / AUDIT-003 (Fix #2): marked.js removed entirely.
+     The mail-body modal now renders m.body via .textContent, which is the
+     safer default: no HTML parsing means no XSS sink to sanitize around.
+     If rich rendering is ever needed back, bundle marked locally under
+     static/ with DOMPurify, do not reinstate the CDN. -->
 <script src="app.js"></script>
 </body>
 </html>

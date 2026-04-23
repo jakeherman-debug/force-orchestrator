@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -20,9 +21,15 @@ import (
 	"force-orchestrator/internal/util"
 )
 
+// jsonCORS stamps the JSON content type for dashboard responses.
+// AUDIT-001/-053: the wildcard Access-Control-Allow-Origin header was removed.
+// Same-origin requests don't need CORS; a wildcard actively let any page on
+// the internet EventSource our SSE streams and drive /api/* POSTs.
+// Global security headers (CSP, X-Frame-Options, etc.) are stamped by
+// securityMiddleware, not here — this function is only about the content type.
+// Name preserved for the audit pattern test (TestPattern_P8) which greps for it.
 func jsonCORS(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +291,19 @@ func handleTasksSubroutes(db *sql.DB) http.HandlerFunc {
 				var cancelBody struct {
 					RequeueType string `json:"requeue_type"`
 				}
-				json.NewDecoder(r.Body).Decode(&cancelBody)
+				// AUDIT-054: decode is gated by MaxBytesReader wrapping r.Body in
+				// securityMiddleware. An oversize body surfaces as *http.MaxBytesError
+				// here and translates to 413. Empty body is fine — decode error is
+				// tolerated because cancel works without a requeue hint.
+				if err := json.NewDecoder(r.Body).Decode(&cancelBody); err != nil {
+					var mbe *http.MaxBytesError
+					if errors.As(err, &mbe) {
+						writeBodyReadError(w, err)
+						return
+					}
+					// Non-size decode failures are fine here (empty/malformed body
+					// just means no requeue hint).
+				}
 				store.CancelTask(db, id, "Cancelled via dashboard")
 				store.LogAudit(db, "dashboard", "cancel", id, "cancelled via dashboard")
 				if cancelBody.RequeueType != "" {
@@ -304,7 +323,15 @@ func handleTasksSubroutes(db *sql.DB) http.HandlerFunc {
 
 			case "reject":
 				var body rejectBody
-				json.NewDecoder(r.Body).Decode(&body)
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					// AUDIT-054: 256 KB body cap — oversized body → 413.
+					var mbe *http.MaxBytesError
+					if errors.As(err, &mbe) {
+						writeBodyReadError(w, err)
+						return
+					}
+					// Fall through — reason-required check below catches empty body.
+				}
 				if strings.TrimSpace(body.Reason) == "" {
 					http.Error(w, `{"error":"reason is required"}`, http.StatusBadRequest)
 					return
@@ -1099,7 +1126,9 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 		}
 		var body addTaskBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			// AUDIT-054: 256 KB body cap (securityMiddleware wraps r.Body in
+			// MaxBytesReader). Oversize → 413; malformed JSON → 400.
+			writeBodyReadError(w, err)
 			return
 		}
 		if strings.TrimSpace(body.Payload) == "" {
