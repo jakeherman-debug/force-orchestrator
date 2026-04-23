@@ -58,8 +58,10 @@ func silentCount(s, substr string) int {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_013_MedicPayloadJSONSwallow(t *testing.T) {
-	t.Skip("AUDIT-013: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-013: defective pattern still present — runMedicTask discards json.Unmarshal error at the bounty.Payload -> &mp call in medic.go
+	// Post-Fix #8a: the unmarshal must be guarded with an `if err :=` check
+	// that fails the bounty on parse error (matching runMedicCITriage's
+	// pattern). If anyone drops the check back to a bare statement, this
+	// test fires and flags the regression.
 	src := silentReadFile(t, "internal/agents/medic.go")
 
 	want := "json.Unmarshal([]byte(bounty.Payload), &mp)"
@@ -76,7 +78,7 @@ func TestAUDIT_013_MedicPayloadJSONSwallow(t *testing.T) {
 	errChecked := strings.Contains(prefix, "if err :=") || regexp.MustCompile(`\berr\s*:?=\s*$`).MatchString(strings.TrimRight(prefix, " \t"))
 
 	if !errChecked {
-		t.Fatal("AUDIT-013: defective pattern still present — runMedicTask discards json.Unmarshal error at the bounty.Payload -> &mp call in medic.go")
+		t.Fatal("AUDIT-013 regression: runMedicTask discards json.Unmarshal error at the bounty.Payload -> &mp call in medic.go. Fix #8a added an `if err :=` check; do not remove it.")
 	}
 }
 
@@ -88,8 +90,9 @@ func TestAUDIT_013_MedicPayloadJSONSwallow(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_014_WorktreeResetParentRequeueSilent(t *testing.T) {
-	t.Skip("AUDIT-014: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-014: defective pattern still present — 2 `_, _ = db.Exec(` sites in pilot_worktree_reset.go; both parent-requeue and escalation-resolve writes are silent
+	// Post-Fix #8a: the parent-requeue UPDATE and escalation-resolve UPDATE
+	// must both have error checks. If either regresses back to `_, _ = db.Exec(`,
+	// this test flags it.
 	src := silentReadFile(t, "internal/agents/pilot_worktree_reset.go")
 
 	occ := silentCount(src, "_, _ = db.Exec(")
@@ -97,7 +100,7 @@ func TestAUDIT_014_WorktreeResetParentRequeueSilent(t *testing.T) {
 	hasEscResolve := strings.Contains(src, "SET status = 'Resolved', acknowledged_at")
 
 	if occ >= 2 && hasParentRequeue && hasEscResolve {
-		t.Fatalf("AUDIT-014: defective pattern still present — %d `_, _ = db.Exec(` sites in pilot_worktree_reset.go; both parent-requeue and escalation-resolve writes are silent", occ)
+		t.Fatalf("AUDIT-014 regression: %d `_, _ = db.Exec(` sites in pilot_worktree_reset.go; both parent-requeue and escalation-resolve writes are silent. Fix #8a replaced these with `if _, err := db.Exec(...)` guarded calls.", occ)
 	}
 }
 
@@ -178,8 +181,9 @@ func TestAUDIT_040_EscalateCITriageDoubleUPDATE(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_041_CreateEscalationNoErrorReturn(t *testing.T) {
-	t.Skip("AUDIT-041: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-041: defective pattern still present — CreateEscalation returns bare int; insert + LastInsertId errors both dropped
+	// Post-Fix #8a: CreateEscalation must NOT carry the old defective signature
+	// (bare int return) AND must NOT discard its INSERT / LastInsertId errors.
+	// If a future refactor reintroduces any of those patterns, this test fires.
 	src := silentReadFile(t, "internal/agents/escalation.go")
 
 	sig := "func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) int {"
@@ -188,7 +192,7 @@ func TestAUDIT_041_CreateEscalationNoErrorReturn(t *testing.T) {
 	hasSilentLastID := strings.Contains(src, "id, _ := res.LastInsertId()")
 
 	if hasBareIntSig && hasSilentInsert && hasSilentLastID {
-		t.Fatal("AUDIT-041: defective pattern still present — CreateEscalation returns bare int; insert + LastInsertId errors both dropped")
+		t.Fatal("AUDIT-041 regression: CreateEscalation returns bare int; insert + LastInsertId errors both dropped. Fix #8a changed the signature to (int, error).")
 	}
 }
 

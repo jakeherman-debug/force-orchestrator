@@ -455,7 +455,7 @@ func cmdApproveTask(db *sql.DB, id int) {
 		fmt.Printf("Merge failed: %v\n", mergeErr)
 		os.Exit(1)
 	}
-	store.UpdateBountyStatus(db, id, "Completed")
+	_ = store.UpdateBountyStatus(db, id, "Completed") // TODO(Fix #8b): propagate error
 	store.UnblockDependentsOf(db, id)
 	if diff != "" {
 		changedFiles := igit.ExtractDiffFiles(diff)
@@ -480,7 +480,7 @@ func cmdRejectTask(db *sql.DB, id int, reason string) {
 	}
 	retryCount := store.IncrementRetryCount(db, id)
 	if retryCount >= agents.MaxRetries {
-		store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason))
+		_ = store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason)) // TODO(Fix #8b): propagate error
 		fmt.Printf("Task %d permanently failed (max retries reached).\n", id)
 	} else {
 		newPayload := fmt.Sprintf("%s\n\nOPERATOR FEEDBACK (attempt %d/%d): %s", b.Payload, retryCount, agents.MaxRetries, reason)

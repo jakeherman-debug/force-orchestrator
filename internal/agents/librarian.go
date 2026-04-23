@@ -114,7 +114,7 @@ func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		}
 	}
 
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 	store.StoreFleetMemory(db, payload.Repo, parentID, "success", summary, payload.Files, tags)
 	logger.Printf("WriteMemory #%d: memory stored for parent task #%d (repo: %s, tags: %s)",
 		bounty.ID, parentID, payload.Repo, tags)

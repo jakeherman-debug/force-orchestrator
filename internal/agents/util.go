@@ -133,7 +133,7 @@ func handleInfraFailure(
 		if recordHistory {
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "", "Failed")
 		}
-		store.FailBounty(db, b.ID, msg)
+		_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		store.LogAudit(db, agentName, "infra-fail", b.ID, msg)
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
@@ -160,7 +160,7 @@ func handleInfraFailure(
 				b.ID, stageName, MaxInfraFailures, msg, reshardID),
 			b.ID, store.MailTypeInfo)
 	} else {
-		store.UpdateBountyStatus(db, b.ID, retryStatus)
+		_ = store.UpdateBountyStatus(db, b.ID, retryStatus) // TODO(Fix #8b): propagate error
 		backoff := InfraBackoff(count)
 		logger.Printf("Task %d: %s infra failure %d/%d, backing off %v", b.ID, stageName, count, MaxInfraFailures, backoff)
 		time.Sleep(backoff)

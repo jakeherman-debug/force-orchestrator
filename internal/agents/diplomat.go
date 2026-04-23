@@ -111,12 +111,16 @@ func SpawnDiplomat(db *sql.DB, name string) {
 func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload shipConvoyPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
+			logger.Printf("ShipConvoy #%d: FailBounty failed after payload parse error: %v", bounty.ID, fbErr)
+		}
 		return
 	}
 	convoy := store.GetConvoy(db, payload.ConvoyID)
 	if convoy == nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID))
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID)); fbErr != nil {
+			logger.Printf("ShipConvoy #%d: FailBounty failed after missing convoy: %v", bounty.ID, fbErr)
+		}
 		return
 	}
 
@@ -125,7 +129,9 @@ func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger in
 		// Nothing to ship — legacy convoy or convoy with no PR-flow repos.
 		logger.Printf("ShipConvoy #%d: convoy %d has no ConvoyAskBranch rows — completing as no-op",
 			bounty.ID, payload.ConvoyID)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("ShipConvoy #%d: Completed update failed on empty-branches no-op: %v", bounty.ID, err)
+		}
 		return
 	}
 
@@ -155,7 +161,9 @@ func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger in
 
 	if len(failures) > 0 {
 		msg := fmt.Sprintf("ShipConvoy partial: created=%v failures=%v", created, failures)
-		store.FailBounty(db, bounty.ID, msg)
+		if err := store.FailBounty(db, bounty.ID, msg); err != nil {
+			logger.Printf("ShipConvoy #%d: FailBounty failed (%v); partial failure still recorded in log", bounty.ID, err)
+		}
 		logger.Printf("ShipConvoy #%d: %s", bounty.ID, msg)
 		return
 	}
@@ -174,7 +182,9 @@ func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger in
 		fmt.Sprintf("[READY TO SHIP] Convoy '%s' — draft PR(s) open", convoy.Name),
 		buildShipItMailBody(db, convoy, branches)+"\n\nA ConvoyReview is running to verify completeness. You will receive a follow-up when it passes.",
 		0, store.MailTypeAlert)
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("ShipConvoy #%d: Completed update failed after successful ship: %v", bounty.ID, err)
+	}
 	logger.Printf("ShipConvoy #%d: convoy %d → DraftPROpen; repos=%v", bounty.ID, payload.ConvoyID, created)
 }
 

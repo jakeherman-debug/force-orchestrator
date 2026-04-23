@@ -27,19 +27,36 @@ func ParseEscalationSignal(output string) (store.EscalationSeverity, string, boo
 	return store.EscalationSeverity(matches[1]), strings.TrimSpace(matches[2]), true
 }
 
-// CreateEscalation records a new escalation for a task.
-func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) int {
-	res, _ := db.Exec(
+// CreateEscalation records a new escalation for a task and marks the task
+// Escalated (which fires the webhook).
+//
+// Fix #8 Phase A: Returns (int, error). A failed INSERT here previously left
+// the task Escalated with no Escalations row — permanently out of the
+// scheduler with nothing for the sweeper to sweep. Callers must now check the
+// error and fall back to FailBounty + operator mail when the INSERT fails.
+func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) (int, error) {
+	res, err := db.Exec(
 		`INSERT INTO Escalations (task_id, severity, message, status) VALUES (?, ?, ?, 'Open')`,
 		taskID, string(severity), message,
 	)
-	id, _ := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("CreateEscalation insert (task=%d): %w", taskID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("CreateEscalation LastInsertId (task=%d): %w", taskID, err)
+	}
 
 	// Mark the task as Escalated so it doesn't get retried automatically.
 	// Use UpdateBountyStatus so the webhook fires for this transition.
-	store.UpdateBountyStatus(db, taskID, "Escalated")
+	if updErr := store.UpdateBountyStatus(db, taskID, "Escalated"); updErr != nil {
+		// The escalation row is on disk but the task didn't transition. This
+		// is still better than the silent-failure original: the caller now
+		// knows something is wrong and can escalate further / fall back.
+		return int(id), fmt.Errorf("CreateEscalation: escalation %d recorded but task status update failed: %w", id, updErr)
+	}
 
-	return int(id)
+	return int(id), nil
 }
 
 // ListEscalations returns escalations filtered by status ("Open", "Acknowledged", "Closed", or "" for all).

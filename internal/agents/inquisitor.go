@@ -235,7 +235,7 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 				store.LogAudit(db, "boot-agent", "reset", t.id, verdict.Reason)
 			case BootEscalate:
 				logger.Printf("Task %d: Boot agent ordered ESCALATE — escalating at LOW severity", t.id)
-				CreateEscalation(db, t.id, store.SeverityLow,
+				_, _ = CreateEscalation(db, t.id, store.SeverityLow, // TODO(Fix #8b): propagate error
 					fmt.Sprintf("Boot agent: %s (locked %.0f min, no commits)", verdict.Reason, t.lockedMinutes))
 				store.LogAudit(db, "boot-agent", "escalate", t.id, verdict.Reason)
 				store.SendMail(db, "inquisitor", "operator",
@@ -247,7 +247,7 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 				logger.Printf("Task %d: Boot agent says IGNORE — agent may still be working", t.id)
 			default: // BootWarn
 				logger.Printf("Task %d: Boot agent says WARN — stall noted but not acting", t.id)
-				CreateEscalation(db, t.id, store.SeverityLow,
+				_, _ = CreateEscalation(db, t.id, store.SeverityLow, // TODO(Fix #8b): propagate error
 					fmt.Sprintf("Agent %s locked %.0f min with no commits — possible stall", t.owner, t.lockedMinutes))
 			}
 		}

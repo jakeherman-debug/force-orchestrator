@@ -78,7 +78,10 @@ func TestCreateEscalation(t *testing.T) {
 	defer db.Close()
 
 	id := store.AddBounty(db, 0, "CodeEdit", "hard task")
-	escID := CreateEscalation(db, id, store.SeverityMedium, "Need human input")
+	escID, err := CreateEscalation(db, id, store.SeverityMedium, "Need human input")
+	if err != nil {
+		t.Fatalf("CreateEscalation returned error: %v", err)
+	}
 	if escID == 0 {
 		t.Fatal("expected non-zero escalation ID")
 	}
@@ -103,7 +106,10 @@ func TestCloseEscalation_Requeue(t *testing.T) {
 	defer db.Close()
 
 	taskID := store.AddBounty(db, 0, "CodeEdit", "escalated task")
-	escID := CreateEscalation(db, taskID, store.SeverityLow, "minor issue")
+	escID, err := CreateEscalation(db, taskID, store.SeverityLow, "minor issue")
+	if err != nil {
+		t.Fatalf("CreateEscalation: %v", err)
+	}
 
 	CloseEscalation(db, escID, true /* requeue */)
 
@@ -125,7 +131,10 @@ func TestAckEscalation(t *testing.T) {
 	defer db.Close()
 
 	taskID := store.AddBounty(db, 0, "CodeEdit", "task")
-	escID := CreateEscalation(db, taskID, store.SeverityLow, "needs input")
+	escID, err := CreateEscalation(db, taskID, store.SeverityLow, "needs input")
+	if err != nil {
+		t.Fatalf("CreateEscalation: %v", err)
+	}
 
 	AckEscalation(db, escID)
 
@@ -146,10 +155,19 @@ func TestListEscalations_AllStatuses(t *testing.T) {
 	id2 := store.AddBounty(db, 0, "CodeEdit", "task2")
 	id3 := store.AddBounty(db, 0, "CodeEdit", "task3")
 
-	e1 := CreateEscalation(db, id1, store.SeverityLow, "open")
-	e2 := CreateEscalation(db, id2, store.SeverityMedium, "acked")
+	e1, err := CreateEscalation(db, id1, store.SeverityLow, "open")
+	if err != nil {
+		t.Fatalf("CreateEscalation id1: %v", err)
+	}
+	e2, err := CreateEscalation(db, id2, store.SeverityMedium, "acked")
+	if err != nil {
+		t.Fatalf("CreateEscalation id2: %v", err)
+	}
 	AckEscalation(db, e2)
-	e3 := CreateEscalation(db, id3, store.SeverityHigh, "closed")
+	e3, err := CreateEscalation(db, id3, store.SeverityHigh, "closed")
+	if err != nil {
+		t.Fatalf("CreateEscalation id3: %v", err)
+	}
 	CloseEscalation(db, e3, false)
 
 	all := ListEscalations(db, "")

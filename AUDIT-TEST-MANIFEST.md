@@ -10,7 +10,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 
 | Pattern | Test file | Test name(s) | Fix removes skip |
 |---|---|---|---|
-| P1 | `internal/store/audit_pattern_p1_test.go` | `TestPattern_P1_UpdateBountyStatusSwallowsDBError` | Fix #8 (no silent failures) |
+| P1 | `internal/store/audit_pattern_p1_test.go` | `TestPattern_P1_UpdateBountyStatusSwallowsDBError` | Fix #8 (no silent failures) | Closed by: Fix #8a (three terminator signatures) |
 | P2 | `internal/store/audit_pattern_p2_test.go` | `TestPattern_P2_IdempotencyKeyRace`, `TestPattern_P2_NoUniqueIndex_Static` | Fix #3 (partial UNIQUE idempotency_key) |
 | P3 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan`, `TestPattern_P3_BoundaryFalsePositive` | Fix #3/#4 (structured convoy_id + index) |
 | P4 | `internal/store/audit_pattern_p4_test.go` | `TestPattern_P4_HotTablesMissingIndexes`, `TestPattern_P4_ClaimQueryUsesIndex` | Fix #4 (hot-table indexes) |
@@ -39,8 +39,8 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-010 | `internal/store/audit_pattern_p4_test.go` | same | static | Fix #4 |
 | AUDIT-011 | `internal/agents/audit_pattern_p3_test.go` | `TestPattern_P3_PayloadLikeDedupIsFullScan` | static (EXPLAIN QUERY PLAN) | Fix #3/#4 |
 | AUDIT-012 | `internal/store/audit_pattern_p6_test.go` | `TestPattern_P6_UndocumentedStatusValues/A_*` | static (AST grep) | Fix #5 |
-| AUDIT-013 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_013_MedicPayloadJSONSwallow` | static | Fix #8 |
-| AUDIT-014 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_014_WorktreeResetParentRequeueSilent` | static | Fix #8 |
+| AUDIT-013 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_013_MedicPayloadJSONSwallow` | static | Fix #8 | Closed by: Fix #8a (medicPayload unmarshal guarded) |
+| AUDIT-014 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_014_WorktreeResetParentRequeueSilent` | static | Fix #8 | Closed by: Fix #8a (parent-requeue + escalation-resolve checked) |
 | AUDIT-015 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn` | static | Fix #8 |
 | AUDIT-016 | `internal/store/audit_pattern_p9_test.go` | `TestPattern_P9_SecretLeaksInOutboundChannels/A_*` | behavioral (httptest) | Fix #10 |
 | AUDIT-017 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_017_*` | static | Fix #10 |
@@ -48,7 +48,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-019 | `internal/store/audit_misc_security_test.go` | `TestAUDIT_MiscSecurity/AUDIT_019_*` | static | Fix #9 |
 | AUDIT-020 | `internal/agents/audit_lifecycle_test.go` | `TestAUDIT_020_*` | static | Fix #1 |
 | AUDIT-021 | `internal/store/audit_pattern_p7_test.go` | `TestPattern_P7_ConcurrentCancelVsApproveRace` | race (20 trials, 20/20 clobbers) | Fix #8 |
-| AUDIT-022 | `internal/store/audit_pattern_p1_test.go` | `TestPattern_P1_UpdateBountyStatusSwallowsDBError` | behavioral+static | Fix #8 |
+| AUDIT-022 | `internal/store/audit_pattern_p1_test.go` | `TestPattern_P1_UpdateBountyStatusSwallowsDBError` | behavioral+static | Fix #8 | Closed by: Fix #8a (UpdateBountyStatus returns error) |
 | AUDIT-102 | `internal/git/audit_protected_branch_test.go` | `TestAUDIT_102_103_104_121_122_124_ProtectedBranchGuardsMissing/AUDIT-102/*` | static | Fix #0 | Closed by: Fix #0 (`fix/protected-branch-guard`) |
 | AUDIT-103 | same | `.../AUDIT-103/ForcePushBranch` | static | Fix #0 | Closed by: Fix #0 |
 | AUDIT-104 | same | `.../AUDIT-104/TriggerCIRerun` | static | Fix #0 | Closed by: Fix #0 |
@@ -85,7 +85,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-038 | same | P1 pattern | pattern | Fix #8 |
 | AUDIT-039 | same | P1 pattern | pattern | Fix #8 |
 | AUDIT-040 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_040_EscalateCITriageDoubleUPDATE` | static | Fix #8 |
-| AUDIT-041 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_041_CreateEscalationNoErrorReturn` | static (AST) | Fix #8 |
+| AUDIT-041 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_041_CreateEscalationNoErrorReturn` | static (AST) | Fix #8 | Closed by: Fix #8a (CreateEscalation returns (int, error); callers fall back to FailBounty) |
 | AUDIT-042 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_042_UpdateAskBranchPRChecksDiscarded` | static grep | Fix #8 |
 | AUDIT-043 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_043_PRCloseUnconditionalMarkClosed` | static | Fix #8 |
 | AUDIT-044 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_044_LibrarianSilentFallback` | static | Fix #8 |

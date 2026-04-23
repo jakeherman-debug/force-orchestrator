@@ -117,23 +117,42 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	// Re-queue the parent task as Pending with a fresh slate: clear branch_name,
 	// error_log, locked_at, and owner so the next astromech starts from zero.
 	// parent stays on its original convoy/priority/payload.
+	//
+	// Fix #8 Phase A (AUDIT-014): both UPDATEs previously used `_, _ = db.Exec(...)`
+	// — if either failed the WorktreeReset still marked itself Completed and the
+	// parent stayed stuck Failed/Escalated. Now we observe both errors; any
+	// failure here fails the WorktreeReset so Medic can escalate.
 	if p.ParentTaskID > 0 {
-		_, _ = db.Exec(`UPDATE BountyBoard
+		if _, err := db.Exec(`UPDATE BountyBoard
 			SET status = 'Pending', branch_name = '', owner = '', locked_at = '',
 			    error_log = 'Reset by WorktreeReset #' || ? || ' after contamination detected: ' || ?
 			WHERE id = ? AND status IN ('Failed','Escalated','ConflictPending')`,
-			bounty.ID, p.Reason, p.ParentTaskID)
+			bounty.ID, p.Reason, p.ParentTaskID); err != nil {
+			if fbErr := store.FailBounty(db, bounty.ID,
+				fmt.Sprintf("parent-requeue UPDATE failed for task #%d: %v", p.ParentTaskID, err)); fbErr != nil {
+				logger.Printf("WorktreeReset #%d: FailBounty after parent-requeue failure also failed: %v", bounty.ID, fbErr)
+			}
+			return
+		}
 		// Also resolve any Open escalations on the parent — the cleanup IS the fix.
-		_, _ = db.Exec(`UPDATE Escalations
+		if _, err := db.Exec(`UPDATE Escalations
 			SET status = 'Resolved', acknowledged_at = datetime('now')
-			WHERE task_id = ? AND status = 'Open'`, p.ParentTaskID)
+			WHERE task_id = ? AND status = 'Open'`, p.ParentTaskID); err != nil {
+			if fbErr := store.FailBounty(db, bounty.ID,
+				fmt.Sprintf("escalation-resolve UPDATE failed for task #%d: %v", p.ParentTaskID, err)); fbErr != nil {
+				logger.Printf("WorktreeReset #%d: FailBounty after escalation-resolve failure also failed: %v", bounty.ID, fbErr)
+			}
+			return
+		}
 	}
 
 	logger.Printf("WorktreeReset #%d: wiped %d worktree(s) for repo %s, reset to %s (%d failures)",
 		bounty.ID, wiped, p.Repo, targetRef, len(failures))
 	store.LogAudit(db, "Pilot", "worktree-reset", bounty.ID,
 		fmt.Sprintf("wiped=%d, reason=%s, target=%s", wiped, p.Reason, targetRef))
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("WorktreeReset #%d: failed to mark Completed: %v", bounty.ID, err)
+	}
 }
 
 // discoverWorktrees enumerates .force-worktrees/<repo>/<agent> directories

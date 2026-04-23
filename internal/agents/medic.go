@@ -116,14 +116,25 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 	logger.Printf("Medic claimed MedicReview #%d (parent task #%d)", bounty.ID, bounty.ParentID)
 
 	// Parse the failure context queued by permanentInfraFail / council / captain.
+	// Fix #8 Phase A (AUDIT-013): the pre-fix code silently swallowed this
+	// JSON error, so malformed payloads produced a zero-valued mp and Medic's
+	// LLM hallucinated a verdict (often "shard") against empty context. Match
+	// the pattern runMedicCITriage already uses: fail the bounty and stop.
 	var mp medicPayload
-	json.Unmarshal([]byte(bounty.Payload), &mp)
+	if err := json.Unmarshal([]byte(bounty.Payload), &mp); err != nil {
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid MedicReview payload: %v", err)); fbErr != nil {
+			logger.Printf("Medic #%d: failed to mark bounty Failed after payload-parse error: %v", bounty.ID, fbErr)
+		}
+		return
+	}
 
 	// Load the original failed task.
 	parent, err := store.GetBounty(db, bounty.ParentID)
 	if err != nil || parent == nil {
 		logger.Printf("Medic #%d: cannot load parent task #%d — escalating", bounty.ID, bounty.ParentID)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		if uErr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uErr != nil {
+			logger.Printf("Medic #%d: mark-Completed failed after parent-load miss: %v", bounty.ID, uErr)
+		}
 		return
 	}
 
@@ -193,7 +204,9 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 		applyMedicEscalate(db, agentName, bounty, parent, decision, logger)
 	}
 
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("Medic #%d: final mark-Completed failed: %v", bounty.ID, err)
+	}
 	store.LogAudit(db, agentName, "medic-triage", parent.ID,
 		fmt.Sprintf("decision=%s reason=%s", decision.Decision, decision.Reason))
 }
@@ -232,7 +245,10 @@ func autoCompletedMedicTask(db *sql.DB, agentName string, medicBounty, parent *s
 	logger.Printf("Medic #%d: parent task #%d has no diff and no unique commits — auto-completing (work already delivered)",
 		medicBounty.ID, parent.ID)
 
-	store.UpdateBountyStatus(db, parent.ID, "Completed")
+	if err := store.UpdateBountyStatus(db, parent.ID, "Completed"); err != nil {
+		logger.Printf("Medic #%d: parent auto-complete failed (%v); stale-lock detector will recover", medicBounty.ID, err)
+		return false
+	}
 	store.RecordTaskHistory(db, parent.ID, agentName, "medic-auto",
 		"Medic auto-completed: no diff vs main, no unique commits — work already delivered.",
 		"Completed")
@@ -255,7 +271,9 @@ func autoCompletedMedicTask(db *sql.DB, agentName string, medicBounty, parent *s
 			parent.ID, parent.TargetRepo),
 		parent.ID, store.MailTypeInfo)
 
-	store.UpdateBountyStatus(db, medicBounty.ID, "Completed")
+	if err := store.UpdateBountyStatus(db, medicBounty.ID, "Completed"); err != nil {
+		logger.Printf("Medic #%d: self-complete failed after auto-complete: %v", medicBounty.ID, err)
+	}
 	return true
 }
 
@@ -388,7 +406,14 @@ func applyMedicEscalate(db *sql.DB, agentName string, bounty, parent *store.Boun
 	if msg == "" {
 		msg = d.Reason
 	}
-	CreateEscalation(db, parent.ID, store.SeverityMedium, msg)
+	if _, err := CreateEscalation(db, parent.ID, store.SeverityMedium, msg); err != nil {
+		// Fix #8a (AUDIT-041): escalation insert failed — fall back to FailBounty
+		// + operator mail so the task doesn't sit Escalated with no Escalations row.
+		logger.Printf("Medic #%d: CreateEscalation for task %d failed (%v); falling back to FailBounty", bounty.ID, parent.ID, err)
+		if fbErr := store.FailBounty(db, parent.ID, msg+" (escalation insert failed: "+err.Error()+")"); fbErr != nil {
+			logger.Printf("Medic #%d: FailBounty fallback for task %d also failed: %v", bounty.ID, parent.ID, fbErr)
+		}
+	}
 	store.SendMail(db, agentName, "operator",
 		fmt.Sprintf("[ESCALATED] Task #%d requires a decision — %s", parent.ID, parent.TargetRepo),
 		fmt.Sprintf("Task #%d has been analyzed by the Fleet Medic and requires your attention.\n\nRepo: %s\nRoot cause: %s\n\nRecommendation:\n%s\n\nTask:\n%s",

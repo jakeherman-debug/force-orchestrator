@@ -80,11 +80,11 @@ type prReviewTriagePayload struct {
 func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload prReviewTriagePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
 		return
 	}
 	if payload.ConvoyID <= 0 {
-		store.FailBounty(db, bounty.ID, "payload missing convoy_id")
+		_ = store.FailBounty(db, bounty.ID, "payload missing convoy_id") // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -94,7 +94,7 @@ func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logge
 	comments := store.ListUnclassifiedPRComments(db, payload.ConvoyID, batchCap)
 	if len(comments) == 0 {
 		logger.Printf("PRReviewTriage #%d: no unclassified comments for convoy %d — completing", bounty.ID, payload.ConvoyID)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 		return
 	}
 
@@ -135,7 +135,7 @@ func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logge
 		}
 	}
 
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 }
 
 // classifyPRReviewComment assembles the prompt, calls Claude, parses the JSON.
@@ -460,7 +460,7 @@ func dispatchConflictedLoop(
 		c.DraftPRNumber, c.ConvoyID, c.Repo, c.ThreadDepth, c.ReviewThreadID, c.Author,
 		util.TruncateStr(c.Body, 500),
 	)
-	CreateEscalation(db, 0, store.SeverityMedium, msg)
+	_, _ = CreateEscalation(db, 0, store.SeverityMedium, msg) // TODO(Fix #8b): propagate error
 	store.LogAudit(db, agentName, "pr-review-conflicted-loop", 0,
 		fmt.Sprintf("comment #%d thread_depth=%d", c.GitHubCommentID, c.ThreadDepth))
 	logger.Printf("PRReviewTriage: comment #%d escalated — thread_depth=%d cap reached", c.GitHubCommentID, c.ThreadDepth)

@@ -11,34 +11,22 @@ import (
 // boundary because core mutators have no error return, so callers cannot
 // observe DB failures.
 //
-// This test demonstrates the violation on UpdateBountyStatus in two ways:
+// Fix #8 Phase A closes the headline defect on UpdateBountyStatus by
+// changing the signature to return error. This test, post-fix, acts as
+// permanent regression protection:
 //
-//  1. STATIC: reflect on the exported function to assert its signature
-//     carries no error-shaped return value. If anyone adds an error
-//     return to fix the audit, this assertion flips and the test starts
-//     failing on the "assertion" branch.
+//  1. STATIC: reflect on the exported function and assert its signature
+//     DOES return an error. If a future refactor drops the error return
+//     (or wraps the function to re-hide it), this half fails loudly.
 //
 //  2. EMPIRICAL: seed a bounty, drop the BountyBoard table to force every
-//     subsequent UPDATE to fail, call UpdateBountyStatus, and show that:
-//     (a) the caller has no error value to inspect (it is a void-returning
-//     func — it cannot even be assigned) and (b) the status was never
-//     actually changed. The caller has no way to know the write failed.
-//
-// The test is EXPECTED TO FAIL under the current (broken) signature,
-// because the audit finding is an open defect. If/when the signature is
-// fixed to return error, the static half flips and this test must be
-// updated to reflect the new contract (and the empirical half can then
-// assert err != nil).
+//     subsequent UPDATE to fail, call UpdateBountyStatus, and assert the
+//     returned error is non-nil. Callers now have a signal to branch on.
 func TestPattern_P1_UpdateBountyStatusSwallowsDBError(t *testing.T) {
-	t.Skip("AUDIT-022/070 (P1): remove when UpdateBountyStatus returns error (Fix #8 — no silent failures)")
-	// Without skip, fails with:
-	//   audit_pattern_p1_test.go:52: AUDIT-P1 (AUDIT-022, AUDIT-070): UpdateBountyStatus has no error return (NumOut=0, returnsError=false). Callers cannot propagate DB failures; the 'no silent failures' invariant in CLAUDE.md is unenforceable at the store boundary.
-	//   audit_pattern_p1_test.go:125: AUDIT-P1 empirical: UpdateBountyStatus silently swallowed DB failure. Post-call status="Pending" (expected "Completed"); caller received no error (function returns void).
-	//   --- FAIL: TestPattern_P1_UpdateBountyStatusSwallowsDBError (0.01s)
 	// ── Part 1: STATIC signature check ────────────────────────────────────
-	// UpdateBountyStatus's declared signature is
-	//   func(db *sql.DB, id int, newStatus string)
-	// i.e. NumOut() == 0. That is the root cause of P1.
+	// Post-Fix #8a, UpdateBountyStatus's declared signature is
+	//   func(db *sql.DB, id int, newStatus string) error
+	// NumOut() == 1 and the return type implements error.
 	fnType := reflect.TypeOf(UpdateBountyStatus)
 	if fnType.Kind() != reflect.Func {
 		t.Fatalf("UpdateBountyStatus is not a function (got %s)", fnType.Kind())
@@ -53,15 +41,15 @@ func TestPattern_P1_UpdateBountyStatusSwallowsDBError(t *testing.T) {
 		}
 	}
 	if !returnsError {
-		t.Errorf("AUDIT-P1 (AUDIT-022, AUDIT-070): UpdateBountyStatus has no error return "+
-			"(NumOut=%d, returnsError=%v). Callers cannot propagate DB failures; "+
-			"the 'no silent failures' invariant in CLAUDE.md is unenforceable at the store boundary.",
+		t.Errorf("AUDIT-P1 regression (AUDIT-022, AUDIT-070): UpdateBountyStatus has no error return "+
+			"(NumOut=%d, returnsError=%v). Fix #8a explicitly added an error return to close this "+
+			"audit — do not remove it without updating CLAUDE.md's 'no silent failures' invariant.",
 			numOut, returnsError)
 	}
 
 	// ── Part 2: EMPIRICAL demonstration ───────────────────────────────────
 	// Seed a real SQLite DB, insert a bounty, drop the table, call the
-	// mutator, and show the caller cannot observe the failure.
+	// mutator, and confirm the caller receives an error.
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -88,48 +76,13 @@ func TestPattern_P1_UpdateBountyStatusSwallowsDBError(t *testing.T) {
 		t.Fatalf("expected direct UPDATE to fail against dropped table, got nil")
 	}
 
-	// Call the audited function. There is literally no return value to
-	// receive — the following line would not compile if we tried:
-	//     err := UpdateBountyStatus(db, id, "Completed")
-	// This IS the P1 violation in executable form.
-	UpdateBountyStatus(db, id, "Completed")
-
-	// Rebuild the table so we can prove the write was lost. We recreate the
-	// row with its pre-call state ("Pending") and assert the caller's
-	// post-condition ("status == Completed") never holds — yet the caller
-	// has no signal that anything went wrong.
-	if _, err := db.Exec(`CREATE TABLE BountyBoard (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		parent_id INTEGER,
-		type TEXT,
-		status TEXT,
-		payload TEXT,
-		owner TEXT DEFAULT '',
-		locked_at TEXT DEFAULT '',
-		created_at TEXT
-	)`); err != nil {
-		t.Fatalf("recreate table failed: %v", err)
+	// Call the audited function. Post-Fix #8a it returns error.
+	gotErr := UpdateBountyStatus(db, id, "Completed")
+	if gotErr == nil {
+		t.Errorf("AUDIT-P1 empirical regression: UpdateBountyStatus swallowed DB failure. "+
+			"Expected a non-nil error; got nil. The ~200-call-site silent-failure blast "+
+			"radius described in AUDIT-022/-070 has re-opened.")
 	}
-	if _, err := db.Exec(
-		`INSERT INTO BountyBoard (id, parent_id, type, status, payload, created_at)
-		 VALUES (?, 0, 'CodeEdit', 'Pending', 'p1-test', datetime('now'))`,
-		id); err != nil {
-		t.Fatalf("reseed failed: %v", err)
-	}
-
-	var status string
-	if err := db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&status); err != nil {
-		t.Fatalf("status read failed: %v", err)
-	}
-
-	// The status remains "Pending" (the write was lost), but the caller
-	// of UpdateBountyStatus received no error and has no way to know.
-	// Any downstream logic branching on "I just completed this task"
-	// will act on a false premise. This is the P1 invariant violation.
-	t.Errorf("AUDIT-P1 empirical: UpdateBountyStatus silently swallowed DB failure. "+
-		"Post-call status=%q (expected %q); caller received no error (function returns void). "+
-		"This is the ~200-call-site silent-failure blast radius described in AUDIT-022/-070.",
-		status, "Completed")
 
 	// Keep sql import referenced even if tests are refactored.
 	var _ *sql.DB = db

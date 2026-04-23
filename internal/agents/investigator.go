@@ -106,7 +106,7 @@ func runInvestigatorTask(db *sql.DB, name string, bounty *store.Bounty, logger *
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 		}
-		CreateEscalation(db, bounty.ID, sev, msg)
+		_, _ = CreateEscalation(db, bounty.ID, sev, msg) // TODO(Fix #8b): propagate error
 		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, bounty.ID, sev, msg))
 		store.LogAudit(db, name, "investigate-escalated", bounty.ID, msg)
 		return
@@ -137,7 +137,7 @@ func runInvestigatorTask(db *sql.DB, name string, bounty *store.Bounty, logger *
 		bounty.ID, util.TruncateStr(bounty.Payload, 60))
 	store.SendMail(db, name, "operator", subject, report, bounty.ID, store.MailTypeInfo)
 
-	store.UpdateBountyStatus(db, bounty.ID, "Completed")
+	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
 	histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Completed")
 	if tokIn > 0 || tokOut > 0 {
 		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
