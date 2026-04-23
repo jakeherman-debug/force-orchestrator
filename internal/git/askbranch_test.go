@@ -306,11 +306,16 @@ func TestRebaseBranchOnto_StaleLocalBranchDoesNotLoseMergeCommits(t *testing.T) 
 
 // ── TriggerCIRerun ───────────────────────────────────────────────────────────
 
+// TestTriggerCIRerun_PushesEmptyCommit verifies the empty-commit push
+// succeeds and origin's branch tip advances. Deliberately checks ORIGIN
+// state (not the local branch) because the plumbing-based implementation
+// never updates the local branch — that's the whole point: it leaves any
+// checkout of the target branch in other worktrees untouched, which was
+// the production bug ("branch is already used by worktree at ...").
 func TestTriggerCIRerun_PushesEmptyCommit(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
 	_, _ = CreateAskBranch(wt, "force/ask-1-rerun")
 
-	// Capture the SHA before the re-trigger.
 	beforeOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-rerun").Output()
 	before := strings.TrimSpace(string(beforeOut))
 
@@ -324,27 +329,54 @@ func TestTriggerCIRerun_PushesEmptyCommit(t *testing.T) {
 		t.Errorf("branch tip unchanged after re-trigger (before=%s after=%s)", before, after)
 	}
 
-	// Verify the new tip is an empty commit — tree should equal parent's tree.
-	treeOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%T", "force/ask-1-rerun").Output()
-	parentTreeOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%T", "force/ask-1-rerun^").Output()
+	// Verify on origin: new tip is an empty commit (tree matches parent tree)
+	// and carries our message. Use `git -C origin show` directly on the SHA.
+	treeOut, _ := exec.Command("git", "-C", origin, "show", "-s", "--format=%T", after).Output()
+	parentTreeOut, _ := exec.Command("git", "-C", origin, "show", "-s", "--format=%T", before).Output()
 	if strings.TrimSpace(string(treeOut)) != strings.TrimSpace(string(parentTreeOut)) {
 		t.Errorf("new commit should be empty (same tree as parent): tip=%q parent=%q", treeOut, parentTreeOut)
 	}
-	// Message must match what we requested.
-	msgOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%s", "force/ask-1-rerun").Output()
+	msgOut, _ := exec.Command("git", "-C", origin, "show", "-s", "--format=%s", after).Output()
 	if !strings.Contains(string(msgOut), "ci: retrigger") {
 		t.Errorf("commit message mismatch: %q", msgOut)
 	}
 }
 
-func TestTriggerCIRerun_DefaultMessageWhenEmpty(t *testing.T) {
+// TestTriggerCIRerun_DoesNotMoveLocalBranch is the direct regression test
+// for task 445's failure: previously the function checked out the target
+// branch in the main worktree, which fails when an astromech has the same
+// branch checked out in a persistent worktree. The plumbing version must
+// leave the local branch ref completely untouched.
+func TestTriggerCIRerun_DoesNotMoveLocalBranch(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
+	_, _ = CreateAskBranch(wt, "force/ask-1-nolocal")
+
+	localBefore, _ := exec.Command("git", "-C", wt, "rev-parse", "force/ask-1-nolocal").Output()
+	headBefore, _ := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
+
+	if err := TriggerCIRerun(wt, "force/ask-1-nolocal", "ci: retrigger"); err != nil {
+		t.Fatalf("TriggerCIRerun: %v", err)
+	}
+
+	localAfter, _ := exec.Command("git", "-C", wt, "rev-parse", "force/ask-1-nolocal").Output()
+	headAfter, _ := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
+	if string(localBefore) != string(localAfter) {
+		t.Errorf("local branch ref moved unexpectedly: before=%s after=%s", localBefore, localAfter)
+	}
+	if string(headBefore) != string(headAfter) {
+		t.Errorf("HEAD moved unexpectedly: before=%s after=%s", headBefore, headAfter)
+	}
+}
+
+func TestTriggerCIRerun_DefaultMessageWhenEmpty(t *testing.T) {
+	wt, origin := makeOriginAndClone(t)
 	_, _ = CreateAskBranch(wt, "force/ask-1-default-msg")
 
 	if err := TriggerCIRerun(wt, "force/ask-1-default-msg", ""); err != nil {
 		t.Fatalf("TriggerCIRerun: %v", err)
 	}
-	msgOut, _ := exec.Command("git", "-C", wt, "show", "-s", "--format=%s", "force/ask-1-default-msg").Output()
+	tipOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-default-msg").Output()
+	msgOut, _ := exec.Command("git", "-C", origin, "show", "-s", "--format=%s", strings.TrimSpace(string(tipOut))).Output()
 	if !strings.Contains(string(msgOut), "ci:") {
 		t.Errorf("default message should contain 'ci:' prefix; got %q", msgOut)
 	}

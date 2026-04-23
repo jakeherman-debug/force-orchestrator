@@ -190,13 +190,23 @@ func ForcePushBranch(repoPath, branch string) error {
 // recover from stuck check runs (checks stayed QUEUED and never ran because
 // the runner never picked up the original push event).
 //
-// Fetches first to avoid non-fast-forward rejections when the remote branch
-// has advanced (e.g. a concurrent rebase landed). Uses a plain `push` (not
-// force) — the new empty commit is additive and should fast-forward.
+// Implemented with git plumbing (commit-tree + push) instead of
+// checkout/commit/push so the main worktree's HEAD is never moved. This
+// matters because the target branch is often an astromech's agent branch
+// that is ALREADY checked out in its persistent worktree (e.g.
+// .force-worktrees/force-orchestrator/R7-A7). A `git checkout` in the main
+// worktree would fail with "already used by worktree at ..." — which is
+// exactly the production failure that forced this rewrite.
 //
-// Errors from any step propagate so the caller can fall through to escalation
-// if the re-trigger attempt itself fails (we don't want to silently fail and
-// leave the stall undetected).
+// The sequence:
+//   1. fetch origin <branch> — pulls the latest ref without touching HEAD
+//   2. rev-parse origin/<branch>^{tree} — gets the tree OID of the tip
+//   3. commit-tree <tree> -p origin/<branch> -m <msg> — creates a new empty
+//      commit whose parent is the current tip, reusing the tree
+//   4. push origin <newsha>:refs/heads/<branch> — fast-forwards origin
+//
+// None of those commands read or write the working tree. Safe regardless of
+// what else is checked out.
 func TriggerCIRerun(repoPath, branch, message string) error {
 	if message == "" {
 		message = "ci: trigger stalled check run"
@@ -204,19 +214,53 @@ func TriggerCIRerun(repoPath, branch, message string) error {
 	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", branch).CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch %s: %s", branch, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("git", "-C", repoPath, "checkout", branch).CombinedOutput(); err != nil {
-		return fmt.Errorf("git checkout %s: %s", branch, strings.TrimSpace(string(out)))
+
+	treeOut, err := exec.Command("git", "-C", repoPath, "rev-parse", "origin/"+branch+"^{tree}").Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return fmt.Errorf("rev-parse origin/%s^{tree}: %s", branch, stderr)
 	}
-	if out, err := exec.Command("git", "-C", repoPath, "reset", "--hard", "origin/"+branch).CombinedOutput(); err != nil {
-		return fmt.Errorf("git reset --hard origin/%s: %s", branch, strings.TrimSpace(string(out)))
+	treeSHA := strings.TrimSpace(string(treeOut))
+
+	// commit-tree reads the message from stdin — avoids shell-escape hazards
+	// when the caller passes arbitrary text. Parent is origin/<branch>^{0}
+	// (dereferenced commit OID) so the new commit FFs cleanly from the tip.
+	cmd := exec.Command("git", "-C", repoPath, "commit-tree", treeSHA, "-p", "origin/"+branch, "-m", message)
+	// Inherit the real environment (PATH, HOME, etc.) and OVERRIDE just the
+	// author/committer identity — otherwise commit-tree refuses to run if no
+	// user.email is configured for the invoking shell.
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=force-orchestrator",
+		"GIT_AUTHOR_EMAIL=force@localhost",
+		"GIT_COMMITTER_NAME=force-orchestrator",
+		"GIT_COMMITTER_EMAIL=force@localhost",
+	)
+	newOut, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return fmt.Errorf("commit-tree: %s", stderr)
 	}
-	if out, err := exec.Command("git", "-C", repoPath, "commit", "--allow-empty", "-m", message).CombinedOutput(); err != nil {
-		return fmt.Errorf("git commit --allow-empty: %s", strings.TrimSpace(string(out)))
-	}
-	if out, err := exec.Command("git", "-C", repoPath, "push", "origin", branch).CombinedOutput(); err != nil {
-		return fmt.Errorf("git push origin %s: %s", branch, strings.TrimSpace(string(out)))
+	newSHA := strings.TrimSpace(string(newOut))
+
+	if out, err := exec.Command("git", "-C", repoPath, "push", "origin",
+		newSHA+":refs/heads/"+branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("git push origin %s:refs/heads/%s: %s",
+			newSHA[:minInt(8, len(newSHA))], branch, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // BranchNameSlug sanitises a string into a git-branch-safe slug: lowercases,
