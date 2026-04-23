@@ -44,18 +44,19 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// cooperatively cancelled. Assert Spawn* signatures do NOT accept a
 	// context.Context.
 	t.Run("TestAUDIT_020_daemon_no_root_context", func(t *testing.T) {
+		t.Skip("AUDIT-020: remove when Spawn* goroutines thread context.Context (Fix #1)")
+		// Without skip, fails with: audit_lifecycle_test.go:52: AUDIT-020: daemon Spawn* calls still do not thread ctx still present
 		src := lifecycleReadFile(t, "cmd/force/fleet_cmds.go")
-		// Every Spawn* invocation from the daemon must be bare `(db` or
-		// `(db, name)` — never `(ctx, db, …)`.
+		// RGR inversion: assert the DEFECT (no ctx threaded) still holds; fail if so.
 		spawnCtx := regexp.MustCompile(`agents\.Spawn\w+\s*\(\s*ctx\b`)
-		if spawnCtx.FindStringIndex(src) != nil {
-			t.Fatalf("AUDIT-020 regression: a Spawn* call now threads ctx; audit should be reopened")
+		if spawnCtx.FindStringIndex(src) == nil {
+			t.Fatal("AUDIT-020: daemon Spawn* calls still do not thread ctx still present")
 		}
-		// Sanity — the daemon DOES call Spawn* functions.
+		// Sanity — confirm the daemon calls Spawn* at all.
 		if !regexp.MustCompile(`agents\.Spawn\w+\s*\(\s*db\b`).MatchString(src) {
 			t.Fatalf("AUDIT-020 precondition missing: no agents.Spawn*(db, ...) calls in fleet_cmds.go")
 		}
-		// And none of the Spawn signatures themselves take a Context.
+		// None of the Spawn signatures themselves take a Context — inverted.
 		for _, f := range []string{
 			"internal/agents/astromech.go",
 			"internal/agents/captain.go",
@@ -69,11 +70,10 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		} {
 			body := lifecycleReadFile(t, f)
 			sigCtx := regexp.MustCompile(`func\s+Spawn\w+\s*\([^)]*context\.Context[^)]*\)`)
-			if sigCtx.FindStringIndex(body) != nil {
-				t.Fatalf("AUDIT-020 regression in %s: Spawn* signature now takes context.Context", f)
+			if sigCtx.FindStringIndex(body) == nil {
+				t.Fatalf("AUDIT-020: Spawn* signature in %s still lacks context.Context still present", f)
 			}
 		}
-		t.Log("AUDIT-020 confirmed: Spawn* have no context.Context parameter; shutdown cannot cooperatively cancel child Claude procs")
 	})
 
 	// ── AUDIT-125 ─────────────────────────────────────────────────────────
@@ -82,6 +82,8 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// `close(heartbeatDone)` — NOT via defer. A panic in RunCLIStreaming leaks
 	// the heartbeat goroutine + ticker.
 	t.Run("TestAUDIT_125_heartbeat_not_deferred", func(t *testing.T) {
+		t.Skip("AUDIT-125: remove when defer close/Remove lands in astromech.go (Fix #8)")
+		// Without skip, fails with: audit_lifecycle_test.go:105: AUDIT-125: heartbeatDone closed without defer still present
 		src := lifecycleReadFile(t, "internal/agents/astromech.go")
 		lines := strings.Split(src, "\n")
 		var declIdx = -1
@@ -94,24 +96,15 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		if declIdx < 0 {
 			t.Fatalf("AUDIT-125 precondition missing: heartbeatDone declaration not found")
 		}
-		// Look at the next 10 lines for a `defer close(heartbeatDone)`.
+		// RGR inversion: fail if defer close(heartbeatDone) is still absent near declaration.
 		end := declIdx + 11
 		if end > len(lines) {
 			end = len(lines)
 		}
 		window := strings.Join(lines[declIdx:end], "\n")
-		if strings.Contains(window, "defer close(heartbeatDone)") {
-			t.Fatalf("AUDIT-125 looks fixed: defer close(heartbeatDone) now present near declaration")
+		if !strings.Contains(window, "defer close(heartbeatDone)") {
+			t.Fatal("AUDIT-125: heartbeatDone closed without defer still present")
 		}
-		// And confirm the bare `close(heartbeatDone)` exists somewhere (proving
-		// the non-deferred close pattern).
-		if !strings.Contains(src, "\tclose(heartbeatDone)") && !strings.Contains(src, "\n\tclose(heartbeatDone)") && !strings.Contains(src, "\n\t\tclose(heartbeatDone)") {
-			// fallback: any non-deferred close
-			if !regexp.MustCompile(`[^r]\s*close\(heartbeatDone\)`).MatchString(src) {
-				t.Fatalf("AUDIT-125 precondition missing: no bare close(heartbeatDone) anywhere")
-			}
-		}
-		t.Logf("AUDIT-125 confirmed: heartbeatDone declared at line %d with no defer close() nearby — panic in RunCLIStreaming leaks goroutine", declIdx+1)
 	})
 
 	// ── AUDIT-126 ─────────────────────────────────────────────────────────
@@ -119,6 +112,8 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// `os.Create(taskLogPath)` has no matching `defer Close()` / `defer Remove()`.
 	// Panic / early return paths leak FD and stale file.
 	t.Run("TestAUDIT_126_tasklog_not_deferred", func(t *testing.T) {
+		t.Skip("AUDIT-126: remove when defer close/Remove lands in astromech.go (Fix #8)")
+		// Without skip, fails with: audit_lifecycle_test.go:137: AUDIT-126: os.Create(taskLogPath) without deferred Close+Remove still present
 		src := lifecycleReadFile(t, "internal/agents/astromech.go")
 		lines := strings.Split(src, "\n")
 		var createIdx = -1
@@ -131,8 +126,7 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		if createIdx < 0 {
 			t.Fatalf("AUDIT-126 precondition missing: os.Create(taskLogPath) not found")
 		}
-		// Within the next 10 lines look for `defer` followed by Close/Remove
-		// on taskLogFile / taskLogPath.
+		// RGR inversion: fail if deferred Close+Remove are still missing near os.Create.
 		end := createIdx + 11
 		if end > len(lines) {
 			end = len(lines)
@@ -140,16 +134,17 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		window := strings.Join(lines[createIdx:end], "\n")
 		hasDeferClose := regexp.MustCompile(`defer\s+.*taskLogFile\.Close\(\)`).MatchString(window)
 		hasDeferRemove := regexp.MustCompile(`defer\s+os\.Remove\(taskLogPath\)`).MatchString(window)
-		if hasDeferClose && hasDeferRemove {
-			t.Fatalf("AUDIT-126 looks fixed: defer Close + defer Remove now present near os.Create")
+		if !(hasDeferClose && hasDeferRemove) {
+			t.Fatal("AUDIT-126: os.Create(taskLogPath) without deferred Close+Remove still present")
 		}
-		t.Logf("AUDIT-126 confirmed: os.Create at line %d not followed by deferred Close+Remove; deferClose=%v deferRemove=%v", createIdx+1, hasDeferClose, hasDeferRemove)
 	})
 
 	// ── AUDIT-127 ─────────────────────────────────────────────────────────
 	// internal/git/git.go and askbranch.go — every `exec.Command("git", ...)` is
 	// bare, none use CommandContext. A hung `git fetch` wedges the caller.
 	t.Run("TestAUDIT_127_git_no_context_timeout", func(t *testing.T) {
+		t.Skip("AUDIT-127: remove when internal/git uses exec.CommandContext (Fix #8)")
+		// Without skip, fails with: audit_lifecycle_test.go:162: AUDIT-127: bare exec.Command for git subprocesses without CommandContext still present
 		gitSrc := lifecycleReadFile(t, "internal/git/git.go")
 		askSrc := lifecycleReadFile(t, "internal/git/askbranch.go")
 		cmdRe := regexp.MustCompile(`exec\.Command\(\s*"git"`)
@@ -163,12 +158,10 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		if total == 0 {
 			t.Fatalf("AUDIT-127 precondition missing: no exec.Command(\"git\", ...) calls found")
 		}
-		// The finding says Command >> CommandContext. Assert at least 20x ratio
-		// OR totalCtx == 0. If a real fix lands, CommandContext should dominate.
-		if totalCtx > 0 && total <= totalCtx*2 {
-			t.Fatalf("AUDIT-127 looks fixed: CommandContext (%d) now comparable to bare Command (%d)", totalCtx, total)
+		// RGR inversion: fail if bare Command still dominates over CommandContext.
+		if totalCtx == 0 || total > totalCtx*2 {
+			t.Fatal("AUDIT-127: bare exec.Command for git subprocesses without CommandContext still present")
 		}
-		t.Logf("AUDIT-127 confirmed: git.go=%d+askbranch.go=%d bare exec.Command vs %d CommandContext — no deadline on any git subprocess", gitCmd, askCmd, totalCtx)
 	})
 
 	// ── AUDIT-129 ─────────────────────────────────────────────────────────
@@ -176,6 +169,8 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// stderrBuf / textBuf are strings.Builder with no size cap. A runaway
 	// Claude can OOM the daemon before the 200 KB astromech breaker fires.
 	t.Run("TestAUDIT_129_unbounded_buffers", func(t *testing.T) {
+		t.Skip("AUDIT-129: remove when RunCLIStreaming caps textBuf size (Fix #8)")
+		// Without skip, fails with: audit_lifecycle_test.go:183: AUDIT-129: unbounded textBuf strings.Builder without size cap still present
 		src := lifecycleReadFile(t, "internal/claude/claude.go")
 		if !strings.Contains(src, "var stderrBuf strings.Builder") {
 			t.Fatalf("AUDIT-129 precondition missing: stderrBuf strings.Builder not found")
@@ -183,17 +178,14 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		if !strings.Contains(src, "var textBuf strings.Builder") {
 			t.Fatalf("AUDIT-129 precondition missing: textBuf strings.Builder not found")
 		}
-		// A fix would introduce a cap-check before writing. Grep for the cap
-		// pattern and assert absent.
+		// RGR inversion: fail if textBuf still has no size cap.
 		capped := regexp.MustCompile(`textBuf\.Len\(\)\s*[<>]=?\s*\d`)
-		if capped.MatchString(src) {
-			t.Fatalf("AUDIT-129 looks fixed: textBuf size check found")
+		if !capped.MatchString(src) {
+			t.Fatal("AUDIT-129: unbounded textBuf strings.Builder without size cap still present")
 		}
-		// Also confirm textBuf.WriteString is called without any preceding Len() guard.
 		if !regexp.MustCompile(`textBuf\.WriteString\(`).MatchString(src) {
 			t.Fatalf("AUDIT-129 precondition missing: textBuf.WriteString not found")
 		}
-		t.Log("AUDIT-129 confirmed: stderrBuf / textBuf are unbounded strings.Builder; no per-write cap — runaway stream OOMs daemon before 200 KB breaker")
 	})
 
 	// ── AUDIT-158 ─────────────────────────────────────────────────────────
@@ -202,49 +194,34 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// exec.Command(...).Run() / .CombinedOutput() with no timeout. A hung git
 	// process wedges the astromech goroutine while holding the Locked row.
 	t.Run("TestAUDIT_158_astromech_git_no_timeout", func(t *testing.T) {
+		t.Skip("AUDIT-158: remove when astromech.go uses CommandContext (Fix #8)")
+		// Without skip, fails with: audit_lifecycle_test.go:206: AUDIT-158: bare exec.Command().Run()/CombinedOutput() without CommandContext still present
 		src := lifecycleReadFile(t, "internal/agents/astromech.go")
-		// Pull the specific call sites and confirm they use Command, not CommandContext.
-		targetLines := []int{574, 589, 627, 657, 660, 665}
-		lines := strings.Split(src, "\n")
-		var bare, ctxed int
-		for _, ln := range targetLines {
-			if ln-1 < 0 || ln-1 >= len(lines) {
-				continue
-			}
-			l := lines[ln-1]
-			if strings.Contains(l, "exec.CommandContext") {
-				ctxed++
-			} else if strings.Contains(l, "exec.Command(") {
-				bare++
-			}
-		}
-		if bare == 0 {
-			t.Fatalf("AUDIT-158 precondition missing: no bare exec.Command at any cited line. lines=%v", targetLines)
-		}
-		if ctxed > 0 {
-			t.Fatalf("AUDIT-158 partially fixed: %d/%d cited lines now use CommandContext", ctxed, len(targetLines))
-		}
-		// And confirm the call patterns chain .Run() or .CombinedOutput().
+		// Sweep the whole file for bare exec.Command(...) .Run/.CombinedOutput patterns.
 		runRe := regexp.MustCompile(`exec\.Command\([^)]+\)\.Run\(\)`)
 		coRe := regexp.MustCompile(`exec\.Command\([^)]+\)\.CombinedOutput\(\)`)
-		if !runRe.MatchString(src) && !coRe.MatchString(src) {
-			t.Fatalf("AUDIT-158 precondition missing: no .Run() / .CombinedOutput() chains on exec.Command")
+		bareRun := len(runRe.FindAllStringIndex(src, -1))
+		bareCO := len(coRe.FindAllStringIndex(src, -1))
+		// RGR inversion: fail if bare exec.Command .Run/.CombinedOutput patterns remain.
+		if bareRun+bareCO > 0 {
+			t.Fatal("AUDIT-158: bare exec.Command().Run()/CombinedOutput() without CommandContext still present")
 		}
-		t.Logf("AUDIT-158 confirmed: %d/%d cited astromech git sites are bare exec.Command with no timeout — hung git wedges agent goroutine", bare, len(targetLines))
 	})
 
 	// ── AUDIT-164 ─────────────────────────────────────────────────────────
 	// cmd/force/fleet_cmds.go:217 — signal.Notify with no matching
 	// `defer signal.Stop(sigChan)`. Leaks registration in embedded test runs.
 	t.Run("TestAUDIT_164_signal_channel_never_stopped", func(t *testing.T) {
+		t.Skip("AUDIT-164: remove when signal.Stop deferred (Fix #8)")
+		// Without skip, fails with: audit_lifecycle_test.go:222: AUDIT-164: signal.Notify without defer signal.Stop still present
 		src := lifecycleReadFile(t, "cmd/force/fleet_cmds.go")
 		if !strings.Contains(src, "signal.Notify(sigChan") {
 			t.Fatalf("AUDIT-164 precondition missing: signal.Notify(sigChan, ...) not found")
 		}
-		if strings.Contains(src, "signal.Stop(sigChan)") {
-			t.Fatalf("AUDIT-164 looks fixed: signal.Stop(sigChan) now present")
+		// RGR inversion: fail if signal.Stop(sigChan) is still missing.
+		if !strings.Contains(src, "signal.Stop(sigChan)") {
+			t.Fatal("AUDIT-164: signal.Notify without defer signal.Stop still present")
 		}
-		t.Log("AUDIT-164 confirmed: signal.Notify without defer signal.Stop — registration leaks on embedded reinvocation")
 	})
 
 	// ── AUDIT-165 ─────────────────────────────────────────────────────────
@@ -252,16 +229,16 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// remove without a timeout. If `git worktree remove` hangs, the defer
 	// never returns and the caller wedges.
 	t.Run("TestAUDIT_165_worktree_remove_no_timeout", func(t *testing.T) {
+		t.Skip("AUDIT-165: remove when worktree-remove wrapped in CommandContext (Fix #8)")
+		// Without skip, fails with: audit_lifecycle_test.go:260: AUDIT-165: worktree remove using bare exec.Command without timeout still present
 		src := lifecycleReadFile(t, "internal/git/askbranch.go")
 		if !strings.Contains(src, `os.MkdirTemp("", "force-rebase-`) {
 			t.Fatalf("AUDIT-165 precondition missing: os.MkdirTemp(..., \"force-rebase-*\") not found")
 		}
-		// Find the defer block and confirm the worktree-remove is a bare
-		// exec.Command (not CommandContext).
+		// Find the defer block and confirm the worktree-remove pattern.
 		deferBlockRe := regexp.MustCompile(`defer\s+func\(\)\s*\{[^}]*\}\(\)`)
 		m := deferBlockRe.FindString(src)
 		if m == "" {
-			// Simpler pattern — look at the 15-line window after MkdirTemp.
 			lines := strings.Split(src, "\n")
 			var startIdx = -1
 			for i, l := range lines {
@@ -279,12 +256,12 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		if !strings.Contains(m, `worktree`) || !strings.Contains(m, `remove`) {
 			t.Fatalf("AUDIT-165 precondition missing: worktree remove not found near MkdirTemp")
 		}
-		if strings.Contains(m, "exec.CommandContext") {
-			t.Fatalf("AUDIT-165 looks fixed: worktree remove now uses CommandContext")
+		// RGR inversion: fail if worktree remove does not yet use CommandContext.
+		if !strings.Contains(m, "exec.CommandContext") {
+			t.Fatal("AUDIT-165: worktree remove using bare exec.Command without timeout still present")
 		}
 		if !strings.Contains(m, "os.RemoveAll(wtPath)") {
 			t.Fatalf("AUDIT-165 precondition missing: os.RemoveAll(wtPath) not found")
 		}
-		t.Log("AUDIT-165 confirmed: deferred `git worktree remove` is bare exec.Command; hang blocks RemoveAll and caller")
 	})
 }

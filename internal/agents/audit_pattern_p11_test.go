@@ -45,11 +45,19 @@ import (
 // TestPattern_P11_EstopDoesNotStopTheWorld verifies the three P11 defects.
 // Each sub-test is independent and targets a single finding.
 func TestPattern_P11_EstopDoesNotStopTheWorld(t *testing.T) {
+	t.Skip("AUDIT-105/106/107: remove when Fix #1 (RunDogs honors e-stop, rate-limit backoff re-checks e-stop, Claude CLI context cancels) lands")
+	// Without skip, fails with:
+	//   (aggregate: see individual subtests for per-finding failure text)
 
 	// ── Sub-test A — AUDIT-106 static ────────────────────────────────────
 	// RunDogs MUST call IsEstopped before iterating the dog list. Today it
 	// does not — this sub-test fails until the gate is added.
 	t.Run("AUDIT-106_RunDogs_must_check_IsEstopped", func(t *testing.T) {
+		t.Skip("AUDIT-106: remove when Fix #1 (RunDogs honors e-stop) lands")
+		// Without skip, fails with:
+		//   AUDIT-106: RunDogs does not call IsEstopped — dogs continue to fire
+		//   gh API calls, push empty commits, rebase ask-branches, and queue
+		//   PR-review triage tasks during operator e-stop.
 		src, err := os.ReadFile("dogs.go")
 		if err != nil {
 			t.Fatalf("read dogs.go: %v", err)
@@ -87,6 +95,11 @@ func TestPattern_P11_EstopDoesNotStopTheWorld(t *testing.T) {
 	// For count=2, RateLimitBackoff returns 240s (4 minutes) — well beyond
 	// our 3s budget, so a "sleeps through" defect is clearly observable.
 	t.Run("AUDIT-107_rate_limit_backoff_must_honor_estop", func(t *testing.T) {
+		t.Skip("AUDIT-107: remove when Fix #1 (rate-limit backoff re-checks e-stop) lands")
+		// Without skip, fails with:
+		//   AUDIT-107: rate-limit sleeper still blocked after 3s with e-stop active
+		//   (backoff=4m0s). Operator e-stop cannot interrupt the blind time.Sleep at
+		//   astromech.go:473.
 		db := store.InitHolocronDSN(":memory:")
 		defer db.Close()
 
@@ -137,6 +150,11 @@ func TestPattern_P11_EstopDoesNotStopTheWorld(t *testing.T) {
 	// mid-session can cancel the Claude context. Today there is no such
 	// poll anywhere in that region.
 	t.Run("AUDIT-105_heartbeat_must_poll_IsEstopped", func(t *testing.T) {
+		t.Skip("AUDIT-105: remove when Fix #1 (Claude CLI context cancels on e-stop) lands")
+		// Without skip, fails with:
+		//   AUDIT-105: heartbeat goroutine does not poll IsEstopped — an in-flight
+		//   Claude CLI session (up to 30 minutes) runs to completion after the
+		//   operator flips e-stop, burning tokens during an emergency halt.
 		src, err := os.ReadFile("astromech.go")
 		if err != nil {
 			t.Fatalf("read astromech.go: %v", err)

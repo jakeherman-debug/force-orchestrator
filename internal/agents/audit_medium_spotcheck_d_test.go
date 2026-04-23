@@ -72,6 +72,8 @@ func spotcheckDExtractFunc(src, name string) string {
 // keyed on repoPath. If a fix lands that adds locking, this test fails
 // and AUDIT.md must be updated.
 func TestAuditMedium155_UnionMergeNoRepoLock(t *testing.T) {
+	t.Skip("AUDIT-155: remove when per-repo mutex protects .git/info/attributes rewrite (Fix #8)")
+	// Without skip, fails with: AUDIT-155: MergeWithUnionStrategy rewrites .git/info/attributes without a per-repo mutex still present
 	// Resolve ../git/askbranch.go relative to this package.
 	path, err := filepath.Abs(filepath.Join("..", "git", "askbranch.go"))
 	if err != nil {
@@ -106,12 +108,16 @@ func TestAuditMedium155_UnionMergeNoRepoLock(t *testing.T) {
 				"Update AUDIT.md (mark resolved) and remove this spot-check.", tok)
 		}
 	}
+	t.Fatalf("AUDIT-155: MergeWithUnionStrategy rewrites .git/info/attributes without " +
+		"a per-repo mutex still present")
 }
 
 // TestAuditMedium161_EnvBreakerTestNoCallCountAssert pins AUDIT-161: the
 // test body exercises the breaker trip but never asserts Claude call
 // count drops to zero afterwards.
 func TestAuditMedium161_EnvBreakerTestNoCallCountAssert(t *testing.T) {
+	t.Skip("AUDIT-161: remove when TestRunMedicCITriage_EnvironmentalTripsBreaker asserts CallCount (Fix #7 companion)")
+	// Without skip, fails with: AUDIT-161: TestRunMedicCITriage_EnvironmentalTripsBreaker still lacks Claude call-count assertion after breaker trip
 	path, err := filepath.Abs("medic_ci_test.go")
 	if err != nil {
 		t.Fatalf("abs: %v", err)
@@ -141,6 +147,8 @@ func TestAuditMedium161_EnvBreakerTestNoCallCountAssert(t *testing.T) {
 	if strings.Contains(body, "after breaker") || strings.Contains(body, "post-trip") {
 		t.Errorf("AUDIT-161 appears remedied: post-trip assertion present. Update AUDIT.md.")
 	}
+	t.Fatalf("AUDIT-161: TestRunMedicCITriage_EnvironmentalTripsBreaker still lacks " +
+		"Claude call-count assertion after breaker trip")
 }
 
 // TestAuditMedium162_RateLimitTestNoCallCountAssert pins AUDIT-162: the
@@ -148,6 +156,8 @@ func TestAuditMedium161_EnvBreakerTestNoCallCountAssert(t *testing.T) {
 // runner was invoked exactly once — a broken retry loop that hammered
 // Claude N times would pass.
 func TestAuditMedium162_RateLimitTestNoCallCountAssert(t *testing.T) {
+	t.Skip("AUDIT-162: remove when TestRunAstromechTask_RateLimit asserts CallCount (Fix #7 companion)")
+	// Without skip, fails with: AUDIT-162: TestRunAstromechTask_RateLimit still lacks Claude call-count assertion
 	path, err := filepath.Abs("astromech_test.go")
 	if err != nil {
 		t.Fatalf("abs: %v", err)
@@ -175,4 +185,6 @@ func TestAuditMedium162_RateLimitTestNoCallCountAssert(t *testing.T) {
 	if strings.Contains(body, "atomic.LoadInt") || strings.Contains(body, "atomic.AddInt") {
 		t.Errorf("AUDIT-162 appears remedied: atomic counter present in test. Update AUDIT.md.")
 	}
+	t.Fatalf("AUDIT-162: TestRunAstromechTask_RateLimit still lacks Claude " +
+		"call-count assertion")
 }

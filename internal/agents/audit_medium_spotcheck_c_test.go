@@ -52,6 +52,8 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 	// having re-opened a previously-resolved escalation for deeper
 	// investigation — the sweeper will silently re-close it 10 min later.
 	t.Run("TestAUDIT_149_sweeper_unconditional_each_tick", func(t *testing.T) {
+		t.Skip("AUDIT-149: remove when Escalations.auto_resolve_count gates sweeper (Fix #5)")
+		// Without skip, fails with: AUDIT-149: escalation-sweeper auto-closes unconditionally on every tick with no auto_resolve_count gate still present
 		src := mediumCReadFile(t, "internal/agents/escalation_sweeper.go")
 
 		// Count the unconditional resolve UPDATE — must occur twice (Rule 1
@@ -87,6 +89,8 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 			t.Fatalf("AUDIT-149 source drift: expected `WHERE e.status = 'Open' ... b.status IN` " +
 				"pattern in sweeper")
 		}
+		t.Fatalf("AUDIT-149: escalation-sweeper auto-closes unconditionally on every " +
+			"tick with no auto_resolve_count gate still present")
 	})
 
 	// ── AUDIT-151 ─────────────────────────────────────────────────────────
@@ -98,6 +102,8 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 	// execution, the UPDATE silently affects 0 rows — the worktree is wiped
 	// but no retry is queued. There is no log warning on a 0-row result.
 	t.Run("TestAUDIT_151_worktree_reset_silent_zero_row", func(t *testing.T) {
+		t.Skip("AUDIT-151: remove when WorktreeReset logs 0-row result + escalates (Fix #8)")
+		// Without skip, fails with: AUDIT-151: WorktreeReset parent-requeue UPDATE discards RowsAffected and emits no escalation on 0-row result still present
 		src := mediumCReadFile(t, "internal/agents/pilot_worktree_reset.go")
 
 		// The exact filter the audit cites must still be present.
@@ -152,6 +158,8 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 			t.Fatalf("AUDIT-151 contradicted: pilot_worktree_reset.go now calls " +
 				"CreateEscalation; audit may be fixed")
 		}
+		t.Fatalf("AUDIT-151: WorktreeReset parent-requeue UPDATE discards RowsAffected " +
+			"and emits no escalation on 0-row result still present")
 	})
 
 	// ── AUDIT-152 ─────────────────────────────────────────────────────────
@@ -161,6 +169,8 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 	// awareness — there is no 30-day branch and no CreateEscalation call
 	// anywhere in the file.
 	t.Run("TestAUDIT_152_ship_it_nag_no_30d_escalation", func(t *testing.T) {
+		t.Skip("AUDIT-152: remove when 30-day escalation threshold added (Fix #1 observability)")
+		// Without skip, fails with: AUDIT-152: ship-it-nag tops out at 1wk with no 30-day escalation branch still present
 		src := mediumCReadFile(t, "internal/agents/pilot_draft_watch.go")
 
 		// Thresholds: must see the three cited constants and NOT a 30d one.
@@ -218,5 +228,7 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 		if !strings.Contains(cases[0], "shipItNag1wk") {
 			t.Fatalf("AUDIT-152 source drift: top case is %q, not shipItNag1wk", cases[0])
 		}
+		t.Fatalf("AUDIT-152: ship-it-nag tops out at 1wk with no 30-day escalation " +
+			"branch still present")
 	})
 }

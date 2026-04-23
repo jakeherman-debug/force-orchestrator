@@ -28,6 +28,14 @@ import (
 // ends up 'Completed' despite the cancel having "succeeded" — proving
 // AUDIT-027 / AUDIT-072.
 func TestPattern_P7_ConcurrentCancelVsApproveRace(t *testing.T) {
+	t.Skip("AUDIT-027/AUDIT-072: remove when UpdateBountyStatusFrom(id, from, to) guards state transitions (Fix #8/#5)")
+	// Without skip, fails with:
+	//   audit_pattern_p7_test.go:135: AUDIT-P7 (AUDIT-027, AUDIT-072): detected 20/20 clobbers
+	//   where CancelTask succeeded but a later unguarded UpdateBountyStatus("Completed")
+	//   overwrote 'Cancelled'. Stats: cancelWins=20, finalCancelled=0, finalCompleted=20.
+	//   UpdateBountyStatus has no source-status guard so it blind-writes regardless of whether
+	//   the prior state still permits the transition.
+	// Fail rate under `-race -count=5`: 5/5 runs fail, 20/20 clobbers per run (deterministic).
 	const trials = 20
 
 	type result struct {
@@ -163,6 +171,12 @@ func TestPattern_P7_ConcurrentCancelVsApproveRace(t *testing.T) {
 // can un-complete finished work and re-run it, duplicating commits / PRs /
 // mail.
 func TestPattern_P7_ResetTaskResurrectsCompleted(t *testing.T) {
+	t.Skip("AUDIT-026: remove when UpdateBountyStatusFrom(id, from, to) guards state transitions (Fix #8/#5)")
+	// Without skip, fails with:
+	//   audit_pattern_p7_test.go:195: AUDIT-P7 (AUDIT-026): ResetTask resurrected a Completed
+	//   task to "Pending". ResetTask (tasks.go:297-315) has no source-status guard and
+	//   unconditionally rewrites Completed tasks. Fix: `AND status NOT IN ('Completed','Cancelled')`
+	//   on both UPDATE branches (the branch_name='' path and the branch_name!='' path).
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 

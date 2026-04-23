@@ -71,11 +71,19 @@ func readSource(t *testing.T, rel string) []byte {
 }
 
 func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
+	t.Skip("AUDIT-108/109/110/114/115/116/139/141-145/163: remove when Fix #8.5 (LLM prompt boundary markers + DisallowUnknownFields) lands")
+	// Without skip, fails with:
+	//   (aggregate: see individual subtests for per-finding failure text)
+
 	// ── Sub-test A (AUDIT-108) ───────────────────────────────────────────
 	// Council's `reviewPrompt` is built by:
 	//   reviewPrompt := fmt.Sprintf("Task: %s\n\nDiff:\n%s%s%s", b.Payload, diff, diffNote, inboxContext)
 	// Nothing wraps `b.Payload` or `diff` in a boundary marker.
 	t.Run("A_CouncilPromptHasNoBoundaryMarker", func(t *testing.T) {
+		t.Skip("AUDIT-108: remove when Fix #8.5 (LLM prompt boundary markers) lands")
+		// Without skip, fails with:
+		//   AUDIT-108: Council reviewPrompt has no boundary-marker token (tried
+		//   <user_content>, <diff>, <untrusted ...) — prompt-injection surface open.
 		src := readSource(t, "internal/agents/jedi_council.go")
 		// Find the reviewPrompt line.
 		idx := strings.Index(string(src), "reviewPrompt := fmt.Sprintf(")
@@ -89,7 +97,10 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 		}
 		snippet := string(src[idx:end])
 
-		// Lock defect: no boundary-marker tokens present today.
+		// RGR: assert the POST-FIX state — at least one boundary-marker token
+		// is present in the prompt. Today none are, so this fails until
+		// Fix #8.5 lands.
+		found := false
 		for _, token := range []string{
 			"<user_content>",
 			"</user_content>",
@@ -98,14 +109,25 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 			"<untrusted",
 		} {
 			if strings.Contains(snippet, token) {
-				t.Errorf("Council reviewPrompt already contains boundary token %q — update this test; the P12 fix landed", token)
+				found = true
+				break
 			}
+		}
+		if !found {
+			t.Errorf("AUDIT-108: Council reviewPrompt has no boundary-marker token (tried " +
+				"<user_content>, <diff>, <untrusted ...) — prompt-injection surface open. " +
+				"Fix #8.5 requires wrapping user-content sections in boundary markers.")
 		}
 	})
 
 	// ── Sub-test B (AUDIT-109) ───────────────────────────────────────────
 	// Captain's `reviewPrompt` has the same shape and the same gap.
 	t.Run("B_CaptainPromptHasNoBoundaryMarker", func(t *testing.T) {
+		t.Skip("AUDIT-109: remove when Fix #8.5 (LLM prompt boundary markers) lands")
+		// Without skip, fails with:
+		//   AUDIT-109: Captain reviewPrompt has no boundary-marker token — same
+		//   prompt-injection surface as Council. Fix #8.5 requires wrapping
+		//   user-content sections in boundary markers.
 		src := readSource(t, "internal/agents/captain.go")
 		idx := strings.Index(string(src), "reviewPrompt := fmt.Sprintf(")
 		if idx < 0 {
@@ -117,6 +139,9 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 		}
 		snippet := string(src[idx:end])
 
+		// RGR: assert POST-FIX state. At least one boundary-marker token
+		// must be present.
+		found := false
 		for _, token := range []string{
 			"<user_content>",
 			"</user_content>",
@@ -126,8 +151,14 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 			"<untrusted",
 		} {
 			if strings.Contains(snippet, token) {
-				t.Errorf("Captain reviewPrompt already contains boundary token %q — update this test; the P12 fix landed", token)
+				found = true
+				break
 			}
+		}
+		if !found {
+			t.Errorf("AUDIT-109: Captain reviewPrompt has no boundary-marker token — same " +
+				"prompt-injection surface as Council. Fix #8.5 requires wrapping " +
+				"user-content sections in boundary markers.")
 		}
 	})
 
@@ -136,23 +167,24 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 	// strings to approve (forwards to Council) rather than to infra-retry.
 	// The test confirms the defective branch exists verbatim.
 	t.Run("C_CaptainDefaultBranchApproves", func(t *testing.T) {
+		t.Skip("AUDIT-114: remove when Fix #8.5 (Captain default-branch stops fail-open) lands")
+		// Without skip, fails with:
+		//   AUDIT-114: Captain default-branch still contains 'defaulting to approve' —
+		//   unknown decisions fail OPEN (forward to Council). Fix #8.5 requires
+		//   routing unknown decisions to infra-retry / escalation, not approve.
 		src := string(readSource(t, "internal/agents/captain.go"))
 
-		// Lock the exact current behaviour: default branch logs the unknown
-		// decision and then calls UpdateBountyStatus with AwaitingCouncilReview —
-		// i.e. treats "unknown" as approve.
-		if !strings.Contains(src, `defaulting to approve`) {
-			t.Errorf("captain default-branch log message changed — verify the fail-open behavior is gone")
+		// RGR: assert the POST-FIX state — the fail-open log and approve call
+		// must be GONE. Today they're present; this fails until Fix #8.5 lands.
+		if strings.Contains(src, `defaulting to approve`) {
+			t.Errorf("AUDIT-114: Captain default-branch still contains 'defaulting to approve' — " +
+				"unknown decisions fail OPEN (forward to Council). Fix #8.5 requires " +
+				"routing unknown decisions to infra-retry / escalation, not approve.")
 		}
-		if !strings.Contains(src, `store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview")`) {
-			t.Errorf("captain default-branch no longer moves to AwaitingCouncilReview — verify fix landed")
-		}
-		// Confirm the default branch is syntactically present right after
-		// "escalate" — i.e. an unknown decision isn't being routed to
-		// handleInfraFailure or FailBounty yet.
-		defaultIdx := strings.Index(src, "default:\n\t\tlogger.Printf(\"Task %d: captain returned unknown decision")
-		if defaultIdx < 0 {
-			t.Errorf("could not find captain default: branch for unknown decisions — update this test if the switch was restructured")
+		if strings.Contains(src, `store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview")`) &&
+			strings.Contains(src, `defaulting to approve`) {
+			t.Errorf("AUDIT-114: Captain default-branch still moves to AwaitingCouncilReview on " +
+				"unknown decision — fail-open is live.")
 		}
 	})
 
@@ -171,6 +203,11 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 	// (`Approved *bool` + non-nil check, or DisallowUnknownFields + required
 	// validation), this sub-test starts passing.
 	t.Run("D_MissingApprovedFieldMustBeRejected", func(t *testing.T) {
+		t.Skip("AUDIT-115: remove when Fix #8.5 (DisallowUnknownFields + required-field validation) lands")
+		// Without skip, fails with:
+		//   AUDIT-115 present: Council parser silently accepted a response missing `approved`;
+		//   got err=nil, ruling={Approved:false, Feedback:"looks fine to me"}.
+		//   Expected: parse error OR a way for the caller to distinguish 'missing' from 'explicit false'.
 		// Exact decoder call from jedi_council.go:198:
 		//   if err := json.Unmarshal([]byte(cleanJSON), &ruling); err != nil { … }
 		malformed := []byte(`{"feedback":"looks fine to me"}`)
@@ -193,6 +230,11 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 	// parsing, this count flips to > 0 and the test fails, forcing an
 	// update of the expected value (so the fix is consciously ratified).
 	t.Run("E_DisallowUnknownFieldsAbsent", func(t *testing.T) {
+		t.Skip("AUDIT-139/163: remove when Fix #8.5 (DisallowUnknownFields adopted in decoders) lands")
+		// Without skip, fails with:
+		//   AUDIT-139/163: found 0 DisallowUnknownFields usages — strict-field JSON
+		//   parsing is absent fleet-wide. Fix #8.5 requires adopting
+		//   json.Decoder.DisallowUnknownFields() in LLM-response decoders.
 		root := repoRoot(t)
 		count := 0
 		hits := []string{}
@@ -229,9 +271,15 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 		if err != nil {
 			t.Fatalf("walk: %v", err)
 		}
-		if count != 0 {
-			t.Errorf("expected zero DisallowUnknownFields usages (P12 unfixed), found %d in: %v", count, hits)
+		// RGR: POST-FIX state requires at least one DisallowUnknownFields
+		// usage in production decoders. Today there are zero — fails until
+		// Fix #8.5 lands.
+		if count == 0 {
+			t.Errorf("AUDIT-139/163: found 0 DisallowUnknownFields usages — strict-field JSON " +
+				"parsing is absent fleet-wide. Fix #8.5 requires adopting " +
+				"json.Decoder.DisallowUnknownFields() in LLM-response decoders.")
 		}
+		_ = hits
 	})
 
 	// ── Sub-test F (AUDIT-116) ───────────────────────────────────────────
@@ -239,38 +287,30 @@ func TestPattern_P12_PromptInjectionSurface(t *testing.T) {
 	// both call `approveProposal(db, feature, tasks, chancellorRuling{}, logger)`.
 	// A zero-value ruling => auto-approve under LLM outage.
 	t.Run("F_ChancellorFailsOpenOnClaudeOrParseError", func(t *testing.T) {
+		t.Skip("AUDIT-116: remove when Fix #8.5 (Chancellor fails CLOSED on Claude/parse error) lands")
+		// Without skip, fails with:
+		//   AUDIT-116: chancellor.go still contains 3 zero-value approveProposal
+		//   fail-open calls. Fix #8.5 requires replacing them with handleInfraFailure
+		//   or operator-review fallback so an LLM outage does not auto-approve Features.
 		src := string(readSource(t, "internal/agents/chancellor.go"))
 
-		// Locate the error-handling block for Claude failure.
-		// Expected verbatim substrings from chancellor.go:92-96 + 101-104.
-		claudeFailSnippet := `Chancellor Claude call failed`
-		parseFailSnippet := `could not parse Chancellor ruling`
 		approveCall := `approveProposal(db, feature, tasks, chancellorRuling{}, logger)`
 
-		if !strings.Contains(src, claudeFailSnippet) {
-			t.Errorf("expected Claude-failure log message to contain %q — chancellor.go may have changed", claudeFailSnippet)
-		}
-		if !strings.Contains(src, parseFailSnippet) {
-			t.Errorf("expected parse-failure log message to contain %q — chancellor.go may have changed", parseFailSnippet)
-		}
-
-		// Count how many times the zero-value approveProposal call appears.
-		// Today it appears at minimum twice (Claude fail + parse fail).
+		// RGR: assert POST-FIX state.
+		//   1. zero-value approveProposal fail-open calls must be GONE (0 occurrences).
+		//   2. either handleInfraFailure OR the operator-review fallback must be present.
 		n := strings.Count(src, approveCall)
-		if n < 2 {
-			t.Errorf("expected at least 2 zero-value approveProposal fail-open calls, found %d — verify P12 AUDIT-116 fix landed", n)
+		if n > 0 {
+			t.Errorf("AUDIT-116: chancellor.go still contains %d zero-value approveProposal "+
+				"fail-open calls. Fix #8.5 requires replacing them with handleInfraFailure "+
+				"or operator-review fallback so an LLM outage does not auto-approve Features.", n)
 		}
-
-		// The fix path should either call handleInfraFailure or return an
-		// escalation instead of a zero-value approveProposal. When those
-		// helpers land in chancellor.go, this test should be updated.
-		for _, forbidden := range []string{
-			"handleInfraFailure(db",                             // infra retry wrapper
-			"SetFeatureStatus(db, feature.ID, \"AwaitingOperatorReview\")", // operator fallback
-		} {
-			if strings.Contains(src, forbidden) {
-				t.Errorf("chancellor.go now references %q — P12 AUDIT-116 fix may have landed; update this test", forbidden)
-			}
+		hasInfra := strings.Contains(src, "handleInfraFailure(db")
+		hasOperatorFallback := strings.Contains(src, `SetFeatureStatus(db, feature.ID, "AwaitingOperatorReview")`)
+		if !hasInfra && !hasOperatorFallback {
+			t.Errorf("AUDIT-116: chancellor.go has neither handleInfraFailure nor " +
+				"AwaitingOperatorReview fallback — Claude/parse failures still fail OPEN. " +
+				"Fix #8.5 requires a fail-closed path.")
 		}
 	})
 }

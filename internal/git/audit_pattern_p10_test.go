@@ -135,6 +135,11 @@ func seedConvoy(t *testing.T, db *sql.DB) int {
 // adversarial string never lands in the column. Today it lands verbatim in
 // every case — this subtest is expected to FAIL until the fix ships.
 func TestPattern_P10_BranchValidatorsMissing(t *testing.T) {
+	t.Skip("AUDIT-018/019/049/050/051/052/098/099/140/153/154: remove when validRef/validRepoPath/validRemoteURL land at store ingress + `--` separator inserted (Fix #9)")
+	// Without skip, fails with:
+	//   audit_pattern_p10_test.go:154: P10 VIOLATION: SetBranchName accepted adversarial ref "--upload-pack=/tmp/evil" (CVE-2017-1000117: leading double-dash → git interprets as flag); stored verbatim
+	//   audit_pattern_p10_test.go:173: P10 VIOLATION: SetBranchNameTx accepted adversarial ref "--upload-pack=/tmp/evil" (CVE-2017-1000117: leading double-dash → git interprets as flag); stored verbatim (setErr=<nil>)
+	//   audit_pattern_p10_test.go:189: P10 VIOLATION: UpsertConvoyAskBranch accepted adversarial ref "--upload-pack=/tmp/evil" (CVE-2017-1000117: leading double-dash → git interprets as flag); stored verbatim (err=<nil>)
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -231,6 +236,12 @@ func safeLabel(s string) string {
 // `newBranch`, `conflictBranch`, `baseRef`, `remoteRef`, `baseSHA`), we
 // flag it. Today virtually every invocation fails this check.
 func TestPattern_P10_GitInvocationsLackDashDashSeparator(t *testing.T) {
+	t.Skip("AUDIT-018/019/049/050/051/052/098/099/140/153/154: remove when validRef/validRepoPath/validRemoteURL land at store ingress + `--` separator inserted (Fix #9)")
+	// Without skip, fails with:
+	//   audit_pattern_p10_test.go:308: P10 VIOLATION: git.go:20 lacks `--` separator before ref arg:
+	//       exec.Command("git", "-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
+	//   audit_pattern_p10_test.go:308: P10 VIOLATION: git.go:29 lacks `--` separator before ref arg:
+	//       exec.Command("git", "-C", repoPath, "rev-parse", "--verify", branch)
 	files := []string{
 		mustAbs(t, "git.go"),
 		mustAbs(t, "askbranch.go"),

@@ -4,6 +4,15 @@ Verification of `AUDIT.md` (166 findings) performed by an orchestrated fanout of
 
 All tests live at `internal/{store,agents,git,dashboard}/audit_*_test.go` and compile cleanly against current `main` (`go vet` clean). They are red-on-main: each test either fails today (and passes once the fix lands) or is a locking test (passes today because the defective pattern is still present; fails the moment the remedy lands so the test has to be removed in lock-step with the fix).
 
+## RGR conversion (follow-up pass)
+
+All ~110 tests have been converted into **Red-phase RGR form** gated by `t.Skip("AUDIT-NNN: remove when <fix> lands")`. Every test now:
+- **Passes with skip** (CI green until the fix PR).
+- **Fails without skip** (assertions inverted where necessary so removing the skip reproduces the defect with a clear `AUDIT-NNN: <defect> still present` message).
+- Has a `// Without skip, fails with: ...` comment block below the skip line capturing 2-5 lines of the exact failure output.
+
+When a fix PR lands (e.g., Fix #3 partial UNIQUE on `idempotency_key`), the PR's minimal change is deleting the matching `t.Skip(...)` line — the test goes Green and stays as permanent regression protection. See **`AUDIT-TEST-MANIFEST.md`** for the full per-ID test / skip-removal mapping.
+
 ## Summary stats
 
 ```

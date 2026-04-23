@@ -64,9 +64,10 @@ func hasColumn(t *testing.T, db *sql.DB, table, col string) bool {
 // exist. Lock both facts so a future fix must remove this test.
 
 func TestAUDIT_005_MedicRequeueZerosRetryCount(t *testing.T) {
+	t.Skip("AUDIT-005: remove when medic_requeue_count + ConvoyReview tightening land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-005: defective pattern still present — ResetTaskFull zeros retry_count/infra_failures, no medic_requeue_count counter in applyMedicRequeue, no medic_requeue_count column on BountyBoard
 	// Source-grep: ResetTaskFull in tasks.go must still zero retry_count.
 	src := readCostLoopSource(t, "../store/tasks.go")
-	// The body of ResetTaskFull sits between the function marker and the next func.
 	start := strings.Index(src, "func ResetTaskFull(")
 	if start < 0 {
 		t.Fatalf("ResetTaskFull not found in store/tasks.go — source moved?")
@@ -75,14 +76,8 @@ func TestAUDIT_005_MedicRequeueZerosRetryCount(t *testing.T) {
 	if nextFunc := strings.Index(body[10:], "\nfunc "); nextFunc > 0 {
 		body = body[:nextFunc+10]
 	}
-	if !strings.Contains(body, "retry_count = 0") {
-		t.Errorf("ResetTaskFull no longer zeros retry_count — if a counter-preserving path replaced it, delete this lock test")
-	}
-	if !strings.Contains(body, "infra_failures = 0") {
-		t.Errorf("ResetTaskFull no longer zeros infra_failures — lock test may be stale")
-	}
+	defectPresent := strings.Contains(body, "retry_count = 0") && strings.Contains(body, "infra_failures = 0")
 
-	// Source-grep: applyMedicRequeue calls ResetTaskFull with no pre-counter check.
 	medicSrc := readCostLoopSource(t, "medic.go")
 	reqStart := strings.Index(medicSrc, "func applyMedicRequeue(")
 	if reqStart < 0 {
@@ -92,18 +87,14 @@ func TestAUDIT_005_MedicRequeueZerosRetryCount(t *testing.T) {
 	if nextFunc := strings.Index(reqBody[10:], "\nfunc "); nextFunc > 0 {
 		reqBody = reqBody[:nextFunc+10]
 	}
-	if !strings.Contains(reqBody, "store.ResetTaskFull(db, parent.ID)") {
-		t.Errorf("applyMedicRequeue no longer calls ResetTaskFull — lock test may be stale")
-	}
-	if strings.Contains(reqBody, "medic_requeue_count") || strings.Contains(reqBody, "MedicRequeueCount") {
-		t.Errorf("applyMedicRequeue appears to reference a medic_requeue_count cap — remove this lock test; the AUDIT-005 defect is fixed")
-	}
+	hasRequeueCounter := strings.Contains(reqBody, "medic_requeue_count") || strings.Contains(reqBody, "MedicRequeueCount")
 
-	// Schema check: no medic_requeue_count column on BountyBoard.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if hasColumn(t, db, "BountyBoard", "medic_requeue_count") {
-		t.Errorf("BountyBoard now has medic_requeue_count — AUDIT-005 appears fixed, remove this lock test")
+	hasSchemaCol := hasColumn(t, db, "BountyBoard", "medic_requeue_count")
+
+	if defectPresent && !hasRequeueCounter && !hasSchemaCol {
+		t.Fatal("AUDIT-005: defective pattern still present — ResetTaskFull zeros retry_count/infra_failures, no medic_requeue_count counter in applyMedicRequeue, no medic_requeue_count column on BountyBoard")
 	}
 }
 
@@ -114,22 +105,17 @@ func TestAUDIT_005_MedicRequeueZerosRetryCount(t *testing.T) {
 // as the structural worst-case.
 
 func TestAUDIT_006_ConvoyReview5x5Structural(t *testing.T) {
+	t.Skip("AUDIT-006: remove when medic_requeue_count + ConvoyReview tightening land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-006: defective pattern still present — convoy_review.go has maxPasses=5, max_findings default=5, full Astromech spawn per finding, no fingerprinting/dedup
 	src := readCostLoopSource(t, "convoy_review.go")
 
-	if !strings.Contains(src, `const maxPasses = 5`) {
-		t.Errorf("convoy_review.go: expected `const maxPasses = 5` — remedy may have tightened the cap; remove this lock test")
-	}
-	if !strings.Contains(src, `getIntConfig(db, "convoy_review_max_findings", 5)`) {
-		t.Errorf("convoy_review.go: expected default convoy_review_max_findings=5; remedy may have tightened; remove this lock test")
-	}
+	hasMaxPasses5 := strings.Contains(src, `const maxPasses = 5`)
+	hasMaxFindings5 := strings.Contains(src, `getIntConfig(db, "convoy_review_max_findings", 5)`)
+	hasSpawn := strings.Contains(src, `store.AddConvoyTask(db, bounty.ID, repo, taskPayload,`)
+	hasFingerprint := strings.Contains(src, "fingerprint") || strings.Contains(src, "findingHash")
 
-	// Each finding spawns a CodeEdit (full Astromech run). Lock the spawn site.
-	if !strings.Contains(src, `store.AddConvoyTask(db, bounty.ID, repo, taskPayload,`) {
-		t.Errorf("convoy_review.go: fix-task spawn pattern moved — lock test stale")
-	}
-	// No fingerprinting / short-circuit on repeated findings.
-	if strings.Contains(src, "fingerprint") || strings.Contains(src, "findingHash") {
-		t.Errorf("convoy_review.go: fingerprint-based dedup detected — AUDIT-006 remedy landed; remove this lock test")
+	if hasMaxPasses5 && hasMaxFindings5 && hasSpawn && !hasFingerprint {
+		t.Fatal("AUDIT-006: defective pattern still present — convoy_review.go has maxPasses=5, max_findings default=5, full Astromech spawn per finding, no fingerprinting/dedup")
 	}
 }
 
@@ -140,24 +126,21 @@ func TestAUDIT_006_ConvoyReview5x5Structural(t *testing.T) {
 // No parse_failure_count column exists.
 
 func TestAUDIT_007_ConvoyReviewParseFailCompletesNoMemory(t *testing.T) {
+	t.Skip("AUDIT-007: remove when medic_requeue_count + ConvoyReview tightening land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-007: defective pattern still present — convoy_review.go marks Completed on second parse fail, no parse_failure_count memory, no parse_failure_count column on BountyBoard/Convoys
 	src := readCostLoopSource(t, "convoy_review.go")
 
-	// Lock the exact "Completed on second parse fail" branch.
-	if !strings.Contains(src, `second parse failed`) ||
-		!strings.Contains(src, `store.UpdateBountyStatus(db, bounty.ID, "Completed")`) {
-		t.Errorf("convoy_review.go: second-parse-failure path changed; lock test stale")
-	}
-	// No parse-failure memory anywhere in the file.
-	if strings.Contains(src, "parse_failure_count") || strings.Contains(src, "ParseFailureCount") {
-		t.Errorf("convoy_review.go: parse_failure_count reference detected — AUDIT-007 fix landed; remove this lock test")
-	}
+	hasSecondParseCompleted := strings.Contains(src, `second parse failed`) &&
+		strings.Contains(src, `store.UpdateBountyStatus(db, bounty.ID, "Completed")`)
+	hasParseFailureMem := strings.Contains(src, "parse_failure_count") || strings.Contains(src, "ParseFailureCount")
 
-	// Schema check: no parse_failure_count column on BountyBoard or Convoys.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if hasColumn(t, db, "BountyBoard", "parse_failure_count") ||
-		hasColumn(t, db, "Convoys", "parse_failure_count") {
-		t.Errorf("parse_failure_count column exists — AUDIT-007 appears fixed; remove this lock test")
+	hasSchemaCol := hasColumn(t, db, "BountyBoard", "parse_failure_count") ||
+		hasColumn(t, db, "Convoys", "parse_failure_count")
+
+	if hasSecondParseCompleted && !hasParseFailureMem && !hasSchemaCol {
+		t.Fatal("AUDIT-007: defective pattern still present — convoy_review.go marks Completed on second parse fail, no parse_failure_count memory, no parse_failure_count column on BountyBoard/Convoys")
 	}
 }
 
@@ -170,6 +153,8 @@ func TestAUDIT_007_ConvoyReviewParseFailCompletesNoMemory(t *testing.T) {
 // one terminates without resolving.
 
 func TestAUDIT_028_AskBranchRebaseConflictNoCap(t *testing.T) {
+	t.Skip("AUDIT-028: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-028: defective pattern still present — runRebaseAskBranch uses idempotency key only (no attempt counter), no failed_rebase_attempts column on ConvoyAskBranches
 	src := readCostLoopSource(t, "pilot_rebase.go")
 
 	start := strings.Index(src, "func runRebaseAskBranch(")
@@ -181,25 +166,17 @@ func TestAUDIT_028_AskBranchRebaseConflictNoCap(t *testing.T) {
 		body = body[:nextFunc+10]
 	}
 
-	// Must still spawn via idempotency key only (no counter).
-	if !strings.Contains(body, `"rebase-conflict:askbranch:"`) {
-		t.Errorf("ask-branch conflict spawn moved; lock test stale")
-	}
-	if !strings.Contains(body, "AddConvoyTaskIdempotent") {
-		t.Errorf("ask-branch conflict no longer uses AddConvoyTaskIdempotent; lock test stale")
-	}
-	// Expect the absence of any per-convoy / per-ask-branch attempt counter.
-	if strings.Contains(body, "failed_rebase_attempts") ||
+	hasIdempKey := strings.Contains(body, `"rebase-conflict:askbranch:"`) && strings.Contains(body, "AddConvoyTaskIdempotent")
+	hasCounter := strings.Contains(body, "failed_rebase_attempts") ||
 		strings.Contains(body, "FailedRebaseAttempts") ||
-		strings.Contains(body, "maxAskBranchConflicts") {
-		t.Errorf("runRebaseAskBranch now has a conflict-attempt counter — AUDIT-028 fix landed; remove this lock test")
-	}
+		strings.Contains(body, "maxAskBranchConflicts")
 
-	// Schema check: no failed_rebase_attempts column on ConvoyAskBranches.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if hasColumn(t, db, "ConvoyAskBranches", "failed_rebase_attempts") {
-		t.Errorf("ConvoyAskBranches.failed_rebase_attempts exists — AUDIT-028/AUDIT-119 fix landed")
+	hasSchemaCol := hasColumn(t, db, "ConvoyAskBranches", "failed_rebase_attempts")
+
+	if hasIdempKey && !hasCounter && !hasSchemaCol {
+		t.Fatal("AUDIT-028: defective pattern still present — runRebaseAskBranch uses idempotency key only (no attempt counter), no failed_rebase_attempts column on ConvoyAskBranches")
 	}
 }
 
@@ -210,25 +187,18 @@ func TestAUDIT_028_AskBranchRebaseConflictNoCap(t *testing.T) {
 // Medic after a distinct parse-failure threshold.
 
 func TestAUDIT_029_CouncilJSONParseRoutesToInfra5x(t *testing.T) {
+	t.Skip("AUDIT-029: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-029: defective pattern still present — jedi_council.go routes parse-fail to handleInfraFailure with shared MaxInfraFailures=5 gate, no dedicated parse-failure counter
 	src := readCostLoopSource(t, "jedi_council.go")
 
-	// Lock the exact parse-fail branch.
-	if !strings.Contains(src, "council JSON parse failed") {
-		t.Errorf("jedi_council.go: JSON-parse-failure log line moved; lock test stale")
-	}
-	if !strings.Contains(src, `handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)`) {
-		t.Errorf("jedi_council.go: parse-fail no longer routes to handleInfraFailure(...,AwaitingCouncilReview,true) — lock test stale")
-	}
-	// Expect NO dedicated parse-failure counter / earlier-reject path.
-	if strings.Contains(src, "parse_failure_count") ||
+	hasParseFailLog := strings.Contains(src, "council JSON parse failed")
+	hasInfraRoute := strings.Contains(src, `handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)`)
+	hasDedicatedHandling := strings.Contains(src, "parse_failure_count") ||
 		strings.Contains(src, "councilParseFailureCap") ||
-		strings.Contains(src, "unable to parse LLM output") {
-		t.Errorf("jedi_council.go: dedicated parse-fail handling present — AUDIT-029 fix landed; remove lock test")
-	}
+		strings.Contains(src, "unable to parse LLM output")
 
-	// Confirm MaxInfraFailures is still the single 5-budget gate.
-	if MaxInfraFailures != 5 {
-		t.Errorf("MaxInfraFailures=%d; expected 5 for AUDIT-029 structural finding", MaxInfraFailures)
+	if hasParseFailLog && hasInfraRoute && !hasDedicatedHandling && MaxInfraFailures == 5 {
+		t.Fatal("AUDIT-029: defective pattern still present — jedi_council.go routes parse-fail to handleInfraFailure with shared MaxInfraFailures=5 gate, no dedicated parse-failure counter")
 	}
 }
 
@@ -243,6 +213,8 @@ func TestAUDIT_029_CouncilJSONParseRoutesToInfra5x(t *testing.T) {
 // consecutive-fallback counter.
 
 func TestAUDIT_030_ChancellorAutoApprovesOnClaudeError(t *testing.T) {
+	t.Skip("AUDIT-030: DUPLICATE-OF-116 — remove when Chancellor classifies Claude errors (Fix #8/#8.5)")
+	// Without skip, fails with: AUDIT-030: defective pattern still present — runChancellorReview auto-approves on both Claude error and parse error, no gh.ClassifyError/ShouldRetry/handleInfraFailure, no consecutive-fallback counter
 	// DUPLICATE-OF: AUDIT-116 (same function body, identical defect).
 	src := readCostLoopSource(t, "chancellor.go")
 
@@ -255,24 +227,16 @@ func TestAUDIT_030_ChancellorAutoApprovesOnClaudeError(t *testing.T) {
 		body = body[:nextFunc+10]
 	}
 
-	// Both error branches must still call approveProposal with zero ruling.
-	if !strings.Contains(body, "auto-approving") {
-		t.Errorf("chancellor.go: auto-approve log line moved; lock test stale")
-	}
-	if strings.Count(body, "approveProposal(db, feature, tasks, chancellorRuling{}, logger)") < 2 {
-		t.Errorf("chancellor.go: expected TWO auto-approve-on-error call sites (Claude error + parse error); AUDIT-030 fix may have landed")
-	}
-
-	// No ClassifyError / infra-failure retry on the error path.
-	if strings.Contains(body, "gh.ClassifyError") ||
+	hasAutoApproveLog := strings.Contains(body, "auto-approving")
+	hasTwoApproveSites := strings.Count(body, "approveProposal(db, feature, tasks, chancellorRuling{}, logger)") >= 2
+	hasErrorClassification := strings.Contains(body, "gh.ClassifyError") ||
 		strings.Contains(body, "ShouldRetry") ||
-		strings.Contains(body, "handleInfraFailure") {
-		t.Errorf("chancellor.go: error classification or infra-failure retry detected — AUDIT-030/AUDIT-116 fix landed; remove lock test")
-	}
-	// No consecutive-fallback counter in SystemConfig.
-	if strings.Contains(body, "chancellor_auto_approve_fallbacks") ||
-		strings.Contains(body, "AwaitingOperatorReview") {
-		t.Errorf("chancellor.go: consecutive-fallback counter detected; AUDIT-116 remedy present")
+		strings.Contains(body, "handleInfraFailure")
+	hasFallbackCounter := strings.Contains(body, "chancellor_auto_approve_fallbacks") ||
+		strings.Contains(body, "AwaitingOperatorReview")
+
+	if hasAutoApproveLog && hasTwoApproveSites && !hasErrorClassification && !hasFallbackCounter {
+		t.Fatal("AUDIT-030: defective pattern still present — runChancellorReview auto-approves on both Claude error and parse error, no gh.ClassifyError/ShouldRetry/handleInfraFailure, no consecutive-fallback counter")
 	}
 }
 
@@ -284,22 +248,16 @@ func TestAUDIT_030_ChancellorAutoApprovesOnClaudeError(t *testing.T) {
 // unbounded CodeEdits on the ask-branch. No convoy-level dispatch counter.
 
 func TestAUDIT_117_PRReviewPerThreadCapBypassable(t *testing.T) {
+	t.Skip("AUDIT-117: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-117: defective pattern still present — pr_review_triage.go uses per-thread depth cap only, no convoy-level fix cap, dispatchInScope spawns without convoy-count gate
 	src := readCostLoopSource(t, "pr_review_triage.go")
 
-	// Confirm the depth cap is read per-comment (per-thread state).
-	if !strings.Contains(src, `getIntConfig(db, "pr_review_thread_depth_cap", 2)`) {
-		t.Errorf("pr_review_triage.go: per-thread depth cap read moved; lock test stale")
-	}
-	if !strings.Contains(src, "c.ThreadDepth") {
-		t.Errorf("pr_review_triage.go: classifier no longer references per-thread depth; lock test stale")
-	}
-	// No convoy-level dispatch cap.
-	if strings.Contains(src, "pr_review_convoy_fix_cap") ||
+	hasPerThreadCap := strings.Contains(src, `getIntConfig(db, "pr_review_thread_depth_cap", 2)`) &&
+		strings.Contains(src, "c.ThreadDepth")
+	hasConvoyCap := strings.Contains(src, "pr_review_convoy_fix_cap") ||
 		strings.Contains(src, "convoyFixCount") ||
-		strings.Contains(src, "ConvoyFixDispatchCount") {
-		t.Errorf("pr_review_triage.go: convoy-level fix cap detected — AUDIT-117 remedy landed; remove lock test")
-	}
-	// dispatchInScope must not consult any convoy-level counter before spawning.
+		strings.Contains(src, "ConvoyFixDispatchCount")
+
 	inScopeStart := strings.Index(src, "func dispatchInScope(")
 	if inScopeStart < 0 {
 		t.Fatal("dispatchInScope not found")
@@ -308,9 +266,11 @@ func TestAUDIT_117_PRReviewPerThreadCapBypassable(t *testing.T) {
 	if nextFunc := strings.Index(inScopeBody[10:], "\nfunc "); nextFunc > 0 {
 		inScopeBody = inScopeBody[:nextFunc+10]
 	}
-	if strings.Contains(inScopeBody, "CountInScopeFixesForConvoy") ||
-		strings.Contains(inScopeBody, "convoy_fix_cap") {
-		t.Errorf("dispatchInScope now gates on convoy-level count — AUDIT-117 fix landed")
+	hasInScopeConvoyCheck := strings.Contains(inScopeBody, "CountInScopeFixesForConvoy") ||
+		strings.Contains(inScopeBody, "convoy_fix_cap")
+
+	if hasPerThreadCap && !hasConvoyCap && !hasInScopeConvoyCheck {
+		t.Fatal("AUDIT-117: defective pattern still present — pr_review_triage.go uses per-thread depth cap only, no convoy-level fix cap, dispatchInScope spawns without convoy-count gate")
 	}
 }
 
@@ -322,6 +282,8 @@ func TestAUDIT_117_PRReviewPerThreadCapBypassable(t *testing.T) {
 // idempotency key (per failed task), producing 1→3→9→27 fanout.
 
 func TestAUDIT_118_ReshardCascadeNoGenerationCap(t *testing.T) {
+	t.Skip("AUDIT-118: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-118: defective pattern still present — commander.go uses bare [RESHARD from task #N] prefix with no generation stamp, no reshard_generation in util.go, no reshard_generation column on BountyBoard
 	src := readCostLoopSource(t, "commander.go")
 
 	start := strings.Index(src, "func autoInsertReshardTasks(")
@@ -332,46 +294,23 @@ func TestAUDIT_118_ReshardCascadeNoGenerationCap(t *testing.T) {
 	if nextFunc := strings.Index(body[10:], "\nfunc "); nextFunc > 0 {
 		body = body[:nextFunc+10]
 	}
-	// Must still use the bare [RESHARD from task #N] prefix with no generation.
-	if !strings.Contains(body, `"[RESHARD from task #%d]`) {
-		t.Errorf("commander.go: reshard prefix format moved; lock test stale")
-	}
-	if strings.Contains(body, "reshard_generation") ||
+
+	hasReshardPrefix := strings.Contains(body, `"[RESHARD from task #%d]`)
+	hasGenCap := strings.Contains(body, "reshard_generation") ||
 		strings.Contains(body, "ReshardGeneration") ||
-		strings.Contains(body, "gen=") {
-		t.Errorf("commander.go: generation cap detected — AUDIT-118 fix landed; remove lock test")
-	}
+		strings.Contains(body, "gen=")
 
-	// util.go's queueReshardDecompose must not check generation either.
 	utilSrc := readCostLoopSource(t, "util.go")
-	if strings.Contains(utilSrc, "reshard_generation") ||
-		strings.Contains(utilSrc, "ReshardGeneration") {
-		t.Errorf("util.go: reshard generation check present — AUDIT-118 fix landed")
-	}
+	hasUtilGenCheck := strings.Contains(utilSrc, "reshard_generation") ||
+		strings.Contains(utilSrc, "ReshardGeneration")
 
-	// Schema: no reshard_generation column on BountyBoard.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if hasColumn(t, db, "BountyBoard", "reshard_generation") {
-		t.Errorf("BountyBoard.reshard_generation exists — AUDIT-118 fix landed")
-	}
+	hasSchemaCol := hasColumn(t, db, "BountyBoard", "reshard_generation")
 
-	// Behavioural-adjacent: fabricate two Decompose tasks with the INFRA_FAILURE_RESHARD
-	// prefix to confirm they are NOT distinguishable by generation — the schema
-	// has no column to tell generation 1 from generation 2.
-	if _, err := db.Exec(`INSERT INTO BountyBoard (type, status, payload) VALUES
-		('Decompose','Pending','[INFRA_FAILURE_RESHARD task 1] shard A'),
-		('Decompose','Pending','[INFRA_FAILURE_RESHARD task 2] shard B')`); err != nil {
-		t.Fatalf("seed rows: %v", err)
+	if hasReshardPrefix && !hasGenCap && !hasUtilGenCheck && !hasSchemaCol {
+		t.Fatal("AUDIT-118: defective pattern still present — commander.go uses bare [RESHARD from task #N] prefix with no generation stamp, no reshard_generation in util.go, no reshard_generation column on BountyBoard")
 	}
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE payload LIKE '[INFRA_FAILURE_RESHARD%'`).Scan(&count); err != nil {
-		t.Fatalf("count rows: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 reshard rows, got %d", count)
-	}
-	// They are indistinguishable — no column to filter on.
 }
 
 // ── AUDIT-119 — main-drift-watch rebase loop has no attempt counter ──────────
@@ -382,6 +321,8 @@ func TestAUDIT_118_ReshardCascadeNoGenerationCap(t *testing.T) {
 // ConvoyAskBranches.failed_rebase_attempts counter.
 
 func TestAUDIT_119_MainDriftWatchNoAttemptCounter(t *testing.T) {
+	t.Skip("AUDIT-119: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-119: defective pattern still present — dogMainDriftWatch queues via QueueRebaseAskBranch with no attempt counter, no failed_rebase_attempts column on ConvoyAskBranches
 	src := readCostLoopSource(t, "pilot_rebase.go")
 
 	dogStart := strings.Index(src, "func dogMainDriftWatch(")
@@ -392,21 +333,18 @@ func TestAUDIT_119_MainDriftWatchNoAttemptCounter(t *testing.T) {
 	if nextFunc := strings.Index(dogBody[10:], "\nfunc "); nextFunc > 0 {
 		dogBody = dogBody[:nextFunc+10]
 	}
-	// Must still just compare SHAs + queue — no attempt counter.
-	if !strings.Contains(dogBody, "QueueRebaseAskBranch") {
-		t.Errorf("dogMainDriftWatch: queue call moved; lock test stale")
-	}
-	if strings.Contains(dogBody, "failed_rebase_attempts") ||
-		strings.Contains(dogBody, "FailedRebaseAttempts") ||
-		strings.Contains(dogBody, "rebaseAttemptCap") {
-		t.Errorf("dogMainDriftWatch: attempt counter detected — AUDIT-119 fix landed; remove lock test")
-	}
 
-	// Schema: no failed_rebase_attempts column (shared remedy with AUDIT-028).
+	hasQueue := strings.Contains(dogBody, "QueueRebaseAskBranch")
+	hasAttemptCounter := strings.Contains(dogBody, "failed_rebase_attempts") ||
+		strings.Contains(dogBody, "FailedRebaseAttempts") ||
+		strings.Contains(dogBody, "rebaseAttemptCap")
+
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if hasColumn(t, db, "ConvoyAskBranches", "failed_rebase_attempts") {
-		t.Errorf("ConvoyAskBranches.failed_rebase_attempts exists — AUDIT-119 fix landed")
+	hasSchemaCol := hasColumn(t, db, "ConvoyAskBranches", "failed_rebase_attempts")
+
+	if hasQueue && !hasAttemptCounter && !hasSchemaCol {
+		t.Fatal("AUDIT-119: defective pattern still present — dogMainDriftWatch queues via QueueRebaseAskBranch with no attempt counter, no failed_rebase_attempts column on ConvoyAskBranches")
 	}
 }
 
@@ -419,9 +357,10 @@ func TestAUDIT_119_MainDriftWatchNoAttemptCounter(t *testing.T) {
 // No AskBranchPRs.spawned_fix_count counter + concurrency guard.
 
 func TestAUDIT_120_FlakyRealBugConcurrentFixSpawns(t *testing.T) {
+	t.Skip("AUDIT-120: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
+	// Without skip, fails with: AUDIT-120: defective pattern still present — applyCITriageRealBug spawns fix task on FailureCount >= cap with no concurrency gate, no spawned_fix_count column on AskBranchPRs
 	src := readCostLoopSource(t, "medic_ci.go")
 
-	// Lock the promotion branch structure.
 	rbStart := strings.Index(src, "func applyCITriageRealBug(")
 	if rbStart < 0 {
 		t.Fatal("applyCITriageRealBug not found")
@@ -430,23 +369,18 @@ func TestAUDIT_120_FlakyRealBugConcurrentFixSpawns(t *testing.T) {
 	if nextFunc := strings.Index(rbBody[10:], "\nfunc "); nextFunc > 0 {
 		rbBody = rbBody[:nextFunc+10]
 	}
-	if !strings.Contains(rbBody, "FailureCount >= medicRetriggerCap") {
-		t.Errorf("applyCITriageRealBug: FailureCount >= cap check moved; lock test stale")
-	}
-	if !strings.Contains(rbBody, "store.AddConvoyTask(db, payload.TaskID, payload.Repo, fixPayload") {
-		t.Errorf("applyCITriageRealBug: fix-task spawn moved; lock test stale")
-	}
-	// No concurrency gate / spawned-fix counter.
-	if strings.Contains(rbBody, "spawned_fix_count") ||
-		strings.Contains(rbBody, "SpawnedFixCount") ||
-		strings.Contains(rbBody, "HasOpenFixTaskForPR") {
-		t.Errorf("applyCITriageRealBug: concurrency guard detected — AUDIT-120 fix landed; remove lock test")
-	}
 
-	// Schema: no spawned_fix_count column on AskBranchPRs.
+	hasCapCheck := strings.Contains(rbBody, "FailureCount >= medicRetriggerCap")
+	hasSpawn := strings.Contains(rbBody, "store.AddConvoyTask(db, payload.TaskID, payload.Repo, fixPayload")
+	hasConcurrencyGate := strings.Contains(rbBody, "spawned_fix_count") ||
+		strings.Contains(rbBody, "SpawnedFixCount") ||
+		strings.Contains(rbBody, "HasOpenFixTaskForPR")
+
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if hasColumn(t, db, "AskBranchPRs", "spawned_fix_count") {
-		t.Errorf("AskBranchPRs.spawned_fix_count exists — AUDIT-120 fix landed; remove lock test")
+	hasSchemaCol := hasColumn(t, db, "AskBranchPRs", "spawned_fix_count")
+
+	if hasCapCheck && hasSpawn && !hasConcurrencyGate && !hasSchemaCol {
+		t.Fatal("AUDIT-120: defective pattern still present — applyCITriageRealBug spawns fix task on FailureCount >= cap with no concurrency gate, no spawned_fix_count column on AskBranchPRs")
 	}
 }

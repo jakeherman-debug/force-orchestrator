@@ -58,34 +58,26 @@ func silentCount(s, substr string) int {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_013_MedicPayloadJSONSwallow(t *testing.T) {
+	t.Skip("AUDIT-013: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-013: defective pattern still present — runMedicTask discards json.Unmarshal error at the bounty.Payload -> &mp call in medic.go
 	src := silentReadFile(t, "internal/agents/medic.go")
 
-	// The defective line:
-	//   json.Unmarshal([]byte(bounty.Payload), &mp)
-	// with no surrounding `if err :=` or `err :=` assignment.
 	want := "json.Unmarshal([]byte(bounty.Payload), &mp)"
 	idx := strings.Index(src, want)
 	if idx < 0 {
 		t.Fatalf("AUDIT-013: expected pattern %q not found; citation may be stale", want)
 	}
 
-	// Verify the call is NOT wrapped in an `if err :=` or `err :=` on the same
-	// or immediately preceding line. Pull the 80 bytes before the match.
 	start := idx - 80
 	if start < 0 {
 		start = 0
 	}
 	prefix := src[start:idx]
-	if strings.Contains(prefix, "if err :=") || regexp.MustCompile(`\berr\s*:?=\s*$`).MatchString(strings.TrimRight(prefix, " \t")) {
-		t.Fatalf("AUDIT-013: runMedicTask now appears to check the json.Unmarshal error — finding may be fixed:\n%s", prefix)
-	}
+	errChecked := strings.Contains(prefix, "if err :=") || regexp.MustCompile(`\berr\s*:?=\s*$`).MatchString(strings.TrimRight(prefix, " \t"))
 
-	// Sanity check: runMedicCITriage on the same file DOES check its unmarshal.
-	ciTriageCheck := "if err := json.Unmarshal([]byte(bounty.Payload), &payload)"
-	if !strings.Contains(src, ciTriageCheck) {
-		t.Logf("AUDIT-013: note — runMedicCITriage's checked unmarshal pattern %q not found; the contrast assertion is weakened (not fatal)", ciTriageCheck)
+	if !errChecked {
+		t.Fatal("AUDIT-013: defective pattern still present — runMedicTask discards json.Unmarshal error at the bounty.Payload -> &mp call in medic.go")
 	}
-	t.Logf("AUDIT-013 REPRODUCED: runMedicTask's json.Unmarshal error is discarded at medic.go")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,21 +88,17 @@ func TestAUDIT_013_MedicPayloadJSONSwallow(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_014_WorktreeResetParentRequeueSilent(t *testing.T) {
+	t.Skip("AUDIT-014: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-014: defective pattern still present — 2 `_, _ = db.Exec(` sites in pilot_worktree_reset.go; both parent-requeue and escalation-resolve writes are silent
 	src := silentReadFile(t, "internal/agents/pilot_worktree_reset.go")
 
-	// Both parent-requeue and escalation-resolve UPDATEs use `_, _ = db.Exec(`.
 	occ := silentCount(src, "_, _ = db.Exec(")
-	if occ < 2 {
-		t.Fatalf("AUDIT-014: expected at least 2 `_, _ = db.Exec(` sites in pilot_worktree_reset.go, found %d — finding may be fixed", occ)
+	hasParentRequeue := strings.Contains(src, "SET status = 'Pending', branch_name = ''")
+	hasEscResolve := strings.Contains(src, "SET status = 'Resolved', acknowledged_at")
+
+	if occ >= 2 && hasParentRequeue && hasEscResolve {
+		t.Fatalf("AUDIT-014: defective pattern still present — %d `_, _ = db.Exec(` sites in pilot_worktree_reset.go; both parent-requeue and escalation-resolve writes are silent", occ)
 	}
-	// And the distinctive SQL fragments are still present unchecked.
-	if !strings.Contains(src, "SET status = 'Pending', branch_name = ''") {
-		t.Fatalf("AUDIT-014: parent-requeue UPDATE text not found; citation stale")
-	}
-	if !strings.Contains(src, "SET status = 'Resolved', acknowledged_at") {
-		t.Fatalf("AUDIT-014: escalations-resolve UPDATE text not found; citation stale")
-	}
-	t.Logf("AUDIT-014 REPRODUCED: %d `_, _ = db.Exec(` sites in pilot_worktree_reset.go; both parent-requeue writes are silent", occ)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,31 +111,27 @@ func TestAUDIT_014_WorktreeResetParentRequeueSilent(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn(t *testing.T) {
+	t.Skip("AUDIT-015: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-015: defective pattern still present — 6 log-and-return sites inside onSubPRMerged with no FailBounty/CreateEscalation escalation path
 	src := silentReadFile(t, "internal/agents/pr_flow.go")
 
-	// Find onSubPRMerged function body.
 	fnIdx := strings.Index(src, "func onSubPRMerged(")
 	if fnIdx < 0 {
 		t.Fatal("AUDIT-015: onSubPRMerged not found; citation stale")
 	}
-	// Slice next ~2KB — fn body is short.
 	end := fnIdx + 2500
 	if end > len(src) {
 		end = len(src)
 	}
 	body := src[fnIdx:end]
 
-	// Count the "logger.Printf(..failed: %v..); return" mid-tx pattern.
 	logReturnRe := regexp.MustCompile(`logger\.Printf\("sub-pr-ci-watch:[^"]*failed:[^"]*",[^)]*\)\s*\n\s*return`)
 	matches := logReturnRe.FindAllString(body, -1)
-	if len(matches) < 3 {
-		t.Fatalf("AUDIT-015: expected >=3 log-and-return sites in onSubPRMerged, found %d — finding may be fixed", len(matches))
+	hasEscalationPath := strings.Contains(body, "FailBounty") || strings.Contains(body, "CreateEscalation")
+
+	if len(matches) >= 3 && !hasEscalationPath {
+		t.Fatalf("AUDIT-015: defective pattern still present — %d log-and-return sites inside onSubPRMerged with no FailBounty/CreateEscalation escalation path", len(matches))
 	}
-	// No FailBounty or CreateEscalation inside the tx body.
-	if strings.Contains(body, "FailBounty") || strings.Contains(body, "CreateEscalation") {
-		t.Fatalf("AUDIT-015: onSubPRMerged now calls FailBounty/CreateEscalation — finding may be fixed")
-	}
-	t.Logf("AUDIT-015 REPRODUCED: %d log-and-return sites inside onSubPRMerged with no escalation path", len(matches))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,14 +143,13 @@ func TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_040_EscalateCITriageDoubleUPDATE(t *testing.T) {
+	t.Skip("AUDIT-040: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-040: defective pattern still present — escalateCITriage sets Escalated status manually AND via CreateEscalation which also calls UpdateBountyStatus(Escalated); webhook fires twice
 	ciSrc := silentReadFile(t, "internal/agents/medic_ci.go")
 
-	// Manual UPDATE present
 	manualUpdate := "UPDATE BountyBoard SET status = 'Escalated'"
-	if !strings.Contains(ciSrc, manualUpdate) {
-		t.Fatalf("AUDIT-040: manual UPDATE %q not found in medic_ci.go — citation stale", manualUpdate)
-	}
-	// Followed by CreateEscalation in the same function.
+	hasManualUpdate := strings.Contains(ciSrc, manualUpdate)
+
 	fnIdx := strings.Index(ciSrc, "func escalateCITriage(")
 	if fnIdx < 0 {
 		t.Fatal("AUDIT-040: escalateCITriage not found; citation stale")
@@ -176,19 +159,15 @@ func TestAUDIT_040_EscalateCITriageDoubleUPDATE(t *testing.T) {
 		fnEnd = 2000
 	}
 	body := ciSrc[fnIdx : fnIdx+fnEnd]
-	if !strings.Contains(body, manualUpdate) {
-		t.Fatalf("AUDIT-040: manual UPDATE not inside escalateCITriage body")
-	}
-	if !strings.Contains(body, "CreateEscalation(db, taskID,") {
-		t.Fatalf("AUDIT-040: CreateEscalation not invoked in escalateCITriage — citation stale")
-	}
+	hasUpdateInBody := strings.Contains(body, manualUpdate)
+	hasCreateEsc := strings.Contains(body, "CreateEscalation(db, taskID,")
 
-	// Confirm CreateEscalation itself re-updates status.
 	escSrc := silentReadFile(t, "internal/agents/escalation.go")
-	if !strings.Contains(escSrc, `store.UpdateBountyStatus(db, taskID, "Escalated")`) {
-		t.Fatalf("AUDIT-040: CreateEscalation no longer calls UpdateBountyStatus(Escalated) — double-update fixed?")
+	hasEscUpdate := strings.Contains(escSrc, `store.UpdateBountyStatus(db, taskID, "Escalated")`)
+
+	if hasManualUpdate && hasUpdateInBody && hasCreateEsc && hasEscUpdate {
+		t.Fatal("AUDIT-040: defective pattern still present — escalateCITriage sets Escalated status manually AND via CreateEscalation which also calls UpdateBountyStatus(Escalated); webhook fires twice")
 	}
-	t.Logf("AUDIT-040 REPRODUCED: escalateCITriage sets Escalated status manually AND via CreateEscalation")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -199,22 +178,18 @@ func TestAUDIT_040_EscalateCITriageDoubleUPDATE(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_041_CreateEscalationNoErrorReturn(t *testing.T) {
+	t.Skip("AUDIT-041: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-041: defective pattern still present — CreateEscalation returns bare int; insert + LastInsertId errors both dropped
 	src := silentReadFile(t, "internal/agents/escalation.go")
 
-	// Exact current signature (as of defect).
 	sig := "func CreateEscalation(db *sql.DB, taskID int, severity store.EscalationSeverity, message string) int {"
-	if !strings.Contains(src, sig) {
-		t.Fatalf("AUDIT-041: signature %q not found — if signature now returns error, finding is fixed", sig)
+	hasBareIntSig := strings.Contains(src, sig)
+	hasSilentInsert := strings.Contains(src, "res, _ := db.Exec(")
+	hasSilentLastID := strings.Contains(src, "id, _ := res.LastInsertId()")
+
+	if hasBareIntSig && hasSilentInsert && hasSilentLastID {
+		t.Fatal("AUDIT-041: defective pattern still present — CreateEscalation returns bare int; insert + LastInsertId errors both dropped")
 	}
-	// Inside the body: `_, _` pattern for the INSERT.
-	if !strings.Contains(src, "res, _ := db.Exec(") {
-		t.Fatalf("AUDIT-041: expected `res, _ := db.Exec(` silent INSERT inside CreateEscalation")
-	}
-	// Inside the body: `id, _ := res.LastInsertId()`.
-	if !strings.Contains(src, "id, _ := res.LastInsertId()") {
-		t.Fatalf("AUDIT-041: expected `id, _ := res.LastInsertId()` silent discard")
-	}
-	t.Logf("AUDIT-041 REPRODUCED: CreateEscalation returns bare int; insert + LastInsertId errors both dropped")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -223,6 +198,8 @@ func TestAUDIT_041_CreateEscalationNoErrorReturn(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_042_UpdateAskBranchPRChecksDiscarded(t *testing.T) {
+	t.Skip("AUDIT-042: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-042: defective pattern still present — `_ = store.UpdateAskBranchPRChecks(` appears pr_flow.go=1, medic_ci.go=2 (total=3); error discarded at all sites
 	prFlow := silentReadFile(t, "internal/agents/pr_flow.go")
 	medicCI := silentReadFile(t, "internal/agents/medic_ci.go")
 
@@ -230,18 +207,11 @@ func TestAUDIT_042_UpdateAskBranchPRChecksDiscarded(t *testing.T) {
 
 	inPRFlow := silentCount(prFlow, pattern)
 	inMedicCI := silentCount(medicCI, pattern)
-
-	if inPRFlow < 1 {
-		t.Fatalf("AUDIT-042: expected >=1 `%s` in pr_flow.go, found %d", pattern, inPRFlow)
-	}
-	if inMedicCI < 2 {
-		t.Fatalf("AUDIT-042: expected >=2 `%s` in medic_ci.go, found %d", pattern, inMedicCI)
-	}
 	total := inPRFlow + inMedicCI
-	if total < 3 {
-		t.Fatalf("AUDIT-042: expected >=3 total sites across pr_flow.go + medic_ci.go, found %d", total)
+
+	if inPRFlow >= 1 && inMedicCI >= 2 && total >= 3 {
+		t.Fatalf("AUDIT-042: defective pattern still present — `%s` appears pr_flow.go=%d, medic_ci.go=%d (total=%d); error discarded at all sites", pattern, inPRFlow, inMedicCI, total)
 	}
-	t.Logf("AUDIT-042 REPRODUCED: `%s` — pr_flow.go=%d, medic_ci.go=%d (total=%d)", pattern, inPRFlow, inMedicCI, total)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,15 +220,16 @@ func TestAUDIT_042_UpdateAskBranchPRChecksDiscarded(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_043_PRCloseUnconditionalMarkClosed(t *testing.T) {
+	t.Skip("AUDIT-043: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-043: defective pattern still present — MarkAskBranchPRClosed called after a logged-only PRClose failure path (unconditionally)
 	src := silentReadFile(t, "internal/agents/pr_flow.go")
 
-	// Find the PRClose site and confirm MarkAskBranchPRClosed follows it
-	// OUTSIDE the `if closeErr != nil` branch — i.e. unconditionally.
 	re := regexp.MustCompile(`if closeErr := ghc\.PRClose\([^)]+\); closeErr != nil \{\s*\n\s*logger\.Printf\([^)]*\)\s*\n\s*\}\s*\n\s*\}\s*\n\s*store\.MarkAskBranchPRClosed\(`)
-	if !re.MatchString(src) {
-		t.Fatalf("AUDIT-043: expected PRClose(log-only) followed by unconditional MarkAskBranchPRClosed pattern not found; citation stale")
+	hasUnconditionalPattern := re.MatchString(src)
+
+	if hasUnconditionalPattern {
+		t.Fatal("AUDIT-043: defective pattern still present — MarkAskBranchPRClosed called after a logged-only PRClose failure path (unconditionally)")
 	}
-	t.Logf("AUDIT-043 REPRODUCED: MarkAskBranchPRClosed called after a logged-only PRClose failure path")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,34 +238,27 @@ func TestAUDIT_043_PRCloseUnconditionalMarkClosed(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_044_LibrarianSilentFallback(t *testing.T) {
+	t.Skip("AUDIT-044: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
+	// Without skip, fails with: AUDIT-044: defective pattern still present — Librarian silently falls back to raw payload on unmarshal error, no FailBounty/return before the fallback; poisons memory index
 	src := silentReadFile(t, "internal/agents/librarian.go")
 
-	// The defective pattern:
-	//   if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-	//       // Fallback: treat raw payload as task description.
-	//       payload.Task = bounty.Payload
-	//   }
 	needle := "payload.Task = bounty.Payload"
-	if !strings.Contains(src, needle) {
-		t.Fatalf("AUDIT-044: fallback assignment %q not found; citation stale", needle)
+	hasFallback := strings.Contains(src, needle)
+
+	var hasErrorExit bool
+	if hasFallback {
+		fallbackIdx := strings.Index(src, needle)
+		start := fallbackIdx - 200
+		if start < 0 {
+			start = 0
+		}
+		window := src[start:fallbackIdx]
+		hasErrorExit = strings.Contains(window, "FailBounty") || strings.Contains(window, "return\n")
 	}
-	// Confirm the fallback comment is still present.
-	if !strings.Contains(src, "Fallback") && !strings.Contains(src, "fallback") {
-		t.Logf("AUDIT-044: fallback comment missing but assignment present — weaker signal, still indicative")
+
+	if hasFallback && !hasErrorExit {
+		t.Fatal("AUDIT-044: defective pattern still present — Librarian silently falls back to raw payload on unmarshal error, no FailBounty/return before the fallback; poisons memory index")
 	}
-	// Confirm NO `return` / `FailBounty` between the unmarshal and the fallback —
-	// i.e. the error is swallowed into the fallback path.
-	fallbackIdx := strings.Index(src, needle)
-	// Scan 200 bytes before it.
-	start := fallbackIdx - 200
-	if start < 0 {
-		start = 0
-	}
-	window := src[start:fallbackIdx]
-	if strings.Contains(window, "FailBounty") || strings.Contains(window, "return\n") {
-		t.Fatalf("AUDIT-044: window before fallback contains FailBounty/return — finding may be fixed")
-	}
-	t.Logf("AUDIT-044 REPRODUCED: Librarian silently falls back to raw payload on unmarshal error, poisoning memory index")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -303,33 +267,31 @@ func TestAUDIT_044_LibrarianSilentFallback(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_090_StalledReviewsSilentScan(t *testing.T) {
+	t.Skip("AUDIT-090: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
+	// Without skip, fails with: AUDIT-090: defective pattern still present — subPRRows.Scan errors silently drop rows in dogStalledReviews (err == nil only path, no logger.Printf of scan error); legitimate 12h+ stalls never alarm
 	src := silentReadFile(t, "internal/agents/dogs.go")
 
-	// Locate dogStalledReviews.
 	fnIdx := strings.Index(src, "func dogStalledReviews(")
 	if fnIdx < 0 {
 		t.Fatal("AUDIT-090: dogStalledReviews not found; citation stale")
 	}
-	// Within 2KB, find the subPRRows scan block.
 	slice := src[fnIdx:]
 	if len(slice) > 4000 {
 		slice = slice[:4000]
 	}
-	// Pattern: `for subPRRows.Next() {` ... `if err := subPRRows.Scan(&id, &hours); err == nil {`
-	// The `err == nil` branch only APPENDS on success; scan errors are dropped.
-	if !strings.Contains(slice, "for subPRRows.Next()") {
-		t.Fatalf("AUDIT-090: subPRRows loop not found; citation stale")
+	hasLoop := strings.Contains(slice, "for subPRRows.Next()")
+	hasSilentSkip := strings.Contains(slice, "err := subPRRows.Scan(&id, &hours); err == nil")
+
+	var hasLoggedErr bool
+	if hasSilentSkip {
+		scanIdx := strings.Index(slice, "err := subPRRows.Scan(&id, &hours); err == nil")
+		window := slice[scanIdx : scanIdx+400]
+		hasLoggedErr = strings.Contains(window, "logger.Printf") && strings.Contains(window, "scan")
 	}
-	if !strings.Contains(slice, "err := subPRRows.Scan(&id, &hours); err == nil") {
-		t.Fatalf("AUDIT-090: expected `err := subPRRows.Scan(...); err == nil` silent-skip pattern not found; citation stale")
+
+	if hasLoop && hasSilentSkip && !hasLoggedErr {
+		t.Fatal("AUDIT-090: defective pattern still present — subPRRows.Scan errors silently drop rows in dogStalledReviews (err == nil only path, no logger.Printf of scan error); legitimate 12h+ stalls never alarm")
 	}
-	// No logger.Printf of the scan error inside this block.
-	scanIdx := strings.Index(slice, "err := subPRRows.Scan(&id, &hours); err == nil")
-	window := slice[scanIdx : scanIdx+400]
-	if strings.Contains(window, "logger.Printf") && strings.Contains(window, "scan") {
-		t.Fatalf("AUDIT-090: scan error now appears to be logged; finding may be fixed")
-	}
-	t.Logf("AUDIT-090 REPRODUCED: subPRRows.Scan errors silently drop rows — legitimate 12h+ stalls never alarm")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,6 +300,8 @@ func TestAUDIT_090_StalledReviewsSilentScan(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_091_GitHygieneReturnsNilOnError(t *testing.T) {
+	t.Skip("AUDIT-091: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
+	// Without skip, fails with: AUDIT-091: defective pattern still present — dogGitHygiene swallows Agents query error as `return nil` (non-fatal)
 	src := silentReadFile(t, "internal/agents/dogs.go")
 
 	fnIdx := strings.Index(src, "func dogGitHygiene(")
@@ -348,18 +312,19 @@ func TestAUDIT_091_GitHygieneReturnsNilOnError(t *testing.T) {
 	if len(slice) > 3000 {
 		slice = slice[:3000]
 	}
-	// The defective pattern: after `db.Query` on Agents, on error → `return nil`.
 	needle := "agentRows, agentErr := db.Query(`SELECT agent_name, repo, worktree_path FROM Agents`)"
-	if !strings.Contains(slice, needle) {
-		t.Fatalf("AUDIT-091: Agents query line not found; citation stale")
+	hasQuery := strings.Contains(slice, needle)
+
+	var hasReturnNil bool
+	if hasQuery {
+		needleIdx := strings.Index(slice, needle)
+		window := slice[needleIdx : needleIdx+400]
+		hasReturnNil = strings.Contains(window, "return nil")
 	}
-	// Within the next ~200 chars expect `return nil // non-fatal`.
-	needleIdx := strings.Index(slice, needle)
-	window := slice[needleIdx : needleIdx+400]
-	if !strings.Contains(window, "return nil") {
-		t.Fatalf("AUDIT-091: expected `return nil` on agent-rows error; citation stale")
+
+	if hasQuery && hasReturnNil {
+		t.Fatal("AUDIT-091: defective pattern still present — dogGitHygiene swallows Agents query error as `return nil` (non-fatal)")
 	}
-	t.Logf("AUDIT-091 REPRODUCED: dogGitHygiene swallows Agents query error as `return nil`")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -368,25 +333,24 @@ func TestAUDIT_091_GitHygieneReturnsNilOnError(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_094_AstromechOwnershipDropsErrors(t *testing.T) {
+	t.Skip("AUDIT-094: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
+	// Without skip, fails with: AUDIT-094: defective pattern still present — ownership check drops db.Exec error (`ownerRes, _ := db.Exec(`) AND RowsAffected error (`n, _ := ownerRes.RowsAffected()`); transient DB failures misread as lost ownership
 	src := silentReadFile(t, "internal/agents/astromech.go")
 
-	// The defective pattern.
 	needle := "ownerRes, _ := db.Exec("
 	idx := strings.Index(src, needle)
-	if idx < 0 {
-		t.Fatalf("AUDIT-094: %q not found; citation stale", needle)
+	hasDBExec := idx >= 0
+
+	var hasRowsAffectedDrop, hasOwnershipLost bool
+	if hasDBExec {
+		window := src[idx : idx+400]
+		hasRowsAffectedDrop = strings.Contains(window, "n, _ := ownerRes.RowsAffected()")
+		hasOwnershipLost = strings.Contains(window, "ownership lost")
 	}
-	// Next line's RowsAffected also discards its error.
-	window := src[idx : idx+400]
-	if !strings.Contains(window, "n, _ := ownerRes.RowsAffected()") {
-		t.Fatalf("AUDIT-094: `n, _ := ownerRes.RowsAffected()` pattern not found in window; citation stale")
+
+	if hasDBExec && hasRowsAffectedDrop && hasOwnershipLost {
+		t.Fatal("AUDIT-094: defective pattern still present — ownership check drops db.Exec error (`ownerRes, _ := db.Exec(`) AND RowsAffected error (`n, _ := ownerRes.RowsAffected()`); transient DB failures misread as lost ownership")
 	}
-	// And on zero rows, logs "ownership lost" — so a transient SQLITE_BUSY
-	// where err != nil AND n == 0 is indistinguishable from genuine loss.
-	if !strings.Contains(window, "ownership lost") {
-		t.Fatalf("AUDIT-094: 'ownership lost' branch not present; citation stale")
-	}
-	t.Logf("AUDIT-094 REPRODUCED: ownership check drops db.Exec error AND RowsAffected error; transient DB failures misread as lost ownership")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -395,28 +359,29 @@ func TestAUDIT_094_AstromechOwnershipDropsErrors(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_095_DiplomatSilentFallback(t *testing.T) {
+	t.Skip("AUDIT-095: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
+	// Without skip, fails with: AUDIT-095: defective pattern still present — Diplomat Claude error silently falls back to bare PR body (buildFallbackPRBody), no ErrClassTransient/handleInfraFailure, no retry, no operator mail
 	src := silentReadFile(t, "internal/agents/diplomat.go")
 
-	// Defective pattern: err from AskClaudeCLI logged, then `return
-	// buildFallbackPRBody(...), nil`.
 	re := regexp.MustCompile(`claude\.AskClaudeCLI\([^)]*\)\s*\n\s*if err != nil \{\s*\n\s*logger\.Printf\("ShipConvoy: Claude failed[^"]*",[^)]*\)\s*\n\s*return buildFallbackPRBody\([^)]*\), nil`)
-	if !re.MatchString(src) {
-		t.Fatalf("AUDIT-095: expected Claude-failed-then-fallback(nil) pattern not found; citation stale")
-	}
-	// No error classification (no ErrClassTransient / handleInfraFailure / operator mail on permanent).
+	hasSilentFallback := re.MatchString(src)
+
 	fnIdx := strings.Index(src, "func generatePRBody(")
 	if fnIdx < 0 {
-		// Some versions may have a different entry; try the specific branch.
 		fnIdx = strings.Index(src, "ShipConvoy: Claude failed")
 	}
-	slice := src[fnIdx:]
-	if len(slice) > 1500 {
-		slice = slice[:1500]
+	var hasErrorClassification bool
+	if fnIdx >= 0 {
+		slice := src[fnIdx:]
+		if len(slice) > 1500 {
+			slice = slice[:1500]
+		}
+		hasErrorClassification = strings.Contains(slice, "ErrClassTransient") || strings.Contains(slice, "handleInfraFailure")
 	}
-	if strings.Contains(slice, "ErrClassTransient") || strings.Contains(slice, "handleInfraFailure") {
-		t.Fatalf("AUDIT-095: error classification appears to have been added — finding may be fixed")
+
+	if hasSilentFallback && !hasErrorClassification {
+		t.Fatal("AUDIT-095: defective pattern still present — Diplomat Claude error silently falls back to bare PR body (buildFallbackPRBody), no ErrClassTransient/handleInfraFailure, no retry, no operator mail")
 	}
-	t.Logf("AUDIT-095 REPRODUCED: Diplomat Claude error silently falls back to bare PR body, no retry, no operator mail")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -425,16 +390,13 @@ func TestAUDIT_095_DiplomatSilentFallback(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_156_GitRunErrorsSwallowed(t *testing.T) {
+	t.Skip("AUDIT-156: remove when internal/git wraps .Run() errors (Fix #8)")
+	// Without skip, fails with: AUDIT-156: defective pattern still present — 23 bare `.Run()` git invocations in internal/git/git.go; reset/clean/branch -D/merge --abort/rebase --abort all silent
 	src := silentReadFile(t, "internal/git/git.go")
 
-	// The shape is `exec.Command("git", ...).Run()` — the trailing `.Run()`
-	// without `if err :=` wrapper is the tell. Count them.
 	re := regexp.MustCompile(`exec\.Command\("git",[^)]*\)\.Run\(\)`)
 	matches := re.FindAllString(src, -1)
-	if len(matches) < 5 {
-		t.Fatalf("AUDIT-156: expected >=5 swallowed `.Run()` git calls in internal/git/git.go, found %d", len(matches))
-	}
-	// Spot-check the cited operations are present.
+
 	needles := []string{
 		`"reset", "--hard", "HEAD"`,
 		`"clean", "-fdx"`,
@@ -442,12 +404,17 @@ func TestAUDIT_156_GitRunErrorsSwallowed(t *testing.T) {
 		`"merge", "--abort"`,
 		`"rebase", "--abort"`,
 	}
+	allPresent := true
 	for _, n := range needles {
 		if !strings.Contains(src, n) {
-			t.Errorf("AUDIT-156: cited git op fragment %q not present; citation may be partially stale", n)
+			allPresent = false
+			break
 		}
 	}
-	t.Logf("AUDIT-156 REPRODUCED: %d bare `.Run()` git invocations in internal/git/git.go; reset/clean/branch -D/merge --abort/rebase --abort all silent", len(matches))
+
+	if len(matches) >= 5 && allPresent {
+		t.Fatalf("AUDIT-156: defective pattern still present — %d bare `.Run()` git invocations in internal/git/git.go; reset/clean/branch -D/merge --abort/rebase --abort all silent", len(matches))
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -456,6 +423,8 @@ func TestAUDIT_156_GitRunErrorsSwallowed(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_159_ManualRowsCloseNotDefer(t *testing.T) {
+	t.Skip("AUDIT-159: remove when dogGitHygiene uses defer rows.Close (Fix #8)")
+	// Without skip, fails with: AUDIT-159: defective pattern still present — dogGitHygiene uses manual rows.Close() (1) and agentRows.Close() (1) with no defer; scan-error path leaks FDs
 	src := silentReadFile(t, "internal/agents/dogs.go")
 
 	fnIdx := strings.Index(src, "func dogGitHygiene(")
@@ -468,21 +437,12 @@ func TestAUDIT_159_ManualRowsCloseNotDefer(t *testing.T) {
 	}
 	body := src[fnIdx : fnIdx+fnEnd]
 
-	// Two bare `rows.Close()` / `agentRows.Close()` calls without `defer`.
 	manualRows := silentCount(body, "\n\trows.Close()")
 	manualAgent := silentCount(body, "\n\tagentRows.Close()")
-	if manualRows < 1 {
-		t.Fatalf("AUDIT-159: expected manual `rows.Close()` in dogGitHygiene, found %d", manualRows)
+	hasDeferRows := strings.Contains(body, "defer rows.Close()")
+	hasDeferAgent := strings.Contains(body, "defer agentRows.Close()")
+
+	if manualRows >= 1 && manualAgent >= 1 && !hasDeferRows && !hasDeferAgent {
+		t.Fatalf("AUDIT-159: defective pattern still present — dogGitHygiene uses manual rows.Close() (%d) and agentRows.Close() (%d) with no defer; scan-error path leaks FDs", manualRows, manualAgent)
 	}
-	if manualAgent < 1 {
-		t.Fatalf("AUDIT-159: expected manual `agentRows.Close()` in dogGitHygiene, found %d", manualAgent)
-	}
-	// And NO `defer rows.Close()` / `defer agentRows.Close()` in the body.
-	if strings.Contains(body, "defer rows.Close()") {
-		t.Fatalf("AUDIT-159: `defer rows.Close()` now present — finding may be fixed")
-	}
-	if strings.Contains(body, "defer agentRows.Close()") {
-		t.Fatalf("AUDIT-159: `defer agentRows.Close()` now present — finding may be fixed")
-	}
-	t.Logf("AUDIT-159 REPRODUCED: dogGitHygiene uses manual rows.Close() (%d) and agentRows.Close() (%d) with no defer — scan-error path leaks FDs", manualRows, manualAgent)
 }

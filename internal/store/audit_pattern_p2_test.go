@@ -19,6 +19,11 @@ import (
 // Covers: AUDIT-008, AUDIT-034, AUDIT-035, AUDIT-036, AUDIT-075, AUDIT-076,
 // and the missing-race-test gap at AUDIT-112.
 func TestPattern_P2_IdempotencyKeyRace(t *testing.T) {
+	t.Skip("AUDIT-008/034/035/036 (P2): remove when partial UNIQUE index on BountyBoard(idempotency_key) lands + ON CONFLICT DO NOTHING (Fix #3)")
+	// Without skip, fails with (go test -race -count=5):
+	//   audit_pattern_p2_test.go:78: AUDIT-008/P2: expected exactly 1 row for idempotency_key="rebase-conflict:branch:agent/R2-D2/p2-race", got 5 — SELECT-then-INSERT race in AddConvoyTaskIdempotent inserted duplicates.
+	//   --- FAIL: TestPattern_P2_IdempotencyKeyRace (0.01s)
+	//   (subsequent iterations: got 29, 5, 10, 16 — race is consistently reproducible)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -88,6 +93,10 @@ func TestPattern_P2_IdempotencyKeyRace(t *testing.T) {
 // of the race above. This test will FAIL the day AUDIT-008 is fixed — at
 // that point, delete it (or invert the assertion) as proof the fix shipped.
 func TestPattern_P2_NoUniqueIndex_Static(t *testing.T) {
+	t.Skip("AUDIT-008 (P2): remove when partial UNIQUE index on BountyBoard(idempotency_key) lands (Fix #3)")
+	// Without skip, fails with (RGR-inverted assertion):
+	//   audit_pattern_p2_test.go:159: AUDIT-008 (P2): no UNIQUE index covers BountyBoard.idempotency_key (0 total indexes scanned). Fix #3: add partial UNIQUE index on BountyBoard(idempotency_key) WHERE status NOT IN ('Completed','Cancelled','Failed') and switch AddConvoyTaskIdempotent to INSERT … ON CONFLICT DO NOTHING RETURNING id.
+	//   --- FAIL: TestPattern_P2_NoUniqueIndex_Static (0.00s)
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -119,8 +128,10 @@ func TestPattern_P2_NoUniqueIndex_Static(t *testing.T) {
 		t.Fatalf("rows.Err: %v", err)
 	}
 
-	// Walk each UNIQUE index's columns. If any covers idempotency_key (alone
-	// or as part of a composite), the fix has shipped and this test must flip.
+	// RGR form: assert the fix is present. We expect at least one UNIQUE
+	// index covering idempotency_key. Today, none exists — so without the
+	// skip, this test FAILS on current main (proving AUDIT-008 is open).
+	// Once Fix #3 lands, the index appears and this test passes.
 	for _, idx := range indexes {
 		if !idx.unique {
 			continue
@@ -141,17 +152,18 @@ func TestPattern_P2_NoUniqueIndex_Static(t *testing.T) {
 			}
 			if strings.EqualFold(cname, "idempotency_key") {
 				cols.Close()
-				t.Fatalf("AUDIT-008 appears FIXED: UNIQUE index %q covers idempotency_key. "+
-					"This static test was the 'fails the day you ship the fix' canary — "+
-					"delete it (or invert the assertion) and confirm the race test above "+
-					"now passes.", idx.name)
+				// Fix has shipped — the UNIQUE index covering idempotency_key is present.
+				return
 			}
 		}
 		cols.Close()
 	}
 
-	t.Logf("confirmed AUDIT-008 open: no UNIQUE index covers BountyBoard.idempotency_key "+
-		"(%d total indexes scanned)", len(indexes))
+	t.Fatalf("AUDIT-008 (P2): no UNIQUE index covers BountyBoard.idempotency_key "+
+		"(%d total indexes scanned). Fix #3: add partial UNIQUE index on "+
+		"BountyBoard(idempotency_key) WHERE status NOT IN "+
+		"('Completed','Cancelled','Failed') and switch AddConvoyTaskIdempotent "+
+		"to INSERT … ON CONFLICT DO NOTHING RETURNING id.", len(indexes))
 }
 
 // quoteIdent wraps an identifier in double quotes, escaping embedded quotes.

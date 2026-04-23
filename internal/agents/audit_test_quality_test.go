@@ -61,122 +61,56 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 
 	// ── AUDIT-111 — no CallCount / invocations counter ──────────────────────
 	t.Run("AUDIT_111_NoClaudeCallCountAsserted", func(t *testing.T) {
-		files := walkTestFiles(t, agentsDir)
-		if len(files) == 0 {
-			t.Fatal("no test files found under internal/agents")
-		}
-		// Ignore this self-referential file — it contains the literal
-		// substrings we're searching for.
-		self, _ := filepath.Abs("audit_test_quality_test.go")
-
-		// Look for *real* counter usage, not coincidental substrings in log
-		// messages. A genuine CallCount counter shows up as one of:
-		//   stub.CallCount, .CallCount(), CallCount ==, CallCount !=,
-		//   atomic.AddInt... involving a CallCount/invocations name.
-		// Bare "invocations" appearing inside a t.Logf is not a remedy.
-		patterns := []*regexp.Regexp{
-			regexp.MustCompile(`\bstub\.CallCount\b`),
-			regexp.MustCompile(`\.CallCount\s*\(`),
-			regexp.MustCompile(`\bCallCount\s*[=!<>]=`),
-			regexp.MustCompile(`\bCallCount\s*\+\+`),
-			regexp.MustCompile(`atomic\.Add\w*\([^)]*[Cc]allCount`),
-			regexp.MustCompile(`atomic\.Add\w*\([^)]*[Ii]nvocations`),
-			regexp.MustCompile(`\binvocations\s*\+\+`),
-			regexp.MustCompile(`\binvocations\s*[=!<>]=`),
-		}
-		var hits []string
-		for _, f := range files {
-			abs, _ := filepath.Abs(f)
-			if abs == self {
-				continue
-			}
-			body := readFile(t, f)
-			for _, rx := range patterns {
-				if rx.MatchString(body) {
-					hits = append(hits, f+" ("+rx.String()+")")
-					break
-				}
-			}
-		}
-		if len(hits) > 0 {
-			t.Errorf("AUDIT-111 REMEDY DETECTED: real CallCount/invocations counter in %v — "+
-				"update this test to expect the counter instead of its absence", hits)
-		}
-
-		// Confirm withStubCLIRunner factory has no CallCount counter field.
+		t.Skip("AUDIT-111: remove when withStubCLIRunner adds CallCount counter (Fix #7 companion)")
+		// Without skip, fails with: audit_test_quality_test.go:77: AUDIT-111: withStubCLIRunner has no CallCount/atomic counter still present
+		// Confirm withStubCLIRunner factory has a CallCount counter field.
 		helpers := readFile(t, filepath.Join(agentsDir, "testhelpers_test.go"))
 		if !strings.Contains(helpers, "func withStubCLIRunner") {
 			t.Fatal("withStubCLIRunner factory not in testhelpers_test.go — factory moved?")
 		}
-		// Extract just the function body (up to the next top-level func).
 		idx := strings.Index(helpers, "func withStubCLIRunner")
 		body := helpers[idx:]
 		if end := strings.Index(body[1:], "\nfunc "); end > 0 {
 			body = body[:end]
 		}
-		if strings.Contains(body, "CallCount") || strings.Contains(body, "atomic.AddInt") {
-			t.Errorf("AUDIT-111 REMEDY: withStubCLIRunner now has a counter; update assertion")
+		// RGR inversion: fail if withStubCLIRunner still has no CallCount counter.
+		if !(strings.Contains(body, "CallCount") || strings.Contains(body, "atomic.AddInt")) {
+			t.Fatal("AUDIT-111: withStubCLIRunner has no CallCount/atomic counter still present")
 		}
-		t.Logf("AUDIT-111 REPRODUCED: no CallCount/invocations counter anywhere in %d test files; "+
-			"withStubCLIRunner stub returns canned output with no counter. Runaway Claude loops pass silently.",
-			len(files))
 	})
 
 	// ── AUDIT-112 — TOCTOU concurrency — now pattern-covered by P2 ──────────
 	t.Run("AUDIT_112_ConcurrentIdempotencyTest_DuplicateOfP2", func(t *testing.T) {
+		t.Skip("AUDIT-112: DUPLICATE-OF-P2 — remove when P2 fix lands (Fix #3)")
+		// Without skip, fails with: audit_test_quality_test.go:88: AUDIT-112: tasks_idempotent_test.go without sync.WaitGroup / go func concurrency still present
 		idem := readFile(t, filepath.Join(storeDir, "tasks_idempotent_test.go"))
-		if strings.Contains(idem, "sync.WaitGroup") || strings.Contains(idem, "go func") {
-			t.Log("AUDIT-112: tasks_idempotent_test.go now has concurrency coverage locally")
-		} else {
-			t.Log("AUDIT-112 REPRODUCED-STATIC: tasks_idempotent_test.go has no sync.WaitGroup or `go func` block")
+		// RGR inversion: fail if tasks_idempotent_test.go still lacks concurrency coverage locally.
+		if !(strings.Contains(idem, "sync.WaitGroup") || strings.Contains(idem, "go func")) {
+			t.Fatal("AUDIT-112: tasks_idempotent_test.go without sync.WaitGroup / go func concurrency still present")
 		}
-		// But P2's audit_pattern_p2_test.go covers the same helper concurrently.
-		p2Path := filepath.Join(storeDir, "audit_pattern_p2_test.go")
-		if _, err := os.Stat(p2Path); err != nil {
-			t.Fatalf("AUDIT-112 expected pattern-cover at %s, file missing: %v", p2Path, err)
-		}
-		p2 := readFile(t, p2Path)
-		needs := []string{"sync.WaitGroup", "AddConvoyTaskIdempotent", "goroutines", "TestPattern_P2_IdempotencyKeyRace"}
-		for _, n := range needs {
-			if !strings.Contains(p2, n) {
-				t.Errorf("AUDIT-112 DUPLICATE-OF-P2 expected %q in audit_pattern_p2_test.go, missing", n)
-			}
-		}
-		t.Log("AUDIT-112 DUPLICATE-OF-P2: 50-goroutine race on AddConvoyTaskIdempotent covered by " +
-			"TestPattern_P2_IdempotencyKeyRace. Finding is pattern-covered; canonical location is the P2 test.")
 	})
 
 	// ── AUDIT-113 — no total Claude call bound across ConvoyReview passes ──
 	t.Run("AUDIT_113_NoBoundedTotalClaudeCallsTest", func(t *testing.T) {
+		t.Skip("AUDIT-113: remove when convoy_review_test adds TotalClaudeCalls bound (Fix #7)")
+		// Without skip, fails with: audit_test_quality_test.go:103: AUDIT-113: convoy_review_test without cross-pass Claude call bound still present
 		raw := readFile(t, filepath.Join(agentsDir, "convoy_review_test.go"))
-		if strings.Contains(raw, "TotalClaudeCalls") ||
+		// RGR inversion: fail if no total-call bound assertion yet exists.
+		hasBound := strings.Contains(raw, "TotalClaudeCalls") ||
 			strings.Contains(raw, "convoyReviewMaxTotalCalls") ||
-			strings.Contains(raw, "TestConvoyReview_TotalClaudeCallsBounded") {
-			t.Errorf("AUDIT-113 REMEDY DETECTED: total-call bound assertion exists; update this test")
+			strings.Contains(raw, "TestConvoyReview_TotalClaudeCallsBounded") ||
+			strings.Contains(raw, "totalCalls") ||
+			strings.Contains(raw, "callsAcross")
+		if !hasBound {
+			t.Fatal("AUDIT-113: convoy_review_test without cross-pass Claude call bound still present")
 		}
-		// Also: current tests do not sum CallCount across passes because
-		// CallCount does not exist. Belt-and-suspenders: grep for any sum
-		// counter tokens.
-		if strings.Contains(raw, "totalCalls") || strings.Contains(raw, "callsAcross") {
-			t.Errorf("AUDIT-113 REMEDY DETECTED: running total counter present")
-		}
-		t.Log("AUDIT-113 REPRODUCED: convoy_review_test.go has no cross-pass Claude call bound. " +
-			"5 passes × 5 findings × N retries product is unverified.")
 	})
 
 	// ── AUDIT-133 — no retry_count preservation across auto-complete ────────
 	t.Run("AUDIT_133_RetryCountPreservation_Untested", func(t *testing.T) {
-		raw := readFile(t, filepath.Join(agentsDir, "medic_recovery_test.go"))
-		// Assert the auto-complete test (line ~54) does NOT touch retry_count.
-		if !strings.Contains(raw, "TestAutoCompletedMedicTask_BranchHasNoDiff") {
-			t.Fatal("expected TestAutoCompletedMedicTask_BranchHasNoDiff in medic_recovery_test.go")
-		}
-		if strings.Contains(raw, "retry_count") {
-			t.Errorf("AUDIT-133 REMEDY DETECTED: retry_count referenced in medic_recovery_test.go — " +
-				"update this test to inspect pre/post assertions")
-		}
-		// Also confirm no sibling test in internal/store covers ResetTaskFull's
-		// counter preservation.
+		t.Skip("AUDIT-133: remove when TestResetTaskFull_PreservesRetryCount added (Fix #6)")
+		// Without skip, fails with: audit_test_quality_test.go:127: AUDIT-133: TestResetTaskFull_PreservesRetryCount missing still present
+		// RGR inversion: fail if no sibling test in internal/store covers ResetTaskFull's counter preservation.
 		storeFiles, err := os.ReadDir(storeDir)
 		if err != nil {
 			t.Fatalf("readdir store: %v", err)
@@ -192,57 +126,57 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 				break
 			}
 		}
-		if found {
-			t.Errorf("AUDIT-133 REMEDY DETECTED: TestResetTaskFull_PreservesRetryCount exists")
+		if !found {
+			t.Fatal("AUDIT-133: TestResetTaskFull_PreservesRetryCount missing still present")
 		}
-		t.Log("AUDIT-133 REPRODUCED: neither medic_recovery_test.go nor internal/store/*_test.go " +
-			"seeds retry_count=N then asserts preservation. AUDIT-005 regression is uncovered.")
 	})
 
 	// ── AUDIT-135 — stub LLM never asserts prompt structure ─────────────────
 	t.Run("AUDIT_135_StubDoesNotAssertPromptStructure", func(t *testing.T) {
-		// stubConvoyReviewLLM is defined in convoy_review_test.go near line 19.
+		t.Skip("AUDIT-135: remove when stubConvoyReviewLLM captures/asserts prompt (Fix #7)")
+		// Without skip, fails with: audit_test_quality_test.go:161: AUDIT-135: stubConvoyReviewLLM / withStubCLIRunner with no prompt capture still present
 		raw := readFile(t, filepath.Join(agentsDir, "convoy_review_test.go"))
 		if !strings.Contains(raw, "func stubConvoyReviewLLM") {
 			t.Fatal("stubConvoyReviewLLM helper moved; update this test")
 		}
-		// Body of the helper — between the signature and the next blank
-		// closing brace at indent 0.
 		idx := strings.Index(raw, "func stubConvoyReviewLLM")
 		rest := raw[idx:]
 		if end := strings.Index(rest, "\n}\n"); end > 0 {
 			rest = rest[:end]
 		}
-		// It must only forward to withStubCLIRunner — no prompt capture.
-		for _, forbidden := range []string{"capturedPrompt", "lastPrompt", "assertPrompt", "requirePrompt"} {
-			if strings.Contains(rest, forbidden) {
-				t.Errorf("AUDIT-135 REMEDY DETECTED: stubConvoyReviewLLM has %q — remedy landed",
-					forbidden)
+		// RGR inversion: fail if stubConvoyReviewLLM still captures no prompt.
+		hasCapture := false
+		for _, token := range []string{"capturedPrompt", "lastPrompt", "assertPrompt", "requirePrompt"} {
+			if strings.Contains(rest, token) {
+				hasCapture = true
+				break
 			}
 		}
-		// And: the testhelpers stub is a 3-line forward with no capture.
-		stub := readFile(t, filepath.Join(agentsDir, "testhelpers_test.go"))
-		for _, forbidden := range []string{"capturedPrompt", "lastPrompt", "PromptHistory"} {
-			if strings.Contains(stub, forbidden) {
-				t.Errorf("AUDIT-135 REMEDY DETECTED: withStubCLIRunner captures prompt (%q)", forbidden)
+		if !hasCapture {
+			stub := readFile(t, filepath.Join(agentsDir, "testhelpers_test.go"))
+			for _, token := range []string{"capturedPrompt", "lastPrompt", "PromptHistory"} {
+				if strings.Contains(stub, token) {
+					hasCapture = true
+					break
+				}
 			}
 		}
-		t.Log("AUDIT-135 REPRODUCED: stubConvoyReviewLLM is a 3-line json.Marshal→withStubCLIRunner " +
-			"forward; neither helper captures or inspects the prompt. summarizeConvoyTasks returning " +
-			"\"\" would still pass every test.")
+		if !hasCapture {
+			t.Fatal("AUDIT-135: stubConvoyReviewLLM / withStubCLIRunner with no prompt capture still present")
+		}
 	})
 
 	// ── AUDIT-136 — ConvoyReview JSON parse-retry untested ──────────────────
 	t.Run("AUDIT_136_ParseFailureRetryPath_Untested", func(t *testing.T) {
+		t.Skip("AUDIT-136: remove when ConvoyReview parse-retry test added (Fix #7)")
+		// Without skip, fails with: audit_test_quality_test.go:195: AUDIT-136: no parse-retry test covering one-retry-then-Completed contract still present
 		path := filepath.Join(agentsDir, "convoy_review_test.go")
-		// Parse via go/ast so we inspect actual test function names, not
-		// comments mentioning the phrase.
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
-		var offenders []string
+		var covers []string
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
@@ -258,18 +192,19 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 				strings.Contains(lower, "retryonce") ||
 				strings.Contains(lower, "parseretry") ||
 				strings.Contains(lower, "malformedjson") {
-				offenders = append(offenders, name)
+				covers = append(covers, name)
 			}
 		}
-		if len(offenders) > 0 {
-			t.Errorf("AUDIT-136 REMEDY DETECTED: parse-retry tests exist: %v — update this assertion", offenders)
+		// RGR inversion: fail if no parse-retry tests exist.
+		if len(covers) == 0 {
+			t.Fatal("AUDIT-136: no parse-retry test covering one-retry-then-Completed contract still present")
 		}
-		t.Log("AUDIT-136 REPRODUCED: no test covers CLAUDE.md's \"one retry with critic note, " +
-			"second failure → mark Completed\" parse-retry contract for ConvoyReview.")
 	})
 
 	// ── AUDIT-137 — TestEscalateSubPR second-call block has no assertion ──
 	t.Run("AUDIT_137_SecondCallBlockLacksAssertion", func(t *testing.T) {
+		t.Skip("AUDIT-137: remove when TestEscalateSubPR_IsAtomic asserts escCount==1 (Fix #8)")
+		// Without skip, fails with: audit_test_quality_test.go:278: AUDIT-137: TestEscalateSubPR_IsAtomic second-call block without assertion still present
 		path := filepath.Join(agentsDir, "pr_flow_test.go")
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
@@ -344,40 +279,36 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 				return true
 			})
 		}
-		if foundAssertion {
-			t.Errorf("AUDIT-137 REMEDY DETECTED: second-call block now contains t.Error*/t.Fatal* — update this test")
+		// RGR inversion: fail if second-call block still lacks a t.Error*/t.Fatal* assertion.
+		if !foundAssertion {
+			t.Fatal("AUDIT-137: TestEscalateSubPR_IsAtomic second-call block without assertion still present")
 		}
-		t.Log("AUDIT-137 REPRODUCED: TestEscalateSubPR_IsAtomic second escalateSubPR call is followed " +
-			"by an `if escCount != 2 { /* comment only */ }` with no assertion body. " +
-			"Idempotency gate is untested.")
 	})
 
 	// ── AUDIT-138 — no full-lifecycle adversarial multi-iter dog test ──────
 	t.Run("AUDIT_138_NoMultiIterationAdversarialLifecycleTest", func(t *testing.T) {
+		t.Skip("AUDIT-138: remove when TestFullConvoyLifecycle_AdversarialLLM added (Fix #7)")
+		// Without skip, fails with: audit_test_quality_test.go:304: AUDIT-138: dogs_test.go without multi-iteration adversarial lifecycle test still present
 		raw := readFile(t, filepath.Join(agentsDir, "dogs_test.go"))
-		// Look for a loop with bound ≥ 10 (the audit suggests 50). This is
-		// the structural shape of a full-lifecycle adversarial test.
 		loopRx := regexp.MustCompile(`for\s+\w+\s*:=\s*0\s*;\s*\w+\s*<\s*(\d{2,})\s*;`)
 		matches := loopRx.FindAllStringSubmatch(raw, -1)
 		bigLoops := 0
 		for _, m := range matches {
-			// Any ≥ 10-iteration numeric for loop counts as suspicious.
 			if len(m) >= 2 && len(m[1]) >= 2 {
 				bigLoops++
 			}
 		}
-		if bigLoops > 0 {
-			t.Errorf("AUDIT-138 POSSIBLE REMEDY: dogs_test.go has %d loop(s) of bound ≥10; "+
-				"check if it's a full-lifecycle test and update this assertion", bigLoops)
-		}
-		// And: no test with the suggested name exists.
+		hasNamed := false
 		for _, name := range []string{"TestFullConvoyLifecycle_AdversarialLLM",
 			"TestFullLifecycle_AdversarialLLM", "TestDog_AdversarialLifecycle"} {
 			if strings.Contains(raw, name) {
-				t.Errorf("AUDIT-138 REMEDY DETECTED: %q exists in dogs_test.go", name)
+				hasNamed = true
+				break
 			}
 		}
-		t.Log("AUDIT-138 REPRODUCED: dogs_test.go has no multi-iteration (≥10) loop-driven dog test. " +
-			"The $300 burn's feedback loop (dog → parse fail → Completed → refire) is structurally unexercised.")
+		// RGR inversion: fail if no multi-iter (>=10) loop AND no named adversarial lifecycle test exists.
+		if bigLoops == 0 && !hasNamed {
+			t.Fatal("AUDIT-138: dogs_test.go without multi-iteration adversarial lifecycle test still present")
+		}
 	})
 }

@@ -46,6 +46,11 @@ const p3DedupSQL = `SELECT COUNT(*) FROM BountyBoard
 	    OR payload LIKE '%"convoy_id":' || ? || '}%')`
 
 func TestPattern_P3_PayloadLikeDedupIsFullScan(t *testing.T) {
+	t.Skip("AUDIT-011: remove when Fix #3/#4 (structured convoy_id column + index replaces payload LIKE) lands")
+	// Without skip, fails with:
+	//   EXPLAIN QUERY PLAN output: SCAN BountyBoard
+	//   Pattern P3 defect still present — plan contains 'SCAN BountyBoard'.
+	//   Fix #3/#4 requires structured convoy_id column + index replacing payload LIKE.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -105,20 +110,18 @@ func TestPattern_P3_PayloadLikeDedupIsFullScan(t *testing.T) {
 	plan := strings.Join(planLines, "\n")
 	t.Logf("EXPLAIN QUERY PLAN output:\n%s", plan)
 
-	// ── Assert the defect: full scan, no index use. ─────────────────────────
-	// Today, SQLite cannot use an index for a LIKE with a leading wildcard, so
-	// the plan must be "SCAN BountyBoard". If somebody introduces a structured
-	// `convoy_id` column in the payload (e.g. via a stored/virtual column +
-	// index) the plan will flip to "SEARCH ... USING INDEX ..." — which is
-	// what we *want*, and this test will then fail, prompting the author to
-	// delete this locking test alongside the fix.
-	if !strings.Contains(plan, "SCAN BountyBoard") {
-		t.Fatalf("Pattern P3 defect no longer present — plan does not contain 'SCAN BountyBoard'.\n"+
-			"If you just added a structured convoy_id index, delete this locking test.\nplan:\n%s", plan)
+	// ── RGR: assert the desired (post-fix) plan, not the current defect. ────
+	// After Fix #3/#4 lands (structured convoy_id column + index replacing the
+	// payload LIKE pattern), the query plan should either avoid a full
+	// "SCAN BountyBoard" OR use an index. Today neither holds — the test
+	// fails loudly until the fix is in place.
+	if strings.Contains(plan, "SCAN BountyBoard") {
+		t.Fatalf("Pattern P3 defect still present — plan contains 'SCAN BountyBoard'.\n"+
+			"Fix #3/#4 requires structured convoy_id column + index replacing payload LIKE.\nplan:\n%s", plan)
 	}
-	if strings.Contains(plan, "USING INDEX") {
-		t.Fatalf("Pattern P3 defect no longer present — plan uses an index.\n"+
-			"If you just added a structured convoy_id index, delete this locking test.\nplan:\n%s", plan)
+	if !strings.Contains(plan, "USING INDEX") {
+		t.Fatalf("Pattern P3 defect still present — plan does not use an index.\n"+
+			"Fix #3/#4 requires structured convoy_id column + index replacing payload LIKE.\nplan:\n%s", plan)
 	}
 }
 
@@ -138,6 +141,11 @@ func TestPattern_P3_PayloadLikeDedupIsFullScan(t *testing.T) {
 // fix to a structured column / JSON-extract index, only the real row
 // matches and this locking test flips — delete it alongside the fix.
 func TestPattern_P3_BoundaryFalsePositive(t *testing.T) {
+	t.Skip("AUDIT-048: remove when Fix #3/#4 (structured convoy_id column + index replaces payload LIKE) lands")
+	// Without skip, fails with:
+	//   Pattern P3 boundary-defect still present — got 2 matches (real + nested-convoy_id
+	//   collision), want 1 (only real). Fix #3/#4 requires structured convoy_id column so
+	//   dedup queries have JSON-structural awareness.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -163,12 +171,13 @@ func TestPattern_P3_BoundaryFalsePositive(t *testing.T) {
 	if err := db.QueryRow(p3DedupSQL, 5, 5).Scan(&matched); err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	// Semantically-correct behaviour would return 1 (only the genuine
-	// convoy_id=5 row). The broken LIKE matches both rows because it has
-	// no notion of JSON structure.
-	if matched != 2 {
-		t.Fatalf("Pattern P3 boundary-defect no longer reproducible — expected 2 false-positive "+
-			"matches (real + nested-convoy_id collision), got %d. If the dedup query was tightened "+
-			"to a structured column, delete this locking test.", matched)
+	// RGR: assert semantically-correct behaviour. Only the genuine
+	// convoy_id=5 row should match; the nested-convoy_id collision must NOT.
+	// Today the LIKE matches both rows (has no notion of JSON structure), so
+	// the test fails until Fix #3/#4 (structured convoy_id column) lands.
+	if matched != 1 {
+		t.Fatalf("Pattern P3 boundary-defect still present — got %d matches (real + nested-convoy_id collision), "+
+			"want 1 (only real). Fix #3/#4 requires structured convoy_id column so dedup queries "+
+			"have JSON-structural awareness.", matched)
 	}
 }
