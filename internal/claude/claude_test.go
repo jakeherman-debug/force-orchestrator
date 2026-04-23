@@ -38,6 +38,10 @@ func TestIsRateLimitError_Detected(t *testing.T) {
 		"claude: 429 Too Many Requests",
 		"overloaded, please try again",
 		"quota exceeded for this account",
+		"stream idle timeout",
+		"Stream Idle Timeout",
+		"partial response received",
+		"Partial Response Received",
 	}
 	for _, c := range cases {
 		if !IsRateLimitError(c) {
