@@ -197,6 +197,13 @@ const (
 	shipItNag24h = 24 * time.Hour
 	shipItNag72h = 72 * time.Hour
 	shipItNag1wk = 7 * 24 * time.Hour
+	// AUDIT-152 / Fix #1: 30-day threshold is the escalation case — convoys
+	// that have sat untouched for a month are not going to ship without
+	// operator attention. Previously convoys hit the 1wk nag once and then
+	// vanished from operator awareness. At 30d we send mail AND create a
+	// SeverityHigh escalation so the convoy appears in the escalation pane
+	// until explicitly acknowledged.
+	shipItNag30d = 30 * 24 * time.Hour
 )
 
 func dogShipItNag(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
@@ -232,7 +239,12 @@ func dogShipItNag(db *sql.DB, logger interface{ Printf(string, ...any) }) error 
 
 		var threshold time.Duration
 		var key string
+		var escalate bool
 		switch {
+		case age >= shipItNag30d:
+			threshold = shipItNag30d
+			key = fmt.Sprintf("nag:convoy:%d:30d", c.id)
+			escalate = true
 		case age >= shipItNag1wk:
 			threshold = shipItNag1wk
 			key = fmt.Sprintf("nag:convoy:%d:1wk", c.id)
@@ -259,13 +271,36 @@ func dogShipItNag(db *sql.DB, logger interface{ Printf(string, ...any) }) error 
 		if len(urls) > 0 {
 			urlSection = "\n\nDraft PR(s):\n" + strings.Join(urls, "\n")
 		}
+		subject := fmt.Sprintf("[SHIP IT REMINDER] Convoy '%s' draft PR open for %v", c.name, threshold)
+		if escalate {
+			subject = fmt.Sprintf("[SHIP IT ESCALATION] Convoy '%s' draft PR open for %v — operator action required", c.name, threshold)
+		}
 		store.SendMail(db, "ship-it-nag", "operator",
-			fmt.Sprintf("[SHIP IT REMINDER] Convoy '%s' draft PR open for %v", c.name, threshold),
+			subject,
 			fmt.Sprintf("Convoy '%s' has had its draft PR(s) open for %v. Review on GitHub and click Ship it when ready, or close the PR if the work is abandoned.%s\n\nRun `force convoy ship %d` to promote, or `force convoy pr %d` for status.",
 				c.name, threshold, urlSection, c.id, c.id),
 			0, store.MailTypeAlert)
+		if escalate {
+			// AUDIT-152 / Fix #1: a convoy sitting >30d is not a nag anymore,
+			// it's a stuck convoy that will never ship without operator
+			// intervention. File an escalation so the operator dashboard
+			// surfaces it until explicitly acknowledged. task_id=0 because
+			// the escalation is convoy-scoped, not task-scoped.
+			//
+			// Unlike task escalations we do NOT flip the task to Escalated
+			// (there is no task — the convoy is already in DraftPROpen and
+			// we want it to stay there). We call db.Exec directly with the
+			// INSERT rather than CreateEscalation to avoid the status
+			// transition side effect.
+			db.Exec(
+				`INSERT INTO Escalations (task_id, severity, message, status)
+				 VALUES (?, ?, ?, 'Open')`,
+				0, string(store.SeverityHigh),
+				fmt.Sprintf("Convoy '%s' (id=%d) open >30d — draft PR abandoned or blocked", c.name, c.id),
+			)
+		}
 		store.SetConfig(db, key, time.Now().UTC().Format(time.RFC3339))
-		logger.Printf("ship-it-nag: convoy %d nagged at %v threshold", c.id, threshold)
+		logger.Printf("ship-it-nag: convoy %d nagged at %v threshold (escalated=%v)", c.id, threshold, escalate)
 	}
 	return nil
 }

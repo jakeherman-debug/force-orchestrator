@@ -13,6 +13,15 @@ type DashboardStatus struct {
 	ReadyToShip       int            `json:"ready_to_ship"` // convoys in DraftPROpen awaiting operator "Ship It"
 	UnreadMail        int            `json:"unread_mail"`
 	TotalSpendDollars float64        `json:"total_spend_dollars"`
+	// Spend-burn surface (Fix #1): trailing-hour spend + attempt rate. When
+	// HourlySpendDollars exceeds HourlySpendCapUSD the dashboard renders red;
+	// when AttemptsLastHour is unusually high (fleet thrash) the dashboard
+	// renders red. SpendCapExceeded is pre-computed so the client doesn't
+	// have to mirror the threshold logic.
+	HourlySpendDollars float64 `json:"hourly_spend_dollars"`
+	HourlySpendCapUSD  float64 `json:"hourly_spend_cap_usd"`
+	AttemptsLastHour   int     `json:"attempts_last_hour"`
+	SpendCapExceeded   bool    `json:"spend_cap_exceeded"`
 }
 
 // TasksResponse is the payload for GET /api/tasks

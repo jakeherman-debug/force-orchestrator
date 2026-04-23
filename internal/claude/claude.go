@@ -301,6 +301,19 @@ func RunCLI(prompt, tools, dir string, maxTurns int, timeout time.Duration) (str
 // (the stub returns immediately), so this falls back to the stub and writes
 // the stub's output to w after it returns.
 func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+	return RunCLIStreamingContext(context.Background(), prompt, tools, dir, maxTurns, timeout, w)
+}
+
+// RunCLIStreamingContext is like RunCLIStreaming but accepts an external
+// context so a caller (e.g. the Astromech heartbeat goroutine polling e-stop)
+// can cancel the in-flight Claude CLI. When parentCtx is cancelled the Claude
+// process is killed via its exec.CommandContext and the caller sees the
+// combined output captured so far plus an error.
+//
+// AUDIT-105 (Fix #1): this is the entry point that makes e-stop effective
+// against a long-running Claude session. The heartbeat goroutine wraps this
+// context, polls IsEstopped every 2 minutes, and cancels when flipped.
+func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
 	if !cliRunnerIsDefault {
 		// Stub installed — call it and write its output to w for consistency.
 		out, err := cliRunner(prompt, tools, dir, maxTurns, timeout)
@@ -310,7 +323,7 @@ func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Durat
 		return out, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
 	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns), "--output-format", "stream-json", "--verbose"}
@@ -357,6 +370,12 @@ func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Durat
 		combined := textBuf.String() + stderrBuf.String()
 		if ctx.Err() == context.DeadlineExceeded {
 			return combined, fmt.Errorf("claude CLI timed out after %v", timeout)
+		}
+		// Caller-driven cancellation (parent context cancelled) — surface
+		// distinctly from a real CLI failure so the caller can short-circuit
+		// rather than treat it as an infra failure.
+		if parentCtx.Err() == context.Canceled {
+			return combined, fmt.Errorf("claude CLI cancelled by caller")
 		}
 		return combined, fmt.Errorf("claude CLI failed: %v", runErr)
 	}

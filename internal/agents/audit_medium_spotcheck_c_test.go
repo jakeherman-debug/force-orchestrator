@@ -163,72 +163,53 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 	})
 
 	// ── AUDIT-152 ─────────────────────────────────────────────────────────
-	// internal/agents/pilot_draft_watch.go:202-271
-	// dogShipItNag has three thresholds: 24h, 72h, 1wk. After the 1wk nag
-	// fires, convoys left open indefinitely disappear from operator
-	// awareness — there is no 30-day branch and no CreateEscalation call
-	// anywhere in the file.
+	// Fix #1 added a 30-day escalation branch to dogShipItNag. This test now
+	// asserts the remedy is in place: the shipItNag30d constant exists, the
+	// switch has a top case for it, and an Escalation row is inserted when
+	// the threshold fires. Permanent regression protection.
 	t.Run("TestAUDIT_152_ship_it_nag_no_30d_escalation", func(t *testing.T) {
-		t.Skip("AUDIT-152: remove when 30-day escalation threshold added (Fix #1 observability)")
-		// Without skip, fails with: AUDIT-152: ship-it-nag tops out at 1wk with no 30-day escalation branch still present
 		src := mediumCReadFile(t, "internal/agents/pilot_draft_watch.go")
 
-		// Thresholds: must see the three cited constants and NOT a 30d one.
+		// Thresholds: must see all four including the new 30d one.
 		for _, needed := range []string{
 			"shipItNag24h",
 			"shipItNag72h",
 			"shipItNag1wk",
+			"shipItNag30d",
 		} {
 			if !strings.Contains(src, needed) {
-				t.Fatalf("AUDIT-152 precondition missing: constant %q not found", needed)
+				t.Fatalf("AUDIT-152 regressed: threshold constant %q missing — the 30d "+
+					"escalation branch must remain in place", needed)
 			}
 		}
 
-		for _, forbidden := range []string{
-			"shipItNag30d",
-			"shipItNag4wk",
-			"30 * 24 * time.Hour",
-			"30*24*time.Hour",
-			`"30d"`,
-		} {
-			if strings.Contains(src, forbidden) {
-				t.Fatalf("AUDIT-152 contradicted: pilot_draft_watch.go now references "+
-					"%q — 30-day threshold may have been added", forbidden)
-			}
-		}
-
-		// Isolate the dogShipItNag function body and verify its switch has
-		// no case beyond shipItNag1wk, and no CreateEscalation.
+		// Isolate the dogShipItNag function body.
 		fnStart := strings.Index(src, "func dogShipItNag(")
 		if fnStart < 0 {
-			t.Fatalf("AUDIT-152 precondition missing: dogShipItNag not found")
+			t.Fatalf("AUDIT-152 source drift: dogShipItNag not found")
 		}
-		// Scan to the matching closing brace of the function — good enough:
-		// this file's only remaining content after dogShipItNag is nothing
-		// (the file ends at 271 per the finding).
 		fnBody := src[fnStart:]
 
-		if strings.Contains(fnBody, "CreateEscalation") {
-			t.Fatalf("AUDIT-152 contradicted: dogShipItNag now calls CreateEscalation; " +
-				"audit may be fixed")
-		}
-
-		// The switch must top out at shipItNag1wk. Count case labels: must
-		// have exactly three (1wk, 72h, 24h).
+		// The switch must now have a case for 30d BEFORE (higher than) 1wk
+		// and the 30d branch must land an escalation.
 		caseRe := regexp.MustCompile(`case age >= shipItNag\w+:`)
 		cases := caseRe.FindAllString(fnBody, -1)
-		if len(cases) != 3 {
-			t.Fatalf("AUDIT-152 source drift: expected exactly 3 age-threshold "+
-				"cases in dogShipItNag, found %d: %v", len(cases), cases)
+		if len(cases) != 4 {
+			t.Fatalf("AUDIT-152 regressed: expected 4 age-threshold cases (30d, 1wk, 72h, 24h), "+
+				"found %d: %v", len(cases), cases)
+		}
+		if !strings.Contains(cases[0], "shipItNag30d") {
+			t.Fatalf("AUDIT-152 regressed: top case is %q, not shipItNag30d — "+
+				"switch order must place the highest threshold first", cases[0])
 		}
 
-		// And confirm the highest case is still shipItNag1wk — i.e., the
-		// first case in the switch (Go's switch evaluates top-down, and the
-		// code lists highest threshold first).
-		if !strings.Contains(cases[0], "shipItNag1wk") {
-			t.Fatalf("AUDIT-152 source drift: top case is %q, not shipItNag1wk", cases[0])
+		// Verify the 30d path actually creates an escalation record. Check
+		// by regex — the implementation may either call CreateEscalation or
+		// INSERT INTO Escalations directly.
+		if !regexp.MustCompile(`CreateEscalation|INSERT INTO Escalations`).MatchString(fnBody) {
+			t.Fatal("AUDIT-152 regressed: dogShipItNag body does not emit any " +
+				"Escalation — the 30d branch must file an escalation so operators " +
+				"see stuck convoys on the dashboard until acknowledged")
 		}
-		t.Fatalf("AUDIT-152: ship-it-nag tops out at 1wk with no 30-day escalation " +
-			"branch still present")
 	})
 }

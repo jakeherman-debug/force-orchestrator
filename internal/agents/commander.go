@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -212,15 +213,23 @@ func insertConvoyAndTasks(db *sql.DB, tasks []store.TaskPlan, bounty *store.Boun
 	return idMapping, nil
 }
 
-func SpawnCommander(db *sql.DB, name string) {
+func SpawnCommander(ctx context.Context, db *sql.DB, name string) {
 	agentName := name
 	logger := NewLogger(name)
 	logger.Printf("Commander starting up")
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Commander %s exiting: %v", name, ctx.Err())
+			return
+		}
 		// Hard stop — operator activated e-stop
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

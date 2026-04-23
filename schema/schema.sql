@@ -198,6 +198,14 @@ CREATE TABLE IF NOT EXISTS Fleet_Mail (
 
 -- ── System configuration ──────────────────────────────────────────────────────
 -- Runtime knobs: e-stop, max_concurrent, num_astromech, num_captain, etc.
+-- Fix #1 added:
+--   hourly_spend_cap_usd       (default 25.0)  — agent claim loops skip-and-sleep
+--                                                when trailing-hour spend exceeds
+--   hourly_spend_estop_usd     (default 200.0) — spend-burn-watch dog auto-flips
+--                                                e-stop when trailing-hour spend
+--                                                exceeds this hard cap
+--   spend_cap_last_alert_hour  (auto)          — dedup key for operator warning
+--                                                mail (hour-of-last-alert)
 
 CREATE TABLE IF NOT EXISTS SystemConfig (
     key   TEXT PRIMARY KEY,

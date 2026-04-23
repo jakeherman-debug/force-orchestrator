@@ -58,10 +58,19 @@ var dogCooldowns = map[string]time.Duration{
 	// operator burden when our own terminal-task-exit or an external merge has
 	// already made the problem moot.
 	"escalation-sweeper":    10 * time.Minute,
+	// spend-burn-watch polls TaskHistory for trailing-hour spend. 5-min cadence
+	// so the operator sees a cost spike within one inquisitor tick of it
+	// landing. Auto-e-stop at $200/h makes the fleet self-contain any runaway
+	// loop regardless of whether anyone is watching the dashboard.
+	"spend-burn-watch":      5 * time.Minute,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
+// spend-burn-watch runs FIRST so that if it flips e-stop, subsequent dogs and
+// any subsequent cycle's agent claims all see the halt immediately — no
+// grace period for the fleet to continue burning tokens past the cap.
 var dogOrder = []string{
+	"spend-burn-watch",
 	"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene",
 	"stalled-reviews", "priority-aging", "daily-digest", "stale-convoys-report",
 	"sub-pr-ci-watch", "main-drift-watch", "draft-pr-watch", "ship-it-nag",
@@ -71,7 +80,22 @@ var dogOrder = []string{
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
 // Called by SpawnInquisitor on every inquisitor cycle.
+//
+// E-stop gate (AUDIT-106 / Fix #1): if the operator has flipped e-stop, NO
+// dogs run — not even observational ones. Dogs issue `gh` API calls, push
+// empty commits via TriggerCIRerun, queue PRReviewTriage tasks, and mutate
+// AskBranchPR rows; every one of these continues burning tokens or quota
+// during an emergency halt. The whole point of e-stop is to stop activity
+// that costs money, so we short-circuit before the cooldown loop.
+//
+// The spend-burn-watch dog itself is skipped when estopped — its job is
+// to auto-flip e-stop, which is already done. Re-running it mid-estop
+// would just emit another no-op log line.
 func RunDogs(db *sql.DB, logger interface{ Printf(string, ...any) }) {
+	if IsEstopped(db) {
+		logger.Printf("RunDogs: e-stop active — skipping all dogs this cycle")
+		return
+	}
 	for _, dogName := range dogOrder {
 		cooldown := dogCooldowns[dogName]
 		last := store.DogLastRun(db, dogName)
@@ -157,6 +181,8 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 		return dogConvoyReviewWatch(db, logger)
 	case "escalation-sweeper":
 		return dogEscalationSweeper(db, logger)
+	case "spend-burn-watch":
+		return dogSpendBurnWatch(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -26,12 +27,16 @@ const bootCallCooldown = 30 * time.Minute
 var bootLastCalled = map[int]time.Time{}
 
 // SpawnInquisitor periodically hunts the fleet for problems.
-func SpawnInquisitor(db *sql.DB) {
+func SpawnInquisitor(ctx context.Context, db *sql.DB) {
 	logger := NewLogger("Inquisitor")
 	logger.Printf("Inquisitor deployed — hunting every %v, stale threshold %v", inquisitorInterval, staleLockTimeout)
 	validateWorktrees(db, logger)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Inquisitor exiting: %v", ctx.Err())
+			return
+		}
 		time.Sleep(inquisitorInterval)
 
 		rows, err := db.Query(`

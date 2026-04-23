@@ -237,14 +237,26 @@ func buildAstromechContext(
 	return
 }
 
-func SpawnAstromech(db *sql.DB, name string) {
+func SpawnAstromech(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
 	logger.Printf("Astromech %s starting up", name)
 
 	for {
+		// Daemon-level cancellation — AUDIT-020 self-heal path. When the
+		// root context is cancelled (shutdown or signal), every agent
+		// claim loop exits cleanly instead of racing the 30s drain.
+		if ctx.Err() != nil {
+			logger.Printf("Astromech %s exiting: %v", name, ctx.Err())
+			return
+		}
 		// Hard stop — operator activated e-stop
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		// Spend cap — skip-and-sleep when trailing-hour spend exceeds soft cap
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 		// Soft throttle — too many tasks already running
@@ -401,18 +413,35 @@ Do not re-do work that is already correctly committed.`
 	logger.Printf("Task %d: running claude CLI (timeout: %v)", bounty.ID, sessionTimeout)
 
 	// Heartbeat goroutine — logs every 2 minutes so fleet.log confirms Claude is alive
-	// during long silent runs. Stops as soon as RunCLIStreaming returns.
+	// during long silent runs. Stops as soon as RunCLIStreamingContext returns.
+	//
+	// AUDIT-105 (Fix #1): the heartbeat also polls IsEstopped every tick. When
+	// the operator flips e-stop, the context is cancelled and the in-flight
+	// Claude CLI is killed — without this, a 45-minute Claude session kicked
+	// off before e-stop would run to completion, burning tokens during an
+	// emergency halt. Poll interval is short (5s) so e-stop response is bounded
+	// at ~5s regardless of how long Claude has been running.
+	claudeCtx, cancelClaude := context.WithCancel(context.Background())
+	defer cancelClaude()
 	heartbeatDone := make(chan struct{})
 	heartbeatStart := time.Now()
 	go func() {
-		ticker := time.NewTicker(2 * time.Minute)
-		defer ticker.Stop()
+		logTicker := time.NewTicker(2 * time.Minute)
+		defer logTicker.Stop()
+		estopTicker := time.NewTicker(5 * time.Second)
+		defer estopTicker.Stop()
 		for {
 			select {
 			case <-heartbeatDone:
 				return
-			case <-ticker.C:
+			case <-logTicker.C:
 				logger.Printf("Task %d: claude still running (%v elapsed)", bounty.ID, time.Since(heartbeatStart).Round(time.Second))
+			case <-estopTicker.C:
+				if IsEstopped(db) {
+					logger.Printf("Task %d: e-stop detected mid-Claude — cancelling context", bounty.ID)
+					cancelClaude()
+					return
+				}
 			}
 		}
 	}()
@@ -427,7 +456,7 @@ Do not re-do work that is already correctly committed.`
 		taskWriter = taskLogFile
 	}
 
-	rawOut, err := claude.RunCLIStreaming(fullPrompt, "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools, worktreeDir, maxTurnsInt, sessionTimeout, taskWriter)
+	rawOut, err := claude.RunCLIStreamingContext(claudeCtx, fullPrompt, "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools, worktreeDir, maxTurnsInt, sessionTimeout, taskWriter)
 
 	close(heartbeatDone)
 	if taskLogFile != nil {
@@ -470,7 +499,13 @@ Do not re-do work that is already correctly committed.`
 			logger.Printf("Task %d: rate limit detected (hit %d), backing off %v", bounty.ID, rlCount+1, backoff)
 			telemetry.EmitEvent(telemetry.EventRateLimited(sessionID, name, bounty.ID, rlCount+1, backoff))
 			store.UpdateBountyStatus(db, bounty.ID, "Pending")
-			time.Sleep(backoff)
+			// AUDIT-107: honour e-stop during the backoff. A blind time.Sleep
+			// leaves an emergency halt ineffective for up to 10 minutes while
+			// the agent sleeps; this helper short-sleeps and re-checks each
+			// iteration so e-stop response time is ≤ 1s.
+			if SleepUnlessEstopped(db, backoff) {
+				logger.Printf("Task %d: rate-limit backoff interrupted by e-stop", bounty.ID)
+			}
 			return
 		}
 

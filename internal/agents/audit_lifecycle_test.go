@@ -37,26 +37,22 @@ func lifecycleReadFile(t *testing.T, rel string) string {
 func TestAuditLifecycleFindings(t *testing.T) {
 
 	// ── AUDIT-020 ─────────────────────────────────────────────────────────
-	// cmd/force/fleet_cmds.go:144-215,425-443
-	// Daemon goroutines are spawned via `go agents.SpawnX(db, ...)` with no
-	// root context.Context threaded in. A signal-driven drain is the only
-	// cancellation path; child `claude -p` processes and dogs cannot be
-	// cooperatively cancelled. Assert Spawn* signatures do NOT accept a
-	// context.Context.
+	// Fix #1 threaded context.Context through every Spawn* and the fleet_cmds
+	// daemon. Assert the remedy is in place — permanent regression
+	// protection against anyone adding a new Spawn* without threading ctx in.
 	t.Run("TestAUDIT_020_daemon_no_root_context", func(t *testing.T) {
-		t.Skip("AUDIT-020: remove when Spawn* goroutines thread context.Context (Fix #1)")
-		// Without skip, fails with: audit_lifecycle_test.go:52: AUDIT-020: daemon Spawn* calls still do not thread ctx still present
 		src := lifecycleReadFile(t, "cmd/force/fleet_cmds.go")
-		// RGR inversion: assert the DEFECT (no ctx threaded) still holds; fail if so.
+		// Every agents.Spawn*(...) call in the daemon must pass ctx first.
 		spawnCtx := regexp.MustCompile(`agents\.Spawn\w+\s*\(\s*ctx\b`)
 		if spawnCtx.FindStringIndex(src) == nil {
-			t.Fatal("AUDIT-020: daemon Spawn* calls still do not thread ctx still present")
+			t.Fatal("AUDIT-020 regressed: daemon no longer threads ctx to agents.Spawn*(...) — " +
+				"restore ctx as the first arg on every spawn so shutdown cancellation propagates")
 		}
-		// Sanity — confirm the daemon calls Spawn* at all.
-		if !regexp.MustCompile(`agents\.Spawn\w+\s*\(\s*db\b`).MatchString(src) {
-			t.Fatalf("AUDIT-020 precondition missing: no agents.Spawn*(db, ...) calls in fleet_cmds.go")
+		if !regexp.MustCompile(`agents\.Spawn\w+\s*\(\s*db\b`).MatchString(src) &&
+			spawnCtx.FindStringIndex(src) == nil {
+			t.Fatalf("AUDIT-020 precondition missing: no agents.Spawn*(...) calls in fleet_cmds.go")
 		}
-		// None of the Spawn signatures themselves take a Context — inverted.
+		// Every Spawn* signature must have context.Context in its parameter list.
 		for _, f := range []string{
 			"internal/agents/astromech.go",
 			"internal/agents/captain.go",
@@ -71,7 +67,8 @@ func TestAuditLifecycleFindings(t *testing.T) {
 			body := lifecycleReadFile(t, f)
 			sigCtx := regexp.MustCompile(`func\s+Spawn\w+\s*\([^)]*context\.Context[^)]*\)`)
 			if sigCtx.FindStringIndex(body) == nil {
-				t.Fatalf("AUDIT-020: Spawn* signature in %s still lacks context.Context still present", f)
+				t.Fatalf("AUDIT-020 regressed: Spawn* signature in %s lacks context.Context — "+
+					"restore ctx as the first parameter", f)
 			}
 		}
 	})

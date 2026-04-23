@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -80,13 +81,21 @@ DEPENDENCY RULES (blocked_by):
 If findings is an empty array, that is a valid result meaning no issues were found.
 If you cannot complete the audit without human input, emit [ESCALATED:LOW|MEDIUM|HIGH:reason] instead of JSON.`
 
-func SpawnAuditor(db *sql.DB, name string) {
+func SpawnAuditor(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
 	logger.Printf("Auditor %s starting up", name)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Auditor %s exiting: %v", name, ctx.Err())
+			return
+		}
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

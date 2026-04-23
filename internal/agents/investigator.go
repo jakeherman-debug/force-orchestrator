@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -42,13 +43,21 @@ Write your full investigation report as plain prose. At the very end emit:
 The text before [DONE] becomes the report delivered to the operator.
 If you truly cannot complete the investigation without human input, emit [ESCALATED:LOW|MEDIUM|HIGH:reason] instead of [DONE].`
 
-func SpawnInvestigator(db *sql.DB, name string) {
+func SpawnInvestigator(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
 	logger.Printf("Investigator %s starting up", name)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Investigator %s exiting: %v", name, ctx.Err())
+			return
+		}
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

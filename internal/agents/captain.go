@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -250,14 +251,22 @@ func isKnownRepo(db *sql.DB, repoName string) bool {
 	return count > 0
 }
 
-func SpawnCaptain(db *sql.DB, name string) {
+func SpawnCaptain(ctx context.Context, db *sql.DB, name string) {
 	agentName := name
 	logger := NewLogger(name)
 	logger.Printf("Captain %s standing by", name)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Captain %s exiting: %v", name, ctx.Err())
+			return
+		}
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

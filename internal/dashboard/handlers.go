@@ -62,6 +62,14 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 		unread, _ := store.MailStats(db, "", "")
 		s.UnreadMail = unread
 		s.TotalSpendDollars = store.TotalSpendDollars(db)
+		// Fix #1 — surface trailing-hour burn rate + attempt rate. A $300 burn
+		// looked identical to two days of healthy operation when only lifetime
+		// spend was shown; hourly gives the operator a real signal. attempts
+		// exposes fleet thrash (Medic-requeue loops, ConvoyReview 5x5 cycles).
+		s.HourlySpendDollars = store.SpendRateDollars(db, "1 hours")
+		s.HourlySpendCapUSD = agents.HourlySpendCapUSD(db)
+		s.AttemptsLastHour = store.AttemptsInWindow(db, "1 hours")
+		s.SpendCapExceeded = s.HourlySpendDollars > s.HourlySpendCapUSD
 
 		if pidBytes, err := os.ReadFile("fleet.pid"); err == nil {
 			var pid int
