@@ -74,13 +74,18 @@ self-healing loop that terminates when a pass returns `"clean"`.
    Jedi Council's `completeAskBranchResolution` path applies (force-push to ask-branch, no
    redundant sub-PR).
 5. **Max findings cap.** Each pass spawns at most `convoy_review_max_findings` fix tasks
-   (SystemConfig, default 5). Remaining findings are picked up in the next pass.
+   (SystemConfig, **default 2** — dropped from 5 by Fix #7). Remaining findings are picked
+   up in the next pass (subject to invariants 10-12 below). Operator override via the
+   SystemConfig key still works; drop only if convoys consistently need broader scope.
 6. **ConvoyReview is an infrastructure task.** It is registered in `InfrastructureTaskTypes`
    and is hidden from the dashboard. It never spawns another ConvoyReview (only CodeEdit fix
    tasks). The dog handles re-triggering.
-7. **On LLM parse failure.** One retry with a critic note appended. Second failure → mark
-   Completed (not Failed) so the dog retries on the next 5-min tick rather than leaving a
-   stuck Locked task.
+7. **On LLM parse failure — escalate after 2 attempts (Fix #7 / AUDIT-007).**
+   Each ConvoyReview row carries `BountyBoard.parse_failure_count`. First failure → one
+   retry on the same row with a critic note appended. Second failure → `CreateEscalation`
+   + `FailBounty` (NOT Completed). The old "mark Completed so the dog retries" path let
+   the 5-min dog burn ~$5/pass × 5 passes on a convoy whose LLM couldn't produce valid
+   JSON. The cap is `convoyReviewParseFailureCap` (=2) in `convoy_review.go`.
 8. **Dog re-trigger condition.** `dogConvoyReviewWatch` queues a new ConvoyReview only when
    ALL of the following hold: convoy status is `DraftPROpen`, no ConvoyReview is
    `Pending`/`Locked`, no child CodeEdit task (whose parent is a ConvoyReview for this
@@ -90,6 +95,24 @@ self-healing loop that terminates when a pass returns `"clean"`.
 9. **Never spawn fix tasks against a moving diff.** `runConvoyReview` checks for active
    non-infrastructure tasks in the convoy before spawning any fix tasks. If any exist,
    it completes without spawning and lets the dog re-trigger once the convoy is quiescent.
+10. **Pass-to-pass fingerprint dedup (Fix #7 / AUDIT-006).** Each pass computes a stable
+    fingerprint of its finding set (`findingSetFingerprint` in `convoy_review.go`: SHA256
+    over sorted per-finding hashes of repo+file+line+type+normalised-description). The
+    fingerprint is persisted to `BountyBoard.last_findings_fingerprint` on Completed rows.
+    If a subsequent pass produces the same fingerprint as the most recent Completed pass,
+    `runConvoyReview` escalates (conflicted_loop) rather than spawning another identical
+    fix-task batch. The findings weren't resolved by the prior spawn and we refuse to
+    loop on them. A `convoyReviewCleanMarker` sentinel distinguishes true clean passes
+    from deferred-completion rows (active tasks / ask-branch conflict gates).
+11. **Clean-pass gate (Fix #7 / AUDIT-006).** Once ANY prior pass returns "clean" for a
+    convoy (`hasPriorCleanPass`), subsequent passes may only verify regressions. If a
+    later pass surfaces new findings after a clean pass, `runConvoyReview` escalates with
+    severity=Medium and mails the operator — either the ask-branch diff drifted or the
+    LLM is re-reviewing inconsistently; either way, stop spawning fix tasks.
+12. **Fingerprints only persist on terminal "spawn decision" rows.** The active-tasks
+    gate and ask-branch-conflict gate complete the row without writing a fingerprint:
+    the diff is still moving, so a "same findings next tick" comparison would be against
+    a diff-state the convoy has since mutated.
 
 ## Self-healing is the default; escalation is the last step
 

@@ -18,6 +18,15 @@ import (
 
 const MaxDiffBytes = 80_000
 
+// Fix #7 (AUDIT-029) — Council parse-failure dedicated cap.
+//
+// When the Council LLM emits unparseable JSON, each infra-retry re-runs a
+// max_turns=5 council pass (~5-10K tokens × 80KB diff = $0.25-$0.50 per
+// retry). Without its own budget, parse failures ride the shared
+// MaxInfraFailures=5 limit → up to ~$2.50 of Council on a single flaky
+// task. Cap parse failures separately and route to Medic early.
+const councilParseFailureCap = 3
+
 // BranchAgentName extracts the agent name from a persistent branch name.
 // Handles both the bare format "agent/R2-D2/task-42" and the username-prefixed
 // format "<user>/agent/R2-D2/task-42". Returns "" for legacy "agent/task-N"
@@ -198,6 +207,21 @@ Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 	if err := json.Unmarshal([]byte(cleanJSON), &ruling); err != nil {
 		msg := fmt.Sprintf("JSON Parse Err: %v | Output: %.500s", err, cleanJSON)
 		logger.Printf("Task %d: council JSON parse failed — returning to queue for retry: %s", b.ID, msg)
+		// Fix #7 (AUDIT-029) — dedicated parse-failure budget.
+		// Parse failures used to count against the shared MaxInfraFailures=5
+		// infra budget, meaning an LLM that emits 5 consecutive malformed
+		// responses burns 5 full Council passes (max_turns=5 × 80KB diff
+		// ≈ $0.25-$0.50). Short-circuit earlier: after councilParseFailureCap
+		// parse failures on the SAME task, rewrap as "unable to parse LLM
+		// output" and route to Medic instead of another Council retry.
+		nParse := incrementParseFailureCount(db, b.ID)
+		if nParse >= councilParseFailureCap {
+			escMsg := fmt.Sprintf("Council unable to parse LLM output for task %d after %d attempts — escalating to Medic", b.ID, nParse)
+			logger.Printf("Task %d: %s", b.ID, escMsg)
+			CreateEscalation(db, b.ID, store.SeverityMedium, escMsg)
+			store.FailBounty(db, b.ID, escMsg)
+			return
+		}
 		handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
 		return
 	}

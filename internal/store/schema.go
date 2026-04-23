@@ -42,6 +42,8 @@ func createSchema(db *sql.DB) {
 		priority       INTEGER DEFAULT 0,
 		task_timeout   INTEGER DEFAULT 0,
 		idempotency_key TEXT   DEFAULT '',
+		parse_failure_count INTEGER DEFAULT 0,
+		last_findings_fingerprint TEXT DEFAULT '',
 		created_at     TEXT    DEFAULT (datetime('now'))
 	);`)
 
@@ -223,6 +225,7 @@ func createSchema(db *sql.DB) {
 		checks_state           TEXT    DEFAULT 'Pending',
 		failure_count          INTEGER DEFAULT 0,
 		stall_retrigger_count  INTEGER DEFAULT 0,
+		spawned_fix_count      INTEGER DEFAULT 0,
 		merged_at              TEXT    DEFAULT '',
 		created_at             TEXT    DEFAULT (datetime('now')),
 		UNIQUE(repo, pr_number)
@@ -276,6 +279,7 @@ func createSchema(db *sql.DB) {
 		thread_depth           INTEGER DEFAULT 0,
 		classification         TEXT    DEFAULT '',
 		classification_reason  TEXT    DEFAULT '',
+		classify_attempts      INTEGER DEFAULT 0,
 		spawned_task_id        INTEGER DEFAULT 0,
 		reply_body             TEXT    DEFAULT '',
 		replied_at             TEXT    DEFAULT '',
@@ -304,6 +308,10 @@ func runMigrations(db *sql.DB) {
 	// Backfill existing rows that have no created_at so they don't get pruned immediately.
 	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now') WHERE created_at = ''`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN idempotency_key TEXT    DEFAULT ''`)
+	// Fix #7 — ConvoyReview tightening: parse-failure counter and last-pass
+	// finding fingerprint for same-set dedup across re-triggered passes.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN parse_failure_count INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN last_findings_fingerprint TEXT DEFAULT ''`)
 
 	// TaskHistory column additions
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_in  INTEGER DEFAULT 0`)
@@ -394,6 +402,7 @@ func runMigrations(db *sql.DB) {
 		checks_state           TEXT    DEFAULT 'Pending',
 		failure_count          INTEGER DEFAULT 0,
 		stall_retrigger_count  INTEGER DEFAULT 0,
+		spawned_fix_count      INTEGER DEFAULT 0,
 		merged_at              TEXT    DEFAULT '',
 		created_at             TEXT    DEFAULT (datetime('now')),
 		UNIQUE(repo, pr_number)
@@ -404,6 +413,8 @@ func runMigrations(db *sql.DB) {
 	// Additive column for existing DBs — counts stuck-runner re-trigger attempts
 	// so sub-pr-ci-watch can cap the loop before escalating.
 	db.Exec(`ALTER TABLE AskBranchPRs ADD COLUMN stall_retrigger_count INTEGER DEFAULT 0`)
+	// Fix #7 (AUDIT-120) — cap Flaky→RealBug concurrent fix task spawns per PR.
+	db.Exec(`ALTER TABLE AskBranchPRs ADD COLUMN spawned_fix_count INTEGER DEFAULT 0`)
 
 	// ConvoyAskBranches — per-(convoy, repo) integration branch. Added as part of
 	// Phase 2; key on (convoy_id, repo) so convoys touching multiple repos work.
@@ -444,6 +455,7 @@ func runMigrations(db *sql.DB) {
 		thread_depth           INTEGER DEFAULT 0,
 		classification         TEXT    DEFAULT '',
 		classification_reason  TEXT    DEFAULT '',
+		classify_attempts      INTEGER DEFAULT 0,
 		spawned_task_id        INTEGER DEFAULT 0,
 		reply_body             TEXT    DEFAULT '',
 		replied_at             TEXT    DEFAULT '',
@@ -453,6 +465,8 @@ func runMigrations(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_convoy ON PRReviewComments (convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id)`)
+	// Fix #7 (AUDIT-032) — classifier retry counter bounds transient failures.
+	db.Exec(`ALTER TABLE PRReviewComments ADD COLUMN classify_attempts INTEGER DEFAULT 0`)
 
 	// ── Fleet memory: topic_tags column + FTS rebuild ────────────────────────
 	// Additive column on the main table; for the FTS5 virtual table we need to

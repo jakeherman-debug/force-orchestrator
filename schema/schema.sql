@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     branch_name    TEXT    DEFAULT '',   -- 'agent/<name>/task-<id>' persistent branch
     priority       INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
     task_timeout   INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
-    idempotency_key TEXT    DEFAULT ''  -- client-supplied UUID; duplicate submissions within 60s return the existing task
+    idempotency_key TEXT    DEFAULT '', -- client-supplied UUID; duplicate submissions within 60s return the existing task
+    parse_failure_count INTEGER DEFAULT 0, -- Fix #7: LLM JSON-parse failures on this row; ConvoyReview escalates at 2
+    last_findings_fingerprint TEXT DEFAULT '' -- Fix #7: SHA256 of last pass's finding set; pass-to-pass dedup gate
 );
 
 -- Status lifecycle:
@@ -114,6 +116,8 @@ CREATE TABLE IF NOT EXISTS AskBranchPRs (
     state          TEXT    DEFAULT 'Open',        -- 'Open' | 'Merged' | 'Closed'
     checks_state   TEXT    DEFAULT 'Pending',     -- 'Pending' | 'Success' | 'Failure'
     failure_count  INTEGER DEFAULT 0,             -- incremented by Medic CIFailureTriage
+    stall_retrigger_count INTEGER DEFAULT 0,      -- stuck-runner re-trigger attempt counter
+    spawned_fix_count INTEGER DEFAULT 0,          -- Fix #7: concurrent Flaky→RealBug fix-task spawn guard
     merged_at      TEXT    DEFAULT '',
     created_at     TEXT    DEFAULT (datetime('now')),
     UNIQUE(repo, pr_number)
@@ -324,6 +328,7 @@ CREATE TABLE IF NOT EXISTS PRReviewComments (
     thread_depth           INTEGER DEFAULT 0,   -- # of fleet-authored fixes already in this thread
     classification         TEXT    DEFAULT '',  -- '' | 'in_scope_fix' | 'out_of_scope' | 'not_actionable' | 'conflicted_loop' | 'human' | 'ignored'
     classification_reason  TEXT    DEFAULT '',
+    classify_attempts      INTEGER DEFAULT 0,   -- Fix #7 (AUDIT-032): bounds transient classifier retries
     spawned_task_id        INTEGER DEFAULT 0,   -- CodeEdit (in_scope) or Feature (out_of_scope)
     reply_body             TEXT    DEFAULT '',  -- the reply text (DRAFT for humans, POSTED for bots)
     replied_at             TEXT    DEFAULT '',  -- empty for humans (never posted) and conflicted_loop

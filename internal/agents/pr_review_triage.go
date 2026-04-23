@@ -31,6 +31,12 @@ import (
 // earlier directions. This prevents the fleet from flip-flopping forever
 // with a bot whose feedback is internally inconsistent.
 
+// Fix #7 (AUDIT-032) — classifyAttemptsCap bounds transient classifier
+// failures on a single PRReviewComment row. Without this, every 5-minute
+// pr-review-poll tick re-ran the classifier indefinitely on a row that
+// hit a transient LLM error — each retry is a Claude call.
+const classifyAttemptsCap = 3
+
 const prReviewSystemPrompt = `You are the Fleet Diplomat, triaging a review comment on an open draft PR.
 
 You are shown:
@@ -116,7 +122,20 @@ func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logge
 
 		decision, classifyErr := classifyPRReviewComment(c, thread, convoyTasks, depthCap, logger)
 		if classifyErr != nil {
-			logger.Printf("PRReviewTriage: comment row %d classify failed: %v — leaving unclassified for retry", c.ID, classifyErr)
+			// Fix #7 (AUDIT-032) — bound transient classifier retries.
+			// Previously the row stayed unclassified forever and every
+			// 5-minute pr-review-poll tick re-entered the retry with no
+			// limit. Each retry is a Claude call (~$0.05). Cap at
+			// classifyAttemptsCap and flag for human review when exceeded.
+			attempts := store.IncrementClassifyAttempts(db, c.ID)
+			if attempts >= classifyAttemptsCap {
+				logger.Printf("PRReviewTriage: comment row %d classifier failed %d times (cap=%d) — marking for human review",
+					c.ID, attempts, classifyAttemptsCap)
+				store.MarkClassifyUnrecoverable(db, c.ID, classifyErr.Error())
+				continue
+			}
+			logger.Printf("PRReviewTriage: comment row %d classify failed: %v — leaving unclassified for retry (%d/%d)",
+				c.ID, classifyErr, attempts, classifyAttemptsCap)
 			continue
 		}
 
@@ -259,6 +278,17 @@ func indent(s, prefix string) string {
 // dispatchPRReviewDecision applies the classifier's decision to the DB and
 // GitHub. Atomic per comment: all DB writes commit together; gh post calls
 // follow the tx (so a rolled-back tx never emits a reply).
+//
+// Fix #7 (AUDIT-031) — hard-force conflicted_loop when thread_depth meets
+// the depth cap, regardless of what the classifier LLM returned. The depth
+// cap used to be advisory (prompt guidance only); a misbehaving or
+// ping-ponging bot at depth 10 could still land in_scope_fix because the
+// classifier emitted it. Every in_scope_fix spawns a full Astromech run —
+// one ppp thread at depth 10 = 10 Astromech sessions. Hard-guard here.
+// Fix #7 (AUDIT-117) — hard-force conflicted_loop when the convoy-level
+// in_scope_fix dispatch count is already past the convoy cap, regardless
+// of per-thread depth. A bot that opens a new thread each iteration
+// resets per-thread depth but accumulates convoy-level fixes — cap globally.
 func dispatchPRReviewDecision(
 	db *sql.DB,
 	agentName string,
@@ -269,6 +299,21 @@ func dispatchPRReviewDecision(
 	decision prReviewDecision,
 	logger interface{ Printf(string, ...any) },
 ) error {
+	depthCap := getIntConfig(db, "pr_review_thread_depth_cap", 2)
+	if c.ThreadDepth >= depthCap && decision.Classification == "in_scope_fix" {
+		logger.Printf("PRReviewTriage: comment #%d thread_depth=%d >= cap=%d — forcing conflicted_loop (was %s)",
+			c.GitHubCommentID, c.ThreadDepth, depthCap, decision.Classification)
+		decision.Classification = "conflicted_loop"
+	}
+	convoyFixCap := getIntConfig(db, "pr_review_convoy_fix_cap", 10)
+	if decision.Classification == "in_scope_fix" {
+		convoyFixCount := store.CountInScopeFixesForConvoy(db, c.ConvoyID)
+		if convoyFixCount >= convoyFixCap {
+			logger.Printf("PRReviewTriage: comment #%d convoy %d in_scope_fix count=%d >= cap=%d — forcing conflicted_loop",
+				c.GitHubCommentID, c.ConvoyID, convoyFixCount, convoyFixCap)
+			decision.Classification = "conflicted_loop"
+		}
+	}
 	switch decision.Classification {
 	case "in_scope_fix":
 		if c.AuthorKind != "bot" {

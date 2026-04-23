@@ -173,6 +173,38 @@ func MarkThreadResolved(db *sql.DB, rowID int) error {
 // ListPendingThreadResolves returns in_scope_fix rows whose spawned CodeEdit
 // task has reached Completed but whose review thread hasn't been resolved yet.
 // Used by the post-Council sweep.
+// CountInScopeFixesForConvoy returns the total number of PRReviewComments
+// classified "in_scope_fix" for a convoy across all threads. Used by
+// PRReviewTriage's convoy-level fix cap (Fix #7 / AUDIT-117): per-thread
+// depth alone is bypassable when a misbehaving bot opens a new thread for
+// each iteration.
+func CountInScopeFixesForConvoy(db *sql.DB, convoyID int) int {
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM PRReviewComments
+		WHERE convoy_id = ? AND classification = 'in_scope_fix'`, convoyID).Scan(&n)
+	return n
+}
+
+// IncrementClassifyAttempts bumps PRReviewComments.classify_attempts by 1
+// and returns the new value. Used by PRReviewTriage (Fix #7 / AUDIT-032)
+// to cap transient classifier failures — past the cap, the row is flagged
+// as 'human' so an operator triages manually.
+func IncrementClassifyAttempts(db *sql.DB, id int) int {
+	db.Exec(`UPDATE PRReviewComments SET classify_attempts = classify_attempts + 1 WHERE id = ?`, id)
+	var n int
+	db.QueryRow(`SELECT IFNULL(classify_attempts, 0) FROM PRReviewComments WHERE id = ?`, id).Scan(&n)
+	return n
+}
+
+// MarkClassifyUnrecoverable flags a comment as 'human' with a reason.
+// Called when a comment hits the classify_attempts cap (Fix #7 / AUDIT-032).
+// Operator review from dashboard posts or dismisses manually.
+func MarkClassifyUnrecoverable(db *sql.DB, id int, reason string) {
+	db.Exec(`UPDATE PRReviewComments SET classification = 'human',
+		classification_reason = ? WHERE id = ?`,
+		"classifier gave up after retries: "+reason, id)
+}
+
 func ListPendingThreadResolves(db *sql.DB) []PRReviewComment {
 	rows, err := db.Query(prReviewCommentSelect + `
 		WHERE classification = 'in_scope_fix'

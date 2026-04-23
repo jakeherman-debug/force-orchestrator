@@ -131,6 +131,25 @@ func runMedicCITriage(db *sql.DB, agentName string, bounty *store.Bounty, logger
 		return
 	}
 
+	// Fix #7 (AUDIT-161) — breaker-open short-circuit.
+	// If the per-repo circuit breaker is already open (>ciEnvThreshold
+	// Environmental failures in the rolling window), we know the
+	// infrastructure is still sick. Running another Claude triage would
+	// just record another Environmental → re-open a still-open breaker
+	// while burning a full Medic Claude call (~$0.05). Short-circuit to
+	// the Environmental handler path, which backs off and waits for the
+	// breaker to close on its own.
+	if IsCIBreakerOpen(db, payload.Repo) {
+		logger.Printf("CIFailureTriage #%d: CI breaker open for %s — skipping Claude, deferring to post-cooldown retry",
+			bounty.ID, payload.Repo)
+		applyCITriageEnvironmental(db, agentName, pr, payload, ciTriageDecision{
+			Classification: "Environmental",
+			Diagnosis:      "CI breaker currently open for this repo; skipping triage until cooldown elapses.",
+		}, logger)
+		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		return
+	}
+
 	userPrompt := fmt.Sprintf("Sub-PR URL: %s\nPR number: %d\nRepo: %s\nBranch: %s\nBuild URL: %s\nFailure count: %d\n",
 		pr.PRURL, pr.PRNumber, payload.Repo, payload.Branch, payload.BuildURL, pr.FailureCount)
 
@@ -204,11 +223,34 @@ func applyCITriageFlaky(db *sql.DB, agentName string, pr *store.AskBranchPR, pay
 // applyCITriageRealBug spawns a CodeEdit task on the same astromech branch
 // with the Medic's fix guidance. When the astromech commits and pushes, the
 // sub-PR updates automatically and sub-pr-ci-watch reruns CI.
+//
+// Fix #7 (AUDIT-120) — concurrent-spawn guard. FailureCount >= cap gated
+// the ESCALATION path but not the spawn itself; a second failure while
+// the prior fix task was still in flight re-entered this function and
+// spawned a second fix task. Now we check store.HasOpenFixTaskForPR and
+// AskBranchPRs.spawned_fix_count: 1 concurrent, 3 total per PR life.
 func applyCITriageRealBug(db *sql.DB, agentName string, pr *store.AskBranchPR, payload ciTriagePayload, decision ciTriageDecision, logger interface{ Printf(string, ...any) }) {
 	if pr.FailureCount >= medicRetriggerCap {
 		// We've already asked astromechs to fix this N times. Escalate.
 		escalateCITriage(db, agentName, pr, payload.TaskID,
 			fmt.Sprintf("RealBug: %s (after %d fix attempts)", decision.Diagnosis, pr.FailureCount), logger)
+		return
+	}
+	// Concurrency gate: if a prior fix task for this PR's branch is still
+	// open, don't spawn another. The sub-pr-ci-watch dog will re-poll; if
+	// the prior fix lands and CI still fails, the next tick will come
+	// through here with the prior fix Completed.
+	if store.HasOpenFixTaskForPR(db, payload.Branch) {
+		logger.Printf("CIFailureTriage: sub-PR #%d already has an open fix task on branch %s — not spawning a second (AUDIT-120 guard)",
+			pr.PRNumber, payload.Branch)
+		return
+	}
+	// Total-spawns gate: cap the lifetime number of fix spawns per PR.
+	if pr.SpawnedFixCount >= medicRetriggerCap {
+		logger.Printf("CIFailureTriage: sub-PR #%d has reached spawned_fix_count cap (%d) — escalating instead of spawning",
+			pr.PRNumber, medicRetriggerCap)
+		escalateCITriage(db, agentName, pr, payload.TaskID,
+			fmt.Sprintf("RealBug: %s (after %d fix spawns)", decision.Diagnosis, pr.SpawnedFixCount), logger)
 		return
 	}
 	// Spawn a CodeEdit on the same branch. The astromech resumes from the
@@ -222,6 +264,9 @@ func applyCITriageRealBug(db *sql.DB, agentName string, pr *store.AskBranchPR, p
 	}
 	// Transfer the branch name so the fix task resumes on the same branch.
 	store.SetBranchName(db, fixID, payload.Branch)
+	// Bump the per-PR spawn counter for the lifetime cap check on future
+	// ticks. Ignore the return — we only care about the durable increment.
+	_, _ = store.IncrementSpawnedFixCount(db, pr.ID)
 	store.SendMail(db, agentName, "astromech",
 		fmt.Sprintf("[CI FIX] Task #%d / PR #%d — please fix", payload.TaskID, pr.PRNumber),
 		fmt.Sprintf("CI failed on your sub-PR. Fix task #%d queued with guidance. Branch: %s\n\nDiagnosis:\n%s\n\nGuidance:\n%s",
