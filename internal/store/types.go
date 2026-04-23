@@ -135,7 +135,8 @@ type AskBranchPR struct {
 	State               string // Open, Merged, Closed
 	ChecksState         string // Pending, Success, Failure
 	FailureCount        int
-	StallRetriggerCount int    // sub-PR CI stall diagnosis re-trigger attempts
+	StallRetriggerCount int // sub-PR CI stall diagnosis re-trigger attempts
+	SpawnedFixCount     int // Fix #7 (AUDIT-120): lifetime count of Medic-spawned fix tasks on this PR
 	MergedAt            string
 	CreatedAt           string
 }

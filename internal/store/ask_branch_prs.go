@@ -48,12 +48,14 @@ func GetAskBranchPR(db *sql.DB, id int) *AskBranchPR {
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
 		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(spawned_fix_count, 0),
 		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE id = ?`, id).
 		Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt)
+			&p.FailureCount, &p.StallRetriggerCount, &p.SpawnedFixCount,
+			&p.MergedAt, &p.CreatedAt)
 	if err != nil {
 		return nil
 	}
@@ -69,12 +71,14 @@ func GetAskBranchPRByTask(db *sql.DB, taskID int) *AskBranchPR {
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
 		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(spawned_fix_count, 0),
 		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE task_id = ? ORDER BY id DESC LIMIT 1`, taskID).
 		Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt)
+			&p.FailureCount, &p.StallRetriggerCount, &p.SpawnedFixCount,
+			&p.MergedAt, &p.CreatedAt)
 	if err != nil {
 		return nil
 	}
@@ -88,6 +92,7 @@ func ListOpenAskBranchPRs(db *sql.DB) []AskBranchPR {
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
 		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(spawned_fix_count, 0),
 		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE state = 'Open' ORDER BY id ASC`)
 	if err != nil {
@@ -100,7 +105,8 @@ func ListOpenAskBranchPRs(db *sql.DB) []AskBranchPR {
 		if err := rows.Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt); err == nil {
+			&p.FailureCount, &p.StallRetriggerCount, &p.SpawnedFixCount,
+			&p.MergedAt, &p.CreatedAt); err == nil {
 			prs = append(prs, p)
 		}
 	}
@@ -114,6 +120,7 @@ func ListAskBranchPRsByConvoy(db *sql.DB, convoyID int) []AskBranchPR {
 		IFNULL(pr_number, 0), IFNULL(pr_url, ''),
 		IFNULL(state, ''), IFNULL(checks_state, ''),
 		IFNULL(failure_count, 0), IFNULL(stall_retrigger_count, 0),
+		IFNULL(spawned_fix_count, 0),
 		IFNULL(merged_at, ''), IFNULL(created_at, '')
 		FROM AskBranchPRs WHERE convoy_id = ? ORDER BY id ASC`, convoyID)
 	if err != nil {
@@ -126,7 +133,8 @@ func ListAskBranchPRsByConvoy(db *sql.DB, convoyID int) []AskBranchPR {
 		if err := rows.Scan(&p.ID, &p.TaskID, &p.ConvoyID, &p.Repo,
 			&p.PRNumber, &p.PRURL,
 			&p.State, &p.ChecksState,
-			&p.FailureCount, &p.StallRetriggerCount, &p.MergedAt, &p.CreatedAt); err == nil {
+			&p.FailureCount, &p.StallRetriggerCount, &p.SpawnedFixCount,
+			&p.MergedAt, &p.CreatedAt); err == nil {
 			prs = append(prs, p)
 		}
 	}
@@ -203,6 +211,41 @@ func IncrementStallRetriggerCount(db *sql.DB, id int) (int, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+// IncrementSpawnedFixCount bumps spawned_fix_count by 1 and returns the
+// new value. Fix #7 (AUDIT-120): caps concurrent Flaky→RealBug fix-task
+// spawns per sub-PR so two overlapping CI failures don't race two fix
+// Astromechs on the same branch. Caller checks the returned value against
+// a cap (medicRetriggerCap=3) and only spawns if under.
+func IncrementSpawnedFixCount(db *sql.DB, id int) (int, error) {
+	if _, err := db.Exec(`UPDATE AskBranchPRs SET spawned_fix_count = spawned_fix_count + 1 WHERE id = ?`, id); err != nil {
+		return 0, err
+	}
+	var count int
+	if err := db.QueryRow(`SELECT IFNULL(spawned_fix_count, 0) FROM AskBranchPRs WHERE id = ?`, id).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// HasOpenFixTaskForPR returns true iff there's an active (non-terminal)
+// CodeEdit task with the given branch_name — i.e., a fix task Medic has
+// already spawned for this PR is still running. Fix #7 (AUDIT-120): the
+// concurrency gate Medic checks BEFORE spawning another fix task for the
+// same sub-PR. A prior fix still in flight means a second spawn would race
+// on the branch.
+func HasOpenFixTaskForPR(db *sql.DB, branch string) bool {
+	if branch == "" {
+		return false
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'CodeEdit' AND branch_name = ?
+		  AND status NOT IN ('Completed','Cancelled','Failed')
+		  AND payload LIKE '[CI_FIX %'`,
+		branch).Scan(&n)
+	return n > 0
 }
 
 // IncrementAskBranchPRFailureCountTx is the transactional sibling of IncrementAskBranchPRFailureCount.

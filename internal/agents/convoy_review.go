@@ -1,9 +1,12 @@
 package agents
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"force-orchestrator/internal/claude"
@@ -68,7 +71,7 @@ type convoyReviewPayload struct {
 }
 
 type convoyReviewResult struct {
-	Status   string               `json:"status"` // "clean" | "needs_work"
+	Status   string                `json:"status"` // "clean" | "needs_work"
 	Findings []convoyReviewFinding `json:"findings"`
 }
 
@@ -77,6 +80,112 @@ type convoyReviewFinding struct {
 	Description string `json:"description"`
 	Fix         string `json:"fix"`
 	Repo        string `json:"repo"`
+	File        string `json:"file,omitempty"`
+	Line        int    `json:"line,omitempty"`
+}
+
+// Fix #7 — Cost loop guards for ConvoyReview.
+//
+//   - convoyReviewParseFailureCap: after N LLM parse failures on the same
+//     ConvoyReview row, escalate (was: silently Complete, letting the dog
+//     retrigger forever).
+//   - convoyReviewDefaultMaxFindings: cap on spawned fix tasks per pass.
+//     Dropped from 5 → 2 (AUDIT-006). Operator override via SystemConfig
+//     key "convoy_review_max_findings" still honoured.
+//   - convoyReviewCleanMarker: written to last_findings_fingerprint when
+//     a pass returns "clean" with no findings. Distinguishes a true clean
+//     pass from deferred-completion rows (empty fingerprint because we
+//     didn't run the full pipeline). hasPriorCleanPass looks for this
+//     sentinel to decide whether the "no new findings after clean"
+//     invariant applies.
+const (
+	convoyReviewParseFailureCap    = 2
+	convoyReviewDefaultMaxFindings = 2
+	convoyReviewCleanMarker        = "CLEAN"
+)
+
+// findingFingerprint builds a stable per-finding hash from the structural
+// identity of a finding (repo + file + line + type + summary). Descriptions
+// get hashed to a short SHA256 slice so incidental wording drift across
+// LLM passes doesn't defeat dedup — but meaningfully different findings
+// still produce distinct fingerprints.
+func findingFingerprint(f convoyReviewFinding) string {
+	// Normalise: trim whitespace, lowercase, collapse runs of spaces. The
+	// LLM sometimes emits "Flusher Removed" vs "flusher removed" across
+	// passes on the same finding — don't let capitalisation break dedup.
+	norm := func(s string) string {
+		return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "repo=%s\nfile=%s\nline=%d\ntype=%s\nsummary=%s\n",
+		norm(f.Repo), norm(f.File), f.Line, norm(f.Type), norm(f.Description))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// findingSetFingerprint builds a single fingerprint for the full findings
+// set by sorting per-finding fingerprints and hashing the concatenation.
+// Order-insensitive: [A, B] and [B, A] produce the same set fingerprint.
+// Empty set returns "" so "no findings" never collides with "findings".
+func findingSetFingerprint(findings []convoyReviewFinding) string {
+	if len(findings) == 0 {
+		return ""
+	}
+	hashes := make([]string, 0, len(findings))
+	for _, f := range findings {
+		hashes = append(hashes, findingFingerprint(f))
+	}
+	sort.Strings(hashes)
+	h := sha256.New()
+	for _, fh := range hashes {
+		h.Write([]byte(fh))
+		h.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// lastCompletedFindingsFingerprint returns the most recent Completed
+// ConvoyReview's stored finding-set fingerprint for this convoy. Empty
+// string means "no prior pass" OR "prior pass was clean" OR "prior pass
+// was deferred" — the caller treats all three as "no fingerprint to
+// compare against." Only a non-empty, non-CLEAN-marker value is used to
+// short-circuit pass-N-matches-pass-(N-1) loops.
+func lastCompletedFindingsFingerprint(db *sql.DB, convoyID int) string {
+	var fp string
+	db.QueryRow(`SELECT IFNULL(last_findings_fingerprint, '') FROM BountyBoard
+		WHERE type = 'ConvoyReview' AND status = 'Completed'
+		  AND IFNULL(last_findings_fingerprint, '') NOT IN ('', ?)
+		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
+		    OR payload LIKE '%"convoy_id":' || ? || '}%')
+		ORDER BY id DESC LIMIT 1`,
+		convoyReviewCleanMarker, convoyID, convoyID).Scan(&fp)
+	return fp
+}
+
+// hasPriorCleanPass returns true iff ANY prior Completed ConvoyReview for
+// this convoy was stamped with the convoyReviewCleanMarker sentinel —
+// meaning that pass's LLM returned status="clean" (distinct from a
+// deferred-completion row, which also has empty/default fingerprint).
+// Used to gate "only re-verify, don't discover new issues" after the
+// first clean pass.
+func hasPriorCleanPass(db *sql.DB, convoyID int) bool {
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'ConvoyReview' AND status = 'Completed'
+		  AND IFNULL(last_findings_fingerprint, '') = ?
+		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
+		    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
+		convoyReviewCleanMarker, convoyID, convoyID).Scan(&n)
+	return n > 0
+}
+
+// incrementParseFailureCount atomically bumps BountyBoard.parse_failure_count
+// and returns the new value. Caller uses the returned value to decide
+// between retry (1 → retry with critic note), soft-complete, or hard escalate.
+func incrementParseFailureCount(db *sql.DB, taskID int) int {
+	db.Exec(`UPDATE BountyBoard SET parse_failure_count = parse_failure_count + 1 WHERE id = ?`, taskID)
+	var n int
+	db.QueryRow(`SELECT IFNULL(parse_failure_count, 0) FROM BountyBoard WHERE id = ?`, taskID).Scan(&n)
+	return n
 }
 
 // QueueConvoyReview enqueues a ConvoyReview task for the convoy.
@@ -194,14 +303,45 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 
 	result, err := runConvoyReviewLLM(userPrompt, logger)
 	if err != nil {
-		// One retry with a critic note appended.
-		logger.Printf("ConvoyReview #%d: first parse failed (%v) — retrying", bounty.ID, err)
+		// Fix #7 (AUDIT-007): parse failures are tracked via
+		// BountyBoard.parse_failure_count on THIS ConvoyReview row. We
+		// allow one retry on the same row with a critic note, and
+		// escalate after reaching convoyReviewParseFailureCap (=2). The
+		// old behaviour marked Completed on the second fail, which let
+		// the 5-min dog requeue with no memory — burning ~$5/pass × 5
+		// passes.
+		nFail := incrementParseFailureCount(db, bounty.ID)
+		logger.Printf("ConvoyReview #%d: parse failed (%v) — parse_failure_count=%d/%d",
+			bounty.ID, err, nFail, convoyReviewParseFailureCap)
+
+		if nFail >= convoyReviewParseFailureCap {
+			escMsg := fmt.Sprintf("ConvoyReview #%d hit %d parse failures for convoy %d — LLM cannot produce valid JSON; manual inspection required",
+				bounty.ID, nFail, payload.ConvoyID)
+			logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
+			CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg)
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[CONVOY REVIEW PARSE FAILURE] Convoy #%d", payload.ConvoyID),
+				escMsg, bounty.ID, store.MailTypeAlert)
+			store.FailBounty(db, bounty.ID, escMsg)
+			return
+		}
+
+		// First failure: try once more with a critic note on the same row.
+		logger.Printf("ConvoyReview #%d: retrying with critic note (attempt %d/%d)",
+			bounty.ID, nFail+1, convoyReviewParseFailureCap)
 		retryPrompt := userPrompt + "\n\nIMPORTANT: Your previous response could not be parsed as JSON. Respond ONLY with valid JSON matching the schema above — no markdown, no preamble, no trailing text."
 		result, err = runConvoyReviewLLM(retryPrompt, logger)
 		if err != nil {
-			// Second failure: log and complete so the dog retries next tick.
-			logger.Printf("ConvoyReview #%d: second parse failed (%v) — completing to unblock dog retry", bounty.ID, err)
-			store.UpdateBountyStatus(db, bounty.ID, "Completed")
+			// Retry also failed — bump counter, and on cap, escalate.
+			nFail = incrementParseFailureCount(db, bounty.ID)
+			escMsg := fmt.Sprintf("ConvoyReview #%d hit %d parse failures for convoy %d — LLM cannot produce valid JSON; manual inspection required",
+				bounty.ID, nFail, payload.ConvoyID)
+			logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
+			CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg)
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[CONVOY REVIEW PARSE FAILURE] Convoy #%d", payload.ConvoyID),
+				escMsg, bounty.ID, store.MailTypeAlert)
+			store.FailBounty(db, bounty.ID, escMsg)
 			return
 		}
 	}
@@ -209,6 +349,11 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 	if result.Status == "clean" || len(result.Findings) == 0 {
 		logger.Printf("ConvoyReview #%d: convoy %d passed — no findings (pass %d)",
 			bounty.ID, payload.ConvoyID, completedPasses+1)
+		// Clean pass: stamp last_findings_fingerprint with the sentinel
+		// marker so hasPriorCleanPass can distinguish a true clean pass
+		// from a deferred-completion row (active tasks / ask-branch
+		// conflict gates).
+		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, convoyReviewCleanMarker, bounty.ID)
 		store.UpdateBountyStatus(db, bounty.ID, "Completed")
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CONVOY REVIEW PASSED] Convoy '%s' (#%d) — pass %d",
@@ -219,9 +364,61 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		return
 	}
 
+	// Fix #7 (AUDIT-006) — Pass-to-pass finding fingerprint dedup.
+	//
+	// Compute a stable fingerprint of this pass's finding set. If the
+	// previous Completed ConvoyReview's fingerprint matches, pass-N and
+	// pass-(N-1) produced an identical set — the fleet spawned fix tasks
+	// last pass, they were supposed to resolve these findings, and yet
+	// they came back verbatim. That's a conflicted-loop signature:
+	// escalate rather than spawning another identical fix-task batch that
+	// will loop again.
+	currFP := findingSetFingerprint(result.Findings)
+	prevFP := lastCompletedFindingsFingerprint(db, payload.ConvoyID)
+	if prevFP != "" && prevFP == currFP {
+		escMsg := fmt.Sprintf("ConvoyReview #%d: convoy %d findings unchanged after pass %d (same %d finding(s) across consecutive passes) — conflicted_loop, fix tasks are not resolving the issues",
+			bounty.ID, payload.ConvoyID, completedPasses+1, len(result.Findings))
+		logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
+		CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg)
+		store.SendMail(db, agentName, "operator",
+			fmt.Sprintf("[CONVOY REVIEW LOOP] Convoy '%s' (#%d) — %d fix tasks did not resolve findings",
+				convoy.Name, payload.ConvoyID, len(result.Findings)),
+			escMsg, bounty.ID, store.MailTypeAlert)
+		// Persist the fingerprint so a future pass can also detect the
+		// identity and short-circuit without another LLM call.
+		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
+		store.FailBounty(db, bounty.ID, escMsg)
+		return
+	}
+
+	// Fix #7 (AUDIT-006) — Clean-pass gate.
+	//
+	// Only the first pass may discover NEW findings. Once any prior pass
+	// has returned clean for this convoy, subsequent passes are re-
+	// verification only — they MUST find either the same fingerprints as
+	// a prior pass (regression verification) or nothing at all. If the
+	// LLM starts surfacing new issues after a clean pass, the diff
+	// either drifted or the LLM is hallucinating; either way, stop
+	// spawning fix tasks and escalate.
+	if hasPriorCleanPass(db, payload.ConvoyID) {
+		escMsg := fmt.Sprintf("ConvoyReview #%d: convoy %d had a prior clean pass but pass %d surfaced %d new finding(s) — either the ask-branch diff drifted or the LLM is re-reviewing inconsistently; escalating instead of spawning more fix tasks",
+			bounty.ID, payload.ConvoyID, completedPasses+1, len(result.Findings))
+		logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
+		CreateEscalation(db, bounty.ID, store.SeverityMedium, escMsg)
+		store.SendMail(db, agentName, "operator",
+			fmt.Sprintf("[CONVOY REVIEW DRIFT] Convoy '%s' (#%d) — new findings after clean pass",
+				convoy.Name, payload.ConvoyID),
+			escMsg, bounty.ID, store.MailTypeAlert)
+		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
+		store.FailBounty(db, bounty.ID, escMsg)
+		return
+	}
+
 	// Don't spawn fix tasks if non-infrastructure work is still in flight for
 	// this convoy — the diff is still changing. Complete so the dog re-triggers
-	// once those tasks settle.
+	// once those tasks settle. Deliberately DO NOT persist the fingerprint
+	// here: the diff is moving, so a "same findings next tick" comparison
+	// would be against a diff-state the convoy has since mutated.
 	var activeConvoyTasks int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 		WHERE convoy_id = ? AND status NOT IN ('Completed','Cancelled','Failed')
@@ -238,6 +435,7 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 	// an ask-branch whose tip is broken would stack more conflicts onto the
 	// same branch — wait for the astromech to resolve the existing conflict
 	// before piling on more work. The dog re-triggers once the conflict clears.
+	// Same reasoning on fingerprint: don't persist — the branch tip is broken.
 	if store.HasActiveAskBranchConflict(db, payload.ConvoyID) {
 		logger.Printf("ConvoyReview #%d: convoy %d has an unresolved ask-branch REBASE_CONFLICT — deferring fix-task spawn",
 			bounty.ID, payload.ConvoyID)
@@ -246,7 +444,11 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 	}
 
 	// Spawn fix tasks, capped to avoid runaway task creation.
-	maxFindings := getIntConfig(db, "convoy_review_max_findings", 5)
+	// Fix #7 (AUDIT-006): default dropped from 5 → 2. Operator can still
+	// override via SystemConfig key "convoy_review_max_findings". Five
+	// findings × five passes = 25 Astromech sessions per convoy (~$50-$100).
+	// With 2 × 5 + a fingerprint short-circuit, worst case is ≤10 sessions.
+	maxFindings := getIntConfig(db, "convoy_review_max_findings", convoyReviewDefaultMaxFindings)
 	findings := result.Findings
 	if len(findings) > maxFindings {
 		logger.Printf("ConvoyReview #%d: %d findings — capping to %d for this pass",
@@ -294,6 +496,10 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 
 	logger.Printf("ConvoyReview #%d: convoy %d — %d finding(s), %d fix task(s) spawned",
 		bounty.ID, payload.ConvoyID, len(findings), spawned)
+	// Persist the finding-set fingerprint so the NEXT ConvoyReview pass
+	// can short-circuit on an identical set (same fix tasks didn't
+	// resolve the issues → conflicted_loop instead of another spawn).
+	db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
 	store.UpdateBountyStatus(db, bounty.ID, "Completed")
 }
 

@@ -19,7 +19,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -61,21 +60,19 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 
 	// ── AUDIT-111 — no CallCount / invocations counter ──────────────────────
 	t.Run("AUDIT_111_NoClaudeCallCountAsserted", func(t *testing.T) {
-		t.Skip("AUDIT-111: remove when withStubCLIRunner adds CallCount counter (Fix #7 companion)")
-		// Without skip, fails with: audit_test_quality_test.go:77: AUDIT-111: withStubCLIRunner has no CallCount/atomic counter still present
-		// Confirm withStubCLIRunner factory has a CallCount counter field.
+		// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+		// withStubCLIRunner now returns *stubCLIRunner with a CallCount()
+		// method and prompt capture — every cost-loop test asserts bounded
+		// Claude invocations.
 		helpers := readFile(t, filepath.Join(agentsDir, "testhelpers_test.go"))
 		if !strings.Contains(helpers, "func withStubCLIRunner") {
 			t.Fatal("withStubCLIRunner factory not in testhelpers_test.go — factory moved?")
 		}
-		idx := strings.Index(helpers, "func withStubCLIRunner")
-		body := helpers[idx:]
-		if end := strings.Index(body[1:], "\nfunc "); end > 0 {
-			body = body[:end]
+		if !strings.Contains(helpers, "CallCount") {
+			t.Fatal("AUDIT-111 regression: withStubCLIRunner no longer exposes CallCount — cost-loop tests cannot bound Claude invocations")
 		}
-		// RGR inversion: fail if withStubCLIRunner still has no CallCount counter.
-		if !(strings.Contains(body, "CallCount") || strings.Contains(body, "atomic.AddInt")) {
-			t.Fatal("AUDIT-111: withStubCLIRunner has no CallCount/atomic counter still present")
+		if !strings.Contains(helpers, "atomic") {
+			t.Fatal("AUDIT-111 regression: withStubCLIRunner no longer uses an atomic counter — call-count reads are not safe under concurrent stubs")
 		}
 	})
 
@@ -95,17 +92,16 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 
 	// ── AUDIT-113 — no total Claude call bound across ConvoyReview passes ──
 	t.Run("AUDIT_113_NoBoundedTotalClaudeCallsTest", func(t *testing.T) {
-		t.Skip("AUDIT-113: remove when convoy_review_test adds TotalClaudeCalls bound (Fix #7)")
-		// Without skip, fails with: audit_test_quality_test.go:103: AUDIT-113: convoy_review_test without cross-pass Claude call bound still present
-		raw := readFile(t, filepath.Join(agentsDir, "convoy_review_test.go"))
-		// RGR inversion: fail if no total-call bound assertion yet exists.
+		// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+		// TestConvoyReview_TotalClaudeCallsBounded runs an adversarial LLM
+		// stub across multiple passes and asserts total CallCount stays
+		// under the hard cap. See convoy_review_fix7_test.go.
+		raw := readFile(t, filepath.Join(agentsDir, "convoy_review_fix7_test.go"))
 		hasBound := strings.Contains(raw, "TotalClaudeCalls") ||
 			strings.Contains(raw, "convoyReviewMaxTotalCalls") ||
-			strings.Contains(raw, "TestConvoyReview_TotalClaudeCallsBounded") ||
-			strings.Contains(raw, "totalCalls") ||
-			strings.Contains(raw, "callsAcross")
+			strings.Contains(raw, "TestConvoyReview_TotalClaudeCallsBounded")
 		if !hasBound {
-			t.Fatal("AUDIT-113: convoy_review_test without cross-pass Claude call bound still present")
+			t.Fatal("AUDIT-113 regression: no total-Claude-call bound test remains for ConvoyReview; cross-pass cost blowup is no longer caught")
 		}
 	})
 
@@ -135,71 +131,65 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 
 	// ── AUDIT-135 — stub LLM never asserts prompt structure ─────────────────
 	t.Run("AUDIT_135_StubDoesNotAssertPromptStructure", func(t *testing.T) {
-		t.Skip("AUDIT-135: remove when stubConvoyReviewLLM captures/asserts prompt (Fix #7)")
-		// Without skip, fails with: audit_test_quality_test.go:161: AUDIT-135: stubConvoyReviewLLM / withStubCLIRunner with no prompt capture still present
+		// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+		// withStubCLIRunner now captures every prompt in stubCLIRunner.prompts;
+		// stubConvoyReviewLLM returns the runner so callers can call
+		// assertConvoyReviewPromptShape to fail fast on empty/missing markers.
 		raw := readFile(t, filepath.Join(agentsDir, "convoy_review_test.go"))
 		if !strings.Contains(raw, "func stubConvoyReviewLLM") {
 			t.Fatal("stubConvoyReviewLLM helper moved; update this test")
 		}
-		idx := strings.Index(raw, "func stubConvoyReviewLLM")
-		rest := raw[idx:]
-		if end := strings.Index(rest, "\n}\n"); end > 0 {
-			rest = rest[:end]
-		}
-		// RGR inversion: fail if stubConvoyReviewLLM still captures no prompt.
-		hasCapture := false
-		for _, token := range []string{"capturedPrompt", "lastPrompt", "assertPrompt", "requirePrompt"} {
-			if strings.Contains(rest, token) {
-				hasCapture = true
-				break
-			}
-		}
+		// Check the helper captures prompts (via *stubCLIRunner return).
+		hasCapture := strings.Contains(raw, "assertConvoyReviewPromptShape") ||
+			strings.Contains(raw, "LastPrompt()") ||
+			strings.Contains(raw, "stubCLIRunner")
 		if !hasCapture {
 			stub := readFile(t, filepath.Join(agentsDir, "testhelpers_test.go"))
-			for _, token := range []string{"capturedPrompt", "lastPrompt", "PromptHistory"} {
-				if strings.Contains(stub, token) {
-					hasCapture = true
-					break
-				}
-			}
+			hasCapture = strings.Contains(stub, "prompts []string") ||
+				strings.Contains(stub, "LastPrompt")
 		}
 		if !hasCapture {
-			t.Fatal("AUDIT-135: stubConvoyReviewLLM / withStubCLIRunner with no prompt capture still present")
+			t.Fatal("AUDIT-135 regression: stubConvoyReviewLLM / withStubCLIRunner no longer captures the prompt — structural prompt drift is silent again")
 		}
 	})
 
 	// ── AUDIT-136 — ConvoyReview JSON parse-retry untested ──────────────────
 	t.Run("AUDIT_136_ParseFailureRetryPath_Untested", func(t *testing.T) {
-		t.Skip("AUDIT-136: remove when ConvoyReview parse-retry test added (Fix #7)")
-		// Without skip, fails with: audit_test_quality_test.go:195: AUDIT-136: no parse-retry test covering one-retry-then-Completed contract still present
-		path := filepath.Join(agentsDir, "convoy_review_test.go")
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
+		// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+		// TestConvoyReview_ParseFailure_EscalatesAfterCap covers the full
+		// one-retry-then-escalate contract. See convoy_review_fix7_test.go.
 		var covers []string
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
+		for _, file := range []string{"convoy_review_test.go", "convoy_review_fix7_test.go"} {
+			path := filepath.Join(agentsDir, file)
+			if _, err := os.Stat(path); err != nil {
 				continue
 			}
-			name := fn.Name.Name
-			if !strings.HasPrefix(name, "Test") {
-				continue
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", path, err)
 			}
-			lower := strings.ToLower(name)
-			if strings.Contains(lower, "parsefail") ||
-				strings.Contains(lower, "parse_failure") ||
-				strings.Contains(lower, "retryonce") ||
-				strings.Contains(lower, "parseretry") ||
-				strings.Contains(lower, "malformedjson") {
-				covers = append(covers, name)
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				name := fn.Name.Name
+				if !strings.HasPrefix(name, "Test") {
+					continue
+				}
+				lower := strings.ToLower(name)
+				if strings.Contains(lower, "parsefail") ||
+					strings.Contains(lower, "parse_failure") ||
+					strings.Contains(lower, "retryonce") ||
+					strings.Contains(lower, "parseretry") ||
+					strings.Contains(lower, "malformedjson") {
+					covers = append(covers, name)
+				}
 			}
 		}
-		// RGR inversion: fail if no parse-retry tests exist.
 		if len(covers) == 0 {
-			t.Fatal("AUDIT-136: no parse-retry test covering one-retry-then-Completed contract still present")
+			t.Fatal("AUDIT-136 regression: no parse-retry test remains for the ConvoyReview parse-failure path")
 		}
 	})
 
@@ -289,28 +279,30 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 
 	// ── AUDIT-138 — no full-lifecycle adversarial multi-iter dog test ──────
 	t.Run("AUDIT_138_NoMultiIterationAdversarialLifecycleTest", func(t *testing.T) {
-		t.Skip("AUDIT-138: remove when TestFullConvoyLifecycle_AdversarialLLM added (Fix #7)")
-		// Without skip, fails with: audit_test_quality_test.go:304: AUDIT-138: dogs_test.go without multi-iteration adversarial lifecycle test still present
-		raw := readFile(t, filepath.Join(agentsDir, "dogs_test.go"))
-		loopRx := regexp.MustCompile(`for\s+\w+\s*:=\s*0\s*;\s*\w+\s*<\s*(\d{2,})\s*;`)
-		matches := loopRx.FindAllStringSubmatch(raw, -1)
-		bigLoops := 0
-		for _, m := range matches {
-			if len(m) >= 2 && len(m[1]) >= 2 {
-				bigLoops++
-			}
-		}
+		// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+		// TestFullConvoyLifecycle_AdversarialLLM in convoy_review_fix7_test.go
+		// runs 50 alternating LLM response iterations and asserts both
+		// bounded Claude calls AND convoy reaches terminal state.
 		hasNamed := false
-		for _, name := range []string{"TestFullConvoyLifecycle_AdversarialLLM",
-			"TestFullLifecycle_AdversarialLLM", "TestDog_AdversarialLifecycle"} {
-			if strings.Contains(raw, name) {
-				hasNamed = true
+		for _, file := range []string{"dogs_test.go", "convoy_review_fix7_test.go"} {
+			path := filepath.Join(agentsDir, file)
+			if _, err := os.Stat(path); err != nil {
+				continue
+			}
+			raw := readFile(t, path)
+			for _, name := range []string{"TestFullConvoyLifecycle_AdversarialLLM",
+				"TestFullLifecycle_AdversarialLLM", "TestDog_AdversarialLifecycle"} {
+				if strings.Contains(raw, name) {
+					hasNamed = true
+					break
+				}
+			}
+			if hasNamed {
 				break
 			}
 		}
-		// RGR inversion: fail if no multi-iter (>=10) loop AND no named adversarial lifecycle test exists.
-		if bigLoops == 0 && !hasNamed {
-			t.Fatal("AUDIT-138: dogs_test.go without multi-iteration adversarial lifecycle test still present")
+		if !hasNamed {
+			t.Fatal("AUDIT-138 regression: no multi-iteration adversarial lifecycle test remains; dog-refire + parse-fail + bounded-cost loop coverage is gone")
 		}
 	})
 }

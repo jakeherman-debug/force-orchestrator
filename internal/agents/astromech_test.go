@@ -287,7 +287,7 @@ func TestRunAstromechTask_RateLimit(t *testing.T) {
 	b, _ := store.GetBounty(db, id)
 
 	// Rate-limit error: message triggers IsRateLimitError
-	withStubCLIRunner(t, "rate limit exceeded", fmt.Errorf("claude CLI failed: 429"))
+	stub := withStubCLIRunner(t, "rate limit exceeded", fmt.Errorf("claude CLI failed: 429"))
 	rateLimitRetries.Delete("R2-D2")
 	logger := log.New(io.Discard, "", 0)
 	runAstromechTask(db, "R2-D2", b, logger)
@@ -295,6 +295,12 @@ func TestRunAstromechTask_RateLimit(t *testing.T) {
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
 		t.Errorf("expected Pending after rate limit, got %q", b.Status)
+	}
+	// Fix #7 (AUDIT-162) — single-rate-limit path must call Claude exactly
+	// once. A broken retry wrapper that hammered Claude 100× on one 429
+	// response passed the old test. CallCount pins this contract.
+	if got := stub.CallCount(); got != 1 {
+		t.Errorf("AUDIT-162: rate-limit path must call Claude exactly once; got %d", got)
 	}
 	rateLimitRetries.Delete("R2-D2") // cleanup
 }

@@ -105,17 +105,24 @@ func TestAUDIT_005_MedicRequeueZerosRetryCount(t *testing.T) {
 // as the structural worst-case.
 
 func TestAUDIT_006_ConvoyReview5x5Structural(t *testing.T) {
-	t.Skip("AUDIT-006: remove when medic_requeue_count + ConvoyReview tightening land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-006: defective pattern still present — convoy_review.go has maxPasses=5, max_findings default=5, full Astromech spawn per finding, no fingerprinting/dedup
+	// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+	// max_findings default dropped 5→2; finding-set fingerprint dedup added
+	// (pass-N == pass-(N-1) short-circuits to conflicted_loop). Test
+	// inverts: fails if any of the old defective patterns re-appear.
 	src := readCostLoopSource(t, "convoy_review.go")
 
-	hasMaxPasses5 := strings.Contains(src, `const maxPasses = 5`)
 	hasMaxFindings5 := strings.Contains(src, `getIntConfig(db, "convoy_review_max_findings", 5)`)
-	hasSpawn := strings.Contains(src, `store.AddConvoyTask(db, bounty.ID, repo, taskPayload,`)
 	hasFingerprint := strings.Contains(src, "fingerprint") || strings.Contains(src, "findingHash")
+	hasParseFailureMem := strings.Contains(src, "parse_failure_count") || strings.Contains(src, "ParseFailureCount")
 
-	if hasMaxPasses5 && hasMaxFindings5 && hasSpawn && !hasFingerprint {
-		t.Fatal("AUDIT-006: defective pattern still present — convoy_review.go has maxPasses=5, max_findings default=5, full Astromech spawn per finding, no fingerprinting/dedup")
+	if hasMaxFindings5 {
+		t.Fatal("AUDIT-006 regression: convoy_review_max_findings default is back to 5 — must be 2 (convoyReviewDefaultMaxFindings)")
+	}
+	if !hasFingerprint {
+		t.Fatal("AUDIT-006 regression: convoy_review.go no longer references fingerprinting — pass-to-pass dedup gate has been removed")
+	}
+	if !hasParseFailureMem {
+		t.Fatal("AUDIT-006 companion regression: convoy_review.go no longer tracks parse_failure_count — loop exit is broken")
 	}
 }
 
@@ -126,21 +133,28 @@ func TestAUDIT_006_ConvoyReview5x5Structural(t *testing.T) {
 // No parse_failure_count column exists.
 
 func TestAUDIT_007_ConvoyReviewParseFailCompletesNoMemory(t *testing.T) {
-	t.Skip("AUDIT-007: remove when medic_requeue_count + ConvoyReview tightening land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-007: defective pattern still present — convoy_review.go marks Completed on second parse fail, no parse_failure_count memory, no parse_failure_count column on BountyBoard/Convoys
+	// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+	// Parse failures now increment BountyBoard.parse_failure_count on the
+	// ConvoyReview row; after convoyReviewParseFailureCap (=2) attempts,
+	// the task escalates instead of marking Completed for dog retrigger.
+	// Test inverts: fails if the schema column or counter memory regresses.
 	src := readCostLoopSource(t, "convoy_review.go")
 
-	hasSecondParseCompleted := strings.Contains(src, `second parse failed`) &&
-		strings.Contains(src, `store.UpdateBountyStatus(db, bounty.ID, "Completed")`)
 	hasParseFailureMem := strings.Contains(src, "parse_failure_count") || strings.Contains(src, "ParseFailureCount")
+	if !hasParseFailureMem {
+		t.Fatal("AUDIT-007 regression: convoy_review.go no longer references parse_failure_count — parse-loop memory is gone")
+	}
 
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	hasSchemaCol := hasColumn(t, db, "BountyBoard", "parse_failure_count") ||
-		hasColumn(t, db, "Convoys", "parse_failure_count")
+	if !hasColumn(t, db, "BountyBoard", "parse_failure_count") {
+		t.Fatal("AUDIT-007 regression: BountyBoard.parse_failure_count column missing — migration has been reverted")
+	}
 
-	if hasSecondParseCompleted && !hasParseFailureMem && !hasSchemaCol {
-		t.Fatal("AUDIT-007: defective pattern still present — convoy_review.go marks Completed on second parse fail, no parse_failure_count memory, no parse_failure_count column on BountyBoard/Convoys")
+	// Escalation path must be wired: after cap, FailBounty + CreateEscalation
+	// must be called (not UpdateBountyStatus(Completed) which was the bug).
+	if !strings.Contains(src, "convoyReviewParseFailureCap") {
+		t.Fatal("AUDIT-007 regression: convoyReviewParseFailureCap constant gone — cap is not enforced")
 	}
 }
 
@@ -186,18 +200,18 @@ func TestAUDIT_028_AskBranchRebaseConflictNoCap(t *testing.T) {
 // Medic after a distinct parse-failure threshold.
 
 func TestAUDIT_029_CouncilJSONParseRoutesToInfra5x(t *testing.T) {
-	t.Skip("AUDIT-029: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-029: defective pattern still present — jedi_council.go routes parse-fail to handleInfraFailure with shared MaxInfraFailures=5 gate, no dedicated parse-failure counter
+	// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+	// Council parse failures now increment BountyBoard.parse_failure_count
+	// and escalate ("unable to parse LLM output") after councilParseFailureCap
+	// (=3), instead of counting against the shared MaxInfraFailures=5 budget.
 	src := readCostLoopSource(t, "jedi_council.go")
 
-	hasParseFailLog := strings.Contains(src, "council JSON parse failed")
-	hasInfraRoute := strings.Contains(src, `handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)`)
 	hasDedicatedHandling := strings.Contains(src, "parse_failure_count") ||
 		strings.Contains(src, "councilParseFailureCap") ||
 		strings.Contains(src, "unable to parse LLM output")
 
-	if hasParseFailLog && hasInfraRoute && !hasDedicatedHandling && MaxInfraFailures == 5 {
-		t.Fatal("AUDIT-029: defective pattern still present — jedi_council.go routes parse-fail to handleInfraFailure with shared MaxInfraFailures=5 gate, no dedicated parse-failure counter")
+	if !hasDedicatedHandling {
+		t.Fatal("AUDIT-029 regression: jedi_council.go no longer has a dedicated parse-failure budget; parse loops are back on the shared MaxInfraFailures=5 gate")
 	}
 }
 
@@ -247,29 +261,18 @@ func TestAUDIT_030_ChancellorAutoApprovesOnClaudeError(t *testing.T) {
 // unbounded CodeEdits on the ask-branch. No convoy-level dispatch counter.
 
 func TestAUDIT_117_PRReviewPerThreadCapBypassable(t *testing.T) {
-	t.Skip("AUDIT-117: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-117: defective pattern still present — pr_review_triage.go uses per-thread depth cap only, no convoy-level fix cap, dispatchInScope spawns without convoy-count gate
+	// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+	// dispatchPRReviewDecision now hard-forces conflicted_loop when either
+	// ThreadDepth >= depth_cap OR convoy-level CountInScopeFixesForConvoy
+	// >= pr_review_convoy_fix_cap. The thread-hop bypass (bot opens new
+	// thread each iteration) no longer defeats the global limit.
 	src := readCostLoopSource(t, "pr_review_triage.go")
 
-	hasPerThreadCap := strings.Contains(src, `getIntConfig(db, "pr_review_thread_depth_cap", 2)`) &&
-		strings.Contains(src, "c.ThreadDepth")
 	hasConvoyCap := strings.Contains(src, "pr_review_convoy_fix_cap") ||
-		strings.Contains(src, "convoyFixCount") ||
-		strings.Contains(src, "ConvoyFixDispatchCount")
+		strings.Contains(src, "CountInScopeFixesForConvoy")
 
-	inScopeStart := strings.Index(src, "func dispatchInScope(")
-	if inScopeStart < 0 {
-		t.Fatal("dispatchInScope not found")
-	}
-	inScopeBody := src[inScopeStart:]
-	if nextFunc := strings.Index(inScopeBody[10:], "\nfunc "); nextFunc > 0 {
-		inScopeBody = inScopeBody[:nextFunc+10]
-	}
-	hasInScopeConvoyCheck := strings.Contains(inScopeBody, "CountInScopeFixesForConvoy") ||
-		strings.Contains(inScopeBody, "convoy_fix_cap")
-
-	if hasPerThreadCap && !hasConvoyCap && !hasInScopeConvoyCheck {
-		t.Fatal("AUDIT-117: defective pattern still present — pr_review_triage.go uses per-thread depth cap only, no convoy-level fix cap, dispatchInScope spawns without convoy-count gate")
+	if !hasConvoyCap {
+		t.Fatal("AUDIT-117 regression: pr_review_triage.go no longer enforces a convoy-level in_scope_fix cap — per-thread depth is bypassable by a bot that opens a new thread per iteration")
 	}
 }
 
@@ -354,8 +357,11 @@ func TestAUDIT_119_MainDriftWatchNoAttemptCounter(t *testing.T) {
 // No AskBranchPRs.spawned_fix_count counter + concurrency guard.
 
 func TestAUDIT_120_FlakyRealBugConcurrentFixSpawns(t *testing.T) {
-	t.Skip("AUDIT-120: remove when rebase/reshard/PRReview convoy-level caps land (Fix #6/#7)")
-	// Without skip, fails with: AUDIT-120: defective pattern still present — applyCITriageRealBug spawns fix task on FailureCount >= cap with no concurrency gate, no spawned_fix_count column on AskBranchPRs
+	// Closed by: Fix #7 (`fix/convoy-review-tightening`).
+	// applyCITriageRealBug now checks HasOpenFixTaskForPR (concurrency gate:
+	// 1 in-flight per PR) AND SpawnedFixCount against medicRetriggerCap
+	// (lifetime gate: 3 total per PR). Second failure while prior fix task
+	// still running no longer races a second Astromech on the branch.
 	src := readCostLoopSource(t, "medic_ci.go")
 
 	rbStart := strings.Index(src, "func applyCITriageRealBug(")
@@ -367,17 +373,16 @@ func TestAUDIT_120_FlakyRealBugConcurrentFixSpawns(t *testing.T) {
 		rbBody = rbBody[:nextFunc+10]
 	}
 
-	hasCapCheck := strings.Contains(rbBody, "FailureCount >= medicRetriggerCap")
-	hasSpawn := strings.Contains(rbBody, "store.AddConvoyTask(db, payload.TaskID, payload.Repo, fixPayload")
 	hasConcurrencyGate := strings.Contains(rbBody, "spawned_fix_count") ||
 		strings.Contains(rbBody, "SpawnedFixCount") ||
 		strings.Contains(rbBody, "HasOpenFixTaskForPR")
+	if !hasConcurrencyGate {
+		t.Fatal("AUDIT-120 regression: applyCITriageRealBug no longer references spawned_fix_count/HasOpenFixTaskForPR — concurrent fix-task spawns are back")
+	}
 
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	hasSchemaCol := hasColumn(t, db, "AskBranchPRs", "spawned_fix_count")
-
-	if hasCapCheck && hasSpawn && !hasConcurrencyGate && !hasSchemaCol {
-		t.Fatal("AUDIT-120: defective pattern still present — applyCITriageRealBug spawns fix task on FailureCount >= cap with no concurrency gate, no spawned_fix_count column on AskBranchPRs")
+	if !hasColumn(t, db, "AskBranchPRs", "spawned_fix_count") {
+		t.Fatal("AUDIT-120 regression: AskBranchPRs.spawned_fix_count column missing — migration has been reverted")
 	}
 }

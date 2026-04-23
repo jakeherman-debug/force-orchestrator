@@ -10,26 +10,28 @@ PRAGMA foreign_keys=ON;
 -- ── Core task board ───────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS BountyBoard (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    parent_id            INTEGER DEFAULT 0,   -- ID of the Feature/Decompose task that spawned this
-    target_repo          TEXT    DEFAULT '',  -- registered repo name (FK → Repositories.name)
-    type                 TEXT,                -- 'Feature' | 'Decompose' | 'CodeEdit'
-    status               TEXT,                -- see status lifecycle below
-    payload              TEXT,                -- task description (enriched with [GOAL: ...] prefix by Commander)
-    owner                TEXT    DEFAULT '',  -- agent name currently holding the lock
-    error_log            TEXT    DEFAULT '',  -- last error or rejection reason
-    retry_count          INTEGER DEFAULT 0,   -- council/captain rejection count (preserved across Medic requeues, Fix #6)
-    infra_failures       INTEGER DEFAULT 0,   -- transient Claude CLI / git failures (preserved across Medic requeues, Fix #6)
-    locked_at            TEXT    DEFAULT '',  -- datetime('now') when locked; '' when free
-    convoy_id            INTEGER DEFAULT 0,   -- FK → Convoys.id (0 = standalone task)
-    checkpoint           TEXT    DEFAULT '',  -- mid-task resume state written by Astromechs
-    branch_name          TEXT    DEFAULT '',  -- 'agent/<name>/task-<id>' persistent branch
-    priority             INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
-    task_timeout         INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
-    idempotency_key      TEXT    DEFAULT '',  -- Fix #3: see idx_bounty_idem below — partial UNIQUE on non-empty, non-terminal rows
-    medic_requeue_count  INTEGER DEFAULT 0,   -- Fix #6: count of Medic-driven requeues; applyMedicRequeue escalates past maxMedicRequeues (2)
-    reshard_generation   INTEGER DEFAULT 0,   -- Fix #6: auto-reshard generation stamp; queueReshardDecompose refuses past maxReshardGeneration (2)
-    created_at           TEXT    DEFAULT (datetime('now'))
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id                 INTEGER DEFAULT 0,   -- ID of the Feature/Decompose task that spawned this
+    target_repo               TEXT    DEFAULT '',  -- registered repo name (FK → Repositories.name)
+    type                      TEXT,                -- 'Feature' | 'Decompose' | 'CodeEdit'
+    status                    TEXT,                -- see status lifecycle below
+    payload                   TEXT,                -- task description (enriched with [GOAL: ...] prefix by Commander)
+    owner                     TEXT    DEFAULT '',  -- agent name currently holding the lock
+    error_log                 TEXT    DEFAULT '',  -- last error or rejection reason
+    retry_count               INTEGER DEFAULT 0,   -- council/captain rejection count (preserved across Medic requeues, Fix #6)
+    infra_failures            INTEGER DEFAULT 0,   -- transient Claude CLI / git failures (preserved across Medic requeues, Fix #6)
+    locked_at                 TEXT    DEFAULT '',  -- datetime('now') when locked; '' when free
+    convoy_id                 INTEGER DEFAULT 0,   -- FK → Convoys.id (0 = standalone task)
+    checkpoint                TEXT    DEFAULT '',  -- mid-task resume state written by Astromechs
+    branch_name               TEXT    DEFAULT '',  -- 'agent/<name>/task-<id>' persistent branch
+    priority                  INTEGER DEFAULT 0,   -- higher = claimed first (ties broken by id ASC)
+    task_timeout              INTEGER DEFAULT 0,   -- per-task override in seconds (0 = default)
+    idempotency_key           TEXT    DEFAULT '',  -- Fix #3: see idx_bounty_idem below — partial UNIQUE on non-empty, non-terminal rows
+    medic_requeue_count       INTEGER DEFAULT 0,   -- Fix #6: count of Medic-driven requeues; applyMedicRequeue escalates past maxMedicRequeues (2)
+    reshard_generation        INTEGER DEFAULT 0,   -- Fix #6: auto-reshard generation stamp; queueReshardDecompose refuses past maxReshardGeneration (2)
+    parse_failure_count       INTEGER DEFAULT 0,   -- Fix #7: LLM JSON-parse failures on this row; ConvoyReview escalates at 2
+    last_findings_fingerprint TEXT    DEFAULT '',  -- Fix #7: SHA256 of last pass's finding set; pass-to-pass dedup gate
+    created_at                TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty
 -- poll and dashboard refresh full-scans BountyBoard.
@@ -138,6 +140,7 @@ CREATE TABLE IF NOT EXISTS AskBranchPRs (
     checks_state          TEXT    DEFAULT 'Pending',     -- 'Pending' | 'Success' | 'Failure'
     failure_count         INTEGER DEFAULT 0,             -- incremented by Medic CIFailureTriage
     stall_retrigger_count INTEGER DEFAULT 0,             -- stuck-CI empty-commit retries (AUDIT-080)
+    spawned_fix_count     INTEGER DEFAULT 0,             -- Fix #7: concurrent Flaky→RealBug fix-task spawn guard
     merged_at             TEXT    DEFAULT '',
     created_at            TEXT    DEFAULT (datetime('now')),
     UNIQUE(repo, pr_number)
@@ -391,6 +394,7 @@ CREATE TABLE IF NOT EXISTS PRReviewComments (
     thread_depth           INTEGER DEFAULT 0,   -- # of fleet-authored fixes already in this thread
     classification         TEXT    DEFAULT '',  -- '' | 'in_scope_fix' | 'out_of_scope' | 'not_actionable' | 'conflicted_loop' | 'human' | 'ignored'
     classification_reason  TEXT    DEFAULT '',
+    classify_attempts      INTEGER DEFAULT 0,   -- Fix #7 (AUDIT-032): bounds transient classifier retries
     spawned_task_id        INTEGER DEFAULT 0,   -- CodeEdit (in_scope) or Feature (out_of_scope)
     reply_body             TEXT    DEFAULT '',  -- the reply text (DRAFT for humans, POSTED for bots)
     replied_at             TEXT    DEFAULT '',  -- empty for humans (never posted) and conflicted_loop
