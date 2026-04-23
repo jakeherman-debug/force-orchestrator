@@ -151,9 +151,10 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 			}
 			return
 		}
-		// Also resolve any Open escalations on the parent — the cleanup IS the fix.
+		// Also close any Open escalations on the parent — the cleanup IS the fix.
+		// Fix B (AUDIT-025): terminal status is 'Closed', not legacy 'Resolved'.
 		if _, err := db.Exec(`UPDATE Escalations
-			SET status = 'Resolved', acknowledged_at = datetime('now')
+			SET status = 'Closed', acknowledged_at = datetime('now')
 			WHERE task_id = ? AND status = 'Open'`, p.ParentTaskID); err != nil {
 			if fbErr := store.FailBounty(db, bounty.ID,
 				fmt.Sprintf("escalation-resolve UPDATE failed for task #%d: %v", p.ParentTaskID, err)); fbErr != nil {

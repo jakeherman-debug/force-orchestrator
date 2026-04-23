@@ -97,7 +97,7 @@ func TestAUDIT_014_WorktreeResetParentRequeueSilent(t *testing.T) {
 
 	occ := silentCount(src, "_, _ = db.Exec(")
 	hasParentRequeue := strings.Contains(src, "SET status = 'Pending', branch_name = ''")
-	hasEscResolve := strings.Contains(src, "SET status = 'Resolved', acknowledged_at")
+	hasEscResolve := strings.Contains(src, "SET status = 'Closed', acknowledged_at")
 
 	if occ >= 2 && hasParentRequeue && hasEscResolve {
 		t.Fatalf("AUDIT-014 regression: %d `_, _ = db.Exec(` sites in pilot_worktree_reset.go; both parent-requeue and escalation-resolve writes are silent. Fix #8a replaced these with `if _, err := db.Exec(...)` guarded calls.", occ)

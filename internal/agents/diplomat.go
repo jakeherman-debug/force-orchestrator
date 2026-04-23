@@ -68,15 +68,18 @@ type shipConvoyPayload struct {
 }
 
 // QueueShipConvoy enqueues a ShipConvoy task for Diplomat.
+// Fix A (AUDIT-011 read-side): convoy_id is stamped on the row so dedup
+// queries can use the structured column + idx_bounty_convoy_status instead
+// of a payload-LIKE full-table scan.
 func QueueShipConvoy(db *sql.DB, convoyID int) (int, error) {
 	if convoyID <= 0 {
 		return 0, fmt.Errorf("QueueShipConvoy: convoyID required")
 	}
 	payload, _ := json.Marshal(shipConvoyPayload{ConvoyID: convoyID})
 	res, err := db.Exec(
-		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		 VALUES (0, '', 'ShipConvoy', 'Pending', ?, 7, datetime('now'))`,
-		string(payload))
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		 VALUES (0, '', 'ShipConvoy', 'Pending', ?, ?, 7, datetime('now'))`,
+		string(payload), convoyID)
 	if err != nil {
 		return 0, err
 	}

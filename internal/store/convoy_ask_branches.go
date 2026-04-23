@@ -236,13 +236,15 @@ func DeleteConvoyAskBranch(db *sql.DB, convoyID int, repo string) error {
 //   2. Zero non-terminal tasks with convoy_id = convoyID (catches CodeEdits,
 //      REBASE_CONFLICT resolvers, ConvoyReview fix tasks, CIFailureTriage,
 //      etc.)
-//   3. Zero Pending/Locked ConvoyReview tasks whose payload references this
-//      convoy (ConvoyReview rows carry convoy_id=0, keyed by payload)
+//   3. Zero Pending/Locked ConvoyReview tasks scoped to this convoy. Post-
+//      Fix A (AUDIT-011 read-side), QueueConvoyReview stamps convoy_id on
+//      the row so this check collapses into an indexed equality predicate.
 //
-// Condition (3) is separate because ConvoyReview inserts convoy_id=0 on its
-// own row — the dog decides the convoy is quiescent AND fires a new review,
-// and between those events the convoy is briefly "no tasks + no review",
-// which we correctly treat as not-ready until the review completes.
+// Condition (3) catches the brief window between "convoy looks quiescent"
+// and "dog fires a new review" — treated as not-ready until the review
+// completes. Post-Fix A (AUDIT-011 read-side) the convoy_id column on the
+// ConvoyReview row makes this lookup an index probe; the active-tasks check
+// (condition 2) already subsumes non-ConvoyReview rows.
 func ConvoyReadyToShip(db *sql.DB, convoyID int) bool {
 	if convoyID <= 0 {
 		return false
@@ -261,19 +263,28 @@ func ConvoyReadyToShip(db *sql.DB, convoyID int) bool {
 	if active > 0 {
 		return false
 	}
+	// Fix A (AUDIT-011 read-side): structured convoy_id column.
+	// QueueConvoyReview stamps convoy_id on the row, so this lookup uses
+	// idx_bounty_convoy_status rather than a payload-LIKE full-table scan.
 	var reviewPending int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
 		WHERE type = 'ConvoyReview'
 		  AND status IN ('Pending','Locked')
-		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-		    OR payload LIKE '%"convoy_id":' || ? || '}%')`,
-		convoyID, convoyID).Scan(&reviewPending)
+		  AND convoy_id = ?`,
+		convoyID).Scan(&reviewPending)
 	return reviewPending == 0
 }
 
 // ListReadyToShipConvoyIDs returns the IDs of every convoy whose self-healing
 // work is done and which is waiting on an operator Ship It click. Batch form
 // of ConvoyReadyToShip used by the dashboard's /api/status count.
+//
+// Fix A (AUDIT-011 read-side): the inner NOT EXISTS ConvoyReview gate now
+// uses the structured convoy_id column. QueueConvoyReview stamps it on the
+// row, and once a task like that is subsumed by the active-tasks NOT EXISTS
+// above, the ConvoyReview clause is technically redundant for the already-
+// subsumed case but kept distinct because ConvoyReview rows can precede
+// their convoy's quiescence (see invariant (3) of ConvoyReadyToShip).
 func ListReadyToShipConvoyIDs(db *sql.DB) []int {
 	rows, err := db.Query(`
 		SELECT c.id FROM Convoys c
@@ -287,8 +298,7 @@ func ListReadyToShipConvoyIDs(db *sql.DB) []int {
 		    SELECT 1 FROM BountyBoard r
 		    WHERE r.type = 'ConvoyReview'
 		      AND r.status IN ('Pending','Locked')
-		      AND (r.payload LIKE '%"convoy_id":' || c.id || ',%'
-		        OR r.payload LIKE '%"convoy_id":' || c.id || '}%')
+		      AND r.convoy_id = c.id
 		  )
 		ORDER BY c.id ASC`)
 	if err != nil {

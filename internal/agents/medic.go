@@ -266,10 +266,11 @@ func autoCompletedMedicTask(db *sql.DB, agentName string, medicBounty, parent *s
 	store.UnblockDependentsOf(db, parent.ID)
 	store.AutoRecoverConvoy(db, parent.ConvoyID, logger)
 
-	// Resolve any Open escalations the parent triggered. They were valid
+	// Close any Open escalations the parent triggered. They were valid
 	// concerns at the time, but the underlying problem is gone.
+	// Fix B (AUDIT-025): terminal status is 'Closed', not legacy 'Resolved'.
 	if _, err := db.Exec(`UPDATE Escalations
-		SET status = 'Resolved', acknowledged_at = datetime('now')
+		SET status = 'Closed', acknowledged_at = datetime('now')
 		WHERE task_id = ? AND status = 'Open'`, parent.ID); err != nil {
 		logger.Printf("Medic #%d: escalation cleanup query failed: %v", medicBounty.ID, err)
 	}

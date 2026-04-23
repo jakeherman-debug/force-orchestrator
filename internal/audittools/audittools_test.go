@@ -25,18 +25,9 @@ import (
 //
 // The operator's end-state goal is this list shrinking to zero.
 var remainingAuditSkips = map[string]string{
-	// Fix #3 closed the write-side of AUDIT-011 (Queue* helpers use
-	// idempotency_key + idx_bounty_idem). The read-side subtest
-	// (TestPattern_P3_BoundaryFalsePositive) remains open for Fix #4's
-	// structured-convoy_id read-path migration.
-	"AUDIT-011": "Fix #4 (read-side JSON-payload dedup migration)",
-
-	// Fix #5 closed AUDIT-012 and AUDIT-087. The remaining P6 sub-tests
-	// require a Resolved→Closed normalization pass (AUDIT-025) and a
-	// dashboard ActiveCount correction (AUDIT-085) — both orthogonal.
-	"AUDIT-025": "Fix #5 follow-up (Resolved→Closed normalization across sinks)",
-	"AUDIT-085": "Fix #2/#5 follow-up (dashboard ActiveCount correction)",
-
+	// AUDIT-011, AUDIT-025, AUDIT-085, AUDIT-149: closed by Campaign 2
+	// (scope deferrals). See FIX-LOG.md § "Campaign 2 — Scope deferrals".
+	//
 	// AUDIT-030 duplicates AUDIT-116 which duplicates Fix #8.5 (prompt
 	// injection). 8.5 was not in the worktree batch.
 	"AUDIT-030": "Fix #8.5 (LLM prompt boundary markers + DisallowUnknownFields)",
@@ -104,9 +95,6 @@ var remainingAuditSkips = map[string]string{
 	"AUDIT-097": "Fix #4/#8 concurrency batch",
 	"AUDIT-099": "Fix #10 pattern-covered / Fix #8 silent-failure",
 	"AUDIT-100": "Fix #8 pattern-covered (P1)",
-
-	// AUDIT-149: Fix #5 agent documented this out-of-scope.
-	"AUDIT-149": "Fix #5 follow-up (Escalations.auto_resolve_count column)",
 }
 
 var auditSkipRe = regexp.MustCompile(`t\.Skip\("(AUDIT-\d+)`)

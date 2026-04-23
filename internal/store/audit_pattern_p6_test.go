@@ -56,7 +56,6 @@ func TestPattern_P6_UndocumentedStatusValues(t *testing.T) {
 
 	dogsPath := filepath.Join(repoRoot, "internal", "agents", "dogs.go")
 	handlersPath := filepath.Join(repoRoot, "internal", "dashboard", "handlers.go")
-	escalationPath := filepath.Join(repoRoot, "internal", "agents", "escalation.go")
 	sweeperPath := filepath.Join(repoRoot, "internal", "agents", "escalation_sweeper.go")
 	medicPath := filepath.Join(repoRoot, "internal", "agents", "medic.go")
 	worktreeResetPath := filepath.Join(repoRoot, "internal", "agents", "pilot_worktree_reset.go")
@@ -132,24 +131,20 @@ func TestPattern_P6_UndocumentedStatusValues(t *testing.T) {
 	})
 
 	t.Run("B_Resolved_escalation_status_written_but_unrecognized", func(t *testing.T) {
-		t.Skip("AUDIT-025: remove when state-machine sweeper + escalation-Resolved normalization land (Fix #5)")
-		// Without skip, fails with:
-		//   audit_pattern_p6_test.go:179: AUDIT-025: 3 sink(s) write Escalations.status='Resolved',
-		//   but the read-side contract (ListEscalations docstring) enumerates only
-		//   'Open','Acknowledged','Closed',''. 'Resolved' rows accumulate...
-		//   audit_pattern_p6_test.go:202: AUDIT-025: dashboard handlers.go contains no reference
-		//   to 'Resolved'. Combined with 3 writer(s), this confirms the write/read status
-		//   vocabulary mismatch...
-		// Part 1: confirm at least one sink writes
-		// Escalations.status='Resolved'. The audit identifies three:
-		// escalation_sweeper.go, medic.go, pilot_worktree_reset.go.
+		// Closed by Campaign 2 (AUDIT-025). The three sinks (escalation_sweeper,
+		// medic auto-complete, pilot_worktree_reset) now write status='Closed'
+		// (the documented terminal state); a schema migration UPDATEs any
+		// lingering historical 'Resolved' rows to 'Closed'.
+		//
+		// This now acts as permanent regression protection: if any production
+		// source file re-introduces `status = 'Resolved'` in an Escalations
+		// UPDATE, the test fails pointing at the exact writer.
 		writers := map[string]string{
 			sweeperPath:       "escalation_sweeper.go",
 			medicPath:         "medic.go",
 			worktreeResetPath: "pilot_worktree_reset.go",
 		}
 		needle := "status = 'Resolved'"
-		foundWriters := 0
 		for path, name := range writers {
 			b, err := os.ReadFile(path)
 			if err != nil {
@@ -157,84 +152,20 @@ func TestPattern_P6_UndocumentedStatusValues(t *testing.T) {
 				continue
 			}
 			if strings.Contains(string(b), needle) {
-				foundWriters++
+				t.Errorf("AUDIT-025 regression: %s at %s still writes legacy "+
+					"`status = 'Resolved'`. Campaign 2 collapsed every Escalations "+
+					"sink onto 'Closed' — do not re-introduce the legacy vocabulary.",
+					name, path)
 			}
-		}
-		if foundWriters == 0 {
-			t.Errorf("AUDIT-025: expected at least one sink to write "+
-				"Escalations %q; found none. If this fires the audit "+
-				"fix is in progress; update the test to track the new "+
-				"canonical status.", needle)
-		}
-
-		// Part 2: confirm the read side's allowlist omits 'Resolved'.
-		// The dashboard's handleEscalationList passes the ?status=
-		// parameter straight through to ListEscalations with no
-		// filtering. ListEscalations's own docstring enumerates the
-		// allowed values: "Open", "Acknowledged", "Closed", or "".
-		// 'Resolved' is deliberately NOT documented, yet nothing
-		// rejects it — it simply returns zero rows through the
-		// WHERE status = ? path. So rows written with 'Resolved'
-		// are invisible to every consumer that filters on the
-		// documented statuses.
-		escBytes, err := os.ReadFile(escalationPath)
-		if err != nil {
-			t.Fatalf("cannot read %s: %v", escalationPath, err)
-		}
-		escSrc := string(escBytes)
-		docIdx := strings.Index(escSrc, "// ListEscalations returns escalations filtered by status")
-		if docIdx < 0 {
-			t.Fatalf("AUDIT-025: could not locate ListEscalations docstring in %s", escalationPath)
-		}
-		// Read the docstring line.
-		docEnd := strings.Index(escSrc[docIdx:], "\n")
-		if docEnd < 0 {
-			t.Fatalf("AUDIT-025: malformed docstring for ListEscalations")
-		}
-		doc := escSrc[docIdx : docIdx+docEnd]
-		if strings.Contains(doc, "Resolved") {
-			t.Logf("AUDIT-025: docstring now mentions 'Resolved' — "+
-				"audit partially addressed. Docstring: %q", doc)
-		} else {
-			t.Errorf("AUDIT-025: %d sink(s) write "+
-				"Escalations.status='Resolved', but the read-side "+
-				"contract (ListEscalations docstring in %s) enumerates "+
-				"only 'Open','Acknowledged','Closed',''. 'Resolved' "+
-				"rows accumulate and are invisible to every consumer "+
-				"that filters on the documented statuses. "+
-				"Docstring: %q", foundWriters, escalationPath, doc)
-		}
-
-		// Part 3: confirm the maintenance cleanup (documented in the
-		// audit at cmd/force/maintenance.go) only recognizes 'Closed'.
-		// The dashboard stats query in handlers.go is similarly narrow
-		// — it counts only Open. Grep for any use of 'Resolved' in
-		// the dashboard handlers: there should be none.
-		handlersBytes, err := os.ReadFile(handlersPath)
-		if err != nil {
-			t.Fatalf("cannot read %s: %v", handlersPath, err)
-		}
-		if strings.Contains(string(handlersBytes), "'Resolved'") ||
-			strings.Contains(string(handlersBytes), `"Resolved"`) {
-			t.Logf("AUDIT-025: dashboard handlers.go now references "+
-				"'Resolved' — audit partially addressed.")
-		} else {
-			t.Errorf("AUDIT-025: dashboard handlers.go (%s) contains "+
-				"no reference to 'Resolved'. Combined with %d "+
-				"writer(s), this confirms the write/read status "+
-				"vocabulary mismatch: 'Resolved' rows are created "+
-				"but never surfaced, filtered, or cleaned up.",
-				handlersPath, foundWriters)
 		}
 	})
 
 	t.Run("C_dashboard_ActiveCount_omits_real_active_states", func(t *testing.T) {
-		t.Skip("AUDIT-085: remove when state-machine sweeper + escalation-Resolved normalization land (Fix #5)")
-		// Without skip, fails with:
-		//   audit_pattern_p6_test.go:250: AUDIT-085: dashboard ActiveCount SQL at
-		//   .../handlers.go:~110 omits active statuses [Classifying AwaitingChancellorReview
-		//   ConflictPending Planned]. Tasks in those states are invisible on the dashboard —
-		//   ActiveCount can read 0 while tens of tasks are actively being classified...
+		// Closed by Campaign 2 (AUDIT-085). The dashboard ActiveCount SQL
+		// in handlers.go now includes Classifying, Planned, ConflictPending,
+		// and AwaitingChancellorReview alongside the previously-counted set.
+		// This test stays as permanent regression protection: if any of
+		// those four drops off the list the dashboard goes blind again.
 		// STATIC check against handlers.go:110. The audit calls out
 		// four missing statuses: 'Classifying',
 		// 'AwaitingChancellorReview', 'ConflictPending', 'Planned'.

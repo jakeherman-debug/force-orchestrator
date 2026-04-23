@@ -46,13 +46,14 @@ func TestHandleStatus_ReadyToShip_OnlyCountsQuiescedConvoys(t *testing.T) {
 	db.Exec(`UPDATE Convoys SET status = 'DraftPROpen' WHERE id = ?`, cidB)
 	_, _ = store.AddConvoyTask(db, 0, "api", "fix regression", cidB, 5, "Pending")
 
-	// Convoy C — DraftPROpen with a Pending ConvoyReview (convoy_id=0 but
-	// payload references this convoy) → NOT ready.
+	// Convoy C — DraftPROpen with a Pending ConvoyReview → NOT ready.
+	// Post-Fix A (AUDIT-011 read-side): ConvoyReview rows carry convoy_id
+	// in the structured column; tests that insert directly must stamp it.
 	cidC, _ := store.CreateConvoy(db, "[3] review-pending")
 	db.Exec(`UPDATE Convoys SET status = 'DraftPROpen' WHERE id = ?`, cidC)
-	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, '', 'ConvoyReview', 'Pending', ?, 5, datetime('now'))`,
-		fmt.Sprintf(`{"convoy_id":%d}`, cidC))
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, '', 'ConvoyReview', 'Pending', ?, ?, 5, datetime('now'))`,
+		fmt.Sprintf(`{"convoy_id":%d}`, cidC), cidC)
 
 	// Convoy D — Active state entirely → NOT ready.
 	cidD, _ := store.CreateConvoy(db, "[4] active")

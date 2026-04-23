@@ -122,7 +122,21 @@ func handleStats(db *sql.DB) http.HandlerFunc {
 		db.QueryRow(`SELECT COUNT(*) FROM Convoys WHERE status = 'Active'`).Scan(&s.ActiveConvoys)
 
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status = 'Pending'`).Scan(&s.PendingCount)
-		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status IN ('Locked','AwaitingCaptainReview','UnderCaptainReview','AwaitingCouncilReview','UnderReview','AwaitingSubPRCI')`).Scan(&s.ActiveCount)
+		// Active = "work the fleet is actively doing, not counting queued Pending or terminal rows."
+		// Fix C (AUDIT-085): previously omitted Classifying, AwaitingChancellorReview,
+		// ConflictPending, Planned — all real in-flight states where LLM spend can
+		// be occurring. Adding them closes the "ActiveCount=0 while 50 tasks run"
+		// dashboard lie.
+		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status IN (
+			'Locked',
+			'Classifying',
+			'Planned',
+			'ConflictPending',
+			'AwaitingCaptainReview','UnderCaptainReview',
+			'AwaitingCouncilReview','UnderReview',
+			'AwaitingChancellorReview',
+			'AwaitingSubPRCI'
+		)`).Scan(&s.ActiveCount)
 		db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE status = 'Completed' AND date(created_at) = date('now')`).Scan(&s.CompletedTodayCount)
 
 		json.NewEncoder(w).Encode(s)

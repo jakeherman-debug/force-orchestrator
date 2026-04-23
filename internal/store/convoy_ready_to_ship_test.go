@@ -54,10 +54,12 @@ func TestConvoyReadyToShip_PendingConvoyReview_False(t *testing.T) {
 
 	cid, _ := CreateConvoy(db, "[1] review-running")
 	db.Exec(`UPDATE Convoys SET status = 'DraftPROpen' WHERE id = ?`, cid)
-	// ConvoyReview rows carry convoy_id=0 and reference the convoy via payload.
-	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, '', 'ConvoyReview', 'Pending', ?, 5, datetime('now'))`,
-		fmt.Sprintf(`{"convoy_id":%d}`, cid))
+	// Post-Fix A (AUDIT-011 read-side): ConvoyReview rows are stamped with
+	// convoy_id by QueueConvoyReview. Tests that insert directly must follow
+	// suit so ConvoyReadyToShip's structured-column lookup sees the row.
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, '', 'ConvoyReview', 'Pending', ?, ?, 5, datetime('now'))`,
+		fmt.Sprintf(`{"convoy_id":%d}`, cid), cid)
 
 	if ConvoyReadyToShip(db, cid) {
 		t.Error("Pending ConvoyReview means the fleet is evaluating the convoy — not ready")
@@ -70,9 +72,9 @@ func TestConvoyReadyToShip_LockedConvoyReview_False(t *testing.T) {
 
 	cid, _ := CreateConvoy(db, "[1] review-locked")
 	db.Exec(`UPDATE Convoys SET status = 'DraftPROpen' WHERE id = ?`, cid)
-	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, '', 'ConvoyReview', 'Locked', ?, 5, datetime('now'))`,
-		fmt.Sprintf(`{"convoy_id":%d}`, cid))
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`,
+		fmt.Sprintf(`{"convoy_id":%d}`, cid), cid)
 
 	if ConvoyReadyToShip(db, cid) {
 		t.Error("Locked (running) ConvoyReview must block ship readiness")
@@ -103,9 +105,9 @@ func TestConvoyReadyToShip_CompletedReviewNotBlocking(t *testing.T) {
 
 	cid, _ := CreateConvoy(db, "[1] post-review")
 	db.Exec(`UPDATE Convoys SET status = 'DraftPROpen' WHERE id = ?`, cid)
-	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, '', 'ConvoyReview', 'Completed', ?, 5, datetime('now'))`,
-		fmt.Sprintf(`{"convoy_id":%d}`, cid))
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, '', 'ConvoyReview', 'Completed', ?, ?, 5, datetime('now'))`,
+		fmt.Sprintf(`{"convoy_id":%d}`, cid), cid)
 
 	if !ConvoyReadyToShip(db, cid) {
 		t.Error("A Completed ConvoyReview is not in-flight — convoy should be ready")
@@ -124,16 +126,18 @@ func TestConvoyReadyToShip_BoundaryIDMatching(t *testing.T) {
 	db.Exec(`UPDATE Convoys SET status = 'DraftPROpen' WHERE id IN (?, ?)`, c1, c10)
 
 	// Pending ConvoyReview for c1 only.
-	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
-		VALUES (0, '', 'ConvoyReview', 'Pending', ?, 5, datetime('now'))`,
-		fmt.Sprintf(`{"convoy_id":%d}`, c1))
+	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
+		VALUES (0, '', 'ConvoyReview', 'Pending', ?, ?, 5, datetime('now'))`,
+		fmt.Sprintf(`{"convoy_id":%d}`, c1), c1)
 
 	if ConvoyReadyToShip(db, c1) {
 		t.Error("c1 with its own pending review must not be ready")
 	}
-	// c10's ID starts with "1" but has a different payload; must NOT match c1's review.
+	// c10's ID starts with "1" but has a distinct convoy_id; post-Fix A this
+	// is an indexed equality check, not a payload-LIKE prefix match, so the
+	// boundary confusion is impossible by construction.
 	if !ConvoyReadyToShip(db, c10) {
-		t.Error("c10 must not be falsely blocked by c1's review (LIKE boundary check)")
+		t.Error("c10 must not be falsely blocked by c1's review")
 	}
 }
 

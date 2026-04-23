@@ -80,14 +80,26 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskdeps_task_id   ON TaskDependencies (task_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskdeps_depends_on ON TaskDependencies (depends_on);`)
 
+	// Escalations. State machine: Open → Acknowledged → Closed.
+	//   - 'Open'          : operator has not looked at it.
+	//   - 'Acknowledged'  : operator has looked but not decided on action.
+	//   - 'Closed'        : auto-closed by the sweeper OR manually closed via
+	//                       CloseEscalation. Terminal.
+	// Legacy 'Resolved' writes were normalized to 'Closed' by the
+	// Campaign 2 migration (AUDIT-025). Do not reintroduce 'Resolved'.
+	// `auto_resolve_count` is incremented exactly once per row when the
+	// escalation-sweeper auto-closes it; a gate in the sweeper skips rows
+	// with count >= 1 so an operator re-opening an auto-closed row is
+	// respected on the next 10-min tick (AUDIT-149).
 	db.Exec(`CREATE TABLE IF NOT EXISTS Escalations (
-		id               INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id          INTEGER NOT NULL,
-		severity         TEXT    NOT NULL,
-		message          TEXT    NOT NULL,
-		status           TEXT    DEFAULT 'Open',
-		created_at       TEXT    DEFAULT (datetime('now')),
-		acknowledged_at  TEXT    DEFAULT ''
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id            INTEGER NOT NULL,
+		severity           TEXT    NOT NULL,
+		message            TEXT    NOT NULL,
+		status             TEXT    DEFAULT 'Open',
+		auto_resolve_count INTEGER DEFAULT 0,
+		created_at         TEXT    DEFAULT (datetime('now')),
+		acknowledged_at    TEXT    DEFAULT ''
 	);`)
 	// Hot-table indexes on Escalations (AUDIT-024, Fix #4). escalation-sweeper
 	// runs `WHERE status='Open'` every 10 minutes and joins back to BountyBoard
@@ -403,6 +415,23 @@ func runMigrations(db *sql.DB) {
 	// Partial UNIQUE on Escalations(task_id) WHERE status='Open'.
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_escalations_open_task
 		ON Escalations(task_id) WHERE status = 'Open'`)
+
+	// Campaign 2 (AUDIT-025): collapse legacy Escalations.status='Resolved' →
+	// 'Closed'. Three sinks (escalation_sweeper, medic auto-complete,
+	// pilot_worktree_reset) used to write 'Resolved' but no read-side consumer
+	// recognised it — rows accumulated invisibly. Write-side is fixed in the
+	// same campaign; this migration normalises the historical rows and is
+	// idempotent (a re-run finds zero rows to update).
+	db.Exec(`UPDATE Escalations
+	         SET status='Closed',
+	             acknowledged_at=COALESCE(NULLIF(acknowledged_at,''), datetime('now'))
+	         WHERE status='Resolved'`)
+
+	// Campaign 2 (AUDIT-149): auto_resolve_count gates the escalation-sweeper
+	// against silently re-closing an escalation the operator has re-opened for
+	// deeper investigation. Sweeper increments exactly once; next tick sees
+	// count >= 1 and skips.
+	db.Exec(`ALTER TABLE Escalations ADD COLUMN auto_resolve_count INTEGER DEFAULT 0`)
 
 	// Fix #7 — ConvoyReview tightening: parse-failure counter and last-pass
 	// finding fingerprint for same-set dedup across re-triggered passes.
