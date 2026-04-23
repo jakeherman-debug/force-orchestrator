@@ -26,35 +26,40 @@ func InitHolocronDSN(dsn string) *sql.DB {
 	createSchema(db)
 	runMigrations(db)
 
+	// Enable foreign-key enforcement AFTER migrations run so the TaskNotes table
+	// rebuild (AUDIT-079 companion) can drop and recreate without tripping FK
+	// checks on its own placeholder rows. From this point on, the
+	// REFERENCES ... ON DELETE CASCADE clause on TaskNotes is active, so
+	// maintenance's DELETE-by-age sweeps on BountyBoard cascade cleanly to
+	// TaskNotes instead of either failing (FKs without cascade) or silently
+	// orphaning child rows (FKs off entirely).
+	db.Exec("PRAGMA foreign_keys=ON;")
+
 	return db
 }
 
 // ── Repositories ──────────────────────────────────────────────────────────────
 
-// AddRepo inserts or replaces a repo registration. PR-flow fields are initialised
+// AddRepo inserts or updates a repo registration. PR-flow fields are initialised
 // to their schema defaults — Layer B backfill populates remote_url/default_branch
 // at daemon startup, and the FindPRTemplate task populates pr_template_path.
 // Preserves any existing PR-flow fields on an update rather than clobbering them.
+//
+// Uses `INSERT ... ON CONFLICT DO UPDATE` (UPSERT) rather than INSERT OR REPLACE
+// (AUDIT-081, Fix #4 companion). SQLite's REPLACE conflict resolution is
+// specified as DELETE-then-INSERT on PRIMARY KEY collisions, which churns row
+// identity and — once PRAGMA foreign_keys=ON is active — would cascade-delete
+// any child rows that reference Repositories.name. UPSERT preserves row
+// identity, so Repositories.name is effectively immutable under
+// re-registration.
 func AddRepo(db *sql.DB, name, path, desc string) {
-	// Preserve existing PR-flow fields when re-adding a repo (e.g. when the operator
-	// re-registers to change local_path or description).
-	var (
-		remoteURL, defaultBranch, templatePath, quarantinedAt, quarantineReason string
-		prFlowEnabled                                                           int
-	)
-	row := db.QueryRow(`SELECT
-		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
-		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, '')
-		FROM Repositories WHERE name = ?`, name)
-	existed := row.Scan(&remoteURL, &defaultBranch, &templatePath, &prFlowEnabled, &quarantinedAt, &quarantineReason) == nil
-	if !existed {
-		prFlowEnabled = 1
-	}
-
-	db.Exec(`INSERT OR REPLACE INTO Repositories
-		(name, local_path, description, remote_url, default_branch, pr_template_path, pr_flow_enabled, quarantined_at, quarantine_reason)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		name, path, desc, remoteURL, defaultBranch, templatePath, prFlowEnabled, quarantinedAt, quarantineReason)
+	db.Exec(`INSERT INTO Repositories
+			(name, local_path, description)
+			VALUES (?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET
+			local_path  = excluded.local_path,
+			description = excluded.description`,
+		name, path, desc)
 }
 
 func GetRepoPath(db *sql.DB, repoName string) string {
