@@ -79,14 +79,17 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 		}
 	})
 
-	// ── AUDIT-112 — TOCTOU concurrency — now pattern-covered by P2 ──────────
+	// ── AUDIT-112 — TOCTOU concurrency — closed by Fix #3 ──────────────────
+	// Fix #3 added TestAddConvoyTaskIdempotent_ConcurrentCallers (50 goroutines)
+	// alongside the partial UNIQUE idx_bounty_idem and the ON CONFLICT DO NOTHING
+	// claim in AddConvoyTaskIdempotent. This meta-test stays as regression
+	// protection: any refactor that removes the concurrency coverage flips it red.
 	t.Run("AUDIT_112_ConcurrentIdempotencyTest_DuplicateOfP2", func(t *testing.T) {
-		t.Skip("AUDIT-112: DUPLICATE-OF-P2 — remove when P2 fix lands (Fix #3)")
-		// Without skip, fails with: audit_test_quality_test.go:88: AUDIT-112: tasks_idempotent_test.go without sync.WaitGroup / go func concurrency still present
 		idem := readFile(t, filepath.Join(storeDir, "tasks_idempotent_test.go"))
-		// RGR inversion: fail if tasks_idempotent_test.go still lacks concurrency coverage locally.
 		if !(strings.Contains(idem, "sync.WaitGroup") || strings.Contains(idem, "go func")) {
-			t.Fatal("AUDIT-112: tasks_idempotent_test.go without sync.WaitGroup / go func concurrency still present")
+			t.Fatal("AUDIT-112 regression: tasks_idempotent_test.go no longer "+
+				"contains sync.WaitGroup / go func concurrency coverage — " +
+				"re-add TestAddConvoyTaskIdempotent_ConcurrentCallers.")
 		}
 	})
 

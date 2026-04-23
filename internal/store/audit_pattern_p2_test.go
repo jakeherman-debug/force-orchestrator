@@ -19,11 +19,9 @@ import (
 // Covers: AUDIT-008, AUDIT-034, AUDIT-035, AUDIT-036, AUDIT-075, AUDIT-076,
 // and the missing-race-test gap at AUDIT-112.
 func TestPattern_P2_IdempotencyKeyRace(t *testing.T) {
-	t.Skip("AUDIT-008/034/035/036 (P2): remove when partial UNIQUE index on BountyBoard(idempotency_key) lands + ON CONFLICT DO NOTHING (Fix #3)")
-	// Without skip, fails with (go test -race -count=5):
-	//   audit_pattern_p2_test.go:78: AUDIT-008/P2: expected exactly 1 row for idempotency_key="rebase-conflict:branch:agent/R2-D2/p2-race", got 5 — SELECT-then-INSERT race in AddConvoyTaskIdempotent inserted duplicates.
-	//   --- FAIL: TestPattern_P2_IdempotencyKeyRace (0.01s)
-	//   (subsequent iterations: got 29, 5, 10, 16 — race is consistently reproducible)
+	// Fix #3 lands: partial UNIQUE on BountyBoard(idempotency_key) + ON CONFLICT
+	// DO NOTHING RETURNING id means 50 concurrent callers with the same key
+	// produce exactly 1 row. Kept as permanent regression protection.
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
@@ -93,10 +91,9 @@ func TestPattern_P2_IdempotencyKeyRace(t *testing.T) {
 // of the race above. This test will FAIL the day AUDIT-008 is fixed — at
 // that point, delete it (or invert the assertion) as proof the fix shipped.
 func TestPattern_P2_NoUniqueIndex_Static(t *testing.T) {
-	t.Skip("AUDIT-008 (P2): remove when partial UNIQUE index on BountyBoard(idempotency_key) lands (Fix #3)")
-	// Without skip, fails with (RGR-inverted assertion):
-	//   audit_pattern_p2_test.go:159: AUDIT-008 (P2): no UNIQUE index covers BountyBoard.idempotency_key (0 total indexes scanned). Fix #3: add partial UNIQUE index on BountyBoard(idempotency_key) WHERE status NOT IN ('Completed','Cancelled','Failed') and switch AddConvoyTaskIdempotent to INSERT … ON CONFLICT DO NOTHING RETURNING id.
-	//   --- FAIL: TestPattern_P2_NoUniqueIndex_Static (0.00s)
+	// Fix #3 lands: idx_bounty_idem (partial UNIQUE on idempotency_key) is
+	// present on every fresh or migrated DB. Test stays as permanent
+	// regression protection — any schema change that drops the index fails here.
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 

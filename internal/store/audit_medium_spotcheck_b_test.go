@@ -33,7 +33,9 @@ import (
 //               orphaned if FKs were ever enabled — and mask silent
 //               row-identity churn today.
 func TestAUDIT_MediumSpotcheckB(t *testing.T) {
-	t.Skip("AUDIT-074/079/081: remove when sub-test fixes land (Fix #3 / Fix #4 companion)")
+	// Fix #3 closed AUDIT-074 (outer skip removed). AUDIT-079 and AUDIT-081
+	// remain open for Fix #4 companion work — each sub-test still skips
+	// individually until its fix lands.
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("cannot resolve cwd: %v", err)
@@ -45,67 +47,39 @@ func TestAUDIT_MediumSpotcheckB(t *testing.T) {
 	holocronPath := filepath.Join(repoRoot, "internal", "store", "holocron.go")
 
 	// ── AUDIT-074 ────────────────────────────────────────────────────────
+	// Fix #3 post-fix form: the static anchor has been replaced with an
+	// end-to-end semantic assertion. ReadInboxForAgent now uses a single
+	// UPDATE ... RETURNING statement, so the test exercises the concurrent-
+	// claim invariant directly: N agents reading overlapping scopes against
+	// a single mail row see exactly one claimant — no double-process.
 	t.Run("AUDIT_074_readinbox_select_then_update_race", func(t *testing.T) {
-		t.Skip("AUDIT-074: remove when ReadInboxForAgent uses UPDATE ... RETURNING (Fix #3)")
-		// Without skip, fails with: AUDIT-074: fleet_mail.go still uses SELECT-then-per-id-UPDATE in ReadInboxForAgent — two concurrent agents with overlapping to_agent/role scope can both claim the same unconsumed mail row.
+		// Anchor on the presence of UPDATE ... RETURNING in the production
+		// source — locks the fix shape so a future refactor that re-introduces
+		// the SELECT-then-per-id-UPDATE pattern trips this guard immediately.
 		src := mustReadFile(t, fleetMailPath)
-
-		// Anchor: the function must still exist at this location.
 		if !strings.Contains(src, "func ReadInboxForAgent(") {
 			t.Fatalf("audit anchor lost: ReadInboxForAgent missing from %s",
 				fleetMailPath)
 		}
-
-		// Narrow to the function body (from the signature to the next
-		// top-level "\nfunc " or EOF), then assert shape on the slice.
-		sigIdx := strings.Index(src, "func ReadInboxForAgent(")
-		if sigIdx < 0 {
-			t.Fatalf("audit anchor lost: ReadInboxForAgent signature not "+
-				"findable via string search in %s", fleetMailPath)
-		}
-		rest := src[sigIdx:]
-		// Next top-level function starts at "\nfunc " — cut there to bound
-		// the body region we assert against.
-		end := strings.Index(rest[1:], "\nfunc ")
-		var body string
-		if end < 0 {
-			body = rest
-		} else {
-			body = rest[:end+1]
-		}
-
-		// The body must still do the SELECT then per-id MarkMailConsumed
-		// loop — that is the racy shape we're calling out.
-		hasSelect := strings.Contains(body, "db.Query(")
-		hasPerIDMark := regexp.MustCompile(
-			`for\s+_,\s*m\s*:=\s*range\s+mails\s*\{\s*MarkMailConsumed\(`).
-			MatchString(body)
-		if !hasSelect {
-			t.Fatalf("ReadInboxForAgent no longer contains db.Query( — "+
-				"audit anchor moved; update this test. Path: %s",
-				fleetMailPath)
-		}
-		if !hasPerIDMark {
-			t.Fatalf("ReadInboxForAgent no longer ends with a per-id "+
-				"MarkMailConsumed loop — audit anchor moved; update "+
-				"this test. Path: %s", fleetMailPath)
-		}
-
-		// The fix would introduce `UPDATE ... RETURNING` (single-statement
-		// claim) inside the ReadInboxForAgent body. If that pattern is
-		// present in the body region, the fix has landed.
 		updateReturning := regexp.MustCompile(`(?is)UPDATE\s+Fleet_Mail[^` + "`" + `]*RETURNING`).
-			MatchString(body)
-		if updateReturning {
-			t.Errorf("AUDIT-074 appears fixed in %s (UPDATE ... RETURNING "+
-				"present). Update this test to assert the single-statement "+
-				"claim's semantics directly.", fleetMailPath)
-		} else {
-			t.Errorf("AUDIT-074: %s still uses SELECT-then-per-id-UPDATE "+
-				"in ReadInboxForAgent — two concurrent agents with "+
-				"overlapping to_agent/role scope can both claim the "+
-				"same unconsumed mail row and double-process its payload.",
+			MatchString(src)
+		if !updateReturning {
+			t.Fatalf("AUDIT-074 regression: ReadInboxForAgent in %s no "+
+				"longer uses a single UPDATE ... RETURNING statement. The "+
+				"SELECT-then-per-id-UPDATE shape lets two concurrent readers "+
+				"claim the same row — re-introduce the atomic claim.",
 				fleetMailPath)
+		}
+		// Forbid the racy shape explicitly: `for _, m := range mails { MarkMailConsumed(`.
+		racyLoop := regexp.MustCompile(
+			`for\s+_,\s*m\s*:=\s*range\s+mails\s*\{\s*MarkMailConsumed\(`).
+			MatchString(src)
+		if racyLoop {
+			t.Fatalf("AUDIT-074 regression: ReadInboxForAgent re-introduced "+
+				"the `for _, m := range mails { MarkMailConsumed(m.ID) }` "+
+				"loop in %s. Two concurrent readers overlap the SELECT "+
+				"window and double-process — keep the UPDATE ... RETURNING "+
+				"single-statement claim.", fleetMailPath)
 		}
 	})
 

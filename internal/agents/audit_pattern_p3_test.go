@@ -2,79 +2,119 @@ package agents
 
 // Pattern P3 verification test — see /AUDIT.md findings AUDIT-011 & AUDIT-048.
 //
-// The fleet uses the following SQL pattern in 9+ production call sites to
-// dedup / count tasks scoped to a convoy via the JSON payload:
+// The fleet historically used the following SQL pattern in 9+ production
+// call sites to dedup / count tasks scoped to a convoy via the JSON payload:
 //
 //   payload LIKE '%"convoy_id":' || ? || ',%'
 //     OR payload LIKE '%"convoy_id":' || ? || '}%'
 //
-// Production sites (non-test):
-//   internal/agents/convoy_review.go:91,126,340
-//   internal/agents/convoy.go:59
-//   internal/agents/pilot_backfill.go:38
-//   internal/agents/pilot_rebase.go:256
-//   internal/agents/pr_review_poll.go:230
-//   internal/store/convoy_ask_branches.go:219,241
+// Fix #3 closed AUDIT-011 at every P3 call site that was spawning tasks
+// (Queue* helpers): those paths now use the idempotency_key column (indexed
+// via idx_bounty_idem) rather than a payload-LIKE scan. The dedup query on
+// QueueConvoyReview that this test originally targeted is GONE in production;
+// QueueConvoyReview / QueueWorktreeReset / QueueRebaseAgentBranch /
+// QueueCreateAskBranch / QueueRebaseAskBranch / queuePRReviewTriageIfAbsent /
+// QueueCIFailureTriageTx all dispatch through store.AddIdempotentTask{,Tx}.
 //
-// This pattern has two defects:
+// The test below was rewritten to reflect that: it asserts the production
+// Queue* helpers no longer contain the payload-LIKE shape, and the
+// idempotency-key dedup query that REPLACED it uses idx_bounty_idem.
 //
-//   1. Leading wildcards ('%"convoy_id":...') disable any index on `payload`,
-//      forcing a full BountyBoard scan on every invocation.
-//   2. Boundary-fragile JSON matching: a payload containing unrelated keys
-//      whose string form ends with `:N,` or `:N}` (e.g. another field whose
-//      value collides with the target id) can produce false positives.
-//
-// This test locks the current behaviour so the defect is visible. When the
-// remedy lands (structured `convoy_id` column + index, or a generated JSON
-// extraction), the assertions invert and this test fails loudly — forcing
-// the author to remove the locking test and verify the fix semantics.
+// Read-side payload-LIKE usage (e.g. GetConvoyReviewCompletedPasses) is out
+// of Fix #3 scope and belongs to Fix #4 (structured convoy_id column + index).
 
 import (
-	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"force-orchestrator/internal/store"
 )
 
-// The literal dedup query lifted verbatim from convoy_review.go:89-92
-// (QueueConvoyReview's existence check). Any call site of the P3 pattern
-// produces identical plans since they all share the same LIKE structure.
-const p3DedupSQL = `SELECT COUNT(*) FROM BountyBoard
-	WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
-	  AND (payload LIKE '%"convoy_id":' || ? || ',%'
-	    OR payload LIKE '%"convoy_id":' || ? || '}%')`
-
 func TestPattern_P3_PayloadLikeDedupIsFullScan(t *testing.T) {
-	t.Skip("AUDIT-011: remove when Fix #3/#4 (structured convoy_id column + index replaces payload LIKE) lands")
-	// Without skip, fails with:
-	//   EXPLAIN QUERY PLAN output: SCAN BountyBoard
-	//   Pattern P3 defect still present — plan contains 'SCAN BountyBoard'.
-	//   Fix #3/#4 requires structured convoy_id column + index replacing payload LIKE.
+	// Fix #3 post-fix form: instead of asserting against a literal SQL string
+	// that no longer exists in production, assert that (a) the production
+	// Queue* helpers no longer contain a payload-LIKE dedup, and (b) the
+	// idempotency-key dedup query that replaces them uses idx_bounty_idem.
+
+	// (a) Production Queue* helpers are free of payload-LIKE dedup.
+	// Each of these files previously contained the racy payload-LIKE shape
+	// the audit called out; Fix #3 migrated them all to idempotency keys.
+	targets := []struct {
+		path string
+		fn   string
+	}{
+		{"internal/agents/convoy_review.go", "QueueConvoyReview"},
+		{"internal/agents/pilot_worktree_reset.go", "QueueWorktreeReset"},
+		{"internal/agents/pilot_rebase_agent.go", "QueueRebaseAgentBranch"},
+		{"internal/agents/pilot_askbranch.go", "QueueCreateAskBranch"},
+		{"internal/agents/pilot_rebase.go", "QueueRebaseAskBranch"},
+		{"internal/agents/pr_review_poll.go", "queuePRReviewTriageIfAbsent"},
+		{"internal/agents/medic_ci.go", "QueueCIFailureTriage"},
+	}
+	repoRoot := findP3RepoRoot(t)
+	// The P3 defect was specifically `payload LIKE '%"<key>":N,%'` patterns
+	// that string-matched JSON fields to dedup on a foreign ID. Forbid those.
+	// Benign payload LIKE usage remains legitimate: QueueRebaseAgentBranch
+	// still uses `payload LIKE '%[REBASE_CONFLICT for task #%'` to detect an
+	// active conflict-resolution CodeEdit on the same branch — that's a
+	// branch_name-based sibling check, not a JSON-field dedup, and stays.
+	p3JSONFieldRe := regexp.MustCompile(`payload\s+LIKE\s+'%"(convoy_id|parent_task_id|sub_pr_row_id)":`)
+	for _, tc := range targets {
+		src := mustReadP3(t, filepath.Join(repoRoot, tc.path))
+		fnBody := extractFunctionBody(t, src, tc.fn)
+		if fnBody == "" {
+			t.Errorf("AUDIT-011 anchor lost: %s not found in %s", tc.fn, tc.path)
+			continue
+		}
+		if p3JSONFieldRe.MatchString(fnBody) {
+			t.Errorf("AUDIT-011 regression: %s in %s still contains "+
+				`payload LIKE '%%"<field>":N,%%' JSON-field dedup — Fix #3 `+
+				"migrated all Queue* helpers to idempotency_key (via "+
+				"store.AddIdempotentTask). Any new JSON-field payload-LIKE in a "+
+				"spawner re-introduces the TOCTOU + full-scan defect.", tc.fn, tc.path)
+		}
+		// Positive assertion: the helper should reach the idempotency-key
+		// plumbing (either directly or via a sibling Queue*Tx function).
+		// Allow either "AddIdempotentTask" or "AddConvoyTaskIdempotent" —
+		// both route through the same atomic-insert path.
+		if !strings.Contains(fnBody, "AddIdempotentTask") &&
+			!strings.Contains(fnBody, "AddConvoyTaskIdempotent") {
+			t.Errorf("AUDIT-011 fix-shape: %s in %s should invoke "+
+				"store.AddIdempotentTask (or AddConvoyTaskIdempotent) for dedup; "+
+				"neither reference found.", tc.fn, tc.path)
+		}
+	}
+
+	// (b) The idempotency-key dedup query uses idx_bounty_idem (the partial
+	// UNIQUE index Fix #3 added). Verified here by EXPLAIN QUERY PLAN against
+	// the canonical SELECT-existing query used by addTaskIdempotent's
+	// post-conflict fallback.
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	// ── Seed 10,000 BountyBoard rows with varied payloads. ────────────────
-	// We mix:
-	//   * ConvoyReview rows targeting convoy_ids 1..1000 (~10 rows each)
-	//   * Rows with an "other_id" key whose numeric value could string-collide
-	//   * Rows with status Completed/Cancelled so the dedup filter bites
+	// Seed enough rows to defeat a small-table full-scan optimization.
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	stmt, err := tx.Prepare(`INSERT INTO BountyBoard
-		(parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
-		VALUES (0, 'repo', ?, ?, ?, 0, 5, datetime('now'))`)
+		(parent_id, target_repo, type, status, payload, convoy_id, priority, idempotency_key, created_at)
+		VALUES (0, 'repo', 'CodeEdit', ?, '{}', 0, 5, ?, datetime('now'))`)
 	if err != nil {
-		t.Fatalf("prepare: %v", err)
+		t.Fatalf("prepare seed: %v", err)
 	}
 	statuses := []string{"Pending", "Locked", "Completed", "Cancelled"}
-	for i := 0; i < 10000; i++ {
-		cid := (i % 1000) + 1
-		payload := fmt.Sprintf(`{"convoy_id":%d,"note":"seed-%d"}`, cid, i)
-		if _, err := stmt.Exec("ConvoyReview", statuses[i%len(statuses)], payload); err != nil {
-			t.Fatalf("exec seed %d: %v", i, err)
+	for i := 0; i < 2000; i++ {
+		key := ""
+		if i%4 < 2 {
+			// Non-terminal — participates in partial-unique predicate
+			key = "idem:" + testKeyN(i)
+		}
+		if _, err := stmt.Exec(statuses[i%len(statuses)], key); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
 	stmt.Close()
@@ -82,47 +122,99 @@ func TestPattern_P3_PayloadLikeDedupIsFullScan(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	// Sanity: confirm the seed landed.
-	var total int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM BountyBoard`).Scan(&total); err != nil {
-		t.Fatalf("count seed: %v", err)
-	}
-	if total < 10000 {
-		t.Fatalf("expected >=10000 seed rows, got %d", total)
-	}
-
-	// ── EXPLAIN QUERY PLAN for the cited dedup SQL. ─────────────────────────
-	rows, err := db.Query("EXPLAIN QUERY PLAN "+p3DedupSQL, 42, 42)
+	// Include `idempotency_key != ''` in the predicate so SQLite's partial
+	// index planner recognises it. The production helper does the same —
+	// see addTaskIdempotent.
+	rows, err := db.Query(`EXPLAIN QUERY PLAN SELECT id FROM BountyBoard
+		WHERE idempotency_key = ?
+		  AND idempotency_key != ''
+		  AND status NOT IN ('Completed','Cancelled','Failed')
+		LIMIT 1`, "idem:lookup-probe")
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
-	defer rows.Close()
-
 	var planLines []string
 	for rows.Next() {
 		var id, parent, notused int
 		var detail string
-		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
-			t.Fatalf("scan plan: %v", err)
-		}
+		rows.Scan(&id, &parent, &notused, &detail)
 		planLines = append(planLines, detail)
 	}
+	rows.Close()
 	plan := strings.Join(planLines, "\n")
-	t.Logf("EXPLAIN QUERY PLAN output:\n%s", plan)
+	t.Logf("EXPLAIN QUERY PLAN (post-fix idempotency lookup):\n%s", plan)
 
-	// ── RGR: assert the desired (post-fix) plan, not the current defect. ────
-	// After Fix #3/#4 lands (structured convoy_id column + index replacing the
-	// payload LIKE pattern), the query plan should either avoid a full
-	// "SCAN BountyBoard" OR use an index. Today neither holds — the test
-	// fails loudly until the fix is in place.
 	if strings.Contains(plan, "SCAN BountyBoard") {
-		t.Fatalf("Pattern P3 defect still present — plan contains 'SCAN BountyBoard'.\n"+
-			"Fix #3/#4 requires structured convoy_id column + index replacing payload LIKE.\nplan:\n%s", plan)
+		t.Errorf("AUDIT-011 regression: idempotency-key dedup lookup falls "+
+			"back to SCAN BountyBoard — idx_bounty_idem missing or not "+
+			"used.\nplan:\n%s", plan)
 	}
-	if !strings.Contains(plan, "USING INDEX") {
-		t.Fatalf("Pattern P3 defect still present — plan does not use an index.\n"+
-			"Fix #3/#4 requires structured convoy_id column + index replacing payload LIKE.\nplan:\n%s", plan)
+	if !strings.Contains(plan, "idx_bounty_idem") {
+		t.Errorf("AUDIT-011 regression: idempotency-key dedup lookup does not "+
+			"use idx_bounty_idem — plan was %q", plan)
 	}
+}
+
+func testKeyN(i int) string {
+	// Tiny helper — avoid importing fmt just for this file.
+	const digits = "0123456789"
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{digits[i%10]}, b...)
+		i /= 10
+	}
+	return string(b)
+}
+
+func findP3RepoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	dir := wd
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Fatalf("could not locate repo root (go.mod) upward from %s", wd)
+	return ""
+}
+
+func mustReadP3(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// extractFunctionBody returns the body of fn (signature + open brace through
+// the first line starting with "\nfunc " at column 0, i.e. the next top-level
+// function). Returns "" if the function is not found.
+func extractFunctionBody(t *testing.T, src, fn string) string {
+	t.Helper()
+	re := regexp.MustCompile(`\bfunc(\s+\([^)]*\))?\s+` + regexp.QuoteMeta(fn) + `\(`)
+	loc := re.FindStringIndex(src)
+	if loc == nil {
+		return ""
+	}
+	rest := src[loc[0]:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end+1]
 }
 
 // Sub-test companion: confirm the leading-wildcard LIKE produces a
@@ -141,7 +233,7 @@ func TestPattern_P3_PayloadLikeDedupIsFullScan(t *testing.T) {
 // fix to a structured column / JSON-extract index, only the real row
 // matches and this locking test flips — delete it alongside the fix.
 func TestPattern_P3_BoundaryFalsePositive(t *testing.T) {
-	t.Skip("AUDIT-048: remove when Fix #3/#4 (structured convoy_id column + index replaces payload LIKE) lands")
+	t.Skip("AUDIT-011 / boundary-false-positive on payload LIKE: Fix #3 closed the write-side callers (Queue* helpers now use idempotency_key). The remaining read-side scans (GetConvoyReviewCompletedPasses, dogConvoyReviewWatch pending/active checks) are Fix #4 scope — structured convoy_id column + index.")
 	// Without skip, fails with:
 	//   Pattern P3 boundary-defect still present — got 2 matches (real + nested-convoy_id
 	//   collision), want 1 (only real). Fix #3/#4 requires structured convoy_id column so
@@ -167,6 +259,13 @@ func TestPattern_P3_BoundaryFalsePositive(t *testing.T) {
 		t.Fatalf("seed colliding row: %v", err)
 	}
 
+	// The read-side payload-LIKE dedup the test is locking behaviour on —
+	// still used by GetConvoyReviewCompletedPasses / dogConvoyReviewWatch
+	// pending checks. Fix #4 replaces with a structured convoy_id column.
+	const p3DedupSQL = `SELECT COUNT(*) FROM BountyBoard
+		WHERE type = 'ConvoyReview' AND status IN ('Pending','Locked')
+		  AND (payload LIKE '%"convoy_id":' || ? || ',%'
+		    OR payload LIKE '%"convoy_id":' || ? || '}%')`
 	var matched int
 	if err := db.QueryRow(p3DedupSQL, 5, 5).Scan(&matched); err != nil {
 		t.Fatalf("query: %v", err)

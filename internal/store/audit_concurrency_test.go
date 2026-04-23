@@ -17,10 +17,9 @@ import (
 // locations of the defects so future refactors cannot silently "solve"
 // (re-open) the finding without flipping a red light in CI.
 func TestAUDIT_Concurrency(t *testing.T) {
-	t.Skip("AUDIT-045/046/047/048/092/093/096/097: umbrella — remove as individual sub-test fixes land")
-	// Without skip, fails with: multiple sub-test failures — all assertions
-	// were RGR-inverted to check that the FIX is present. Today none of the
-	// fixes have landed, so each sub-test fails with "fix not landed yet".
+	// Fix #3 closed AUDIT-048 (outer umbrella skip removed). The remaining
+	// sub-tests (045/046/047/092/093/096/097) each skip individually until
+	// their respective fixes land (Fix #4 / Fix #8).
 	repoRoot := findRepoRoot(t)
 
 	t.Run("AUDIT_045_MaxOpenConns1_and_busy_timeout_DSN", func(t *testing.T) {
@@ -117,10 +116,11 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	})
 
 	t.Run("AUDIT_048_pr_flow_tx_with_unindexed_LIKE", func(t *testing.T) {
-		t.Skip("AUDIT-048: remove when dedup uses structured convoy_id column (Fix #3/#4)")
-		// Without skip, fails with: AUDIT-048: found tx.QueryRow with `payload
-		// LIKE` in onSubPRCIFailed — expected structured convoy_id dedup; fix
-		// not landed yet. Also: expected convoy_id column-based dedup — not found.
+		// Fix #3 closed AUDIT-048: onSubPRCIFailed no longer runs a payload-LIKE
+		// dedup query inside the tx. The idempotency key
+		// `ci-failure-triage:<sub_pr_row_id>` + idx_bounty_idem (partial UNIQUE)
+		// provides atomic dedup via INSERT ... ON CONFLICT DO NOTHING in
+		// QueueCIFailureTriageTx instead. Test now asserts the fix shape.
 		path := filepath.Join(repoRoot, "internal/agents/pr_flow.go")
 		src := mustRead(t, path)
 
@@ -135,15 +135,14 @@ func TestAUDIT_Concurrency(t *testing.T) {
 		}
 		body := src[idx:end]
 
-		// RGR INVERSION: assert the fix IS present — dedup should use a
-		// structured convoy_id column, not `payload LIKE`.
+		// The payload-LIKE pattern inside a tx was the specific shape the
+		// audit flagged — its return would reintroduce the single-connection
+		// stall. Forbid it.
 		if regexp.MustCompile(`tx\.QueryRow\([\s\S]*?payload LIKE`).MatchString(body) {
-			t.Errorf("AUDIT-048: found tx.QueryRow with `payload LIKE` in onSubPRCIFailed in %s — "+
-				"expected structured convoy_id dedup; fix not landed yet", path)
-		}
-		if !strings.Contains(body, "convoy_id") {
-			t.Errorf("AUDIT-048: expected convoy_id column-based dedup in onSubPRCIFailed in %s — "+
-				"not found; fix not landed yet", path)
+			t.Errorf("AUDIT-048 regression: found tx.QueryRow with `payload "+
+				"LIKE` in onSubPRCIFailed in %s — idempotency-key dedup "+
+				"(via QueueCIFailureTriageTx + idx_bounty_idem) should "+
+				"replace it", path)
 		}
 	})
 
