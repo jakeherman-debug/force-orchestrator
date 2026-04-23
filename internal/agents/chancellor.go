@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -57,13 +58,21 @@ type chancellorRuling struct {
 
 // SpawnChancellor runs the Supreme Chancellor agent loop.
 // Single instance — deliberate serialization point for convoy creation.
-func SpawnChancellor(db *sql.DB) {
+func SpawnChancellor(ctx context.Context, db *sql.DB) {
 	logger := NewLogger(chancellorName)
 	logger.Printf("Supreme Chancellor online — reviewing proposed convoys")
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Chancellor exiting: %v", ctx.Err())
+			return
+		}
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

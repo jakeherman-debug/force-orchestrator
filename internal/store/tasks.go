@@ -545,6 +545,37 @@ func TotalSpendDollars(db *sql.DB) float64 {
 		float64(tokensOut)*PriceOutputPerMillion/1_000_000
 }
 
+// SpendRateDollars returns the total spend across all TaskHistory rows with
+// created_at within the given window (e.g. "1 hours", "30 minutes"). Used by
+// the spend-burn-watch dog and the /api/status endpoint to surface in-flight
+// burn rate rather than lifetime spend.
+//
+// Window is a SQLite-compatible modifier (minus sign is added internally).
+func SpendRateDollars(db *sql.DB, window string) float64 {
+	var tokensIn, tokensOut int64
+	db.QueryRow(
+		`SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0)
+		 FROM TaskHistory
+		 WHERE created_at > datetime('now', ?)`,
+		"-"+window,
+	).Scan(&tokensIn, &tokensOut)
+	return float64(tokensIn)*PriceInputPerMillion/1_000_000 +
+		float64(tokensOut)*PriceOutputPerMillion/1_000_000
+}
+
+// AttemptsInWindow returns the count of TaskHistory rows created within the
+// given SQLite modifier window (e.g. "1 hours"). Drives the attempts_last_hour
+// stat surfaced on /api/status — a thrashing fleet shows up here as a sustained
+// high attempt rate even when spend happens to be moderate.
+func AttemptsInWindow(db *sql.DB, window string) int {
+	var n int
+	db.QueryRow(
+		`SELECT COUNT(*) FROM TaskHistory WHERE created_at > datetime('now', ?)`,
+		"-"+window,
+	).Scan(&n)
+	return n
+}
+
 // ── Task history ──────────────────────────────────────────────────────────────
 
 // RecordTaskHistory inserts a history entry and returns its row ID.

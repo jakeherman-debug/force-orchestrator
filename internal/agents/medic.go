@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -89,13 +90,21 @@ type medicShard struct {
 	Repo string `json:"repo"`
 }
 
-func SpawnMedic(db *sql.DB, name string) {
+func SpawnMedic(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
 	logger.Printf("Medic %s coming online", name)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Medic %s exiting: %v", name, ctx.Err())
+			return
+		}
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -141,81 +142,91 @@ func cmdDaemon(db *sql.DB) {
 
 	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d commander(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s), %d pilot(s))...\n",
 		numAgents, numCaptain, numCouncil, numCommanders, numInvestigators, numAuditors, numLibrarians, numMedics, numPilots)
-	go agents.SpawnChancellor(db)
+
+	// AUDIT-020 (Fix #1): threaded context for graceful shutdown. Every agent
+	// Spawn loop exits cleanly when ctx is cancelled, which happens on
+	// SIGINT/SIGTERM BEFORE the drain loop begins. This replaces the prior
+	// behaviour where agents kept claiming fresh Pending tasks during the 30s
+	// drain window and `claude -p` children orphaned on daemon exit.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go agents.SpawnChancellor(ctx, db)
 	for i := 0; i < numCommanders; i++ {
 		name := fmt.Sprintf("Commander-%d", i+1)
 		if i < len(commanderRoster) {
 			name = commanderRoster[i]
 		}
-		go agents.SpawnCommander(db, name)
+		go agents.SpawnCommander(ctx, db, name)
 	}
 	for i := 0; i < numAgents; i++ {
 		name := fmt.Sprintf("Astromech-%d", i+1)
 		if i < len(astromechRoster) {
 			name = astromechRoster[i]
 		}
-		go agents.SpawnAstromech(db, name)
+		go agents.SpawnAstromech(ctx, db, name)
 	}
 	for i := 0; i < numCaptain; i++ {
 		name := fmt.Sprintf("Captain-%d", i+1)
 		if i < len(captainRoster) {
 			name = captainRoster[i]
 		}
-		go agents.SpawnCaptain(db, name)
+		go agents.SpawnCaptain(ctx, db, name)
 	}
 	for i := 0; i < numCouncil; i++ {
 		name := fmt.Sprintf("Council-%d", i+1)
 		if i < len(councilRoster) {
 			name = councilRoster[i]
 		}
-		go agents.SpawnJediCouncil(db, name)
+		go agents.SpawnJediCouncil(ctx, db, name)
 	}
 	for i := 0; i < numInvestigators; i++ {
 		name := fmt.Sprintf("Investigator-%d", i+1)
 		if i < len(investigatorRoster) {
 			name = investigatorRoster[i]
 		}
-		go agents.SpawnInvestigator(db, name)
+		go agents.SpawnInvestigator(ctx, db, name)
 	}
 	for i := 0; i < numAuditors; i++ {
 		name := fmt.Sprintf("Auditor-%d", i+1)
 		if i < len(auditorRoster) {
 			name = auditorRoster[i]
 		}
-		go agents.SpawnAuditor(db, name)
+		go agents.SpawnAuditor(ctx, db, name)
 	}
 	for i := 0; i < numLibrarians; i++ {
 		name := fmt.Sprintf("Librarian-%d", i+1)
 		if i < len(librarianRoster) {
 			name = librarianRoster[i]
 		}
-		go agents.SpawnLibrarian(db, name)
+		go agents.SpawnLibrarian(ctx, db, name)
 	}
 	for i := 0; i < numMedics; i++ {
 		name := fmt.Sprintf("Medic-%d", i+1)
 		if i < len(medicRoster) {
 			name = medicRoster[i]
 		}
-		go agents.SpawnMedic(db, name)
+		go agents.SpawnMedic(ctx, db, name)
 	}
 	for i := 0; i < numPilots; i++ {
 		name := fmt.Sprintf("Pilot-%d", i+1)
 		if i < len(pilotRoster) {
 			name = pilotRoster[i]
 		}
-		go agents.SpawnPilot(db, name)
+		go agents.SpawnPilot(ctx, db, name)
 	}
 	for i := 0; i < numDiplomats; i++ {
 		name := fmt.Sprintf("Diplomat-%d", i+1)
 		if i < len(diplomatRoster) {
 			name = diplomatRoster[i]
 		}
-		go agents.SpawnDiplomat(db, name)
+		go agents.SpawnDiplomat(ctx, db, name)
 	}
-	go agents.SpawnInquisitor(db)
+	go agents.SpawnInquisitor(ctx, db)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
+	defer signal.Stop(sigChan)
 	spawnedAgents := numAgents
 	spawnedCaptains := numCaptain
 	spawnedCouncil := numCouncil
@@ -246,7 +257,7 @@ func cmdDaemon(db *sql.DB) {
 					name = astromechRoster[spawnedAgents]
 				}
 				fmt.Printf("Scaling: spawning %s (astromechs: %d → %d)\n", name, spawnedAgents, newTarget)
-				go agents.SpawnAstromech(db, name)
+				go agents.SpawnAstromech(ctx, db, name)
 				spawnedAgents++
 			}
 			if newTarget < spawnedAgents {
@@ -267,7 +278,7 @@ func cmdDaemon(db *sql.DB) {
 					name = captainRoster[spawnedCaptains]
 				}
 				fmt.Printf("Scaling: spawning %s (captains: %d → %d)\n", name, spawnedCaptains, newCaptains)
-				go agents.SpawnCaptain(db, name)
+				go agents.SpawnCaptain(ctx, db, name)
 				spawnedCaptains++
 			}
 			if newCaptains < spawnedCaptains {
@@ -288,7 +299,7 @@ func cmdDaemon(db *sql.DB) {
 					name = councilRoster[spawnedCouncil]
 				}
 				fmt.Printf("Scaling: spawning %s (council: %d → %d)\n", name, spawnedCouncil, newCouncil)
-				go agents.SpawnJediCouncil(db, name)
+				go agents.SpawnJediCouncil(ctx, db, name)
 				spawnedCouncil++
 			}
 			if newCouncil < spawnedCouncil {
@@ -309,7 +320,7 @@ func cmdDaemon(db *sql.DB) {
 					name = commanderRoster[spawnedCommanders]
 				}
 				fmt.Printf("Scaling: spawning %s (commanders: %d → %d)\n", name, spawnedCommanders, newCommanders)
-				go agents.SpawnCommander(db, name)
+				go agents.SpawnCommander(ctx, db, name)
 				spawnedCommanders++
 			}
 			if newCommanders < spawnedCommanders {
@@ -330,7 +341,7 @@ func cmdDaemon(db *sql.DB) {
 					name = investigatorRoster[spawnedInvestigators]
 				}
 				fmt.Printf("Scaling: spawning %s (investigators: %d → %d)\n", name, spawnedInvestigators, newInvestigators)
-				go agents.SpawnInvestigator(db, name)
+				go agents.SpawnInvestigator(ctx, db, name)
 				spawnedInvestigators++
 			}
 			if newInvestigators < spawnedInvestigators {
@@ -351,7 +362,7 @@ func cmdDaemon(db *sql.DB) {
 					name = auditorRoster[spawnedAuditors]
 				}
 				fmt.Printf("Scaling: spawning %s (auditors: %d → %d)\n", name, spawnedAuditors, newAuditors)
-				go agents.SpawnAuditor(db, name)
+				go agents.SpawnAuditor(ctx, db, name)
 				spawnedAuditors++
 			}
 			if newAuditors < spawnedAuditors {
@@ -372,7 +383,7 @@ func cmdDaemon(db *sql.DB) {
 					name = librarianRoster[spawnedLibrarians]
 				}
 				fmt.Printf("Scaling: spawning %s (librarians: %d → %d)\n", name, spawnedLibrarians, newLibrarians)
-				go agents.SpawnLibrarian(db, name)
+				go agents.SpawnLibrarian(ctx, db, name)
 				spawnedLibrarians++
 			}
 			if newLibrarians < spawnedLibrarians {
@@ -393,7 +404,7 @@ func cmdDaemon(db *sql.DB) {
 					name = medicRoster[spawnedMedics]
 				}
 				fmt.Printf("Scaling: spawning %s (medics: %d → %d)\n", name, spawnedMedics, newMedics)
-				go agents.SpawnMedic(db, name)
+				go agents.SpawnMedic(ctx, db, name)
 				spawnedMedics++
 			}
 			if newMedics < spawnedMedics {
@@ -414,7 +425,7 @@ func cmdDaemon(db *sql.DB) {
 					name = pilotRoster[spawnedPilots]
 				}
 				fmt.Printf("Scaling: spawning %s (pilots: %d → %d)\n", name, spawnedPilots, newPilots)
-				go agents.SpawnPilot(db, name)
+				go agents.SpawnPilot(ctx, db, name)
 				spawnedPilots++
 			}
 			if newPilots < spawnedPilots {
@@ -422,8 +433,17 @@ func cmdDaemon(db *sql.DB) {
 			}
 
 		default:
-			// SIGINT / SIGTERM — graceful drain then exit.
-			fmt.Printf("\nReceived %v — draining in-flight tasks (up to 30s)...\n", sig)
+			// SIGINT / SIGTERM — cancel context to stop agents claiming new work,
+			// then graceful drain, then exit.
+			//
+			// AUDIT-020 (Fix #1): cancel() is called BEFORE the drain loop, so
+			// every Spawn goroutine sees ctx.Err() != nil on its next iteration
+			// and returns cleanly. Prior behaviour let agents keep claiming
+			// fresh Pending tasks during the 30s drain, which raced the
+			// ReleaseInFlightTasks sweep and left orphaned `claude -p`
+			// children. Now agent claim loops stop before the sweep runs.
+			fmt.Printf("\nReceived %v — cancelling context, draining in-flight tasks (up to 30s)...\n", sig)
+			cancel()
 			drainDeadline := time.Now().Add(30 * time.Second)
 			for time.Now().Before(drainDeadline) {
 				var active int

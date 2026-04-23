@@ -237,3 +237,17 @@ func EventStallDetected(taskID int, agent, repo string, lockedMinutes float64) T
 	}
 }
 
+// EventSpendCapExceeded is emitted by the spend-burn-watch dog when the
+// trailing-hour spend crosses a threshold. kind is "soft_cap" (operator
+// warning) or "auto_estop" (fleet halt).
+func EventSpendCapExceeded(hourlySpend, threshold float64, kind string) TelemetryEvent {
+	return TelemetryEvent{
+		EventType: "spend_cap_exceeded",
+		Payload: map[string]any{
+			"hourly_spend_usd": hourlySpend,
+			"threshold_usd":    threshold,
+			"kind":             kind,
+		},
+	}
+}
+

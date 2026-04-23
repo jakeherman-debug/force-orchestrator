@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -298,13 +299,21 @@ func QueueFindPRTemplate(db *sql.DB, repoName, localPath string) (int, error) {
 // SpawnPilot runs a Pilot agent loop. Pilot claims infra task types in turn
 // (FindPRTemplate in Phase 1; later phases add CreateAskBranch, RebaseAskBranch,
 // CleanupAskBranch, RevalidateRepoConfig).
-func SpawnPilot(db *sql.DB, name string) {
+func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
 	logger.Printf("Pilot %s coming online", name)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Pilot %s exiting: %v", name, ctx.Err())
+			return
+		}
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

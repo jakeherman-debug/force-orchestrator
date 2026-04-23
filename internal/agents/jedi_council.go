@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -41,15 +42,23 @@ func BranchAgentName(branchName string) string {
 	return ""
 }
 
-func SpawnJediCouncil(db *sql.DB, name string) {
+func SpawnJediCouncil(ctx context.Context, db *sql.DB, name string) {
 	agentName := name
 	logger := NewLogger(name)
 	logger.Printf("%s starting up", name)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("%s exiting: %v", name, ctx.Err())
+			return
+		}
 		// Hard stop — operator activated e-stop
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 

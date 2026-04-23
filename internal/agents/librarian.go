@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -47,13 +48,21 @@ type writeMemoryPayload struct {
 	Repo     string `json:"repo"`
 }
 
-func SpawnLibrarian(db *sql.DB, name string) {
+func SpawnLibrarian(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
 	logger.Printf("Librarian %s coming online", name)
 
 	for {
+		if ctx.Err() != nil {
+			logger.Printf("Librarian %s exiting: %v", name, ctx.Err())
+			return
+		}
 		if IsEstopped(db) {
 			time.Sleep(5 * time.Second)
+			continue
+		}
+		if SpendCapExceeded(db) {
+			time.Sleep(10 * time.Second)
 			continue
 		}
 
