@@ -1,8 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -27,7 +29,6 @@ import (
 // code; closing the finding flips the assertion green.
 
 func TestAUDIT_066_PruneFleetUnparameterizedInterval(t *testing.T) {
-	t.Skip("AUDIT-066: remove when pruneFleet uses ? placeholder (Fix #8 companion)")
 	// Without skip, fails with: AUDIT-066 REPRODUCED: pruneFleet composes SQL time windows via fmt.Sprintf with `datetime('now', '%s')` interpolation instead of using a `?` placeholder + bound arg. Found 12 fmt.Sprintf calls and 14 `datetime('now', '%s')` hits in cmd/force/maintenance.go lines 466-503.
 	// Citation: cmd/force/maintenance.go:466-503.
 	// Expectation: the prune targets slice is built with `?` placeholders
@@ -71,24 +72,21 @@ func TestAUDIT_066_PruneFleetUnparameterizedInterval(t *testing.T) {
 }
 
 func TestAUDIT_068_ClaimBountyConflatesErrNoRowsWithRealErrors(t *testing.T) {
-	t.Skip("AUDIT-068: remove when claim helpers distinguish ErrNoRows from driver errors (Fix #8)")
-	// Without skip, fails with: AUDIT-068 REPRODUCED (static): claim helpers contain NO reference to sql.ErrNoRows or errors.Is; AUDIT-068 REPRODUCED (empirical): ClaimBounty returned (nil,false) identically for empty queue and missing-table driver error.
-	// Citation: internal/store/tasks.go:87-120 (ClaimBounty),
-	// plus :124 (ClaimForReview) and :146 (ClaimForCaptainReview).
-	// Expectation: the claim helpers distinguish sql.ErrNoRows (benign,
-	// nothing to claim) from real driver/schema errors (which should log
-	// or surface).
+	// Post-fix contract (Fix #8d, AUDIT-068): the claim helpers distinguish
+	// sql.ErrNoRows (benign "nothing to claim") from real driver/schema
+	// errors. The return signature stays `(*Bounty, bool)` — callers need not
+	// be rewritten — but non-ErrNoRows errors are LOGGED to the package-level
+	// stdlib logger, so a silent fleet stall (missing table, FK constraint
+	// surprise, connection error) is observable to the operator via the
+	// daemon log.
 	//
-	// We assert this two ways:
-	//   Part A — STATIC grep: the body of tasks.go between the ClaimBounty
-	//     declaration and ~line 160 (covering all three claim helpers)
-	//     should mention sql.ErrNoRows or errors.Is at least once.
-	//   Part B — EMPIRICAL: seed a DB, DROP the BountyBoard table (guaranteed
-	//     "no such table" from the driver), and call ClaimBounty. A correct
-	//     implementation would surface the error (via log, return, or
-	//     escalation). Instead, the caller sees the identical (nil, false)
-	//     it would see for a legitimate empty queue — indistinguishable,
-	//     so the whole fleet silently stalls if the schema drifts.
+	// Two assertions:
+	//   Part A — STATIC grep: the claim helpers in tasks.go reference
+	//     sql.ErrNoRows and errors.Is.
+	//   Part B — EMPIRICAL: capture the stdlib log output while calling the
+	//     claim helpers with (a) an empty queue and (b) a dropped table.
+	//     The empty-queue call MUST NOT log (ErrNoRows is benign); the
+	//     dropped-table call MUST log a "not ErrNoRows" message.
 
 	// ── Part A: STATIC grep ───────────────────────────────────────────────
 	raw, err := os.ReadFile("tasks.go")
@@ -100,28 +98,38 @@ func TestAUDIT_068_ClaimBountyConflatesErrNoRowsWithRealErrors(t *testing.T) {
 	if len(lines) < 160 {
 		t.Fatalf("tasks.go has only %d lines, citation points to 87-160", len(lines))
 	}
-	region := strings.Join(lines[86:160], "\n") // lines 87..160
+	region := strings.Join(lines[86:220], "\n") // widen to cover all three helpers
 
-	hasErrNoRows := strings.Contains(region, "sql.ErrNoRows") ||
+	hasErrNoRows := strings.Contains(region, "sql.ErrNoRows") &&
 		strings.Contains(region, "errors.Is")
-	if hasErrNoRows {
-		t.Logf("AUDIT-068 STATIC check passed: claim helpers in tasks.go:87-160 " +
-			"reference sql.ErrNoRows / errors.Is.")
-	} else {
-		t.Errorf("AUDIT-068 REPRODUCED (static): ClaimBounty/ClaimForReview/" +
-			"ClaimForCaptainReview (tasks.go:87-160) contain NO reference to " +
-			"sql.ErrNoRows or errors.Is. Every QueryRow error — including " +
-			"driver/schema errors — is swallowed as 'nothing to claim'.")
+	if !hasErrNoRows {
+		t.Errorf("AUDIT-068 REGRESSION (static): ClaimBounty/ClaimForReview/" +
+			"ClaimForCaptainReview (tasks.go) no longer reference sql.ErrNoRows " +
+			"+ errors.Is. Silent fleet stall on schema drift is back.")
 	}
 
-	// ── Part B: EMPIRICAL demonstration ───────────────────────────────────
+	// ── Part B: EMPIRICAL log capture ─────────────────────────────────────
+	var buf bytes.Buffer
+	origOut := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
+	}()
+
 	db := InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	// Confirm claim on empty (legitimate ErrNoRows) returns (nil, false).
+	// Empty queue → no log output.
 	if b, ok := ClaimBounty(db, "CodeEdit", "astromech-test"); ok || b != nil {
 		t.Fatalf("empty queue: expected (nil,false), got (%v,%v)", b, ok)
 	}
+	if buf.Len() != 0 {
+		t.Errorf("AUDIT-068 REGRESSION: empty queue produced log output; ErrNoRows must stay silent. Got: %q", buf.String())
+	}
+	buf.Reset()
 
 	// Drop BountyBoard to force a driver-level error on the SELECT.
 	if _, err := db.Exec(`DROP TABLE BountyBoard`); err != nil {
@@ -140,35 +148,23 @@ func TestAUDIT_068_ClaimBountyConflatesErrNoRowsWithRealErrors(t *testing.T) {
 
 	b, ok := ClaimBounty(db, "CodeEdit", "astromech-test")
 	if ok || b != nil {
-		t.Fatalf("post-DROP: expected (nil,false) from broken impl, got (%v,%v)", b, ok)
+		t.Fatalf("post-DROP: expected (nil,false), got (%v,%v)", b, ok)
 	}
-	// The critical empirical claim: the caller has NO signal to tell
-	// "queue empty" from "BountyBoard table is gone" — the return is
-	// identical to the empty-queue case above. This is the silent fleet
-	// stall the audit describes.
-	t.Errorf("AUDIT-068 REPRODUCED (empirical): ClaimBounty returned (nil,false) " +
-		"identically for (a) legitimate empty queue and (b) missing-table driver " +
-		"error. Callers cannot distinguish 'nothing to claim' from 'DB is broken'; " +
-		"fleet stalls silently on schema drift.")
+	logged := buf.String()
+	if !strings.Contains(logged, "ClaimBounty") || !strings.Contains(logged, "DB error") {
+		t.Errorf("AUDIT-068 REPRODUCED: post-DROP call must log a non-ErrNoRows DB error. Got: %q", logged)
+	}
+	if !strings.Contains(logged, "no such table") {
+		t.Errorf("AUDIT-068: expected underlying driver error (no such table) in log output. Got: %q", logged)
+	}
 }
 
 func TestAUDIT_069_ResolveFeatureBlockersNoTransaction(t *testing.T) {
-	t.Skip("AUDIT-069: remove when ResolveFeatureBlockers wraps in tx (Fix #8)")
-	// Without skip, fails with: AUDIT-069 REPRODUCED (static): ResolveFeatureBlockers performs multi-table mutation with NO transaction (hasBegin=false, hasCommit=false, hasAddDependencyTx=false).
-	// Citation: internal/store/feature_blockers.go:19-75 (ResolveFeatureBlockers).
-	// Expectation: the multi-table mutation (INSERT TaskDependencies, UPDATE
-	// FeatureBlockers SET resolved_at, optional ClearConvoyHold) is wrapped
-	// in a single sql.Tx so a crash mid-sequence either commits all or none.
-	//
-	// We assert this two ways:
-	//   Part A — STATIC grep: the function body must contain db.Begin() or
-	//     BeginTx + Commit/Rollback, and should call AddDependencyTx (not
-	//     AddDependency) since the whole point of AddDependencyTx is exactly
-	//     this case.
-	//   Part B — EMPIRICAL: call ResolveFeatureBlockers with a blocker and
-	//     a tail task, then inspect the on-disk state to show the multi-step
-	//     mutation is committed piecemeal — each db.Exec lands independently,
-	//     so a panic between steps would leave half-resolved state.
+	// Post-fix contract (Fix #8d, AUDIT-069): the multi-table mutation
+	// (AddDependency, UPDATE FeatureBlockers.resolved_at, optional
+	// ClearConvoyHold) is wrapped in a single sql.Tx so a crash mid-sequence
+	// either commits all or none. Uses AddDependencyTx + ClearConvoyHoldTx
+	// siblings to participate in the same tx.
 
 	// ── Part A: STATIC grep ───────────────────────────────────────────────
 	raw, err := os.ReadFile("feature_blockers.go")
@@ -177,31 +173,33 @@ func TestAUDIT_069_ResolveFeatureBlockersNoTransaction(t *testing.T) {
 	}
 	src := string(raw)
 
-	// Slice to the ResolveFeatureBlockers function body (lines 19-75).
-	lines := strings.Split(src, "\n")
-	if len(lines) < 75 {
-		t.Fatalf("feature_blockers.go has only %d lines, citation 19-75", len(lines))
+	// Scan the whole ResolveFeatureBlockers function body — from its
+	// declaration to the next top-level `func ` keyword.
+	fnIdx := strings.Index(src, "func ResolveFeatureBlockers(")
+	if fnIdx < 0 {
+		t.Fatalf("ResolveFeatureBlockers not found in feature_blockers.go")
 	}
-	region := strings.Join(lines[18:75], "\n")
+	tail := src[fnIdx+1:]
+	nextFn := strings.Index(tail, "\nfunc ")
+	var region string
+	if nextFn < 0 {
+		region = src[fnIdx:]
+	} else {
+		region = src[fnIdx : fnIdx+1+nextFn]
+	}
 
 	hasBegin := strings.Contains(region, "db.Begin(") ||
 		strings.Contains(region, "BeginTx(")
 	hasCommit := strings.Contains(region, ".Commit(")
 	hasTxDep := strings.Contains(region, "AddDependencyTx(")
+	hasTxHold := strings.Contains(region, "ClearConvoyHoldTx(")
 
-	if hasBegin && hasCommit {
-		t.Logf("AUDIT-069 STATIC check passed: ResolveFeatureBlockers has "+
-			"Begin/Commit (hasTxDep=%v).", hasTxDep)
-		// If tx exists but AddDependencyTx not used, that is still buggy
-		// (nested-connection hazard), but fine for this spot-check —
-		// leave detailed diagnosis for a follow-up.
-	} else {
-		t.Errorf("AUDIT-069 REPRODUCED (static): ResolveFeatureBlockers "+
-			"(feature_blockers.go:19-75) performs multi-table mutation with NO "+
-			"transaction (hasBegin=%v, hasCommit=%v, hasAddDependencyTx=%v). "+
-			"Crash between INSERT TaskDependencies and UPDATE FeatureBlockers "+
-			"leaves hold cleared but deps unwired (or vice versa).",
-			hasBegin, hasCommit, hasTxDep)
+	if !hasBegin || !hasCommit || !hasTxDep {
+		t.Errorf("AUDIT-069 REGRESSION (static): ResolveFeatureBlockers "+
+			"dropped its transaction wrapping. hasBegin=%v, hasCommit=%v, "+
+			"hasAddDependencyTx=%v, hasClearConvoyHoldTx=%v. Multi-table "+
+			"mutation without tx re-opens the crash-mid-sequence defect.",
+			hasBegin, hasCommit, hasTxDep, hasTxHold)
 	}
 
 	// ── Part B: EMPIRICAL demonstration ───────────────────────────────────

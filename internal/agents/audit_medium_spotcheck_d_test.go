@@ -67,14 +67,14 @@ func spotcheckDExtractFunc(src, name string) string {
 	return ""
 }
 
-// TestAuditMedium155_UnionMergeNoRepoLock pins AUDIT-155: the body of
-// MergeWithUnionStrategy must not reference mergeMu or any sync.Mutex
-// keyed on repoPath. If a fix lands that adds locking, this test fails
-// and AUDIT.md must be updated.
-func TestAuditMedium155_UnionMergeNoRepoLock(t *testing.T) {
-	t.Skip("AUDIT-155: remove when per-repo mutex protects .git/info/attributes rewrite (Fix #8)")
-	// Without skip, fails with: AUDIT-155: MergeWithUnionStrategy rewrites .git/info/attributes without a per-repo mutex still present
-	// Resolve ../git/askbranch.go relative to this package.
+// TestAuditMedium155_UnionMergeHasRepoLock is the post-fix regression guard
+// for AUDIT-155: MergeWithUnionStrategy now acquires a per-repo mutex
+// before rewriting .git/info/attributes, so two concurrent union-merges in
+// the same repo cannot race on the attributes file (which would produce
+// spurious conflict-marker storms and cascade into RebaseConflict
+// escalations). The lock is shared with MergeAndCleanup via
+// lockRepoForMerge(repoPath) — both mutate the repo's shared state.
+func TestAuditMedium155_UnionMergeHasRepoLock(t *testing.T) {
 	path, err := filepath.Abs(filepath.Join("..", "git", "askbranch.go"))
 	if err != nil {
 		t.Fatalf("abs: %v", err)
@@ -86,30 +86,29 @@ func TestAuditMedium155_UnionMergeNoRepoLock(t *testing.T) {
 		t.Fatalf("could not locate MergeWithUnionStrategy in %s", path)
 	}
 
-	// The attributes rewrite site must still be present — otherwise the
-	// finding's cited range has moved and the reviewer must re-verify.
+	// Anchor check: the attributes rewrite must still be present — if it
+	// moved elsewhere, the audit's scope has changed and re-review is
+	// needed.
 	if !strings.Contains(body, ".git") || !strings.Contains(body, "attributes") {
 		t.Fatalf("MergeWithUnionStrategy no longer rewrites .git/info/attributes; "+
 			"AUDIT-155 must be re-audited against the new code shape:\n%s", body)
 	}
 
-	// Expected defective state: NO mergeMu.Lock, NO sync.Mutex acquisition,
-	// NO per-repo keyed mutex inside this function.
-	forbidden := []string{
-		"mergeMu.Lock",
-		"mergeMu.Unlock",
-		"sync.Mutex",
-		"repoMu",
-		"repoLock",
+	// Post-fix contract: MergeWithUnionStrategy must acquire a per-repo
+	// lock (lockRepoForMerge is the canonical helper) before mutating
+	// the attributes file.
+	if !strings.Contains(body, "lockRepoForMerge") && !strings.Contains(body, "sync.Mutex") {
+		t.Errorf("AUDIT-155 REGRESSION: MergeWithUnionStrategy no longer references "+
+			"lockRepoForMerge or sync.Mutex — per-repo locking around the "+
+			".git/info/attributes rewrite has been dropped. Function body:\n%s", body)
 	}
-	for _, tok := range forbidden {
-		if strings.Contains(body, tok) {
-			t.Errorf("AUDIT-155 appears remedied: MergeWithUnionStrategy now references %q. "+
-				"Update AUDIT.md (mark resolved) and remove this spot-check.", tok)
-		}
+	// Both Lock and Unlock (or deferred Unlock) must be present.
+	if !strings.Contains(body, ".Lock()") {
+		t.Errorf("AUDIT-155 REGRESSION: per-repo lock is no longer acquired (no .Lock() call in function body)")
 	}
-	t.Fatalf("AUDIT-155: MergeWithUnionStrategy rewrites .git/info/attributes without " +
-		"a per-repo mutex still present")
+	if !strings.Contains(body, "defer") || !strings.Contains(body, "Unlock") {
+		t.Errorf("AUDIT-155 REGRESSION: per-repo Unlock is no longer deferred in MergeWithUnionStrategy")
+	}
 }
 
 // TestAuditMedium161_EnvBreakerTestNoCallCountAssert pins AUDIT-161: the

@@ -21,6 +21,39 @@ import (
 	"force-orchestrator/internal/util"
 )
 
+// shortGitTimeout bounds short-lived git subprocess invocations (ownership
+// detach, branch delete, status/add/commit) so a hung git subprocess cannot
+// wedge the astromech goroutine while it holds the Locked row. AUDIT-158 /
+// AUDIT-127 (Fix #8d): pre-fix these were chained invocations of the
+// exec.Command constructor directly terminated by Run or CombinedOutput,
+// with no context-based timeout.
+const shortGitTimeout = 60 * time.Second
+
+// runShortGit runs a git command with a 60s context timeout. Replaces the
+// pre-fix chained-and-Run form. AUDIT-158 (Fix #8d).
+func runShortGit(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), shortGitTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "git", args...).Run()
+}
+
+// combinedShortGit runs a git command with a 60s context timeout and
+// returns combined output. Replaces the pre-fix chained-and-CombinedOutput
+// form. AUDIT-158 (Fix #8d).
+func combinedShortGit(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), shortGitTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+}
+
+// combinedShortGitArgs is identical to combinedShortGit but accepts a
+// pre-built arg slice (for callers assembling positional slots).
+func combinedShortGitArgs(args []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), shortGitTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+}
+
 // maxOutputBytes is the circuit-breaker threshold for blown-context detection.
 // If Claude's combined output exceeds this size, the task is re-queued for
 // decomposition rather than sent to council review with potentially garbled output.
@@ -83,6 +116,31 @@ func nextReviewStatus(db *sql.DB, convoyID int) string {
 		return "AwaitingCaptainReview"
 	}
 	return "AwaitingCouncilReview"
+}
+
+// pruneRateLimitRetries drops entries for agent names no longer in the
+// Agents table. AUDIT-096 (Fix #8d): the rateLimitRetries sync.Map grew
+// unbounded across fleet scale-ups/downs because retired agent names
+// left dangling counter entries. Called from the Inquisitor tick.
+func pruneRateLimitRetries(db *sql.DB) {
+	live := map[string]bool{}
+	rows, err := db.Query(`SELECT DISTINCT agent_name FROM Agents`)
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var n string
+		if sErr := rows.Scan(&n); sErr == nil {
+			live[n] = true
+		}
+	}
+	rows.Close()
+	rateLimitRetries.Range(func(key, _ any) bool {
+		if name, ok := key.(string); ok && !live[name] {
+			rateLimitRetries.Delete(name)
+		}
+		return true
+	})
 }
 
 // rateLimitRetries caches per-agent rate-limit hit count in memory, keyed by agent name.
@@ -467,24 +525,38 @@ Do not re-do work that is already correctly committed.`
 			}
 		}
 	}()
+	// AUDIT-125 (Fix #8d): defer close(heartbeatDone) AFTER the goroutine
+	// spawn — so a panic inside RunCLIStreamingContext cannot leak the
+	// heartbeat goroutine + its two tickers. The explicit close() call
+	// that used to sit post-RunCLIStreaming was removed; the defer is the
+	// single signal path. Defer order: this runs BEFORE the enclosing
+	// defer cancelClaude() (LIFO), so the goroutine sees heartbeatDone
+	// closed, returns, and only then does cancelClaude fire.
+	defer close(heartbeatDone)
 
 	// Per-task streaming log — written to fleet-task-<id>.log while Claude runs.
 	// The file is removed on completion so it only exists for in-progress tasks.
 	// `force tail <id>` tails this file to show live output.
+	// AUDIT-126 (Fix #8d): defer Close + Remove immediately so an early
+	// return / panic cannot leak the FD or the stale log file.
 	taskLogPath := fmt.Sprintf("fleet-task-%d.log", bounty.ID)
 	taskLogFile, _ := os.Create(taskLogPath)
 	var taskWriter io.Writer = io.Discard
 	if taskLogFile != nil {
+		// AUDIT-100 (Fix #8d): 0600 so the on-disk stream (which captures
+		// Claude output including injected inbox mail and prior-attempt
+		// transcripts) is operator-private on multi-user hosts. os.Create
+		// uses 0666 & ^umask, which is typically 0644 — too open.
+		_ = os.Chmod(taskLogPath, 0600)
 		taskWriter = taskLogFile
+		defer taskLogFile.Close()
+		defer os.Remove(taskLogPath)
 	}
 
 	rawOut, err := claude.RunCLIStreamingContext(claudeCtx, fullPrompt, "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools, worktreeDir, maxTurnsInt, sessionTimeout, taskWriter)
 
-	close(heartbeatDone)
-	if taskLogFile != nil {
-		taskLogFile.Close()
-		os.Remove(taskLogPath)
-	}
+	// Heartbeat goroutine is stopped via deferred stopHeartbeat above; no
+	// explicit close here any more.
 
 	outputStr := strings.TrimSpace(rawOut)
 	outputPreview := outputStr
@@ -513,9 +585,31 @@ Do not re-do work that is already correctly committed.`
 
 		// Rate limit: back off without burning the circuit breaker
 		if claude.IsRateLimitError(outputStr) || claude.IsRateLimitError(err.Error()) {
-			rlCountVal, _ := rateLimitRetries.Load(name)
-			rlCount, _ := rlCountVal.(int)
-			rateLimitRetries.Store(name, rlCount+1)
+			// AUDIT-096 (Fix #8d): atomic compare-and-swap so two goroutines
+			// for the same agent name can't lose an increment. The spin
+			// retries until we win the race; without the CAS loop a
+			// concurrent Load+Store could drop bumps (e.g., during a
+			// scale-up or restart that temporarily has two goroutines for
+			// the same agent name).
+			rlCount := 0
+			for {
+				var loaded int
+				v, seen := rateLimitRetries.Load(name)
+				if seen {
+					loaded, _ = v.(int)
+				}
+				rlCount = loaded
+				if rateLimitRetries.CompareAndSwap(name, v, rlCount+1) {
+					break
+				}
+				// Initial Store for the not-seen case.
+				if !seen {
+					if _, loadedAfter := rateLimitRetries.LoadOrStore(name, rlCount+1); !loadedAfter {
+						break
+					}
+					// Someone else stored first — retry the CAS.
+				}
+			}
 			claude.PersistRateLimitHit(db, name, rlCount+1)
 			backoff := RateLimitBackoff(rlCount)
 			logger.Printf("Task %d: rate limit detected (hit %d), backing off %v", bounty.ID, rlCount+1, backoff)
@@ -587,7 +681,6 @@ Do not re-do work that is already correctly committed.`
 // non-error retry-path once retry_count >= 2, giving both failure modes
 // the same bounded Decompose shard handling.
 func autoShardIfNoCommits(db *sql.DB, bounty *store.Bounty, name, sessionID, repoPath, branchName, outputStr string, injectedMemoryIDs []int, kind string, logger interface{ Printf(string, ...any) }) bool {
-	_ = logger // reserved for future diagnostics; kept on the signature so callers don't have to decide.
 	base := igit.GetDefaultBranch(repoPath)
 	logOut, _ := igit.RunCmd(repoPath, "log", base+".."+branchName, "--oneline")
 	if strings.TrimSpace(logOut) != "" {
@@ -598,7 +691,13 @@ func autoShardIfNoCommits(db *sql.DB, bounty *store.Bounty, name, sessionID, rep
 		kind, newID, bounty.InfraFailures, bounty.RetryCount)
 	shardHistID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
 	store.StampHistoryMemoryIDs(db, shardHistID, injectedMemoryIDs)
-	store.FailBounty(db, bounty.ID, failMsg)
+	// Fix #8d (CLAUDE.md "No silent failures"): observe the terminator error.
+	// If FailBounty fails the task stays Locked — the operator mail below and
+	// the stale-lock detector are the two recovery channels; the log line
+	// names both so an on-call can correlate.
+	if err := store.FailBounty(db, bounty.ID, failMsg); err != nil {
+		logger.Printf("autoShardIfNoCommits #%d: FailBounty failed (%v); operator mail below surfaces the Decompose reshard, stale-lock detector will clear the Locked row", bounty.ID, err)
+	}
 	telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, name, bounty.ID, failMsg))
 	store.SendMail(db, name, "operator",
 		fmt.Sprintf("[AUTO-SHARDED] Task #%d — re-queued as Decompose #%d after repeated %s failures with no progress",
@@ -667,8 +766,8 @@ func processAstromechOutput(
 			store.LogAudit(db, name, "ownership-lost", taskID,
 				"Claude completed work but ownership changed mid-run — work discarded")
 			base := igit.GetDefaultBranch(repoPath)
-			exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
-			exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+			_ = runShortGit("-C", worktreeDir, "checkout", "--detach", base)
+			_ = runShortGit("-C", repoPath, "branch", "-D", branchName)
 			return
 		}
 	}
@@ -682,8 +781,8 @@ func processAstromechOutput(
 				len(outputStr), util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"", "context-blown, scope-too-large")
 		base := igit.GetDefaultBranch(repoPath)
-		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
-		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+		_ = runShortGit("-C", worktreeDir, "checkout", "--detach", base)
+		_ = runShortGit("-C", repoPath, "branch", "-D", branchName)
 		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
 		if err := store.UpdateBountyStatus(db, taskID, "Completed"); err != nil {
 			// Decompose shard is already queued; if this status update fails the
@@ -732,8 +831,8 @@ func processAstromechOutput(
 				util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"", "scope-too-large, shard-needed")
 		base := igit.GetDefaultBranch(repoPath)
-		exec.Command("git", "-C", worktreeDir, "checkout", "--detach", base).Run()
-		exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+		_ = runShortGit("-C", worktreeDir, "checkout", "--detach", base)
+		_ = runShortGit("-C", repoPath, "branch", "-D", branchName)
 		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
 		if err := store.UpdateBountyStatus(db, taskID, "Completed"); err != nil {
 			// Decompose shard is already queued; if this status update fails the
@@ -768,22 +867,22 @@ func processAstromechOutput(
 
 	// ── Commit inference ─────────────────────────────────────────────────
 
-	gitAddOut, _ := exec.Command("git", "-C", worktreeDir, "add", ".").CombinedOutput()
+	gitAddOut, _ := combinedShortGit("-C", worktreeDir, "add", ".")
 	logger.Printf("Task %d: git add output: %s", taskID, strings.TrimSpace(string(gitAddOut)))
 
-	gitStatusOut, _ := exec.Command("git", "-C", worktreeDir, "status", "--short").CombinedOutput()
+	gitStatusOut, _ := combinedShortGit("-C", worktreeDir, "status", "--short")
 	logger.Printf("Task %d: git status after add: %s", taskID, strings.TrimSpace(string(gitStatusOut)))
 
 	// Truncate payload to 72 chars for the commit subject line
 	commitSubject := util.TruncateStr(strings.SplitN(bounty.Payload, "\n", 2)[0], 72)
-	commitOut, commitErr := exec.Command("git", "-C", worktreeDir, "commit", "-m",
-		fmt.Sprintf("task(%d): %s", taskID, commitSubject)).CombinedOutput()
+	commitOut, commitErr := combinedShortGitArgs([]string{"-C", worktreeDir, "commit", "-m",
+		fmt.Sprintf("task(%d): %s", taskID, commitSubject)})
 	logger.Printf("Task %d: git commit output: %s", taskID, strings.TrimSpace(string(commitOut)))
 
 	if commitErr != nil {
 		// Claude may have already committed — check for commits ahead of the default branch
 		base := igit.GetDefaultBranch(repoPath)
-		aheadOut, _ := exec.Command("git", "-C", worktreeDir, "log", base+"..HEAD", "--oneline").CombinedOutput()
+		aheadOut, _ := combinedShortGit("-C", worktreeDir, "log", base+"..HEAD", "--oneline")
 		logger.Printf("Task %d: commits ahead of base: %s", taskID, strings.TrimSpace(string(aheadOut)))
 
 		if len(strings.TrimSpace(string(aheadOut))) == 0 {

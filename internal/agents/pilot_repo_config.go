@@ -70,7 +70,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 		return
 	}
 	if repo.LocalPath == "" {
-		_ = store.QuarantineRepo(db, payload.Repo, "no local_path recorded")
+		if err := store.QuarantineRepo(db, payload.Repo, "no local_path recorded"); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: QuarantineRepo(%s) failed: %v — repo stays unquarantined; next RevalidateRepoConfig dog tick will retry", bounty.ID, payload.Repo, err)
+		}
 		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
 			logger.Printf("RevalidateRepoConfig #%d: failed to mark Completed after quarantining %s: %v — stale-lock detector will recover", bounty.ID, payload.Repo, err)
 		}
@@ -84,8 +86,10 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 	// 1. Origin URL.
 	currentRemote, remoteErr := repoRemoteURL(repo.LocalPath)
 	if remoteErr != nil {
-		_ = store.QuarantineRepo(db, payload.Repo,
-			fmt.Sprintf("origin unreachable: %v", remoteErr))
+		if qErr := store.QuarantineRepo(db, payload.Repo,
+			fmt.Sprintf("origin unreachable: %v", remoteErr)); qErr != nil {
+			logger.Printf("RevalidateRepoConfig #%d: QuarantineRepo(%s, origin-unreachable) failed: %v — next RevalidateRepoConfig dog tick will retry", bounty.ID, payload.Repo, qErr)
+		}
 		store.SendMail(db, "Pilot", "operator",
 			fmt.Sprintf("[QUARANTINED] %s — origin unreachable", payload.Repo),
 			fmt.Sprintf("Repo '%s' failed RevalidateRepoConfig.\n\nError: %v\n\nThe PR flow is disabled for this repo; tasks fall back to legacy local-merge. Fix the remote and run `force repo set-pr-flow %s on` to re-enable.",
@@ -99,14 +103,18 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 	}
 	if currentRemote != repo.RemoteURL {
 		issues = append(issues, fmt.Sprintf("remote URL changed: %s → %s", repo.RemoteURL, currentRemote))
-		_ = store.SetRepoRemoteInfo(db, payload.Repo, currentRemote, repo.DefaultBranch)
+		if err := store.SetRepoRemoteInfo(db, payload.Repo, currentRemote, repo.DefaultBranch); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: SetRepoRemoteInfo(%s, remote-drift) failed: %v — repo keeps stale URL; RevalidateRepoConfig dog will retry on next tick", bounty.ID, payload.Repo, err)
+		}
 		healedAny = true
 	}
 
 	// 2. Default branch still present.
 	currentDefault := repoDefaultBranch(repo.LocalPath)
 	if currentDefault == "" {
-		_ = store.QuarantineRepo(db, payload.Repo, "default branch undetectable")
+		if err := store.QuarantineRepo(db, payload.Repo, "default branch undetectable"); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: QuarantineRepo(%s, no-default-branch) failed: %v — next RevalidateRepoConfig dog tick will retry", bounty.ID, payload.Repo, err)
+		}
 		store.SendMail(db, "Pilot", "operator",
 			fmt.Sprintf("[QUARANTINED] %s — default branch undetectable", payload.Repo),
 			fmt.Sprintf("Repo '%s' no longer has a detectable default branch (main/master/develop).\n\nFix the repo and re-run `force repo sync`.", payload.Repo),
@@ -118,7 +126,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 	}
 	if currentDefault != repo.DefaultBranch {
 		issues = append(issues, fmt.Sprintf("default branch changed: %s → %s", repo.DefaultBranch, currentDefault))
-		_ = store.SetRepoRemoteInfo(db, payload.Repo, currentRemote, currentDefault)
+		if err := store.SetRepoRemoteInfo(db, payload.Repo, currentRemote, currentDefault); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: SetRepoRemoteInfo(%s, default-branch-drift) failed: %v — RevalidateRepoConfig dog will retry on next tick", bounty.ID, payload.Repo, err)
+		}
 		healedAny = true
 	}
 
@@ -128,7 +138,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 		if _, err := os.Stat(repo.PRTemplatePath); err != nil {
 			issues = append(issues, fmt.Sprintf("pr_template_path missing: %s (%v)", repo.PRTemplatePath, err))
 			// Clear the stale path and re-run FindPRTemplate.
-			_ = store.SetRepoPRTemplatePath(db, payload.Repo, "")
+			if sErr := store.SetRepoPRTemplatePath(db, payload.Repo, ""); sErr != nil {
+				logger.Printf("RevalidateRepoConfig #%d: SetRepoPRTemplatePath(%s, clear) failed: %v — FindPRTemplate requeue below is the recovery path (Diplomat fallback still works with the stale path)", bounty.ID, payload.Repo, sErr)
+			}
 			if _, qErr := QueueFindPRTemplate(db, payload.Repo, repo.LocalPath); qErr != nil {
 				logger.Printf("RevalidateRepoConfig: could not requeue FindPRTemplate: %v", qErr)
 			}
@@ -140,7 +152,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 	if out, pingErr := exec.Command("git", "-C", repo.LocalPath, "ls-remote", "--heads",
 		"origin", currentDefault).CombinedOutput(); pingErr != nil {
 		msg := strings.TrimSpace(string(out))
-		_ = store.QuarantineRepo(db, payload.Repo, fmt.Sprintf("origin ls-remote failed: %s", msg))
+		if qErr := store.QuarantineRepo(db, payload.Repo, fmt.Sprintf("origin ls-remote failed: %s", msg)); qErr != nil {
+			logger.Printf("RevalidateRepoConfig #%d: QuarantineRepo(%s, ls-remote-failed) failed: %v — next RevalidateRepoConfig dog tick will retry", bounty.ID, payload.Repo, qErr)
+		}
 		store.SendMail(db, "Pilot", "operator",
 			fmt.Sprintf("[QUARANTINED] %s — cannot reach origin", payload.Repo),
 			fmt.Sprintf("Repo '%s' ls-remote failed: %s\n\nCheck network/auth; re-run `force repo set-pr-flow %s on` to re-enable.",

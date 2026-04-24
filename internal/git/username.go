@@ -28,9 +28,17 @@ import (
 // it once at startup isn't a concern.
 
 var (
-	usernameOnce  sync.Once
-	cachedUser    string
-	usernameMu    sync.Mutex
+	usernameOnce     sync.Once
+	cachedUser       string
+	usernameMu       sync.Mutex
+	// AUDIT-097 (Fix #8d): usernameCached replaces the sync.Once-reassignment
+	// pattern in ResetBranchPrefixCache. Assigning a new sync.Once{} under
+	// usernameMu was unsafe because sync.Once's internal word and mutex are
+	// not valid "new-zero-value while prior calls are still in Do". The
+	// replacement: a bool flag gated by usernameMu governs whether to
+	// re-run discoverGitHubUsername; the sync.Once is left permanently
+	// consumed and never re-created.
+	usernameCached bool
 )
 
 // BranchPrefix returns the branch-name prefix including trailing slash, e.g.
@@ -40,20 +48,46 @@ var (
 //
 // Test hook: use SetBranchPrefixOverride to force a known value; the override
 // persists until cleared with SetBranchPrefixOverride("").
+//
+// AUDIT-097 (Fix #8d): discovery is gated by a usernameMu-guarded boolean
+// flag rather than a sync.Once that can be reassigned. The Once fires at
+// most once per process; re-discovery goes through the flag path.
 func BranchPrefix() string {
 	usernameMu.Lock()
-	override := branchPrefixOverride
-	usernameMu.Unlock()
-	if override != nil {
-		return *override
+	if branchPrefixOverride != nil {
+		o := *branchPrefixOverride
+		usernameMu.Unlock()
+		return o
 	}
-	usernameOnce.Do(func() {
-		cachedUser = discoverGitHubUsername()
-	})
-	if cachedUser == "" {
+	needDiscover := !usernameCached
+	usernameMu.Unlock()
+
+	if needDiscover {
+		usernameOnce.Do(func() {
+			discovered := discoverGitHubUsername()
+			usernameMu.Lock()
+			cachedUser = discovered
+			usernameCached = true
+			usernameMu.Unlock()
+		})
+		// If a prior Do already ran (before a test's cache reset), flip
+		// the flag here so we don't repeat the Do gate; the reset path
+		// below handles the re-discovery.
+		usernameMu.Lock()
+		if !usernameCached {
+			cachedUser = discoverGitHubUsername()
+			usernameCached = true
+		}
+		usernameMu.Unlock()
+	}
+
+	usernameMu.Lock()
+	u := cachedUser
+	usernameMu.Unlock()
+	if u == "" {
 		return ""
 	}
-	return cachedUser + "/"
+	return u + "/"
 }
 
 // branchPrefixOverride is set by tests via SetBranchPrefixOverride. When
@@ -81,10 +115,16 @@ func SetBranchPrefixOverride(prefix string) (restore func()) {
 // ResetBranchPrefixCache clears the memoised username so the next call to
 // BranchPrefix re-runs discovery. Only useful in tests that want to verify
 // discovery behaviour itself.
+//
+// AUDIT-097 (Fix #8d): no longer reassigns usernameOnce (which is
+// undefined behaviour — sync.Once's internal word cannot be safely
+// replaced while prior .Do invocations may still be in flight). Instead
+// we flip usernameCached back to false; BranchPrefix re-runs discovery
+// under usernameMu, guarded by the bool.
 func ResetBranchPrefixCache() {
 	usernameMu.Lock()
 	defer usernameMu.Unlock()
-	usernameOnce = sync.Once{}
+	usernameCached = false
 	cachedUser = ""
 }
 

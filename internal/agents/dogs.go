@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -114,15 +115,32 @@ func RunDogs(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 		}
 		logger.Printf("Dog %s: running (cooldown %v)", dogName, cooldown)
 		store.DogMarkRun(db, dogName)
-		if err := runDog(db, dogName, logger); err != nil {
-			logger.Printf("Dog %s: error — %v", dogName, err)
-			store.SendMail(db, "inquisitor", "operator",
-				fmt.Sprintf("[DOG FAILURE] %s", dogName),
-				fmt.Sprintf("Watchdog '%s' failed during its scheduled run.\n\nError: %v\n\nThis may indicate a system health issue requiring attention.", dogName, err),
-				0, store.MailTypeAlert)
-		} else {
-			logger.Printf("Dog %s: done", dogName)
+		// AUDIT-047 (Fix #8d): write heartbeat_at so /healthz can spot a
+		// wedged dog — a dog whose heartbeat_at is stale relative to its
+		// cooldown is stuck in a long-running op.
+		store.DogMarkHeartbeat(db, dogName)
+		// AUDIT-047 (Fix #8d): per-dog context.WithTimeout. A hung `gh
+		// pr view` inside Inquisitor would previously wedge the whole
+		// watchdog. Each dog now gets a 5-minute budget; past that we log
+		// and move on so the cycle keeps running.
+		dogCtx, dogCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		errCh := make(chan error, 1)
+		go func(name string) { errCh <- runDog(db, name, logger) }(dogName)
+		select {
+		case err := <-errCh:
+			if err != nil {
+				logger.Printf("Dog %s: error — %v", dogName, err)
+				store.SendMail(db, "inquisitor", "operator",
+					fmt.Sprintf("[DOG FAILURE] %s", dogName),
+					fmt.Sprintf("Watchdog '%s' failed during its scheduled run.\n\nError: %v\n\nThis may indicate a system health issue requiring attention.", dogName, err),
+					0, store.MailTypeAlert)
+			} else {
+				logger.Printf("Dog %s: done", dogName)
+			}
+		case <-dogCtx.Done():
+			logger.Printf("Dog %s: timed out after 5m — moving on; the dog goroutine may still finish but won't block the cycle", dogName)
 		}
+		dogCancel()
 	}
 }
 

@@ -11,14 +11,32 @@ import (
 	"sync"
 )
 
-// mergeMu serializes merge operations across goroutines.
-// Prevents concurrent council members from racing on the same git main worktree.
-// AUDIT-046 closure notes: callers that hold a per-repo lock (see repoMu) should
-// NOT also hold mergeMu — the per-repo mutex is the canonical cross-repo
-// parallel-ship gate. mergeMu remains only for operations that mutate the
-// shared main worktree (checkout / merge / reset) where per-repo locking
-// applies but the mutex pair is load-bearing.
-var mergeMu sync.Mutex
+// mergeMus shards the pre-Fix-#8d global mergeMu on a per-repo basis so
+// cross-repo parallel shipping is no longer capped at one concurrent merge.
+// AUDIT-046 (Fix #8d): the prior single `var mergeMu sync.Mutex` serialised
+// every MergeAndCleanup across every repo, turning a multi-repo convoy
+// ship into a strict sequential queue. Conceptually this is a
+// map[string]*sync.Mutex keyed on filepath.Clean(repoPath); sync.Map gives
+// us lock-free lookup + atomic LoadOrStore so two goroutines racing to
+// acquire the same repo's mutex consistently see the same mutex instance.
+//
+// AUDIT-155 (Fix #8d): this map also backs the per-repo lock that
+// MergeWithUnionStrategy acquires while it rewrites .git/info/attributes —
+// two concurrent union-merges in the same repo would race on the attributes
+// file and one caller's deferred restore would clobber the other's merge.
+var mergeMus sync.Map
+
+// lockRepoForMerge returns a per-repo mutex, creating it lazily. Callers
+// acquire the mutex around MergeAndCleanup / MergeWithUnionStrategy.
+func lockRepoForMerge(repoPath string) *sync.Mutex {
+	key := filepath.Clean(repoPath)
+	if v, ok := mergeMus.Load(key); ok {
+		return v.(*sync.Mutex)
+	}
+	newMu := &sync.Mutex{}
+	actual, _ := mergeMus.LoadOrStore(key, newMu)
+	return actual.(*sync.Mutex)
+}
 
 // bestEffortRun runs a git subcommand and LOGS any failure without returning
 // it. Use this for cleanup / rollback paths where (a) the operation is
@@ -429,8 +447,12 @@ func MergeAndCleanup(repoPath string, branchName string, worktreeDir string) err
 	if err := AssertNotDefaultBranch(repoPath, branchName); err != nil {
 		return fmt.Errorf("MergeAndCleanup refused: %w", err)
 	}
-	mergeMu.Lock()
-	defer mergeMu.Unlock()
+	// AUDIT-046 (Fix #8d): per-repo lock, not global. Two different repos
+	// can ship convoys in parallel; two tasks in the same repo still
+	// serialise on the shared main worktree.
+	mu := lockRepoForMerge(repoPath)
+	mu.Lock()
+	defer mu.Unlock()
 
 	base := GetDefaultBranch(repoPath)
 

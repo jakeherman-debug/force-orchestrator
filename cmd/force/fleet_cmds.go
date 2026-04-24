@@ -607,7 +607,9 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 			}
 			fmt.Printf("  (note) %s — PR flow will fall back to legacy local-merge for this repo.\n", reason)
 			fmt.Printf("  Fix: `git -C %s remote add origin <url>` then `force repo sync`.\n", absPath)
-			_ = store.SetRepoPRFlowEnabled(db, name, false)
+			if err := store.SetRepoPRFlowEnabled(db, name, false); err != nil {
+				fmt.Printf("  (warn) failed to persist pr_flow=false for %s: %v — re-run `force repo set-pr-flow %s off`\n", name, err, name)
+			}
 		} else {
 			// Detect default branch via symbolic-ref, fall back to common names.
 			var defaultBranch string

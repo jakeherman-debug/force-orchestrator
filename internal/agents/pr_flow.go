@@ -363,12 +363,21 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 		case "Escalated", "Failed", "Cancelled":
 			logger.Printf("sub-pr-ci-watch: sub-PR #%d task %d is %s — closing PR and stopping tracking",
 				pr.PRNumber, pr.TaskID, bounty.Status)
+			// AUDIT-043 (Fix #8d): only mark the PR closed in the DB when the
+			// GitHub close actually succeeded. Otherwise the DB diverges — we
+			// stop tracking but the PR stays open on GitHub, cluttering the
+			// repo forever. Leaving checks_state != Closed means the next
+			// dog tick will retry the close.
+			closeOK := true
 			if cwd != "" && ghRepo != "" {
 				if closeErr := ghc.PRClose(cwd, ghRepo, pr.PRNumber); closeErr != nil {
-					logger.Printf("sub-pr-ci-watch: close PR #%d on GitHub failed: %v", pr.PRNumber, closeErr)
+					logger.Printf("sub-pr-ci-watch: close PR #%d on GitHub failed: %v — DB stays open so the next dog tick will retry", pr.PRNumber, closeErr)
+					closeOK = false
 				}
 			}
-			store.MarkAskBranchPRClosed(db, pr.ID)
+			if closeOK {
+				store.MarkAskBranchPRClosed(db, pr.ID)
+			}
 			return
 		}
 	}
@@ -381,7 +390,9 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 
 	// Externally merged (rare — human merged the sub-PR directly).
 	if view.Merged {
-		onSubPRMerged(db, pr, logger)
+		if err := onSubPRMerged(db, pr, logger); err != nil {
+			escalateOnSubPRMergedFailure(db, pr, err, logger)
+		}
 		return
 	}
 	// Externally closed (without merge).
@@ -442,7 +453,9 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 	}
 
 	if string(rollup) != pr.ChecksState {
-		_ = store.UpdateAskBranchPRChecks(db, pr.ID, string(rollup))
+		if err := store.UpdateAskBranchPRChecks(db, pr.ID, string(rollup)); err != nil {
+			logger.Printf("sub-pr-ci-watch: UpdateAskBranchPRChecks for PR #%d failed (rollup=%s): %v — next sub-pr-ci-watch tick (5-min cadence) re-reads PR checks and retries the write", pr.PRNumber, rollup, err)
+		}
 	}
 
 	switch rollup {
@@ -473,42 +486,45 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 	}
 }
 
-func onSubPRMerged(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
-	// All four writes (mark PR merged, complete task, unblock deps, queue memory
-	// task) must land atomically. A partial failure here is catastrophic: if we
-	// mark the PR merged but don't complete the task, sub-pr-ci-watch will never
-	// re-pick it up (PR no longer in state=Open), so the task is stuck forever.
+// onSubPRMerged records a sub-PR merge in the DB. All four writes (mark PR
+// merged, complete task, unblock deps, queue memory task) must land atomically.
+// A partial failure is catastrophic: if we mark the PR merged but don't
+// complete the task, sub-pr-ci-watch will never re-pick it up (PR no longer in
+// state=Open), so the task is stuck forever.
+//
+// AUDIT-015 (Fix #8d): returns error so the caller (handleSubPRPoll / SSE
+// merge callback) can escalate. Pre-fix the six partial-failure sites were
+// log-and-return with no escalation path — an upstream DB flake would loop
+// the dog forever against a PR that was already merged on GitHub. Post-fix,
+// the caller routes any error through CreateEscalation (idempotent per-task
+// via Fix #3 partial UNIQUE) so the operator sees one Open escalation
+// regardless of how many dog ticks it took to repro.
+func onSubPRMerged(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) error {
 	memoryPayload := fmt.Sprintf(`{"task":%q,"files":"","feedback":"merged via PR #%d","diff":"","repo":%q}`,
 		"sub-PR merged", pr.PRNumber, pr.Repo)
 
 	tx, err := db.Begin()
 	if err != nil {
-		logger.Printf("sub-pr-ci-watch: begin tx for sub-PR #%d merge: %v", pr.PRNumber, err)
-		return
+		return fmt.Errorf("begin tx for sub-PR #%d merge: %w", pr.PRNumber, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	if err := store.MarkAskBranchPRMergedTx(tx, pr.ID); err != nil {
-		logger.Printf("sub-pr-ci-watch: mark merged #%d failed: %v", pr.PRNumber, err)
-		return
+		return fmt.Errorf("mark merged #%d: %w", pr.PRNumber, err)
 	}
 	if err := store.UpdateBountyStatusTx(tx, pr.TaskID, "Completed"); err != nil {
-		logger.Printf("sub-pr-ci-watch: update task %d status failed: %v", pr.TaskID, err)
-		return
+		return fmt.Errorf("update task %d status: %w", pr.TaskID, err)
 	}
 	unblocked, err := store.UnblockDependentsOfTx(tx, pr.TaskID)
 	if err != nil {
-		logger.Printf("sub-pr-ci-watch: unblock dependents of task %d failed: %v", pr.TaskID, err)
-		return
+		return fmt.Errorf("unblock dependents of task %d: %w", pr.TaskID, err)
 	}
 	if _, err := store.AddBountyTx(tx, pr.TaskID, "WriteMemory", memoryPayload); err != nil {
-		logger.Printf("sub-pr-ci-watch: queue WriteMemory for task %d failed: %v", pr.TaskID, err)
-		return
+		return fmt.Errorf("queue WriteMemory for task %d: %w", pr.TaskID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		logger.Printf("sub-pr-ci-watch: commit sub-PR #%d merge failed: %v", pr.PRNumber, err)
-		return
+		return fmt.Errorf("commit sub-PR #%d merge: %w", pr.PRNumber, err)
 	}
 
 	// Post-commit side effects: fire webhook only after DB state is durable.
@@ -517,6 +533,24 @@ func onSubPRMerged(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(st
 		logger.Printf("Task %d: unblocked %d dependent(s) after sub-PR merge", pr.TaskID, unblocked)
 	}
 	logger.Printf("sub-pr-ci-watch: task %d completed via sub-PR #%d merge", pr.TaskID, pr.PRNumber)
+	return nil
+}
+
+// escalateOnSubPRMergedFailure is the operator-signal path for AUDIT-015:
+// when onSubPRMerged's atomic tx fails but the PR is already merged on
+// GitHub, we emit an Open escalation so the operator sees the DB/GitHub
+// state divergence. Idempotent per-task via the Fix #3 partial UNIQUE
+// (idx_escalations_open_task) — repeated dog ticks collapse to one Open row.
+func escalateOnSubPRMergedFailure(db *sql.DB, pr store.AskBranchPR, err error, logger interface{ Printf(string, ...any) }) {
+	msg := fmt.Sprintf("sub-PR #%d (%s) merged on GitHub but DB state did not update after repeated attempts: %v. Task status is stale; reconcile by verifying main and manually marking Completed.",
+		pr.PRNumber, pr.Repo, err)
+	logger.Printf("sub-pr-ci-watch: onSubPRMerged #%d failed (%v) — escalating task %d", pr.PRNumber, err, pr.TaskID)
+	if _, escErr := CreateEscalation(db, pr.TaskID, store.SeverityHigh, msg); escErr != nil {
+		logger.Printf("sub-pr-ci-watch: CreateEscalation for task %d failed: %v — operator mail below is the fallback surfacing path", pr.TaskID, escErr)
+	}
+	store.SendMail(db, "sub-pr-ci-watch", "operator",
+		fmt.Sprintf("[DB INCONSISTENCY] Sub-PR #%d merged but DB did not update", pr.PRNumber),
+		msg, pr.TaskID, store.MailTypeAlert)
 }
 
 func onSubPRClosedExternally(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
@@ -843,7 +877,9 @@ func mergeSubPRDirect(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger i
 		logger.Printf("sub-pr-ci-watch: task %d direct merge #%d failed: %v", pr.TaskID, pr.PRNumber, mErr)
 		return
 	}
-	onSubPRMerged(db, pr, logger)
+	if err := onSubPRMerged(db, pr, logger); err != nil {
+		escalateOnSubPRMergedFailure(db, pr, err, logger)
+	}
 }
 
 // onSubPRMissingCI is the legacy name used by cycle1 tests; delegates to mergeSubPRDirect.

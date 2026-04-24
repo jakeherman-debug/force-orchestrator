@@ -145,7 +145,9 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		if repo.LocalPath == "" || repo.RemoteURL == "" {
 			// Layer B backfill should have populated these. If they're empty,
 			// flag the repo and skip rather than generate broken branches.
-			_ = store.SetRepoPRFlowEnabled(db, repoName, false)
+			if err := store.SetRepoPRFlowEnabled(db, repoName, false); err != nil {
+				logger.Printf("CreateAskBranch #%d: quarantine pr_flow for %s failed: %v — repo stays enabled; Pilot preflight dog will re-quarantine on next tick", bounty.ID, repoName, err)
+			}
 			failures = append(failures, fmt.Sprintf("%s: missing local_path or remote_url (pr_flow disabled)", repoName))
 			continue
 		}
@@ -192,7 +194,9 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 	if len(created) > 0 {
 		firstRepo := repos[0]
 		if ab := store.GetConvoyAskBranch(db, payload.ConvoyID, firstRepo); ab != nil {
-			_ = store.SetConvoyAskBranch(db, payload.ConvoyID, ab.AskBranch, ab.AskBranchBaseSHA)
+			if err := store.SetConvoyAskBranch(db, payload.ConvoyID, ab.AskBranch, ab.AskBranchBaseSHA); err != nil {
+				logger.Printf("CreateAskBranch #%d: legacy Convoys.ask_branch mirror update failed: %v — per-repo ConvoyAskBranches rows are authoritative, the main-drift-watch dog reads those", bounty.ID, err)
+			}
 		}
 	}
 
@@ -266,7 +270,9 @@ func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pri
 		repo := store.GetRepo(db, ab.Repo)
 		if repo == nil || repo.LocalPath == "" {
 			// Repo gone — just remove the DB row.
-			_ = store.DeleteConvoyAskBranch(db, ab.ConvoyID, ab.Repo)
+			if err := store.DeleteConvoyAskBranch(db, ab.ConvoyID, ab.Repo); err != nil {
+				logger.Printf("CleanupAskBranch #%d: DeleteConvoyAskBranch(repo-gone) %s failed: %v — row persists, next CleanupAskBranch dog tick will retry", bounty.ID, ab.Repo, err)
+			}
 			deleted = append(deleted, ab.Repo+"(row-only)")
 			continue
 		}
@@ -274,7 +280,9 @@ func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pri
 			failed = append(failed, fmt.Sprintf("%s: %v", ab.Repo, err))
 			continue
 		}
-		_ = store.DeleteConvoyAskBranch(db, ab.ConvoyID, ab.Repo)
+		if err := store.DeleteConvoyAskBranch(db, ab.ConvoyID, ab.Repo); err != nil {
+			logger.Printf("CleanupAskBranch #%d: DeleteConvoyAskBranch %s failed: %v — remote branch gone but DB row persists; CleanupAskBranch dog will re-run and skip the already-deleted branch", bounty.ID, ab.Repo, err)
+		}
 		deleted = append(deleted, ab.Repo)
 	}
 	if len(failed) > 0 {

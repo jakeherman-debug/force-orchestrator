@@ -48,7 +48,9 @@ func dogPRReviewResolve(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 		if c.CommentType != "review_comment" {
 			// Still stamp as resolved to drop it from the sweep; the fix
 			// landed, there's nothing else to do.
-			_ = store.MarkThreadResolved(db, c.ID)
+			if err := store.MarkThreadResolved(db, c.ID); err != nil {
+				logger.Printf("pr-review-resolve: mark resolved (issue-comment) for row %d failed: %v — sweep dog will retry next cycle", c.ID, err)
+			}
 			continue
 		}
 		nodeID, err := ghc.FindReviewThreadNodeID(repoCfg.LocalPath, ghRepo, c.DraftPRNumber, c.GitHubCommentID)
@@ -59,7 +61,9 @@ func dogPRReviewResolve(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 		if nodeID == "" {
 			// Thread not found (comment deleted? thread detached?). Stamp as
 			// resolved so we don't re-check forever.
-			_ = store.MarkThreadResolved(db, c.ID)
+			if err := store.MarkThreadResolved(db, c.ID); err != nil {
+				logger.Printf("pr-review-resolve: mark resolved (thread-detached) for row %d failed: %v — sweep dog will retry next cycle", c.ID, err)
+			}
 			continue
 		}
 		if err := ghc.ResolveReviewThread(repoCfg.LocalPath, nodeID); err != nil {

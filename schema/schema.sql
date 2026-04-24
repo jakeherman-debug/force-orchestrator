@@ -290,9 +290,10 @@ CREATE INDEX IF NOT EXISTS idx_auditlog_task_id    ON AuditLog (task_id);
 -- Cooldown tracking for periodic background dogs (log rotation, WAL checkpoint, etc.)
 
 CREATE TABLE IF NOT EXISTS Dogs (
-    name        TEXT PRIMARY KEY,
-    last_run_at TEXT    DEFAULT '',
-    run_count   INTEGER DEFAULT 0
+    name         TEXT PRIMARY KEY,
+    last_run_at  TEXT    DEFAULT '',
+    run_count    INTEGER DEFAULT 0,
+    heartbeat_at TEXT    DEFAULT ''
 );
 
 -- ── Fleet memory ─────────────────────────────────────────────────────────────

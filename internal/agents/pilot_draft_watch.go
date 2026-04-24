@@ -94,14 +94,20 @@ func pollConvoyDraftPRs(db *sql.DB, convoyID int, convoyName string, logger inte
 		switch {
 		case isMerged:
 			if ab.DraftPRState != "Merged" {
-				_ = store.UpdateConvoyAskBranchDraftState(db, ab.ConvoyID, ab.Repo, "Merged")
-				logger.Printf("draft-pr-watch: %s draft PR #%d merged", ab.Repo, ab.DraftPRNumber)
+				if err := store.UpdateConvoyAskBranchDraftState(db, ab.ConvoyID, ab.Repo, "Merged"); err != nil {
+					logger.Printf("draft-pr-watch: UpdateConvoyAskBranchDraftState(Merged) for %s PR #%d failed: %v — next draft-pr-watch dog tick re-reads PR state and retries", ab.Repo, ab.DraftPRNumber, err)
+				} else {
+					logger.Printf("draft-pr-watch: %s draft PR #%d merged", ab.Repo, ab.DraftPRNumber)
+				}
 			}
 			merged++
 		case strings.EqualFold(state, "CLOSED"):
 			if ab.DraftPRState != "Closed" {
-				_ = store.UpdateConvoyAskBranchDraftState(db, ab.ConvoyID, ab.Repo, "Closed")
-				logger.Printf("draft-pr-watch: %s draft PR #%d closed without merge", ab.Repo, ab.DraftPRNumber)
+				if err := store.UpdateConvoyAskBranchDraftState(db, ab.ConvoyID, ab.Repo, "Closed"); err != nil {
+					logger.Printf("draft-pr-watch: UpdateConvoyAskBranchDraftState(Closed) for %s PR #%d failed: %v — next draft-pr-watch dog tick re-reads PR state and retries", ab.Repo, ab.DraftPRNumber, err)
+				} else {
+					logger.Printf("draft-pr-watch: %s draft PR #%d closed without merge", ab.Repo, ab.DraftPRNumber)
+				}
 			}
 			closed++
 		default:

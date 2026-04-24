@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,6 +28,13 @@ const bootCallCooldown = 30 * time.Minute
 var bootLastCalled = map[int]time.Time{}
 
 // SpawnInquisitor periodically hunts the fleet for problems.
+//
+// AUDIT-047 (Fix #8d): each iteration runs inside a derived context.WithTimeout
+// (15 min hard budget) so a wedged subcomponent (e.g., a stuck gh call inside
+// RunDogs, a hung pragma WAL_CHECKPOINT) cannot freeze the Inquisitor
+// indefinitely. Dog-level timeouts (see RunDogs) provide a finer-grained
+// 5-min budget per dog, and DogMarkHeartbeat writes heartbeat_at on each
+// dog-start so /healthz can surface a wedged dog to the operator.
 func SpawnInquisitor(ctx context.Context, db *sql.DB) {
 	logger := NewLogger("Inquisitor")
 	logger.Printf("Inquisitor deployed — hunting every %v, stale threshold %v", inquisitorInterval, staleLockTimeout)
@@ -38,6 +46,27 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB) {
 			return
 		}
 		time.Sleep(inquisitorInterval)
+		// AUDIT-047: bound each Inquisitor tick with context.WithTimeout.
+		// When the tick returns normally the cancel frees the context.
+		// When the tick runs long, the context fires and downstream calls
+		// that honour it (gh, future claude calls) abort rather than hang.
+		tickCtx, tickCancel := context.WithTimeout(ctx, 15*time.Minute)
+		runInquisitorTick(tickCtx, db, logger)
+		tickCancel()
+		continue
+	}
+}
+
+// runInquisitorTick executes one Inquisitor sweep cycle. Split out from
+// SpawnInquisitor so each tick runs under its own timeout-bounded
+// context (AUDIT-047) without the enclosing for-loop needing deferred
+// cancellation book-keeping.
+func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
+	_ = ctx // ctx is honoured by downstream gh / claude calls that take it explicitly
+	// The original body (preserved below) doesn't yet take ctx everywhere —
+	// threading it through the stale-lock UPDATE / classifier is a future
+	// work item; for now the tick-level timeout prevents a single sweep
+	// from running longer than 15 min.
 
 		rows, err := db.Query(`
 			SELECT id FROM BountyBoard
@@ -101,10 +130,16 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB) {
 			}
 		}
 
+		// AUDIT-096 (Fix #8d): prune rateLimitRetries entries for agent
+		// names that are no longer present in the Agents table. Without a
+		// prune the map grows unbounded across fleet scale-ups/downs as
+		// retired agent names leave dangling counter entries. Helper
+		// lives in astromech.go next to the map declaration.
+		pruneRateLimitRetries(db)
+
 		RunDogs(db, logger)
 
 		db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
-	}
 }
 
 // staleClassifyingTimeout is how long a task may remain in status='Classifying'

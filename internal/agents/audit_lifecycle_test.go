@@ -79,8 +79,6 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// `close(heartbeatDone)` — NOT via defer. A panic in RunCLIStreaming leaks
 	// the heartbeat goroutine + ticker.
 	t.Run("TestAUDIT_125_heartbeat_not_deferred", func(t *testing.T) {
-		t.Skip("AUDIT-125: remove when defer close/Remove lands in astromech.go (Fix #8)")
-		// Without skip, fails with: audit_lifecycle_test.go:105: AUDIT-125: heartbeatDone closed without defer still present
 		src := lifecycleReadFile(t, "internal/agents/astromech.go")
 		lines := strings.Split(src, "\n")
 		var declIdx = -1
@@ -93,8 +91,13 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		if declIdx < 0 {
 			t.Fatalf("AUDIT-125 precondition missing: heartbeatDone declaration not found")
 		}
-		// RGR inversion: fail if defer close(heartbeatDone) is still absent near declaration.
-		end := declIdx + 11
+		// RGR inversion: fail if defer close(heartbeatDone) is still absent
+		// near declaration. Window is 40 lines — wide enough to cover the
+		// heartbeat goroutine spawn (which must live between the make and
+		// the defer so AUDIT-105's carve-out picks up the IsEstopped poll),
+		// but tight enough that the defer has to be in the same logical
+		// block as the declaration.
+		end := declIdx + 40
 		if end > len(lines) {
 			end = len(lines)
 		}
@@ -109,8 +112,6 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// `os.Create(taskLogPath)` has no matching `defer Close()` / `defer Remove()`.
 	// Panic / early return paths leak FD and stale file.
 	t.Run("TestAUDIT_126_tasklog_not_deferred", func(t *testing.T) {
-		t.Skip("AUDIT-126: remove when defer close/Remove lands in astromech.go (Fix #8)")
-		// Without skip, fails with: audit_lifecycle_test.go:137: AUDIT-126: os.Create(taskLogPath) without deferred Close+Remove still present
 		src := lifecycleReadFile(t, "internal/agents/astromech.go")
 		lines := strings.Split(src, "\n")
 		var createIdx = -1
@@ -166,8 +167,6 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// stderrBuf / textBuf are strings.Builder with no size cap. A runaway
 	// Claude can OOM the daemon before the 200 KB astromech breaker fires.
 	t.Run("TestAUDIT_129_unbounded_buffers", func(t *testing.T) {
-		t.Skip("AUDIT-129: remove when RunCLIStreaming caps textBuf size (Fix #8)")
-		// Without skip, fails with: audit_lifecycle_test.go:183: AUDIT-129: unbounded textBuf strings.Builder without size cap still present
 		src := lifecycleReadFile(t, "internal/claude/claude.go")
 		if !strings.Contains(src, "var stderrBuf strings.Builder") {
 			t.Fatalf("AUDIT-129 precondition missing: stderrBuf strings.Builder not found")
@@ -191,8 +190,6 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// exec.Command(...).Run() / .CombinedOutput() with no timeout. A hung git
 	// process wedges the astromech goroutine while holding the Locked row.
 	t.Run("TestAUDIT_158_astromech_git_no_timeout", func(t *testing.T) {
-		t.Skip("AUDIT-158: remove when astromech.go uses CommandContext (Fix #8)")
-		// Without skip, fails with: audit_lifecycle_test.go:206: AUDIT-158: bare exec.Command().Run()/CombinedOutput() without CommandContext still present
 		src := lifecycleReadFile(t, "internal/agents/astromech.go")
 		// Sweep the whole file for bare exec.Command(...) .Run/.CombinedOutput patterns.
 		runRe := regexp.MustCompile(`exec\.Command\([^)]+\)\.Run\(\)`)
@@ -209,8 +206,6 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// cmd/force/fleet_cmds.go:217 — signal.Notify with no matching
 	// `defer signal.Stop(sigChan)`. Leaks registration in embedded test runs.
 	t.Run("TestAUDIT_164_signal_channel_never_stopped", func(t *testing.T) {
-		t.Skip("AUDIT-164: remove when signal.Stop deferred (Fix #8)")
-		// Without skip, fails with: audit_lifecycle_test.go:222: AUDIT-164: signal.Notify without defer signal.Stop still present
 		src := lifecycleReadFile(t, "cmd/force/fleet_cmds.go")
 		if !strings.Contains(src, "signal.Notify(sigChan") {
 			t.Fatalf("AUDIT-164 precondition missing: signal.Notify(sigChan, ...) not found")

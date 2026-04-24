@@ -230,6 +230,18 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 		return "", fmt.Errorf("branch and baseRef required")
 	}
 
+	// AUDIT-155 (Fix #8d): acquire the per-repo merge lock before rewriting
+	// .git/info/attributes. Two concurrent union-merges in the same repo
+	// would otherwise race: one caller's `defer restore` could run while
+	// the other is mid-merge, reverting the attributes file and producing
+	// spurious conflict-marker storms (which cascade into RebaseConflict
+	// escalations). The lock is shared with MergeAndCleanup — the two
+	// operations both mutate the repo's `.git/info/attributes` and/or
+	// shared main worktree, so serialising them per-repo is correct.
+	mu := lockRepoForMerge(repoPath)
+	mu.Lock()
+	defer mu.Unlock()
+
 	// Fetch both refs so we're merging against current origin state.
 	// `--` separator before the branch refspec (Fix #9).
 	if out, err := exec.Command("git", "-C", repoPath, "fetch", "origin", "--", branch).CombinedOutput(); err != nil {

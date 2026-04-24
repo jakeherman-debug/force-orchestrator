@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"log"
+)
 
 // CreateFeatureBlocker records that blockedConvoyID cannot proceed until
 // blockingFeatureID has a completed convoy. Also sets a ConvoyHold so the
@@ -24,17 +27,30 @@ func CreateFeatureBlocker(db *sql.DB, blockedConvoyID, blockingFeatureID int, re
 // root Pending/Planned tasks to the new convoy's tail tasks, then clears the blockers
 // and any ConvoyHold on the blocked convoy (if no other blockers remain).
 // Returns the number of cross-convoy dependency edges injected.
+//
+// AUDIT-069 (Fix #8d): the per-blocked-convoy sequence (AddDependency,
+// UPDATE FeatureBlockers SET resolved_at, optional ClearConvoyHold) now
+// runs inside a single tx. Pre-fix, a crash mid-sequence could leave the
+// hold cleared but dependencies unwired — the operator saw a "ready"
+// convoy with no blockers wired, and the blocked work ran out of order.
+// The outer read phase (finding blocked_convoy_ids, tail ids, root ids)
+// stays outside the tx: those are snapshots, and holding the single
+// SQLite writer while iterating them would block every other writer.
 func ResolveFeatureBlockers(db *sql.DB, blockingFeatureID, newConvoyID int) int {
 	rows, err := db.Query(`
 		SELECT blocked_convoy_id FROM FeatureBlockers
 		WHERE blocking_feature_id = ? AND resolved_at IS NULL`, blockingFeatureID)
 	if err != nil {
+		log.Printf("ResolveFeatureBlockers: blocked_convoy_ids query failed: %v", err)
 		return 0
 	}
 	var blockedConvoyIDs []int
 	for rows.Next() {
 		var id int
-		rows.Scan(&id)
+		if sErr := rows.Scan(&id); sErr != nil {
+			log.Printf("ResolveFeatureBlockers: blocked_convoy_id scan failed: %v", sErr)
+			continue
+		}
 		blockedConvoyIDs = append(blockedConvoyIDs, id)
 	}
 	rows.Close()
@@ -49,35 +65,72 @@ func ResolveFeatureBlockers(db *sql.DB, blockingFeatureID, newConvoyID int) int 
 			WHERE convoy_id = ? AND status IN ('Pending', 'Planned')
 			  AND id NOT IN (SELECT task_id FROM TaskDependencies)`, blockedConvoyID)
 		if err != nil {
+			log.Printf("ResolveFeatureBlockers: root-ids query for convoy %d failed: %v", blockedConvoyID, err)
 			continue
 		}
 		var rootIDs []int
 		for rootRows.Next() {
 			var id int
-			rootRows.Scan(&id)
+			if sErr := rootRows.Scan(&id); sErr != nil {
+				log.Printf("ResolveFeatureBlockers: root-id scan failed: %v", sErr)
+				continue
+			}
 			rootIDs = append(rootIDs, id)
 		}
 		rootRows.Close()
 
+		// Atomic mutation for this blocked convoy: deps + blocker-resolve +
+		// optional hold-clear all land together (or not at all).
+		tx, err := db.Begin()
+		if err != nil {
+			log.Printf("ResolveFeatureBlockers: begin tx for convoy %d failed: %v", blockedConvoyID, err)
+			continue
+		}
+		localInjected := 0
+		var txErr error
 		for _, rootID := range rootIDs {
 			for _, tailID := range tailIDs {
-				AddDependency(db, rootID, tailID)
-				injected++
+				if depErr := AddDependencyTx(tx, rootID, tailID); depErr != nil {
+					txErr = depErr
+					break
+				}
+				localInjected++
+			}
+			if txErr != nil {
+				break
 			}
 		}
-
-		// Mark blocker resolved.
-		db.Exec(`UPDATE FeatureBlockers SET resolved_at = datetime('now')
-		         WHERE blocked_convoy_id = ? AND blocking_feature_id = ?`,
-			blockedConvoyID, blockingFeatureID)
-
-		// Clear ConvoyHold only if no other unresolved blockers remain.
-		var remaining int
-		db.QueryRow(`SELECT COUNT(*) FROM FeatureBlockers
-		             WHERE blocked_convoy_id = ? AND resolved_at IS NULL`, blockedConvoyID).Scan(&remaining)
-		if remaining == 0 {
-			ClearConvoyHold(db, blockedConvoyID)
+		if txErr == nil {
+			if _, uErr := tx.Exec(`UPDATE FeatureBlockers SET resolved_at = datetime('now')
+				WHERE blocked_convoy_id = ? AND blocking_feature_id = ?`,
+				blockedConvoyID, blockingFeatureID); uErr != nil {
+				txErr = uErr
+			}
 		}
+		if txErr == nil {
+			var remaining int
+			// Count remaining unresolved blockers EXCLUDING the row we just
+			// updated inside the tx — the tx hasn't committed yet so the
+			// count would otherwise still include it.
+			if cErr := tx.QueryRow(`SELECT COUNT(*) FROM FeatureBlockers
+				WHERE blocked_convoy_id = ? AND resolved_at IS NULL`, blockedConvoyID).Scan(&remaining); cErr != nil {
+				txErr = cErr
+			} else if remaining == 0 {
+				if hErr := ClearConvoyHoldTx(tx, blockedConvoyID); hErr != nil {
+					txErr = hErr
+				}
+			}
+		}
+		if txErr != nil {
+			log.Printf("ResolveFeatureBlockers: tx for convoy %d failed mid-sequence: %v — rolling back", blockedConvoyID, txErr)
+			_ = tx.Rollback()
+			continue
+		}
+		if cErr := tx.Commit(); cErr != nil {
+			log.Printf("ResolveFeatureBlockers: tx commit for convoy %d failed: %v", blockedConvoyID, cErr)
+			continue
+		}
+		injected += localInjected
 	}
 	return injected
 }

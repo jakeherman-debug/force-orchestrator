@@ -23,6 +23,13 @@ func InitHolocronDSN(dsn string) *sql.DB {
 	// under concurrent agent goroutines. Reads still fan out through idle conns.
 	db.SetMaxOpenConns(1)
 	db.Exec("PRAGMA journal_mode=WAL;")
+	// AUDIT-045 (Fix #8d): busy_timeout set post-Open via db.Exec rather
+	// than inside the DSN query-string. Pre-fix only `InitHolocron` (the
+	// production DSN) carried `?_busy_timeout=5000`; every `:memory:` DSN
+	// used by tests ran with busy_timeout=0, so SQLITE_BUSY races in the
+	// test fleet looked indistinguishable from real bugs. Setting it via
+	// post-Open Exec applies uniformly regardless of DSN.
+	db.Exec("PRAGMA busy_timeout=5000;")
 
 	createSchema(db)
 	runMigrations(db)
@@ -240,6 +247,22 @@ func DogMarkRun(db *sql.DB, name string) {
 	db.Exec(`INSERT INTO Dogs (name, last_run_at, run_count)
 		VALUES (?, datetime('now'), 1)
 		ON CONFLICT(name) DO UPDATE SET last_run_at = datetime('now'), run_count = run_count + 1`, name)
+}
+
+// DogMarkHeartbeat stamps the dog's heartbeat_at timestamp. AUDIT-047
+// (Fix #8d): called at the start of each dog's work so /healthz can
+// detect a wedged dog by comparing heartbeat_at + last_run_at against
+// the dog's cooldown.
+func DogMarkHeartbeat(db *sql.DB, name string) {
+	db.Exec(`UPDATE Dogs SET heartbeat_at = datetime('now') WHERE name = ?`, name)
+}
+
+// DogHeartbeat returns the most recent heartbeat_at for a dog (empty if
+// never recorded / pre-migration DB).
+func DogHeartbeat(db *sql.DB, name string) string {
+	var t string
+	db.QueryRow(`SELECT IFNULL(heartbeat_at, '') FROM Dogs WHERE name = ?`, name).Scan(&t)
+	return t
 }
 
 // ── SystemConfig ──────────────────────────────────────────────────────────────

@@ -181,7 +181,9 @@ func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger in
 	}
 
 	// All per-repo draft PRs are open. Transition convoy to DraftPROpen.
-	_ = store.SetConvoyStatus(db, payload.ConvoyID, "DraftPROpen")
+	if err := store.SetConvoyStatus(db, payload.ConvoyID, "DraftPROpen"); err != nil {
+		logger.Printf("ShipConvoy #%d: SetConvoyStatus(DraftPROpen) for convoy %d failed: %v — convoy-review-watch dog will re-queue a ConvoyReview on the next tick once the status flip lands via retry", bounty.ID, payload.ConvoyID, err)
+	}
 
 	// Queue a ConvoyReview to verify the ask-branch diff delivers everything commissioned.
 	// The dog re-triggers it after each round of fix tasks completes.
@@ -256,7 +258,9 @@ func openDraftPRForAskBranch(db *sql.DB, agentName string, convoy *store.Convoy,
 	if err := igit.ForcePushBranch(repo.LocalPath, ab.AskBranch); err != nil {
 		return fmt.Errorf("force-push after rebase failed: %w", err)
 	}
-	_ = store.UpdateConvoyAskBranchBase(db, ab.ConvoyID, ab.Repo, newTip)
+	if err := store.UpdateConvoyAskBranchBase(db, ab.ConvoyID, ab.Repo, newTip); err != nil {
+		logger.Printf("ShipConvoy: UpdateConvoyAskBranchBase(%s, new tip after rebase) failed: %v — main-drift-watch reads this SHA; a stale value triggers an extra rebase cycle but does not corrupt state", ab.Repo, err)
+	}
 
 	// Build the PR body.
 	body, bodyErr := generatePRBody(db, convoy, ab, repo, logger)

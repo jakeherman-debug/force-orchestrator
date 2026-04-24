@@ -83,65 +83,41 @@ func TestAuditMediumSpotcheckC(t *testing.T) {
 	// Cancelled by operator) between Medic's spawn and WorktreeReset's
 	// execution, the UPDATE silently affects 0 rows — the worktree is wiped
 	// but no retry is queued. There is no log warning on a 0-row result.
-	t.Run("TestAUDIT_151_worktree_reset_silent_zero_row", func(t *testing.T) {
-		t.Skip("AUDIT-151: remove when WorktreeReset logs 0-row result + escalates (Fix #8)")
-		// Without skip, fails with: AUDIT-151: WorktreeReset parent-requeue UPDATE discards RowsAffected and emits no escalation on 0-row result still present
+	t.Run("TestAUDIT_151_worktree_reset_logs_zero_row_and_escalates", func(t *testing.T) {
+		// Post-fix contract (Fix #8d): when the parent-requeue UPDATE
+		// affects 0 rows (parent transitioned to an unexpected state
+		// between Medic spawn and WorktreeReset execution), the reset
+		// logs a warning AND escalates via CreateEscalation. The
+		// wipe-then-silently-no-op pre-fix behaviour is closed.
 		src := mediumCReadFile(t, "internal/agents/pilot_worktree_reset.go")
 
-		// The exact filter the audit cites must still be present.
+		// Anchor: the status filter must still be present — if it moved,
+		// the audit scope has changed.
 		filterRe := regexp.MustCompile(
 			`status IN \('Failed','Escalated','ConflictPending'\)`)
 		if !filterRe.MatchString(src) {
-			t.Fatalf("AUDIT-151 precondition missing: parent-requeue UPDATE no " +
+			t.Fatalf("AUDIT-151 anchor lost: parent-requeue UPDATE no " +
 				"longer filters on status IN ('Failed','Escalated','ConflictPending')")
 		}
 
-		// The UPDATE is executed with `_, _ = db.Exec(...)` — the RowsAffected
-		// return is discarded, so there is no check for 0 rows and no log
-		// warning. Assert the discard idiom is present around the parent
-		// UPDATE statement.
-		discardRe := regexp.MustCompile(
-			`(?s)_,\s*_\s*=\s*db\.Exec\(` + "`" + `UPDATE BountyBoard[^` + "`" + `]*?status IN \('Failed','Escalated','ConflictPending'\)`)
-		if !discardRe.MatchString(src) {
-			t.Fatalf("AUDIT-151 source drift: parent-requeue UPDATE no longer " +
-				"uses the `_, _ = db.Exec(...)` discard idiom; audit may be fixed")
+		// Post-fix contract: the UPDATE is captured into a variable so
+		// RowsAffected can be checked. Assert the presence of the `res.
+		// RowsAffected()` / `n == 0` pattern near the UPDATE.
+		if !strings.Contains(src, "RowsAffected") {
+			t.Error("AUDIT-151 REGRESSION: WorktreeReset parent-requeue UPDATE no " +
+				"longer checks RowsAffected — 0-row silent no-op is back")
 		}
-
-		// No RowsAffected handling and no warning-level log anywhere in the
-		// function body near the UPDATE.
-		// Find the window from ParentTaskID > 0 down to the next blank line
-		// past the escalation-resolve call.
-		startIdx := strings.Index(src, "if p.ParentTaskID > 0 {")
-		if startIdx < 0 {
-			t.Fatalf("AUDIT-151 precondition missing: can't find parent-requeue block")
+		// The 0-row path must escalate.
+		if !strings.Contains(src, "CreateEscalation") {
+			t.Error("AUDIT-151 REGRESSION: pilot_worktree_reset.go no longer calls " +
+				"CreateEscalation on 0-row parent-requeue; operator loses the signal")
 		}
-		// Window = next ~500 chars (covers the two UPDATEs and the block close).
-		endIdx := startIdx + 800
-		if endIdx > len(src) {
-			endIdx = len(src)
+		// The 0-row path must mail the operator (belt-and-suspenders with
+		// the escalation).
+		if !strings.Contains(src, "unexpected state") && !strings.Contains(src, "unexpected parent") {
+			t.Error("AUDIT-151 REGRESSION: no log / mail line mentioning " +
+				"'unexpected state' on the 0-row path — operator visibility regressed")
 		}
-		window := src[startIdx:endIdx]
-
-		for _, banned := range []string{
-			"RowsAffected",
-			"rows affected",
-			"no-op",
-			"unexpected parent state",
-		} {
-			if strings.Contains(window, banned) {
-				t.Fatalf("AUDIT-151 contradicted: parent-requeue block now mentions "+
-					"%q — may be fixed", banned)
-			}
-		}
-
-		// And no CreateEscalation within the reset logic at all — the fix
-		// would add one for "parent state unexpected."
-		if strings.Contains(src, "CreateEscalation") {
-			t.Fatalf("AUDIT-151 contradicted: pilot_worktree_reset.go now calls " +
-				"CreateEscalation; audit may be fixed")
-		}
-		t.Fatalf("AUDIT-151: WorktreeReset parent-requeue UPDATE discards RowsAffected " +
-			"and emits no escalation on 0-row result still present")
 	})
 
 	// ── AUDIT-152 ─────────────────────────────────────────────────────────

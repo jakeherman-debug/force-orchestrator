@@ -133,7 +133,15 @@ func (e ExecRunner) Run(cwd string, args []string, stdin []byte) ([]byte, []byte
 		return stdoutBuf.Bytes(), stderrBuf.Bytes(), err
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
-		<-done
+		// AUDIT-092 (Fix #8d): the Wait-after-Kill drain can hang forever
+		// if the process is in an uninterruptible syscall (e.g., a kernel
+		// NFS operation). A 5s backstop via time.After keeps the caller
+		// responsive; a genuinely stuck kernel thread will get reaped
+		// later by init, but the daemon goroutine is no longer wedged.
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
 		return stdoutBuf.Bytes(), stderrBuf.Bytes(), fmt.Errorf("gh timed out after %v", timeout)
 	}
 }

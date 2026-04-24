@@ -2,7 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 )
@@ -86,6 +88,12 @@ func GetBounty(db *sql.DB, id int) (*Bounty, error) {
 // ClaimBounty atomically claims the next available task using optimistic locking.
 // Higher-priority tasks (priority DESC) are claimed first; ties broken by id ASC (FIFO).
 // A task is claimable only when all its dependencies (in TaskDependencies) are Completed.
+//
+// AUDIT-068 (Fix #8d): distinguishes sql.ErrNoRows (benign, nothing to claim)
+// from real driver/schema errors — the latter are logged so a silent fleet
+// stall (BountyBoard table dropped, migration gap, FK constraint surprise)
+// is observable to the operator via the daemon log, rather than looking
+// identical to "queue empty."
 func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) {
 	var b Bounty
 	err := db.QueryRow(`
@@ -107,11 +115,18 @@ func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) 
 		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Type, &b.Status,
 			&b.Payload, &b.ConvoyID, &b.Checkpoint, &b.Priority, &b.TaskTimeout)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("ClaimBounty(type=%s, agent=%s): DB error (not ErrNoRows): %v", taskType, agentName, err)
+		}
 		return nil, false
 	}
-	res, _ := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE BountyBoard SET status = 'Locked', owner = ?, locked_at = datetime('now')
 		WHERE id = ? AND status = 'Pending'`, agentName, b.ID)
+	if err != nil {
+		log.Printf("ClaimBounty(id=%d, agent=%s): lock UPDATE failed: %v", b.ID, agentName, err)
+		return nil, false
+	}
 	rows, _ := res.RowsAffected()
 	if rows == 1 {
 		b.Status = "Locked"
@@ -123,6 +138,7 @@ func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) 
 
 // ClaimForReview atomically claims the next task awaiting council review.
 // Higher-priority tasks are reviewed first, matching the claim order used by Astromechs.
+// AUDIT-068 (Fix #8d): non-ErrNoRows errors are logged.
 func ClaimForReview(db *sql.DB, agentName string) (*Bounty, bool) {
 	var b Bounty
 	err := db.QueryRow(`
@@ -132,11 +148,18 @@ func ClaimForReview(db *sql.DB, agentName string) (*Bounty, bool) {
 		LIMIT 1`).
 		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Payload, &b.RetryCount, &b.BranchName, &b.ConvoyID, &b.Priority)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("ClaimForReview(agent=%s): DB error (not ErrNoRows): %v", agentName, err)
+		}
 		return nil, false
 	}
-	res, _ := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE BountyBoard SET status = 'UnderReview', owner = ?, locked_at = datetime('now')
 		WHERE id = ? AND status = 'AwaitingCouncilReview'`, agentName, b.ID)
+	if err != nil {
+		log.Printf("ClaimForReview(id=%d, agent=%s): claim UPDATE failed: %v", b.ID, agentName, err)
+		return nil, false
+	}
 	rows, _ := res.RowsAffected()
 	if rows == 1 {
 		return &b, true
@@ -145,6 +168,7 @@ func ClaimForReview(db *sql.DB, agentName string) (*Bounty, bool) {
 }
 
 // ClaimForCaptainReview atomically claims the next task awaiting captain review.
+// AUDIT-068 (Fix #8d): non-ErrNoRows errors are logged.
 func ClaimForCaptainReview(db *sql.DB, agentName string) (*Bounty, bool) {
 	var b Bounty
 	err := db.QueryRow(`
@@ -154,11 +178,18 @@ func ClaimForCaptainReview(db *sql.DB, agentName string) (*Bounty, bool) {
 		LIMIT 1`).
 		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Payload, &b.RetryCount, &b.BranchName, &b.ConvoyID, &b.Priority)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("ClaimForCaptainReview(agent=%s): DB error (not ErrNoRows): %v", agentName, err)
+		}
 		return nil, false
 	}
-	res, _ := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE BountyBoard SET status = 'UnderCaptainReview', owner = ?, locked_at = datetime('now')
 		WHERE id = ? AND status = 'AwaitingCaptainReview'`, agentName, b.ID)
+	if err != nil {
+		log.Printf("ClaimForCaptainReview(id=%d, agent=%s): claim UPDATE failed: %v", b.ID, agentName, err)
+		return nil, false
+	}
 	rows, _ := res.RowsAffected()
 	if rows == 1 {
 		return &b, true

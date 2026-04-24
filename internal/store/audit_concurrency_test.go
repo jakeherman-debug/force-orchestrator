@@ -23,7 +23,6 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 
 	t.Run("AUDIT_045_MaxOpenConns1_and_busy_timeout_DSN", func(t *testing.T) {
-		t.Skip("AUDIT-045: remove when PRAGMA busy_timeout set via post-Open Exec (Fix #4/#8)")
 		// Without skip, fails with: AUDIT-045: expected post-Open
 		// `db.Exec("PRAGMA busy_timeout=...")` uniformly applied across all DSNs
 		// in internal/store/holocron.go — none found; fix not landed yet. Also:
@@ -56,7 +55,6 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	})
 
 	t.Run("AUDIT_046_global_mergeMu_not_per_repo", func(t *testing.T) {
-		t.Skip("AUDIT-046: remove when mergeMu sharded by repoPath (Fix #8)")
 		// Without skip, fails with: AUDIT-046: expected per-repo mergeMu
 		// sharding (one of [map[string]*sync.Mutex mergeMuByRepo mergeMus]) in
 		// internal/git/git.go — none found; fix not landed yet.
@@ -84,7 +82,6 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	})
 
 	t.Run("AUDIT_047_inquisitor_single_goroutine_blocking_loop", func(t *testing.T) {
-		t.Skip("AUDIT-047: remove when per-dog context.WithTimeout + Dogs heartbeat column (Fix #8)")
 		// Without skip, fails with: AUDIT-047: expected per-dog
 		// context.WithTimeout in inquisitor.go — not found. Also: expected
 		// heartbeat reference in inquisitor.go and Dogs DDL — not found.
@@ -147,7 +144,6 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	})
 
 	t.Run("AUDIT_092_ExecRunner_no_Kill_backstop", func(t *testing.T) {
-		t.Skip("AUDIT-092: remove when Kill+drain has time.After backstop (Fix #8)")
 		// Without skip, fails with: AUDIT-092: expected time.After backstop
 		// within 300 chars after cmd.Process.Kill() in internal/gh/gh.go —
 		// not found; fix not landed yet.
@@ -168,7 +164,6 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	})
 
 	t.Run("AUDIT_093_claude_RunCLIStreaming_no_WaitDelay", func(t *testing.T) {
-		t.Skip("AUDIT-093: remove when cmd.WaitDelay=5s set in RunCLIStreaming (Fix #8)")
 		// Without skip, fails with: AUDIT-093: expected cmd.WaitDelay in
 		// RunCLIStreaming in internal/claude/claude.go — not found; fix not landed yet.
 		path := filepath.Join(repoRoot, "internal/claude/claude.go")
@@ -182,7 +177,6 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	})
 
 	t.Run("AUDIT_096_rateLimitRetries_non_atomic_and_no_prune", func(t *testing.T) {
-		t.Skip("AUDIT-096: remove when rateLimitRetries uses atomic ops + prune (Fix #8)")
 		// Without skip, fails with: AUDIT-096: expected atomic update helper
 		// (CompareAndSwap or LoadOrStore) on rateLimitRetries — not found.
 		// Also: expected rateLimitRetries.Range-driven prune — not found.
@@ -203,7 +197,6 @@ func TestAUDIT_Concurrency(t *testing.T) {
 	})
 
 	t.Run("AUDIT_097_ResetBranchPrefixCache_unsafe_Once_swap", func(t *testing.T) {
-		t.Skip("AUDIT-097: remove when ResetBranchPrefixCache is fixed / removed (Fix #8)")
 		// Without skip, fails with: AUDIT-097: ResetBranchPrefixCache still
 		// reassigns `usernameOnce = sync.Once{}` in internal/git/username.go —
 		// fix not landed yet (sync.Once is not safe to reassign under its own guard).

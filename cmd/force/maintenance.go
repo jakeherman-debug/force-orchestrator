@@ -450,6 +450,12 @@ func importFleet(db *sql.DB, inFile string) (int, error) {
 
 // pruneFleet deletes old completed/failed tasks, their history, closed escalations,
 // and old audit log entries to keep the database small.
+//
+// AUDIT-066 (Fix #8d): the time window is passed as a bound `?` placeholder
+// (not fmt.Sprintf-interpolated). keepDays is operator-supplied via the
+// CLI, so SQL injection would be trivial without the placeholder — a
+// negative integer or an appended subquery would execute as written. The
+// ? placeholder binds the value as data and eliminates the class.
 func pruneFleet(db *sql.DB, keepDays int, dryRun bool) {
 	since := fmt.Sprintf("-%d days", keepDays)
 	prefix := ""
@@ -462,56 +468,71 @@ func pruneFleet(db *sql.DB, keepDays int, dryRun bool) {
 		label       string
 		countQuery  string
 		deleteQuery string
+		argCount    int // how many times to repeat `since` in the query's ? placeholders
 	}
 	targets := []pruneTarget{
 		{
 			"old task history",
-			fmt.Sprintf(`SELECT COUNT(*) FROM TaskHistory WHERE created_at < datetime('now', '%s')
-				AND task_id IN (SELECT id FROM BountyBoard WHERE created_at < datetime('now', '%s'))`, since, since),
-			fmt.Sprintf(`DELETE FROM TaskHistory WHERE created_at < datetime('now', '%s')
-				AND task_id IN (SELECT id FROM BountyBoard WHERE created_at < datetime('now', '%s'))`, since, since),
+			`SELECT COUNT(*) FROM TaskHistory WHERE created_at < datetime('now', ?)
+				AND task_id IN (SELECT id FROM BountyBoard WHERE created_at < datetime('now', ?))`,
+			`DELETE FROM TaskHistory WHERE created_at < datetime('now', ?)
+				AND task_id IN (SELECT id FROM BountyBoard WHERE created_at < datetime('now', ?))`,
+			2,
 		},
 		{
 			"orphaned task dependencies",
 			`SELECT COUNT(*) FROM TaskDependencies WHERE task_id NOT IN (SELECT id FROM BountyBoard) OR depends_on NOT IN (SELECT id FROM BountyBoard)`,
 			`DELETE FROM TaskDependencies WHERE task_id NOT IN (SELECT id FROM BountyBoard) OR depends_on NOT IN (SELECT id FROM BountyBoard)`,
+			0,
 		},
 		{
 			"old tasks",
-			fmt.Sprintf(`SELECT COUNT(*) FROM BountyBoard WHERE status IN ('Completed', 'Failed') AND created_at < datetime('now', '%s')`, since),
-			fmt.Sprintf(`DELETE FROM BountyBoard WHERE status IN ('Completed', 'Failed') AND created_at < datetime('now', '%s')`, since),
+			`SELECT COUNT(*) FROM BountyBoard WHERE status IN ('Completed', 'Failed') AND created_at < datetime('now', ?)`,
+			`DELETE FROM BountyBoard WHERE status IN ('Completed', 'Failed') AND created_at < datetime('now', ?)`,
+			1,
 		},
 		{
 			"closed escalations",
-			fmt.Sprintf(`SELECT COUNT(*) FROM Escalations WHERE status = 'Closed' AND created_at < datetime('now', '%s')`, since),
-			fmt.Sprintf(`DELETE FROM Escalations WHERE status = 'Closed' AND created_at < datetime('now', '%s')`, since),
+			`SELECT COUNT(*) FROM Escalations WHERE status = 'Closed' AND created_at < datetime('now', ?)`,
+			`DELETE FROM Escalations WHERE status = 'Closed' AND created_at < datetime('now', ?)`,
+			1,
 		},
 		{
 			"old audit log entries",
-			fmt.Sprintf(`SELECT COUNT(*) FROM AuditLog WHERE created_at < datetime('now', '%s')`, since),
-			fmt.Sprintf(`DELETE FROM AuditLog WHERE created_at < datetime('now', '%s')`, since),
+			`SELECT COUNT(*) FROM AuditLog WHERE created_at < datetime('now', ?)`,
+			`DELETE FROM AuditLog WHERE created_at < datetime('now', ?)`,
+			1,
 		},
 		{
 			"read fleet mail",
-			fmt.Sprintf(`SELECT COUNT(*) FROM Fleet_Mail WHERE read_at != '' AND created_at < datetime('now', '%s')`, since),
-			fmt.Sprintf(`DELETE FROM Fleet_Mail WHERE read_at != '' AND created_at < datetime('now', '%s')`, since),
+			`SELECT COUNT(*) FROM Fleet_Mail WHERE read_at != '' AND created_at < datetime('now', ?)`,
+			`DELETE FROM Fleet_Mail WHERE read_at != '' AND created_at < datetime('now', ?)`,
+			1,
 		},
 		{
 			"old fleet memories",
-			fmt.Sprintf(`SELECT COUNT(*) FROM FleetMemory WHERE created_at < datetime('now', '%s')`, since),
-			fmt.Sprintf(`DELETE FROM FleetMemory WHERE created_at < datetime('now', '%s')`, since),
+			`SELECT COUNT(*) FROM FleetMemory WHERE created_at < datetime('now', ?)`,
+			`DELETE FROM FleetMemory WHERE created_at < datetime('now', ?)`,
+			1,
 		},
 	}
 
 	total := 0
 	for _, t := range targets {
+		args := make([]any, t.argCount)
+		for i := 0; i < t.argCount; i++ {
+			args[i] = since
+		}
 		if dryRun {
 			var n int
-			db.QueryRow(t.countQuery).Scan(&n)
+			if err := db.QueryRow(t.countQuery, args...).Scan(&n); err != nil {
+				fmt.Printf("  ERROR counting %s: %v\n", t.label, err)
+				continue
+			}
 			fmt.Printf("  Would delete %5d rows  — %s\n", n, t.label)
 			total += n
 		} else {
-			res, err := db.Exec(t.deleteQuery)
+			res, err := db.Exec(t.deleteQuery, args...)
 			if err != nil {
 				fmt.Printf("  ERROR pruning %s: %v\n", t.label, err)
 				continue

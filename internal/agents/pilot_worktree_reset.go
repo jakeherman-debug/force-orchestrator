@@ -73,14 +73,31 @@ func QueueWorktreeReset(db *sql.DB, p worktreeResetPayload) (int, error) {
 }
 
 func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+	// Fix #8d / CLAUDE.md "No silent failures": every FailBounty /
+	// UpdateBountyStatus return is checked and a clear recovery hint is logged
+	// — on DB failure the stale-lock detector (45-min timeout) sweeps the row
+	// back to Pending so another Pilot tick re-runs the reset. Without this,
+	// the task stayed Locked with no operator visibility when the terminator
+	// itself failed (AUDIT-013/014/022/041 class regression).
+	failTask := func(msg string) {
+		if err := store.FailBounty(db, bounty.ID, msg); err != nil {
+			logger.Printf("WorktreeReset #%d: FailBounty failed (%v); stale-lock detector will recover", bounty.ID, err)
+		}
+	}
+	completeTask := func(reason string) {
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("WorktreeReset #%d: UpdateBountyStatus(Completed) failed (%v); stale-lock detector will recover — %s", bounty.ID, err, reason)
+		}
+	}
+
 	var p worktreeResetPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &p); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err))
+		failTask(fmt.Sprintf("invalid payload: %v", err))
 		return
 	}
 	repo := store.GetRepo(db, p.Repo)
 	if repo == nil || repo.LocalPath == "" {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("repo %s not registered", p.Repo))
+		failTask(fmt.Sprintf("repo %s not registered", p.Repo))
 		return
 	}
 
@@ -88,7 +105,7 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	// corrupt medic LLM output (e.g. `-rm`, `--upload-pack=/tmp/evil`)
 	// never reaches the fetch/reset calls below.
 	if err := igit.ValidateRef(p.TargetBranch); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid target_branch %q: %v", p.TargetBranch, err))
+		failTask(fmt.Sprintf("invalid target_branch %q: %v", p.TargetBranch, err))
 		return
 	}
 	// Resolve the target ref up front. Fetching the origin remote first keeps
@@ -96,7 +113,7 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	// stale refs/remotes/origin/* happen to be cached locally. `--` keeps the
 	// refspec positional.
 	if out, err := exec.Command("git", "-C", repo.LocalPath, "fetch", "origin", "--", p.TargetBranch).CombinedOutput(); err != nil {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("fetch %s: %s", p.TargetBranch, strings.TrimSpace(string(out))))
+		failTask(fmt.Sprintf("fetch %s: %s", p.TargetBranch, strings.TrimSpace(string(out))))
 		return
 	}
 	targetRef := "origin/" + p.TargetBranch
@@ -108,7 +125,7 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	worktreeRoots := discoverWorktrees(repo.LocalPath, p.Repo, p.Agents)
 	if len(worktreeRoots) == 0 {
 		logger.Printf("WorktreeReset #%d: no astromech worktrees found for repo %s — marking Completed", bounty.ID, p.Repo)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		completeTask("no worktrees to wipe")
 		return
 	}
 
@@ -126,7 +143,7 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	// next astromech claim will find a clean tree. But we propagate the
 	// failure count so the operator notices if half the wipes failed.
 	if len(failures) > 0 && wiped == 0 {
-		store.FailBounty(db, bounty.ID, fmt.Sprintf("worktree reset failed for all %d worktrees: %s",
+		failTask(fmt.Sprintf("worktree reset failed for all %d worktrees: %s",
 			len(worktreeRoots), strings.Join(failures, "; ")))
 		return
 	}
@@ -140,15 +157,43 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	// parent stayed stuck Failed/Escalated. Now we observe both errors; any
 	// failure here fails the WorktreeReset so Medic can escalate.
 	if p.ParentTaskID > 0 {
-		if _, err := db.Exec(`UPDATE BountyBoard
+		// AUDIT-151 (Fix #8d): the UPDATE filter `status IN ('Failed','
+		// Escalated','ConflictPending')` silently no-ops when the parent
+		// has transitioned elsewhere (operator cancelled, sibling
+		// completed, etc.) between Medic's spawn and WorktreeReset's
+		// execution. Pre-fix the worktree was wiped but no retry queued
+		// and no operator signal emitted. Post-fix, on 0 rows affected we
+		// escalate with a low-severity row — the worktree wipe is still
+		// useful, but the operator is notified that the parent state was
+		// unexpected so they can reconcile.
+		res, err := db.Exec(`UPDATE BountyBoard
 			SET status = 'Pending', branch_name = '', owner = '', locked_at = '',
 			    error_log = 'Reset by WorktreeReset #' || ? || ' after contamination detected: ' || ?
 			WHERE id = ? AND status IN ('Failed','Escalated','ConflictPending')`,
-			bounty.ID, p.Reason, p.ParentTaskID); err != nil {
-			if fbErr := store.FailBounty(db, bounty.ID,
-				fmt.Sprintf("parent-requeue UPDATE failed for task #%d: %v", p.ParentTaskID, err)); fbErr != nil {
-				logger.Printf("WorktreeReset #%d: FailBounty after parent-requeue failure also failed: %v", bounty.ID, fbErr)
+			bounty.ID, p.Reason, p.ParentTaskID)
+		if err != nil {
+			failTask(fmt.Sprintf("parent-requeue UPDATE failed for task #%d: %v", p.ParentTaskID, err))
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			// Unexpected parent state — look up actual status for a clear
+			// operator message and escalate.
+			var currentStatus string
+			_ = db.QueryRow(`SELECT IFNULL(status, '') FROM BountyBoard WHERE id = ?`, p.ParentTaskID).Scan(&currentStatus)
+			escMsg := fmt.Sprintf("WorktreeReset #%d wiped worktrees but parent task #%d was in unexpected state %q (not Failed/Escalated/ConflictPending); no requeue was performed. Review the parent and decide whether to re-run.",
+				bounty.ID, p.ParentTaskID, currentStatus)
+			logger.Printf("WorktreeReset #%d: parent-requeue affected 0 rows — parent #%d status=%q (unexpected). Escalating.", bounty.ID, p.ParentTaskID, currentStatus)
+			if _, escErr := CreateEscalation(db, p.ParentTaskID, store.SeverityLow, escMsg); escErr != nil {
+				logger.Printf("WorktreeReset #%d: CreateEscalation for unexpected parent state also failed: %v — operator mail below is the fallback", bounty.ID, escErr)
 			}
+			store.SendMail(db, "Pilot", "operator",
+				fmt.Sprintf("[WORKTREE RESET] Parent task #%d in unexpected state — no requeue", p.ParentTaskID),
+				escMsg, p.ParentTaskID, store.MailTypeAlert)
+			// Still mark the WorktreeReset task Completed — the worktree
+			// work DID land. The parent-state issue is captured in the
+			// escalation.
+			completeTask("parent requeue no-op; escalated")
 			return
 		}
 		// Also close any Open escalations on the parent — the cleanup IS the fix.
@@ -156,10 +201,7 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 		if _, err := db.Exec(`UPDATE Escalations
 			SET status = 'Closed', acknowledged_at = datetime('now')
 			WHERE task_id = ? AND status = 'Open'`, p.ParentTaskID); err != nil {
-			if fbErr := store.FailBounty(db, bounty.ID,
-				fmt.Sprintf("escalation-resolve UPDATE failed for task #%d: %v", p.ParentTaskID, err)); fbErr != nil {
-				logger.Printf("WorktreeReset #%d: FailBounty after escalation-resolve failure also failed: %v", bounty.ID, fbErr)
-			}
+			failTask(fmt.Sprintf("escalation-resolve UPDATE failed for task #%d: %v", p.ParentTaskID, err))
 			return
 		}
 	}
@@ -168,9 +210,7 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 		bounty.ID, wiped, p.Repo, targetRef, len(failures))
 	store.LogAudit(db, "Pilot", "worktree-reset", bounty.ID,
 		fmt.Sprintf("wiped=%d, reason=%s, target=%s", wiped, p.Reason, targetRef))
-	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
-		logger.Printf("WorktreeReset #%d: failed to mark Completed: %v", bounty.ID, err)
-	}
+	completeTask("worktree reset succeeded")
 }
 
 // discoverWorktrees enumerates .force-worktrees/<repo>/<agent> directories

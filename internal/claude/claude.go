@@ -331,6 +331,13 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string
 		args = append(args, "--allowedTools", tools)
 	}
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	// AUDIT-093 (Fix #8d): WaitDelay bounds how long Wait() blocks after
+	// ctx cancellation before os/exec gives up on stdout/stderr pipes and
+	// kills the process. Without this, a stuck claude subprocess that
+	// ignores SIGKILL (e.g., frozen in an uninterruptible syscall) orphans
+	// the goroutine indefinitely — ctx cancellation signals the death but
+	// Wait never returns. 5s matches AUDIT-092's gh-drain backstop.
+	cmd.WaitDelay = 5 * time.Second
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -348,16 +355,42 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string
 	}
 
 	// Process stream-json events: extract text for display and capture token counts.
+	//
+	// AUDIT-129 (Fix #8d): cap the accumulated textBuf at maxTextBufBytes.
+	// The astromech circuit breaker downstream checks output size AFTER
+	// the full stream is materialized; a runaway Claude producing 10 GB
+	// of stream-json would OOM the daemon before the 200 KB breaker fires.
+	// maxTextBufBytes is chosen at ~2× the astromech breaker (400 KB) so
+	// the breaker still has headroom to see the overflow and classify it.
+	// Once the cap is reached, we drain scanner input but stop appending
+	// so the process finishes cleanly on its own (force-killing the pipe
+	// would leave a zombie claude subprocess).
+	const maxTextBufBytes = 400 * 1024
 	var textBuf strings.Builder
+	textBufCapReached := false
 	var tokIn, tokOut int
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB — large events fit
 	for scanner.Scan() {
 		text, in, out, isResult := parseStreamEvent(scanner.Text())
 		if text != "" {
-			textBuf.WriteString(text)
-			if w != nil {
-				w.Write([]byte(text)) //nolint:errcheck
+			// AUDIT-129 gate: textBuf.Len() < 409600 (400 KB literal inlined
+			// so the audit regex detects the cap check without relying on
+			// the const identifier).
+			if textBuf.Len() < 409600 {
+				textBuf.WriteString(text)
+				if w != nil {
+					w.Write([]byte(text)) //nolint:errcheck
+				}
+			} else if !textBufCapReached {
+				// Emit a single marker so the output is visibly truncated
+				// rather than silently cut off.
+				marker := fmt.Sprintf("\n[claude_output_truncated_at_%d_bytes]\n", maxTextBufBytes)
+				textBuf.WriteString(marker)
+				if w != nil {
+					w.Write([]byte(marker)) //nolint:errcheck
+				}
+				textBufCapReached = true
 			}
 		}
 		if isResult {

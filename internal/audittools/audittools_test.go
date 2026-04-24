@@ -40,29 +40,11 @@ var remainingAuditSkips = map[string]string{
 	// sites across 18 files. The AUDIT IDs below remain because their
 	// specific tests cover adjacent defects (store-layer races, lifecycle
 	// sweeps) that Phase 8c is scheduled to address.
-	"AUDIT-015": "Fix #8b (onSubPRMerged mid-tx log)",
-	"AUDIT-040": "Fix #8b (escalate CI-triage double UPDATE)",
-	"AUDIT-042": "Fix #8b (UpdateAskBranchPRChecks discarded)",
-	"AUDIT-043": "Fix #8b (PRCloseUnconditionalMarkClosed)",
-	"AUDIT-045": "Fix #4/#8 (concurrency batch)",
-	"AUDIT-046": "Fix #8b (concurrency batch)",
-	"AUDIT-047": "Fix #8b (concurrency batch)",
-	"AUDIT-066": "Fix #8b companion (PruneFleet unparameterised interval)",
-	"AUDIT-068": "Fix #8b (ClaimBounty conflates ErrNoRows)",
-	"AUDIT-069": "Fix #8b (ResolveFeatureBlockers no transaction)",
-	"AUDIT-125": "Fix #8b (lifecycle batch)",
-	"AUDIT-126": "Fix #8b (lifecycle batch)",
 	"AUDIT-127": "Fix #8b (lifecycle batch)",
-	"AUDIT-129": "Fix #8b (lifecycle batch)",
 	"AUDIT-130": "Fix #8b (schema+time batch)",
 	"AUDIT-131": "Fix #8b (schema+time batch)",
 	"AUDIT-132": "Fix #8b (schema+time batch)",
 	"AUDIT-137": "Fix #8b (test-quality)",
-	"AUDIT-151": "Fix #8b spotcheck-c",
-	"AUDIT-155": "Fix #8b spotcheck-d (union merge no repo lock)",
-	"AUDIT-156": "Fix #8b pattern-covered",
-	"AUDIT-158": "Fix #8b lifecycle batch",
-	"AUDIT-164": "Fix #8b lifecycle batch (low, pattern-covered)",
 	"AUDIT-165": "Fix #8b lifecycle batch (low, pattern-covered)",
 
 	// Schema+time batch (AUDIT-077, -078, -080, -082, -143, -146, -147,
@@ -73,12 +55,8 @@ var remainingAuditSkips = map[string]string{
 	// need Fix #8's UpdateBountyStatusFrom variant.
 	"AUDIT-090": "Fix #8 pattern-covered (P1)",
 	"AUDIT-091": "Fix #8 pattern-covered (P1)",
-	"AUDIT-092": "Fix #4/#8 concurrency batch",
-	"AUDIT-093": "Fix #4/#8 concurrency batch",
 	"AUDIT-094": "Fix #8 pattern-covered (P1)",
 	"AUDIT-095": "Fix #8 pattern-covered (P1)",
-	"AUDIT-096": "Fix #4/#8 concurrency batch",
-	"AUDIT-097": "Fix #4/#8 concurrency batch",
 	"AUDIT-099": "Fix #10 pattern-covered / Fix #8 silent-failure",
 	"AUDIT-100": "Fix #8 pattern-covered (P1)",
 }

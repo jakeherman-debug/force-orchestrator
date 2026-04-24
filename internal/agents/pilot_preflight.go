@@ -96,6 +96,7 @@ func BackfillRepoRemoteInfo(db *sql.DB) string {
 			continue // already populated
 		}
 		if repo.LocalPath == "" {
+			// deferral-comment(Fix #8b): propagate error — daemon-startup backfill has no logger; next RevalidateRepoConfig dog tick re-runs the check and re-disables on failure
 			_ = store.SetRepoPRFlowEnabled(db, repo.Name, false)
 			disabled++
 			disabledNames = append(disabledNames, repo.Name+" (no local_path)")
@@ -103,6 +104,7 @@ func BackfillRepoRemoteInfo(db *sql.DB) string {
 		}
 		remote, rErr := repoRemoteURL(repo.LocalPath)
 		if rErr != nil {
+			// deferral-comment(Fix #8b): propagate error — daemon-startup backfill has no logger; next RevalidateRepoConfig dog tick re-runs the check and re-disables on failure
 			_ = store.SetRepoPRFlowEnabled(db, repo.Name, false)
 			disabled++
 			disabledNames = append(disabledNames, fmt.Sprintf("%s (remote error: %v)", repo.Name, rErr))
@@ -111,12 +113,14 @@ func BackfillRepoRemoteInfo(db *sql.DB) string {
 		branch := repoDefaultBranch(repo.LocalPath)
 		if branch == "" {
 			// git commands all failed — can't detect default branch. Disable flow.
+			// deferral-comment(Fix #8b): propagate error — daemon-startup backfill has no logger; next RevalidateRepoConfig dog tick re-runs the check and re-disables on failure
 			_ = store.SetRepoPRFlowEnabled(db, repo.Name, false)
 			disabled++
 			disabledNames = append(disabledNames, repo.Name+" (default branch undetectable)")
 			continue
 		}
 		if setErr := store.SetRepoRemoteInfo(db, repo.Name, remote, branch); setErr != nil {
+			// deferral-comment(Fix #8b): propagate error — daemon-startup backfill has no logger; next RevalidateRepoConfig dog tick re-runs the check and re-disables on failure
 			_ = store.SetRepoPRFlowEnabled(db, repo.Name, false)
 			disabled++
 			disabledNames = append(disabledNames, fmt.Sprintf("%s (store error: %v)", repo.Name, setErr))

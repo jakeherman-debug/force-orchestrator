@@ -167,7 +167,12 @@ func runMedicCITriage(db *sql.DB, agentName string, bounty *store.Bounty, logger
 			Classification: "Environmental",
 			Diagnosis:      "CI breaker currently open for this repo; skipping triage until cooldown elapses.",
 		}, logger)
-		store.UpdateBountyStatus(db, bounty.ID, "Completed")
+		// Fix #8d (CLAUDE.md "No silent failures"): observe the terminator
+		// error. If the UPDATE fails the triage task stays Locked; the
+		// stale-lock detector will requeue it.
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("CIFailureTriage #%d: Completed update failed on breaker-open path: %v — stale-lock detector will recover", bounty.ID, err)
+		}
 		return
 	}
 
@@ -241,7 +246,9 @@ func applyCITriageFlaky(db *sql.DB, agentName string, pr *store.AskBranchPR, pay
 		return
 	}
 	// Just reset checks_state so the next sub-pr-ci-watch tick picks it up again.
-	_ = store.UpdateAskBranchPRChecks(db, pr.ID, "Pending")
+	if err := store.UpdateAskBranchPRChecks(db, pr.ID, "Pending"); err != nil {
+		logger.Printf("CIFailureTriage: UpdateAskBranchPRChecks(Pending) for PR #%d on Flaky path failed: %v — next sub-pr-ci-watch tick will recompute from the rollup and retry the write", pr.PRNumber, err)
+	}
 	logger.Printf("CIFailureTriage: sub-PR #%d classified Flaky (count=%d) — awaiting re-run", pr.PRNumber, pr.FailureCount)
 }
 
@@ -290,8 +297,12 @@ func applyCITriageRealBug(db *sql.DB, agentName string, pr *store.AskBranchPR, p
 	// Transfer the branch name so the fix task resumes on the same branch.
 	store.SetBranchName(db, fixID, payload.Branch)
 	// Bump the per-PR spawn counter for the lifetime cap check on future
-	// ticks. Ignore the return — we only care about the durable increment.
-	_, _ = store.IncrementSpawnedFixCount(db, pr.ID)
+	// ticks. If the UPDATE fails the cap check still works — it reads
+	// spawned_fix_count on the next triage pass, and a stuck counter would
+	// just allow one extra spawn before medicRetriggerCap trips.
+	if _, err := store.IncrementSpawnedFixCount(db, pr.ID); err != nil {
+		logger.Printf("CIFailureTriage: IncrementSpawnedFixCount for PR #%d failed: %v — cap check re-reads on next tick; worst case is one extra fix spawn before medicRetriggerCap trips", pr.PRNumber, err)
+	}
 	store.SendMail(db, agentName, "astromech",
 		fmt.Sprintf("[CI FIX] Task #%d / PR #%d — please fix", payload.TaskID, pr.PRNumber),
 		fmt.Sprintf("CI failed on your sub-PR. Fix task #%d queued with guidance. Branch: %s\n\nDiagnosis:\n%s\n\nGuidance:\n%s",
@@ -315,7 +326,9 @@ func applyCITriageEnvironmental(db *sql.DB, agentName string, pr *store.AskBranc
 		logger.Printf("CIFailureTriage: environmental failure on %s (count in window=%d)", payload.Repo, getCIEnvCount(db, payload.Repo))
 	}
 	// Reset checks_state so sub-pr-ci-watch re-evaluates next tick.
-	_ = store.UpdateAskBranchPRChecks(db, pr.ID, "Pending")
+	if err := store.UpdateAskBranchPRChecks(db, pr.ID, "Pending"); err != nil {
+		logger.Printf("CIFailureTriage: UpdateAskBranchPRChecks(Pending) for PR #%d on Environmental path failed: %v — next sub-pr-ci-watch tick recomputes rollup and retries", pr.PRNumber, err)
+	}
 }
 
 // applyCITriageBranchProtection escalates — we cannot self-heal repo policy.
@@ -326,11 +339,13 @@ func applyCITriageBranchProtection(db *sql.DB, agentName string, pr *store.AskBr
 }
 
 func escalateCITriage(db *sql.DB, agentName string, pr *store.AskBranchPR, taskID int, msg string, logger interface{ Printf(string, ...any) }) {
-	// Clear owner/locked_at so the task doesn't appear stuck locked after escalation.
-	// Escalation row is created unconditionally so the operator still sees the issue
-	// even if the status update hits a transient DB error.
-	if _, err := db.Exec(`UPDATE BountyBoard SET status = 'Escalated', owner = '', locked_at = '', error_log = ? WHERE id = ?`, msg, taskID); err != nil {
-		logger.Printf("CIFailureTriage: task %d status update failed (%v); escalation still recorded", taskID, err)
+	// AUDIT-040 (Fix #8d): previously this function wrote status='Escalated'
+	// directly AND then called CreateEscalation (which also writes the status
+	// and fires the webhook) — firing twice. Now we only write the error_log
+	// here for the dashboard detail view; CreateEscalation below handles the
+	// status transition + webhook exactly once.
+	if _, err := db.Exec(`UPDATE BountyBoard SET error_log = ? WHERE id = ?`, store.RedactSecrets(msg), taskID); err != nil {
+		logger.Printf("CIFailureTriage: task %d error_log write failed (%v); escalation still recorded via CreateEscalation below", taskID, err)
 	}
 	if _, err := CreateEscalation(db, taskID, store.SeverityMedium, msg); err != nil {
 		// AUDIT-041: escalation insert failed — fall back to FailBounty + operator mail

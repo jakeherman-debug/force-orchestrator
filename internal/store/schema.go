@@ -223,10 +223,14 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_auditlog_task_id    ON AuditLog (task_id);`)
 
 	// Periodic dog-agent state — cooldown tracking.
+	// AUDIT-047 (Fix #8d): heartbeat_at is updated at dog-start so /healthz
+	// can detect a wedged dog (the Inquisitor's per-dog context.WithTimeout
+	// also bounds the stall, but heartbeat_at is the user-visible signal).
 	db.Exec(`CREATE TABLE IF NOT EXISTS Dogs (
-		name        TEXT PRIMARY KEY,
-		last_run_at TEXT    DEFAULT '',
-		run_count   INTEGER DEFAULT 0
+		name         TEXT PRIMARY KEY,
+		last_run_at  TEXT    DEFAULT '',
+		run_count    INTEGER DEFAULT 0,
+		heartbeat_at TEXT    DEFAULT ''
 	);`)
 
 	// Fleet memory — lessons learned from completed and failed tasks, injected into future agents.
@@ -427,6 +431,10 @@ func runMigrations(db *sql.DB) {
 	// queueReshardDecompose.
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN medic_requeue_count INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN reshard_generation  INTEGER DEFAULT 0`)
+	// AUDIT-047 (Fix #8d): Dogs.heartbeat_at tracks the most recent tick
+	// a dog started its work. /healthz + the inquisitor can spot a wedged
+	// dog by comparing heartbeat_at + last_run_at against its cadence.
+	db.Exec(`ALTER TABLE Dogs ADD COLUMN heartbeat_at TEXT DEFAULT ''`)
 
 	// Fix #3: partial UNIQUE idempotency_key index for upgrade paths. See the
 	// createSchema copy of this index for the semantics and the rationale on

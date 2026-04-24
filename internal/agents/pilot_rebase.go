@@ -155,7 +155,9 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 			if pushErr := igit.ForcePushBranch(repo.LocalPath, ab.AskBranch); pushErr != nil {
 				logger.Printf("RebaseAskBranch #%d: union merge succeeded but push failed: %v — falling through to astromech", bounty.ID, pushErr)
 			} else {
-				_ = store.UpdateConvoyAskBranchBase(db, payload.ConvoyID, payload.Repo, unionTip)
+				if err := store.UpdateConvoyAskBranchBase(db, payload.ConvoyID, payload.Repo, unionTip); err != nil {
+					logger.Printf("RebaseAskBranch #%d: UpdateConvoyAskBranchBase after union-merge failed: %v — main-drift-watch reads Convoys.ask_branch_base_sha; a stale SHA triggers a follow-up rebase cycle", bounty.ID, err)
+				}
 				logger.Printf("RebaseAskBranch #%d: union-merge fallback recovered ask-branch; new tip=%s",
 					bounty.ID, unionTip[:minInt(8, len(unionTip))])
 				store.LogAudit(db, "Pilot", "rebase-union-merge", bounty.ID,

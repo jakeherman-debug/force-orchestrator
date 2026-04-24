@@ -114,8 +114,6 @@ func TestAUDIT_014_WorktreeResetParentRequeueSilent(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn(t *testing.T) {
-	t.Skip("AUDIT-015: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-015: defective pattern still present — 6 log-and-return sites inside onSubPRMerged with no FailBounty/CreateEscalation escalation path
 	src := silentReadFile(t, "internal/agents/pr_flow.go")
 
 	fnIdx := strings.Index(src, "func onSubPRMerged(")
@@ -146,8 +144,6 @@ func TestAUDIT_015_OnSubPRMergedMidTxLogAndReturn(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_040_EscalateCITriageDoubleUPDATE(t *testing.T) {
-	t.Skip("AUDIT-040: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-040: defective pattern still present — escalateCITriage sets Escalated status manually AND via CreateEscalation which also calls UpdateBountyStatus(Escalated); webhook fires twice
 	ciSrc := silentReadFile(t, "internal/agents/medic_ci.go")
 
 	manualUpdate := "UPDATE BountyBoard SET status = 'Escalated'"
@@ -202,8 +198,6 @@ func TestAUDIT_041_CreateEscalationNoErrorReturn(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_042_UpdateAskBranchPRChecksDiscarded(t *testing.T) {
-	t.Skip("AUDIT-042: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-042: defective pattern still present — `_ = store.UpdateAskBranchPRChecks(` appears pr_flow.go=1, medic_ci.go=2 (total=3); error discarded at all sites
 	prFlow := silentReadFile(t, "internal/agents/pr_flow.go")
 	medicCI := silentReadFile(t, "internal/agents/medic_ci.go")
 
@@ -224,8 +218,6 @@ func TestAUDIT_042_UpdateAskBranchPRChecksDiscarded(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_043_PRCloseUnconditionalMarkClosed(t *testing.T) {
-	t.Skip("AUDIT-043: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-043: defective pattern still present — MarkAskBranchPRClosed called after a logged-only PRClose failure path (unconditionally)
 	src := silentReadFile(t, "internal/agents/pr_flow.go")
 
 	re := regexp.MustCompile(`if closeErr := ghc\.PRClose\([^)]+\); closeErr != nil \{\s*\n\s*logger\.Printf\([^)]*\)\s*\n\s*\}\s*\n\s*\}\s*\n\s*store\.MarkAskBranchPRClosed\(`)

@@ -114,7 +114,9 @@ func runPRFlowStartup(db *sql.DB) error {
 		if c.RepoKey != "" {
 			// Non-fatal per-repo failure — disable pr_flow for this repo so it
 			// takes the legacy path rather than producing bad PRs.
-			_ = store.SetRepoPRFlowEnabled(db, c.RepoKey, false)
+			if err := store.SetRepoPRFlowEnabled(db, c.RepoKey, false); err != nil {
+				fmt.Printf("  (warn) failed to disable pr_flow for %s: %v — re-run `force repo set-pr-flow %s off`\n", c.RepoKey, err, c.RepoKey)
+			}
 			perRepoFailures = append(perRepoFailures, fmt.Sprintf("%s: %s", c.RepoKey, c.Detail))
 		}
 	}
