@@ -82,8 +82,17 @@ func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 	// Parse the structured payload from jedi_council.
 	var payload writeMemoryPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		// Fallback: treat raw payload as task description.
-		payload.Task = bounty.Payload
+		// AUDIT-044: malformed payload previously silently assigned the raw
+		// bounty payload as the task description, poisoning the memory
+		// index with unstructured text that carried no files/diff/repo
+		// fields. Fail the task instead so the jedi_council re-enqueue
+		// (or operator inspection) can correct the payload shape. Stale-
+		// lock detector will recover if the FailBounty write itself fails.
+		logger.Printf("WriteMemory #%d: invalid payload JSON: %v — failing task to avoid poisoning memory index", bounty.ID, err)
+		if failErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("librarian: invalid WriteMemory payload JSON: %v", err)); failErr != nil {
+			logger.Printf("WriteMemory #%d: FailBounty after bad payload failed: %v — stale-lock detector will recover", bounty.ID, failErr)
+		}
+		return
 	}
 
 	// parentID is the original task (CodeEdit) that this WriteMemory was spawned from.
@@ -123,7 +132,11 @@ func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		}
 	}
 
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		// Memory is stored below unconditionally; the status update is
+		// bookkeeping. Stale-lock detector will recover if the row sticks.
+		logger.Printf("WriteMemory #%d: Completed status update failed: %v — memory was stored; stale-lock detector will recover", bounty.ID, err)
+	}
 	store.StoreFleetMemory(db, payload.Repo, parentID, "success", summary, payload.Files, tags)
 	logger.Printf("WriteMemory #%d: memory stored for parent task #%d (repo: %s, tags: %s)",
 		bounty.ID, parentID, payload.Repo, tags)

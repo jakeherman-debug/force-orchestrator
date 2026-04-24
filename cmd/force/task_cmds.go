@@ -455,7 +455,15 @@ func cmdApproveTask(db *sql.DB, id int) {
 		fmt.Printf("Merge failed: %v\n", mergeErr)
 		os.Exit(1)
 	}
-	_ = store.UpdateBountyStatus(db, id, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, id, "Completed"); err != nil {
+		// Merge already succeeded on disk; the status update is bookkeeping.
+		// Surface the DB error so the operator knows to re-try via `force
+		// task show` or re-run the status update — the branch is gone so
+		// this isn't auto-recoverable.
+		fmt.Fprintf(os.Stderr, "warning: task %d merged but status update to Completed failed: %v\n", id, err)
+		fmt.Fprintf(os.Stderr, "  the merge itself succeeded; re-run the approval or manually set status to Completed.\n")
+		os.Exit(1)
+	}
 	store.UnblockDependentsOf(db, id)
 	if diff != "" {
 		changedFiles := igit.ExtractDiffFiles(diff)
@@ -480,7 +488,10 @@ func cmdRejectTask(db *sql.DB, id int, reason string) {
 	}
 	retryCount := store.IncrementRetryCount(db, id)
 	if retryCount >= agents.MaxRetries {
-		_ = store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason)) // TODO(Fix #8b): propagate error
+		if err := store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason)); err != nil {
+			fmt.Fprintf(os.Stderr, "error: task %d rejected but FailBounty write failed: %v\n", id, err)
+			os.Exit(1)
+		}
 		fmt.Printf("Task %d permanently failed (max retries reached).\n", id)
 	} else {
 		newPayload := fmt.Sprintf("%s\n\nOPERATOR FEEDBACK (attempt %d/%d): %s", b.Payload, retryCount, agents.MaxRetries, reason)
