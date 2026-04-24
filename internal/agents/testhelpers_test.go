@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"bytes"
 	"io"
 	"os"
@@ -33,7 +34,7 @@ type stubCLIRunner struct {
 	// fn, if set, overrides the static (output, err). Tests use this to
 	// return different canned responses per call (e.g. adversarial parse
 	// failures alternating with valid JSON).
-	fn func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)
+	fn func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)
 }
 
 // CallCount returns the current number of Claude invocations observed.
@@ -122,7 +123,7 @@ func initTestRepo(t *testing.T) string {
 func withStubCLIRunner(t *testing.T, output string, err error) *stubCLIRunner {
 	t.Helper()
 	s := &stubCLIRunner{output: output, err: err}
-	claude.SetCLIRunner(func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	claude.SetCLIRunner(func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		s.callCount.Add(1)
 		s.mu.Lock()
 		s.prompts = append(s.prompts, prompt)
@@ -131,7 +132,7 @@ func withStubCLIRunner(t *testing.T, output string, err error) *stubCLIRunner {
 		fn := s.fn
 		s.mu.Unlock()
 		if fn != nil {
-			return fn(prompt, tools, dir, maxTurns, timeout)
+			return fn(context.Background(), prompt, tools, dir, maxTurns, timeout)
 		}
 		return s.output, s.err
 	})
@@ -143,17 +144,17 @@ func withStubCLIRunner(t *testing.T, output string, err error) *stubCLIRunner {
 // a per-call dispatcher. Used for adversarial LLM stubs that return
 // different responses on different calls (e.g. pass 1 = malformed JSON,
 // pass 2 = needs_work, pass 3 = clean).
-func withStubCLIRunnerFn(t *testing.T, fn func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)) *stubCLIRunner {
+func withStubCLIRunnerFn(t *testing.T, fn func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)) *stubCLIRunner {
 	t.Helper()
 	s := &stubCLIRunner{fn: fn}
-	claude.SetCLIRunner(func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	claude.SetCLIRunner(func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		s.callCount.Add(1)
 		s.mu.Lock()
 		s.prompts = append(s.prompts, prompt)
 		s.tools = append(s.tools, tools)
 		s.dirs = append(s.dirs, dir)
 		s.mu.Unlock()
-		return fn(prompt, tools, dir, maxTurns, timeout)
+		return fn(context.Background(), prompt, tools, dir, maxTurns, timeout)
 	})
 	t.Cleanup(claude.ResetCLIRunner)
 	return s

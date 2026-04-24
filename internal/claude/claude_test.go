@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,7 +120,7 @@ func TestDefaultCLIRunner_Success(t *testing.T) {
 	cliRunner = defaultCLIRunner
 	t.Cleanup(func() { cliRunner = orig })
 
-	out, err := defaultCLIRunner("test prompt", "", "", 5, 10*time.Second)
+	out, err := defaultCLIRunner(context.Background(), "test prompt", "", "", 5, 10*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestDefaultCLIRunner_ErrorExit(t *testing.T) {
 		"CLAUDE_STUB_EXIT":   "1",
 	})
 
-	_, err := defaultCLIRunner("test prompt", "", "", 5, 10*time.Second)
+	_, err := defaultCLIRunner(context.Background(), "test prompt", "", "", 5, 10*time.Second)
 	if err == nil {
 		t.Fatal("expected error for non-zero exit, got nil")
 	}
@@ -148,7 +149,7 @@ func TestDefaultCLIRunner_WithAllowedTools(t *testing.T) {
 		"CLAUDE_STUB_OUTPUT": "ok",
 	})
 
-	out, err := defaultCLIRunner("prompt", "Edit,Read,Bash", "", 3, 10*time.Second)
+	out, err := defaultCLIRunner(context.Background(), "prompt", "Edit,Read,Bash", "", 3, 10*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,7 +168,7 @@ func TestDefaultCLIRunner_Timeout(t *testing.T) {
 		t.Skip("bc not available — skipping sleep stub test")
 	}
 
-	_, err := defaultCLIRunner("test prompt", "", "", 1, 100*time.Millisecond)
+	_, err := defaultCLIRunner(context.Background(), "test prompt", "", "", 1, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -178,7 +179,7 @@ func TestDefaultCLIRunner_Timeout(t *testing.T) {
 
 func TestAskClaudeCLI_UsesRunner(t *testing.T) {
 	orig := cliRunner
-	cliRunner = func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	cliRunner = func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		return `{"approved":true,"feedback":""}`, nil
 	}
 	t.Cleanup(func() { cliRunner = orig })

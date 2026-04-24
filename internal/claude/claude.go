@@ -228,11 +228,14 @@ const InvestigateTools = "Read,Grep,Glob,Bash," + atlassianReadTools + "," + gle
 // AtlassianReadTools exposes the atlassian tools for use in cmd/force (add-jira command).
 const AtlassianReadTools = atlassianReadTools
 
-// CLIRunner executes the Claude CLI. prompt is the full content of the -p flag.
-// tools is --allowedTools (empty = omit the flag). dir is the working directory
-// (empty = inherit current directory). maxTurns is --max-turns. timeout is the
-// context deadline. Always returns raw combined output even on error (may be partial).
-type CLIRunner func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)
+// CLIRunner executes the Claude CLI. ctx (Fix #8e) is the caller's
+// daemon-cancellable context — the runner wraps it with a per-call timeout
+// instead of fabricating a context.Background root. prompt is the full
+// content of the -p flag. tools is --allowedTools (empty = omit the flag).
+// dir is the working directory (empty = inherit current directory).
+// maxTurns is --max-turns. timeout is the per-call deadline. Always
+// returns raw combined output even on error (may be partial).
+type CLIRunner func(ctx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)
 
 // cliRunner is the active runner used by all agents. Override in tests to inject a stub.
 var cliRunner CLIRunner = defaultCLIRunner
@@ -241,8 +244,12 @@ var cliRunner CLIRunner = defaultCLIRunner
 // RunCLIStreaming uses this to decide whether to stream or fall back to buffered output.
 var cliRunnerIsDefault = true
 
-func defaultCLIRunner(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func defaultCLIRunner(parentCtx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	// Fix #8e: derive the bounded ctx from the caller's parentCtx so daemon
+	// shutdown / e-stop cancels in-flight Claude CLI invocations. Pre-fix
+	// this fabricated context.Background, leaving every AskClaudeCLI call
+	// deaf to daemon shutdown until its own timeout fired.
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
 	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns), "--output-format", "json"}
@@ -285,8 +292,10 @@ var DefaultCLIRunner CLIRunner = defaultCLIRunner
 
 // RunCLI invokes the active CLI runner directly (for use by agents that need
 // custom directories and timeouts, e.g. Astromech running in a worktree).
-func RunCLI(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
-	return cliRunner(prompt, tools, dir, maxTurns, timeout)
+// Fix #8e: ctx threads from the caller so daemon cancellation propagates to
+// the underlying claude subprocess.
+func RunCLI(ctx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	return cliRunner(ctx, prompt, tools, dir, maxTurns, timeout)
 }
 
 // RunCLIStreaming is like RunCLI but also writes Claude's live output to w as
@@ -300,7 +309,15 @@ func RunCLI(prompt, tools, dir string, maxTurns int, timeout time.Duration) (str
 // When a test stub is installed via SetCLIRunner, streaming is not meaningful
 // (the stub returns immediately), so this falls back to the stub and writes
 // the stub's output to w after it returns.
+// Fix #8e: RunCLIStreaming retains its no-ctx signature for backward
+// compatibility with the small number of legacy call sites (one
+// classifier path); use RunCLIStreamingContext directly when the caller
+// holds a daemon ctx (every astromech path does). The
+// `context.Background()` here is a deliberate exception, isolated to a
+// single non-hot-path call site, and explicitly commented.
 func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+	// context.Background intentional: legacy non-daemon entry-point with no
+	// caller-supplied ctx. Hot-path callers use RunCLIStreamingContext.
 	return RunCLIStreamingContext(context.Background(), prompt, tools, dir, maxTurns, timeout, w)
 }
 
@@ -316,7 +333,7 @@ func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Durat
 func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
 	if !cliRunnerIsDefault {
 		// Stub installed — call it and write its output to w for consistency.
-		out, err := cliRunner(prompt, tools, dir, maxTurns, timeout)
+		out, err := cliRunner(parentCtx, prompt, tools, dir, maxTurns, timeout)
 		if w != nil && out != "" {
 			w.Write([]byte(out)) //nolint:errcheck
 		}
@@ -427,9 +444,25 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string
 // AskClaudeCLI is a convenience wrapper for simple (non-worktree) Claude calls.
 // tools is a comma-separated list of allowed tool names; pass empty string for
 // pure reasoning calls. maxTurns caps the session length.
+//
+// Fix #8e: the no-ctx form is retained as a convenience wrapper for legacy
+// agent paths (Captain, Medic, Diplomat — all called from claim ctx but
+// without ctx threaded through their LLM helper layer yet). It feeds
+// context.Background to the runner. New code SHOULD use AskClaudeCLIContext
+// to thread the daemon ctx through; the test layer enforces this for new
+// adoption sites via Pattern P11.
 func AskClaudeCLI(systemPrompt, userPrompt, tools string, maxTurns int) (string, error) {
+	// context.Background intentional: legacy convenience wrapper with no
+	// caller-supplied ctx. Use AskClaudeCLIContext for ctx-bearing callers.
+	return AskClaudeCLIContext(context.Background(), systemPrompt, userPrompt, tools, maxTurns)
+}
+
+// AskClaudeCLIContext is the ctx-aware variant of AskClaudeCLI. Fix #8e:
+// callers that hold a daemon-cancellable ctx should prefer this so e-stop
+// can interrupt LLM calls.
+func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, tools string, maxTurns int) (string, error) {
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
-	out, err := cliRunner(fullPrompt, tools, "", maxTurns, claudeCLITimeout)
+	out, err := cliRunner(ctx, fullPrompt, tools, "", maxTurns, claudeCLITimeout)
 	if err != nil {
 		return "", err
 	}

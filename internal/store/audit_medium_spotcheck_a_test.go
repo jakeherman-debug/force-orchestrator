@@ -41,34 +41,63 @@ func TestAUDIT_066_PruneFleetUnparameterizedInterval(t *testing.T) {
 	}
 	src := string(raw)
 
-	// Line-range slice covering the documented region (lines 466-503).
-	lines := strings.Split(src, "\n")
-	if len(lines) < 503 {
-		t.Fatalf("maintenance.go has only %d lines, citation points to 466-503", len(lines))
+	// Find the pruneFleet function body and slice 50 lines from its start.
+	// Fix #8e: the original line-pinned slice (466-503) drifted when an
+	// unrelated rows.Err() sweep added log-call lines higher in the file.
+	// Locating the function by name keeps the test stable across line
+	// shifts but checks the same code region.
+	startMarker := "func pruneFleet("
+	startIdx := strings.Index(src, startMarker)
+	if startIdx < 0 {
+		t.Fatalf("could not locate pruneFleet in %s", path)
 	}
-	region := strings.Join(lines[465:503], "\n") // 0-indexed: 465..502 inclusive = lines 466..503
+	region := src[startIdx:]
+	if nl := indexNthNewline(region, 50); nl > 0 {
+		region = region[:nl]
+	}
 
 	// The exact bug pattern: `datetime('now', '%s')` inside a fmt.Sprintf
 	// with `since` substituted in. Safe only because `since` is built from
 	// an int, but flagged as regression-prone: if `keepDays` ever becomes
 	// user-controlled, this becomes SQL injection. The fix is a `?`
 	// placeholder and a bound argument.
+	//
+	// Fix #8e clarification: the test now flags ONLY the bug pattern, not
+	// every fmt.Sprintf in the function. The post-fix code has one
+	// legitimate fmt.Sprintf at the top of pruneFleet (`since := fmt.Sprintf(
+	// "-%d days", keepDays)`) that builds the bound-parameter string from
+	// an int — that's SAFE because the value flows through `?` placeholders,
+	// not SQL composition. The bug shape is fmt.Sprintf interpolating into
+	// `datetime('now', '%s')` directly, which is what bugPattern detects.
 	bugPattern := regexp.MustCompile(`datetime\('now', '%s'\)`)
-	sprintfCount := strings.Count(region, "fmt.Sprintf(")
 	bugHits := len(bugPattern.FindAllString(region, -1))
 
-	if sprintfCount == 0 && bugHits == 0 {
-		t.Logf("AUDIT-066 appears CLOSED: region 466-503 contains 0 fmt.Sprintf calls " +
-			"and 0 `datetime('now', '%%s')` interpolations.")
+	if bugHits == 0 {
+		t.Logf("AUDIT-066 appears CLOSED: pruneFleet body contains 0 " +
+			"`datetime('now', '%%s')` interpolations.")
 		return
 	}
 
 	t.Errorf("AUDIT-066 REPRODUCED: pruneFleet composes SQL time windows via "+
 		"fmt.Sprintf with `datetime('now', '%%s')` interpolation instead of "+
-		"using a `?` placeholder + bound arg. Found %d fmt.Sprintf calls and "+
-		"%d `datetime('now', '%%s')` hits in cmd/force/maintenance.go lines 466-503. "+
-		"Regression-prone: if keepDays becomes operator-supplied or dynamic, this "+
-		"is SQL injection.", sprintfCount, bugHits)
+		"using a `?` placeholder + bound arg. Found %d `datetime('now', '%%s')` "+
+		"hits inside the pruneFleet function body in cmd/force/maintenance.go. "+
+		"Regression-prone: if keepDays becomes operator-supplied or dynamic, "+
+		"this is SQL injection.", bugHits)
+}
+
+// indexNthNewline returns the byte offset of the n-th '\n' in s, or -1 if
+// s contains fewer than n newlines.
+func indexNthNewline(s string, n int) int {
+	pos := 0
+	for i := 0; i < n; i++ {
+		idx := strings.Index(s[pos:], "\n")
+		if idx < 0 {
+			return -1
+		}
+		pos += idx + 1
+	}
+	return pos
 }
 
 func TestAUDIT_068_ClaimBountyConflatesErrNoRowsWithRealErrors(t *testing.T) {

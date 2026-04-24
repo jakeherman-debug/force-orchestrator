@@ -67,11 +67,12 @@ func SpawnInvestigator(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runInvestigatorTask(db, name, bounty, logger)
+		runInvestigatorTask(ctx, db, name, bounty, logger)
 	}
 }
 
-func runInvestigatorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
+// Fix #8e: ctx threads from SpawnInvestigator's claim ctx.
+func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed Investigate #%d: %s", sessionID, bounty.ID, util.TruncateStr(bounty.Payload, 80))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -104,7 +105,7 @@ func runInvestigatorTask(db *sql.DB, name string, bounty *store.Bounty, logger *
 
 	logger.Printf("Task %d: starting investigation (timeout: %v)", bounty.ID, investigatorTimeout)
 
-	rawOut, err := claude.RunCLI(fullPrompt, claude.InvestigateTools, runDir, 30, investigatorTimeout)
+	rawOut, err := claude.RunCLI(ctx, fullPrompt, claude.InvestigateTools, runDir, 30, investigatorTimeout)
 	outputStr := strings.TrimSpace(rawOut)
 	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 

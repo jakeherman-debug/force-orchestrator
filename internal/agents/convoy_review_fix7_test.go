@@ -338,7 +338,7 @@ func TestConvoyReview_TotalClaudeCallsBounded(t *testing.T) {
 		{`{"status":"clean","findings":[]}`, nil},
 	}
 	idx := 0
-	stub := withStubCLIRunnerFn(t, func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	stub := withStubCLIRunnerFn(t, func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		r := responses[idx%len(responses)]
 		idx++
 		return r.out, r.err
@@ -408,7 +408,7 @@ func TestFullConvoyLifecycle_AdversarialLLM(t *testing.T) {
 	convoyID := seedDraftPROpenConvoy(t, db)
 
 	// All malformed — forces the parse-failure escalate path to fire.
-	stub := withStubCLIRunnerFn(t, func(prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	stub := withStubCLIRunnerFn(t, func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		return "still not json", nil
 	})
 

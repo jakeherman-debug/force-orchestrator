@@ -92,7 +92,7 @@ func TestFix8B_Auditor_Escalate_FallsBackWhenCreateEscalationFails(t *testing.T)
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	runAuditorTask(db, "auditor-1", bounty, logger)
+	runAuditorTask(context.Background(), db, "auditor-1", bounty, logger)
 
 	// Task should be Failed via fallback (not Escalated-with-no-row).
 	b, _ := store.GetBounty(db, id)
@@ -165,7 +165,7 @@ func TestFix8B_Investigator_Escalate_FallsBackWhenCreateEscalationFails(t *testi
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	runInvestigatorTask(db, "investigator-1", bounty, logger)
+	runInvestigatorTask(context.Background(), db, "investigator-1", bounty, logger)
 
 	b, _ := store.GetBounty(db, id)
 	if b.Status != "Failed" {

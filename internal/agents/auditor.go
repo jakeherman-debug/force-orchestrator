@@ -105,11 +105,12 @@ func SpawnAuditor(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runAuditorTask(db, name, bounty, logger)
+		runAuditorTask(ctx, db, name, bounty, logger)
 	}
 }
 
-func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
+// Fix #8e: ctx threads from SpawnAuditor's claim ctx.
+func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed Audit #%d: %s", sessionID, bounty.ID, util.TruncateStr(bounty.Payload, 80))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -140,7 +141,7 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 
 	logger.Printf("Task %d: starting audit (timeout: %v)", bounty.ID, auditorTimeout)
 
-	rawOut, err := claude.RunCLI(fullPrompt, claude.InvestigateTools, runDir, 40, auditorTimeout)
+	rawOut, err := claude.RunCLI(ctx, fullPrompt, claude.InvestigateTools, runDir, 40, auditorTimeout)
 	outputStr := strings.TrimSpace(rawOut)
 	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 
