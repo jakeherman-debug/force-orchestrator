@@ -1,5 +1,33 @@
 # Final status — audit fix campaign
 
+## Campaign wave 2 (2026-04-23, afternoon)
+
+Four follow-up campaigns merged to local main after the initial 10-fix wave.
+
+| Campaign | Merge SHA | AUDIT IDs closed |
+|----------|-----------|------------------|
+| 1 — Fix #8.5 LLM prompt boundary markers | `2333d3f` | 030, 108, 109, 110, 114, 115, 116, 139 |
+| 2 — Scope deferrals | `acae291` | 011 (read-side), 025, 085, 149 |
+| 3 — Fix #8b error-return migration (5 worktrees) | `b9d1a7a`, `3ab456d`, `ad144a9`, `c614139`, `e824b78` | 044 (others not carried AUDIT IDs in TODOs; 108 production markers migrated across 18 files) |
+| 4 — Fix #8c schema/time/parser cleanup | `320409e` merge | 077, 078, 080, 082, 143, 146, 147, 148 |
+
+**Post-wave-2 state:**
+- `grep -rn "TODO(Fix #8b)" --include="*.go" .` → 10 hits, all in regression-guard comments in `fix8b_*_test.go` files. Zero in production code.
+- `grep 't.Skip("AUDIT-' --include="*.go" .` → 39 hits, all on the `remainingAuditSkips` allowlist (Fix #8b pattern-covered concurrency batch + a few narrow silent-failure defects explicitly noted as adjacent-to-but-not-in-scope for the wave 1 & 2 campaigns).
+- `make test-audit` → green.
+- `go test -tags sqlite_fts5 -timeout 600s -count=1 ./...` → green across all 9 packages.
+- `make smoke` → green in ~10 s.
+- New tests added by wave 2: ~60+ across unit / integration / fuzz / acceptance / regression guards.
+
+## Additional dangerous patterns surfaced by wave 2
+
+1. **Go-side wall-clock vs SQLite UTC column comparisons.** Fix #8c's AUDIT-146/-147 fix introduced `store.NowSQLite()` for callers that format a timestamp for SQLite. The hazard pattern is any `time.Now()` being compared to a SQLite-written timestamp — it worked only by accident of Go's `time.Time` location propagation. An audit pattern on "Go-side wall-clock compared to SQLite UTC column" would likely surface more instances.
+2. **`runMigrations` has no transaction boundary.** 50+ `db.Exec` calls. A power loss mid-migration can leave the DB half-migrated and the next startup silently retries. Worst case: the TaskNotes 12-step rebuild leaves `TaskNotes_new` orphaned. Wrap in `BEGIN/COMMIT` with a recovery path.
+3. **`PRAGMA foreign_keys=ON` fires AFTER `runMigrations` runs.** Intentional for TaskNotes rebuild but means every other migration silently runs with FKs disabled. Fragile.
+4. **`TestSchemaParity` (new in Fix #8c) only checks column name sets.** A developer who changes `created_at`'s default from `datetime('now')` to `''` in createSchema passes parity while reintroducing AUDIT-078. A type+default parity test would catch it.
+5. **Chancellor's SEQUENCE/MERGE fallback (Fix #8.5 agent's note).** When the LLM emits `{"action":"SEQUENCE","sequence_after_convoy_ids":[]}` (required sub-field empty), `runChancellorReview` still falls back to `approveProposal`. Fix #8.5 closed the top-level unknown-decision vector but didn't extend fail-closed semantics to malformed SEQUENCE/MERGE payloads. Follow-up.
+6. **`commander.go` and the boot agent still use plain `json.Unmarshal` on LLM output.** Fix #8.5 wired `strictJSONUnmarshal` / DisallowUnknownFields into the six listed LLM-invoking agents; Commander and Boot were out of scope. 3-line change each.
+
 ## Fixes shipped (10 of 11 in the Prioritized Fix Plan)
 
 | Fix | Branch | Merge SHA | AUDIT IDs closed |
