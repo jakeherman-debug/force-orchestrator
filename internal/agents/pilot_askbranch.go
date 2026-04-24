@@ -92,17 +92,23 @@ func AskBranchNameForConvoy(convoyID int, convoyName string) string {
 func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload createAskBranchPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
+			logger.Printf("CreateAskBranch #%d: FailBounty after invalid payload failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 	if payload.ConvoyID <= 0 {
-		_ = store.FailBounty(db, bounty.ID, "payload missing convoy_id") // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, "payload missing convoy_id"); fbErr != nil {
+			logger.Printf("CreateAskBranch #%d: FailBounty after payload validation failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
 	convoy := store.GetConvoy(db, payload.ConvoyID)
 	if convoy == nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID)); fbErr != nil {
+			logger.Printf("CreateAskBranch #%d: FailBounty after convoy-not-found failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
@@ -113,7 +119,9 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		// check will re-queue if needed.
 		logger.Printf("CreateAskBranch #%d: convoy %d has no CodeEdit tasks yet — completing as no-op",
 			bounty.ID, payload.ConvoyID)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("CreateAskBranch #%d: failed to mark Completed: %v — stale-lock detector will recover", bounty.ID, err)
+		}
 		return
 	}
 
@@ -171,7 +179,9 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 				len(created), len(failures),
 				strings.Join(created, ","), strings.Join(failures, ";"))
 		}
-		_ = store.FailBounty(db, bounty.ID, msg) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, msg); fbErr != nil {
+			logger.Printf("CreateAskBranch #%d: FailBounty after per-repo failures failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		logger.Printf("CreateAskBranch #%d: %s", bounty.ID, msg)
 		return
 	}
@@ -188,7 +198,9 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 
 	logger.Printf("CreateAskBranch #%d: convoy %d → created=[%s] skipped=[%s]",
 		bounty.ID, payload.ConvoyID, strings.Join(created, ","), strings.Join(skipped, ","))
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("CreateAskBranch #%d: failed to mark Completed: %v — stale-lock detector will recover", bounty.ID, err)
+	}
 }
 
 // ── CleanupAskBranch ─────────────────────────────────────────────────────────
@@ -235,11 +247,15 @@ func QueueCleanupAskBranchTx(tx *sql.Tx, convoyID int) (int, error) {
 func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload cleanupAskBranchPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
+			logger.Printf("CleanupAskBranch #%d: FailBounty after invalid payload failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 	if payload.ConvoyID <= 0 {
-		_ = store.FailBounty(db, bounty.ID, "payload missing convoy_id") // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, "payload missing convoy_id"); fbErr != nil {
+			logger.Printf("CleanupAskBranch #%d: FailBounty after payload validation failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
@@ -262,12 +278,16 @@ func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pri
 		deleted = append(deleted, ab.Repo)
 	}
 	if len(failed) > 0 {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("cleanup failures: %s", strings.Join(failed, "; "))) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("cleanup failures: %s", strings.Join(failed, "; "))); fbErr != nil {
+			logger.Printf("CleanupAskBranch #%d: FailBounty after cleanup failures failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 	logger.Printf("CleanupAskBranch #%d: convoy %d → deleted=[%s]",
 		bounty.ID, payload.ConvoyID, strings.Join(deleted, ","))
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("CleanupAskBranch #%d: failed to mark Completed: %v — stale-lock detector will recover", bounty.ID, err)
+	}
 }
 
 func minInt(a, b int) int {

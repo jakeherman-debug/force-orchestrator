@@ -93,13 +93,17 @@ func QueueRebaseAgentBranch(db *sql.DB, p rebaseAgentPayload) (int, error) {
 func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var p rebaseAgentPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &p); err != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
+			logger.Printf("RebaseAgentBranch #%d: FailBounty after invalid payload failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
 	repo := store.GetRepo(db, p.Repo)
 	if repo == nil || repo.LocalPath == "" {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("repo %s not found", p.Repo)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("repo %s not found", p.Repo)); fbErr != nil {
+			logger.Printf("RebaseAgentBranch #%d: FailBounty after repo-not-found failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
@@ -116,12 +120,16 @@ func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pr
 		)
 		conflictTaskID, existed, addErr := store.AddConvoyTaskIdempotent(db, idKey, bounty.ID, p.Repo, conflictPayload, p.ConvoyID, 5, "Pending")
 		if addErr != nil {
-			_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("queue rebase-conflict task: %v", addErr)) // TODO(Fix #8b): propagate error
+			if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("queue rebase-conflict task: %v", addErr)); fbErr != nil {
+				logger.Printf("RebaseAgentBranch #%d: FailBounty after conflict-queue failure failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+			}
 			return
 		}
 		if existed {
 			logger.Printf("RebaseAgentBranch #%d: conflict — reusing existing task #%d for branch %s", bounty.ID, conflictTaskID, p.Branch)
-			_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+			if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+				logger.Printf("RebaseAgentBranch #%d: failed to mark Completed after reusing conflict task #%d: %v — stale-lock detector will recover", bounty.ID, conflictTaskID, err)
+			}
 			return
 		}
 		logger.Printf("RebaseAgentBranch #%d: conflict — spawned task #%d for branch %s", bounty.ID, conflictTaskID, p.Branch)
@@ -131,17 +139,23 @@ func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pr
 			fmt.Sprintf("Rebase of %s onto ask-branch %s conflicted.\n\nResolve conflict markers on %s and commit. Council review will approve and the branch will be force-pushed.\n\nError:\n%v",
 				p.Branch, p.AskBranch, p.Branch, rebaseErr),
 			conflictTaskID, store.MailTypeFeedback)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("RebaseAgentBranch #%d: failed to mark Completed after spawning conflict task #%d: %v — stale-lock detector will recover", bounty.ID, conflictTaskID, err)
+		}
 		return
 	}
 
 	// Clean rebase — force-push the agent branch so the open sub-PR auto-updates.
 	if pushErr := igit.ForcePushBranch(repo.LocalPath, p.Branch); pushErr != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push %s failed: %v", p.Branch, pushErr)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push %s failed: %v", p.Branch, pushErr)); fbErr != nil {
+			logger.Printf("RebaseAgentBranch #%d: FailBounty after force-push failure failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
 	logger.Printf("RebaseAgentBranch #%d: rebased %s onto ask-branch %s, new tip %s",
 		bounty.ID, p.Branch, p.AskBranch, newTip[:minInt(8, len(newTip))])
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("RebaseAgentBranch #%d: failed to mark Completed: %v — stale-lock detector will recover", bounty.ID, err)
+	}
 }
