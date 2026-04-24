@@ -52,6 +52,9 @@ func ListMail(db *sql.DB, toAgent string) []FleetMail {
 		m.MessageType = MailType(mt)
 		mails = append(mails, m)
 	}
+	if rErr := sqlRows.Err(); rErr != nil {
+		log.Printf("fleet_mail.go:ListMail: rows iter error: %v", rErr)
+	}
 	return mails
 }
 
@@ -117,6 +120,9 @@ func ReadInboxForAgent(db *sql.DB, agentName, role string, taskID int) []FleetMa
 		}
 		m.MessageType = MailType(mt)
 		mails = append(mails, m)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("fleet_mail.go:ReadInboxForAgent: rows iter error: %v", rErr)
 	}
 	// Preserve the pre-fix creation-order contract.
 	sortMailsByCreatedAscID(mails)

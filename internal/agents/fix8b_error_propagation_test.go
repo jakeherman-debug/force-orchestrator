@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"bytes"
 	"fmt"
 	"log"
@@ -58,7 +59,7 @@ func TestFix8B_PRReviewTriage_BadPayload_LogsFailBountyError(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	runPRReviewTriage(db, "Diplomat", bounty, logger)
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty") || !strings.Contains(logs, "stale-lock detector will recover") {

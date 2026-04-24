@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"log"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -60,6 +61,9 @@ func dogPRReviewPoll(db *sql.DB, logger interface{ Printf(string, ...any) }) err
 			continue
 		}
 		convoys = append(convoys, c)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pr_review_poll.go:dogPRReviewPoll: rows iter error: %v", rErr)
 	}
 	rows.Close()
 	if len(convoys) == 0 {

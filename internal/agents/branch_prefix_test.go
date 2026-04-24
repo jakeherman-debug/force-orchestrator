@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -118,7 +119,7 @@ func TestRunCreateAskBranch_UsesPrefixedBranchName(t *testing.T) {
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	ab := store.GetConvoyAskBranch(db, cid, "api")
 	if ab == nil {

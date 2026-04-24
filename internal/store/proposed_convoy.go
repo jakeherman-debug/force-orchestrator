@@ -111,6 +111,9 @@ func GetActiveConvoyContext(db *sql.DB) []ActiveConvoyInfo {
 		}
 		convoys = append(convoys, c)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("proposed_convoy.go:GetActiveConvoyContext: rows iter error: %v", rErr)
+	}
 	rows.Close()
 
 	for i := range convoys {
@@ -131,6 +134,9 @@ func GetActiveConvoyContext(db *sql.DB) []ActiveConvoyInfo {
 				payload = payload[:100] + "…"
 			}
 			convoys[i].Tasks = append(convoys[i].Tasks, payload)
+		}
+		if rErr := taskRows.Err(); rErr != nil {
+			log.Printf("proposed_convoy.go:GetActiveConvoyContext: rows iter error: %v", rErr)
 		}
 		taskRows.Close()
 	}
@@ -157,6 +163,9 @@ func GetPendingProposals(db *sql.DB, excludeFeatureID int) []PendingProposalInfo
 			continue
 		}
 		proposals = append(proposals, p)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("proposed_convoy.go:GetPendingProposals: rows iter error: %v", rErr)
 	}
 	return proposals
 }
@@ -187,6 +196,9 @@ func GetPendingFeatures(db *sql.DB, excludeFeatureID int) []PendingFeatureInfo {
 		}
 		features = append(features, f)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("proposed_convoy.go:GetPendingFeatures: rows iter error: %v", rErr)
+	}
 	return features
 }
 
@@ -215,6 +227,9 @@ func GetConvoyTailTaskIDs(db *sql.DB, convoyID int) []int {
 			continue
 		}
 		ids = append(ids, id)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("proposed_convoy.go:GetConvoyTailTaskIDs: rows iter error: %v", rErr)
 	}
 	return ids
 }

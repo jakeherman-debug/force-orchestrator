@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -236,7 +237,7 @@ func TestCouncilBoundaryIntegrity_InvokedEndToEnd(t *testing.T) {
 	// the stub receives, not the response.
 	stub := withStubCLIRunner(t, `{"approved":false,"feedback":"wanted to test boundary"}`, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	if stub.CallCount() == 0 {
 		t.Fatal("stub LLM was never called — Council short-circuited before reaching the prompt build")
@@ -287,7 +288,7 @@ func TestCaptain_UnknownDecisionFailsClosed(t *testing.T) {
 	// Use just "decision" and "feedback" so strictJSONUnmarshal accepts the shape.
 	withStubCLIRunner(t, `{"decision":"ratify","feedback":"","task_updates":[],"new_tasks":[],"rejected_files":[]}`, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	// The task MUST NOT be in AwaitingCouncilReview (pre-fix behavior).
@@ -319,7 +320,7 @@ func TestCaptain_StrictJSONRejectsUnknownFields(t *testing.T) {
 	// Inject an unknown field "severity" — an LLM that drifts must surface as parse error.
 	withStubCLIRunner(t, `{"decision":"approve","feedback":"","task_updates":[],"new_tasks":[],"rejected_files":[],"severity":"high"}`, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status == "AwaitingCouncilReview" {
@@ -357,7 +358,7 @@ func TestCaptain_NewTasksWithSignalToken_Rejected(t *testing.T) {
 	rawJSON, _ := json.Marshal(resp)
 	withStubCLIRunner(t, string(rawJSON), nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	// Count new tasks inserted into the convoy — there must be NONE with
 	// the injected payload.

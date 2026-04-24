@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,12 +48,12 @@ func TestPrepareAgentBranch_BranchesOffAskBranch(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	agentWT, err := GetOrCreateAgentWorktree(db, "R2-D2", wt)
+	agentWT, err := GetOrCreateAgentWorktree(context.Background(), db, "R2-D2", wt)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	branchName, _, err := PrepareAgentBranch(agentWT, wt, 99, "R2-D2", "", "force/ask-42-demo")
+	branchName, _, err := PrepareAgentBranch(context.Background(), agentWT, wt, 99, "R2-D2", "", "force/ask-42-demo")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch with ask-branch base: %v", err)
 	}
@@ -123,14 +124,14 @@ func TestPrepareAgentBranch_FetchesWhenLocalAskBranchIsStale(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	agentWT, err := GetOrCreateAgentWorktree(db, "R3-S6", wt)
+	agentWT, err := GetOrCreateAgentWorktree(context.Background(), db, "R3-S6", wt)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Task 248 branches off the ask-branch. With the fix, we fetch first and
 	// use the remote ref — so 247's file should be present.
-	branchName, _, err := PrepareAgentBranch(agentWT, wt, 248, "R3-S6", "", "force/ask-42-demo")
+	branchName, _, err := PrepareAgentBranch(context.Background(), agentWT, wt, 248, "R3-S6", "", "force/ask-42-demo")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch: %v", err)
 	}
@@ -153,11 +154,11 @@ func TestPrepareAgentBranch_FallsBackWhenAskBranchUnresolvable(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	agentWT, err := GetOrCreateAgentWorktree(db, "BB-8", dir)
+	agentWT, err := GetOrCreateAgentWorktree(context.Background(), db, "BB-8", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	branchName, _, err := PrepareAgentBranch(agentWT, dir, 7, "BB-8", "", "does/not/exist")
+	branchName, _, err := PrepareAgentBranch(context.Background(), agentWT, dir, 7, "BB-8", "", "does/not/exist")
 	if err != nil {
 		t.Fatalf("should fall back rather than fail: %v", err)
 	}

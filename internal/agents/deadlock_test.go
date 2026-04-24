@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
@@ -66,7 +67,7 @@ func TestDogGitHygiene_WithReposAndAgents_NoDeadlock(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	runWithDeadline(t, 5*time.Second, func() {
-		dogGitHygiene(db, logger)
+		dogGitHygiene(context.Background(), db, logger)
 	})
 }
 
@@ -95,7 +96,7 @@ func TestDogGitHygiene_OrphanedBranchCleaned(t *testing.T) {
 	// No tasks reference this branch — it should be detected as orphaned.
 	logger := log.New(io.Discard, "", 0)
 	runWithDeadline(t, 5*time.Second, func() {
-		dogGitHygiene(db, logger)
+		dogGitHygiene(context.Background(), db, logger)
 	})
 
 	// Worktree should be detached (rev-parse HEAD is no longer on the branch).
@@ -130,7 +131,7 @@ func TestDogGitHygiene_MultipleReposMultipleAgents_NoDeadlock(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	runWithDeadline(t, 8*time.Second, func() {
-		dogGitHygiene(db, logger)
+		dogGitHygiene(context.Background(), db, logger)
 	})
 }
 
@@ -161,6 +162,6 @@ func TestRunDogs_WithReposAndAgents_NoDeadlock(t *testing.T) {
 	// Leave all dogs due (no last_run_at) so all dogs execute.
 	logger := log.New(io.Discard, "", 0)
 	runWithDeadline(t, 10*time.Second, func() {
-		RunDogs(db, logger)
+		RunDogs(context.Background(), db, logger)
 	})
 }

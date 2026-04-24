@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 
 	igit "force-orchestrator/internal/git"
@@ -24,29 +25,32 @@ import (
 //
 // For performance, all lookups stay in the store package; no git subprocess
 // other than the single diff command is added.
-func reviewDiff(db *sql.DB, repoPath string, b *store.Bounty) string {
+// Fix #8e: ctx threads from the caller (reviewer claim ctx) so the diff
+// subprocess cancels on daemon shutdown.
+func reviewDiff(ctx context.Context, db *sql.DB, repoPath string, b *store.Bounty) string {
 	if b == nil || repoPath == "" || b.BranchName == "" {
 		return ""
 	}
 	if b.ConvoyID > 0 {
 		if ab := store.GetConvoyAskBranch(db, b.ConvoyID, b.TargetRepo); ab != nil && ab.AskBranch != "" {
-			return igit.GetDiffFromBase(repoPath, "origin/"+ab.AskBranch, b.BranchName)
+			return igit.GetDiffFromBase(ctx, repoPath, "origin/"+ab.AskBranch, b.BranchName)
 		}
 	}
-	return igit.GetDiff(repoPath, b.BranchName)
+	return igit.GetDiff(ctx, repoPath, b.BranchName)
 }
 
 // reviewCommitsAhead mirrors reviewDiff but returns one-line log output —
 // used by auto-complete checks ("is there any net-new work here?"). Same
 // base-selection rule.
-func reviewCommitsAhead(db *sql.DB, repoPath string, b *store.Bounty) string {
+// Fix #8e: ctx threads from the caller.
+func reviewCommitsAhead(ctx context.Context, db *sql.DB, repoPath string, b *store.Bounty) string {
 	if b == nil || repoPath == "" || b.BranchName == "" {
 		return ""
 	}
 	if b.ConvoyID > 0 {
 		if ab := store.GetConvoyAskBranch(db, b.ConvoyID, b.TargetRepo); ab != nil && ab.AskBranch != "" {
-			return igit.CommitsAheadOf(repoPath, "origin/"+ab.AskBranch, b.BranchName)
+			return igit.CommitsAheadOf(ctx, repoPath, "origin/"+ab.AskBranch, b.BranchName)
 		}
 	}
-	return igit.CommitsAhead(repoPath, b.BranchName)
+	return igit.CommitsAhead(ctx, repoPath, b.BranchName)
 }

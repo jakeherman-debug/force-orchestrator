@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"os/exec"
@@ -88,7 +89,7 @@ func TestDogMainDriftWatch_NoDrift_IsNoOp(t *testing.T) {
 	convoyID, _ := setupRebaseScenario(t, db, "force/ask-nodrift")
 	_ = convoyID
 
-	if err := dogMainDriftWatch(db, testLogger{}); err != nil {
+	if err := dogMainDriftWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	var queued int
@@ -105,7 +106,7 @@ func TestDogMainDriftWatch_DriftDetected_QueuesRebase(t *testing.T) {
 	convoyID, repoDir := setupRebaseScenario(t, db, "force/ask-drift")
 	_ = advanceMain(t, repoDir)
 
-	if err := dogMainDriftWatch(db, testLogger{}); err != nil {
+	if err := dogMainDriftWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	var queued int
@@ -127,8 +128,8 @@ func TestDogMainDriftWatch_DoesNotDuplicate(t *testing.T) {
 	_, repoDir := setupRebaseScenario(t, db, "force/ask-dup")
 	advanceMain(t, repoDir)
 
-	_ = dogMainDriftWatch(db, testLogger{})
-	_ = dogMainDriftWatch(db, testLogger{})
+	_ = dogMainDriftWatch(context.Background(), db, testLogger{})
+	_ = dogMainDriftWatch(context.Background(), db, testLogger{})
 
 	var queued int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'RebaseAskBranch' AND status IN ('Pending', 'Locked')`).Scan(&queued)
@@ -148,7 +149,7 @@ func TestRunRebaseAskBranch_HappyPath_ForcePushesAndUpdatesSHA(t *testing.T) {
 
 	id, _ := QueueRebaseAskBranch(db, convoyID, "api")
 	b, _ := store.GetBounty(db, id)
-	runRebaseAskBranch(db, b, testLogger{})
+	runRebaseAskBranch(context.Background(), db, b, testLogger{})
 
 	updated, _ := store.GetBounty(db, id)
 	if updated.Status != "Completed" {
@@ -215,7 +216,7 @@ func TestRunRebaseAskBranch_Conflict_SpawnsRebaseConflictCodeEdit(t *testing.T) 
 
 	id, _ := QueueRebaseAskBranch(db, convoyID, "api")
 	b, _ := store.GetBounty(db, id)
-	runRebaseAskBranch(db, b, testLogger{})
+	runRebaseAskBranch(context.Background(), db, b, testLogger{})
 
 	// Pilot task should have Completed — astromech handles the resolution now.
 	updated, _ := store.GetBounty(db, id)
@@ -244,7 +245,7 @@ func TestRunRebaseAskBranch_NoAskBranchIsNoOp(t *testing.T) {
 
 	id, _ := QueueRebaseAskBranch(db, convoyID, "api")
 	b, _ := store.GetBounty(db, id)
-	runRebaseAskBranch(db, b, testLogger{})
+	runRebaseAskBranch(context.Background(), db, b, testLogger{})
 
 	updated, _ := store.GetBounty(db, id)
 	if updated.Status != "Completed" {
@@ -303,13 +304,13 @@ func TestRunRebaseAskBranch_Conflict_Idempotent(t *testing.T) {
 	// First run spawns the conflict task.
 	id1, _ := QueueRebaseAskBranch(db, convoyID, "api")
 	b1, _ := store.GetBounty(db, id1)
-	runRebaseAskBranch(db, b1, testLogger{})
+	runRebaseAskBranch(context.Background(), db, b1, testLogger{})
 
 	// Second run (as if main-drift-watch re-queued before the first conflict
 	// was resolved) must reuse the existing conflict task, not create a second.
 	id2, _ := QueueRebaseAskBranch(db, convoyID, "api")
 	b2, _ := store.GetBounty(db, id2)
-	runRebaseAskBranch(db, b2, testLogger{})
+	runRebaseAskBranch(context.Background(), db, b2, testLogger{})
 
 	var conflictCount int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard
@@ -328,7 +329,7 @@ func TestRunRebaseAskBranch_InvalidPayloadFails(t *testing.T) {
 		VALUES (0, 'api', 'RebaseAskBranch', 'Pending', 'not-json', datetime('now'))`)
 	id, _ := res.LastInsertId()
 	b, _ := store.GetBounty(db, int(id))
-	runRebaseAskBranch(db, b, testLogger{})
+	runRebaseAskBranch(context.Background(), db, b, testLogger{})
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
 		t.Errorf("invalid payload should fail, got %q", updated.Status)

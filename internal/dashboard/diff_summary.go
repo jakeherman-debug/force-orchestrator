@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -66,7 +67,9 @@ func parseDiffStats(diff string) []DiffFileStat {
 // handleConvoyDiffSummary handles GET /api/convoys/{id}/diff-summary.
 // It iterates over the convoy's ask-branches, calls GetDiff for each branch
 // in its repo's worktree, and returns per-file and totals addition/deletion counts.
-func handleConvoyDiffSummary(db *sql.DB, convoyID int, w http.ResponseWriter) {
+// Fix #8e: ctx threads from the http.Request so the diff subprocess cancels
+// when the client disconnects (or the dashboard server shuts down).
+func handleConvoyDiffSummary(ctx context.Context, db *sql.DB, convoyID int, w http.ResponseWriter) {
 	askBranches := store.ListConvoyAskBranches(db, convoyID)
 
 	result := make([]AskBranchDiffSummary, 0, len(askBranches))
@@ -75,7 +78,7 @@ func handleConvoyDiffSummary(db *sql.DB, convoyID int, w http.ResponseWriter) {
 		if repoPath == "" {
 			continue
 		}
-		diff := igit.GetDiff(repoPath, ab.AskBranch)
+		diff := igit.GetDiff(ctx, repoPath, ab.AskBranch)
 		files := parseDiffStats(diff)
 		if files == nil {
 			files = []DiffFileStat{}

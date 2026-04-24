@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"log"
@@ -155,7 +156,7 @@ func TestRunMedicCITriage_RealBugSpawnsFixTask(t *testing.T) {
 
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, triageID)
 	if updated.Status != "Completed" {
@@ -185,7 +186,7 @@ func TestRunMedicCITriage_FlakyRetriesWithoutFix(t *testing.T) {
 	withStubCLIRunner(t, `{"classification":"Flaky","diagnosis":"intermittent timeout","fix_guidance":"","operator_note":""}`, nil)
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	// No fix task should be spawned.
 	var fixCount int
@@ -214,7 +215,7 @@ func TestRunMedicCITriage_FlakyPromotedEscalatesAtCap(t *testing.T) {
 	withStubCLIRunner(t, `{"classification":"Flaky","diagnosis":"looks flaky again","fix_guidance":"","operator_note":""}`, nil)
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Escalated" {
@@ -239,7 +240,7 @@ func TestRunMedicCITriage_EnvironmentalTripsBreaker(t *testing.T) {
 		_, payload, _ := setupTriageScenario(t, db)
 		triageID, _ := QueueCIFailureTriage(db, payload)
 		b, _ := store.GetBounty(db, triageID)
-		runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+		runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 	}
 	if !IsCIBreakerOpen(db, "api") {
 		t.Errorf("breaker should be open after %d Environmental failures", ciEnvThreshold)
@@ -258,7 +259,7 @@ func TestRunMedicCITriage_EnvironmentalTripsBreaker(t *testing.T) {
 		_, payload, _ := setupTriageScenario(t, db)
 		triageID, _ := QueueCIFailureTriage(db, payload)
 		b, _ := store.GetBounty(db, triageID)
-		runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+		runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 	}
 	if after := stub.CallCount(); after > postTripCount {
 		t.Errorf("AUDIT-161: breaker-open path still calls Claude — CallCount grew from %d to %d after breaker opened", postTripCount, after)
@@ -274,7 +275,7 @@ func TestRunMedicCITriage_BranchProtectionEscalates(t *testing.T) {
 
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Escalated" {
@@ -296,7 +297,7 @@ func TestRunMedicCITriage_UnfixableEscalates(t *testing.T) {
 
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Escalated" {
@@ -313,7 +314,7 @@ func TestRunMedicCITriage_MalformedJSONEscalates(t *testing.T) {
 
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Escalated" {
@@ -330,7 +331,7 @@ func TestRunMedicCITriage_ClaudeErrorEscalates(t *testing.T) {
 
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Escalated" {
@@ -352,7 +353,7 @@ func TestRunMedicCITriage_SkipsAlreadyMergedPR(t *testing.T) {
 
 	triageID, _ := QueueCIFailureTriage(db, payload)
 	b, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 
 	// Triage task completes as a no-op.
 	updated, _ := store.GetBounty(db, triageID)
@@ -398,7 +399,7 @@ func TestJediCouncilApproval_RequeuesWhenBreakerOpen(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	// Task should NOT be AwaitingSubPRCI; it must be back at AwaitingCouncilReview
 	// for a later retry after the breaker closes.

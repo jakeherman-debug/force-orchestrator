@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
@@ -110,7 +111,7 @@ func TestRunDog_Unknown(t *testing.T) {
 	defer db.Close()
 
 	logger := log.New(io.Discard, "", 0)
-	err := runDog(db, "unknown-dog", logger)
+	err := runDog(context.Background(), db, "unknown-dog", logger)
 	if err == nil {
 		t.Error("expected error for unknown dog")
 	}
@@ -124,7 +125,7 @@ func TestRunDog_MailCleanup(t *testing.T) {
 	defer db.Close()
 
 	logger := log.New(io.Discard, "", 0)
-	if err := runDog(db, "mail-cleanup", logger); err != nil {
+	if err := runDog(context.Background(), db, "mail-cleanup", logger); err != nil {
 		t.Fatalf("mail-cleanup dog failed: %v", err)
 	}
 }
@@ -134,7 +135,7 @@ func TestRunDog_DBVacuum(t *testing.T) {
 	defer db.Close()
 
 	logger := log.New(io.Discard, "", 0)
-	if err := runDog(db, "db-vacuum", logger); err != nil {
+	if err := runDog(context.Background(), db, "db-vacuum", logger); err != nil {
 		t.Fatalf("db-vacuum dog failed: %v", err)
 	}
 }
@@ -145,7 +146,7 @@ func TestRunDog_GitHygiene_NoRepos(t *testing.T) {
 
 	// No repos registered — should succeed with no-op
 	logger := log.New(io.Discard, "", 0)
-	if err := runDog(db, "git-hygiene", logger); err != nil {
+	if err := runDog(context.Background(), db, "git-hygiene", logger); err != nil {
 		t.Fatalf("git-hygiene with no repos failed: %v", err)
 	}
 }
@@ -164,7 +165,7 @@ func TestRunDogs_NeverRun(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	// All dogs have no last-run timestamp → all are due → all should run
-	RunDogs(db, logger)
+	RunDogs(context.Background(), db, logger)
 
 	// All 4 dogs should have been marked as run
 	for _, name := range []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup"} {
@@ -192,7 +193,7 @@ func TestRunDogs_CooldownRespected(t *testing.T) {
 	}
 
 	logger := log.New(io.Discard, "", 0)
-	RunDogs(db, logger)
+	RunDogs(context.Background(), db, logger)
 
 	// No dog should have run again (within cooldown)
 	for _, name := range []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup"} {
@@ -222,7 +223,7 @@ func TestRunDogs_RFC3339Cooldown(t *testing.T) {
 	db.QueryRow(`SELECT run_count FROM Dogs WHERE name = 'db-vacuum'`).Scan(&countBefore)
 
 	logger := log.New(io.Discard, "", 0)
-	RunDogs(db, logger)
+	RunDogs(context.Background(), db, logger)
 
 	var countAfter int
 	db.QueryRow(`SELECT run_count FROM Dogs WHERE name = 'db-vacuum'`).Scan(&countAfter)
@@ -243,7 +244,7 @@ func TestDogGitHygiene_MissingRepoPath(t *testing.T) {
 	store.AddRepo(db, "dead-repo", "/nonexistent/path/to/repo", "dead repo")
 
 	logger := log.New(io.Discard, "", 0)
-	if err := dogGitHygiene(db, logger); err != nil {
+	if err := dogGitHygiene(context.Background(), db, logger); err != nil {
 		t.Fatalf("dogGitHygiene should not fail for missing path: %v", err)
 	}
 }
@@ -260,7 +261,7 @@ func TestDogGitHygiene_WithExistingRepo(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	// git fetch --prune fails (no remote), but dogGitHygiene returns nil regardless
-	err := dogGitHygiene(db, logger)
+	err := dogGitHygiene(context.Background(), db, logger)
 	if err != nil {
 		t.Errorf("expected no error from dogGitHygiene, got: %v", err)
 	}

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -61,7 +62,9 @@ func QueueRebaseAskBranch(db *sql.DB, convoyID int, repo string) (int, error) {
 	return id, nil
 }
 
-func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnPilot's claim loop so a hung fetch/rebase/
+// push during ask-branch rebase cancels on daemon shutdown.
+func runRebaseAskBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload rebasePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
@@ -94,12 +97,12 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 	// main-drift-watch re-queued, repeat.
 	defaultBranch := repo.DefaultBranch
 	if defaultBranch == "" {
-		defaultBranch = igit.GetDefaultBranch(repo.LocalPath)
+		defaultBranch = igit.GetDefaultBranch(ctx, repo.LocalPath)
 	}
 
 	// Drift guard: if the branch is dramatically behind main, escalate rather
 	// than attempt a mega-rebase that's likely to conflict on dozens of files.
-	if behind, ahead, err := countCommitsAheadBehind(repo.LocalPath, ab.AskBranch, defaultBranch); err == nil {
+	if behind, ahead, err := countCommitsAheadBehind(ctx, repo.LocalPath, ab.AskBranch, defaultBranch); err == nil {
 		_ = ahead
 		if behind > maxDriftBehind {
 			escMsg := fmt.Sprintf("Ask-branch %s on %s is %d commits behind %s (limit %d) — convoy needs manual intervention",
@@ -136,7 +139,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		return
 	}
 
-	newTip, rebaseErr := igit.RebaseBranchOnto(repo.LocalPath, ab.AskBranch, defaultBranch)
+	newTip, rebaseErr := igit.RebaseBranchOnto(ctx, repo.LocalPath, ab.AskBranch, defaultBranch)
 	if rebaseErr != nil {
 		// Before escalating to an astromech, try a non-LLM fallback: merge
 		// the default branch into the ask-branch with `-X union` strategy.
@@ -147,12 +150,12 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 		// resolution is reserved for structural conflicts that genuinely
 		// need judgement.
 		logger.Printf("RebaseAskBranch #%d: rebase conflicted — attempting union-merge fallback", bounty.ID)
-		unionTip, unionErr := igit.MergeWithUnionStrategy(repo.LocalPath, ab.AskBranch, "refs/remotes/origin/"+defaultBranch,
+		unionTip, unionErr := igit.MergeWithUnionStrategy(ctx, repo.LocalPath, ab.AskBranch, "refs/remotes/origin/"+defaultBranch,
 			fmt.Sprintf("merge %s into %s via union strategy (auto-recovery from rebase conflict)", defaultBranch, ab.AskBranch))
 		if unionErr == nil {
 			// Union merge succeeded in a temp worktree; the local ref now
 			// points at the merge commit. Push it.
-			if pushErr := igit.ForcePushBranch(repo.LocalPath, ab.AskBranch); pushErr != nil {
+			if pushErr := igit.ForcePushBranch(ctx, repo.LocalPath, ab.AskBranch); pushErr != nil {
 				logger.Printf("RebaseAskBranch #%d: union merge succeeded but push failed: %v — falling through to astromech", bounty.ID, pushErr)
 			} else {
 				if err := store.UpdateConvoyAskBranchBase(db, payload.ConvoyID, payload.Repo, unionTip); err != nil {
@@ -220,7 +223,7 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 	}
 
 	// Clean rebase — force-push with lease, update stored base SHA.
-	if pushErr := igit.ForcePushBranch(repo.LocalPath, ab.AskBranch); pushErr != nil {
+	if pushErr := igit.ForcePushBranch(ctx, repo.LocalPath, ab.AskBranch); pushErr != nil {
 		cls := gh.ClassifyError(pushErr.Error())
 		if cls.ShouldRetry() {
 			// Put the task back to Pending so the next Pilot tick retries.
@@ -265,8 +268,9 @@ func runRebaseAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 // branch is behind / ahead of base, using `git rev-list --count --left-right`.
 // Sscanf errors propagate as an error so a malformed git output can't silently
 // leave behind=0 and bypass the drift-cap escalation.
-func countCommitsAheadBehind(repoPath, branch, base string) (behind, ahead int, err error) {
-	out, err := igit.RunCmd(repoPath, "rev-list", "--count", "--left-right",
+// Fix #8e: ctx threads from the caller (Pilot's claim ctx).
+func countCommitsAheadBehind(ctx context.Context, repoPath, branch, base string) (behind, ahead int, err error) {
+	out, err := igit.RunCmd(ctx, repoPath, "rev-list", "--count", "--left-right",
 		"refs/remotes/origin/"+base+"..."+branch)
 	if err != nil {
 		return 0, 0, fmt.Errorf("rev-list: %s", strings.TrimSpace(out))
@@ -290,7 +294,9 @@ func countCommitsAheadBehind(repoPath, branch, base string) (behind, ahead int, 
 // Cheap: one `git ls-remote` per ask-branch (milliseconds). Heavy work (the
 // rebase) only runs when we've actually detected a SHA change, so idle repos
 // cost almost nothing.
-func dogMainDriftWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+// Fix #8e: ctx threads from RunDogs (per-dog 5m ctx, derived from inquisitor
+// tick ctx) so the ls-remote network ops cancel on daemon shutdown.
+func dogMainDriftWatch(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 	rows := store.ListAllConvoyAskBranches(db)
 	if len(rows) == 0 {
 		return nil
@@ -307,7 +313,7 @@ func dogMainDriftWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 		key := repoKey{ab.Repo, repoCfg.LocalPath}
 		headSHA, cached := checkedHeadSHA[key]
 		if !cached {
-			sha, err := igit.RemoteHeadSHA(repoCfg.LocalPath)
+			sha, err := igit.RemoteHeadSHA(ctx, repoCfg.LocalPath)
 			if err != nil {
 				logger.Printf("main-drift-watch: ls-remote %s failed: %v", ab.Repo, err)
 				continue

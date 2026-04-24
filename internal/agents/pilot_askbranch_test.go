@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,7 +101,7 @@ func TestRunCreateAskBranch_HappyPathSingleRepo(t *testing.T) {
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	got := store.GetConvoyAskBranch(db, cid, "api")
 	if got == nil {
@@ -137,7 +138,7 @@ func TestRunCreateAskBranch_MultiRepoFansOut(t *testing.T) {
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	branches := store.ListConvoyAskBranches(db, cid)
 	if len(branches) != 2 {
@@ -167,12 +168,12 @@ func TestRunCreateAskBranch_Idempotent(t *testing.T) {
 	// First run.
 	id1, _ := QueueCreateAskBranch(db, cid)
 	b1, _ := store.GetBounty(db, id1)
-	runCreateAskBranch(db, b1, testLogger{})
+	runCreateAskBranch(context.Background(), db, b1, testLogger{})
 
 	// Second run — handler should skip repo because branch exists.
 	id2, _ := QueueCreateAskBranch(db, cid)
 	b2, _ := store.GetBounty(db, id2)
-	runCreateAskBranch(db, b2, testLogger{})
+	runCreateAskBranch(context.Background(), db, b2, testLogger{})
 
 	branches := store.ListConvoyAskBranches(db, cid)
 	if len(branches) != 1 {
@@ -199,7 +200,7 @@ func TestRunCreateAskBranch_SkipsPRFlowDisabledRepo(t *testing.T) {
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	// No ask-branch should have been created.
 	if branches := store.ListConvoyAskBranches(db, cid); len(branches) != 0 {
@@ -221,7 +222,7 @@ func TestRunCreateAskBranch_FailsWhenRepoUnregistered(t *testing.T) {
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Failed" {
@@ -238,7 +239,7 @@ func TestRunCreateAskBranch_FailsOnInvalidPayload(t *testing.T) {
 		VALUES (0, '', 'CreateAskBranch', 'Pending', 'not-json', datetime('now'))`)
 	id, _ := res.LastInsertId()
 	b, _ := store.GetBounty(db, int(id))
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
 		t.Errorf("expected Failed, got %q", updated.Status)
@@ -254,7 +255,7 @@ func TestRunCreateAskBranch_NoCodeEditTasksCompletes(t *testing.T) {
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Completed" {
@@ -278,7 +279,7 @@ func TestRunCleanupAskBranch_DeletesBranchesAndRows(t *testing.T) {
 	// First create the branch.
 	createID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, createID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 	if len(store.ListConvoyAskBranches(db, cid)) != 1 {
 		t.Fatal("setup failed — expected 1 ask-branch row")
 	}
@@ -286,7 +287,7 @@ func TestRunCleanupAskBranch_DeletesBranchesAndRows(t *testing.T) {
 	// Now clean it up.
 	cleanupID, _ := QueueCleanupAskBranch(db, cid)
 	cb, _ := store.GetBounty(db, cleanupID)
-	runCleanupAskBranch(db, cb, testLogger{})
+	runCleanupAskBranch(context.Background(), db, cb, testLogger{})
 
 	// Rows gone.
 	if len(store.ListConvoyAskBranches(db, cid)) != 0 {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 	"os"
@@ -98,6 +99,9 @@ func cmdConfig(db *sql.DB, args []string) {
 				continue
 			}
 			fmt.Printf("%-25s = %s\n", k, v)
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("config.go:cmdConfig: rows iter error: %v", rErr)
 		}
 		if !found {
 			fmt.Println("No config values set. Defaults are in effect.")

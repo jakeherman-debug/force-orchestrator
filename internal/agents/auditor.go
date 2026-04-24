@@ -382,6 +382,9 @@ func buildAuditRepoContext(db *sql.DB, scopedRepo string) string {
 		}
 		entries = append(entries, fmt.Sprintf("- %s (%s): %s", name, path, desc))
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("auditor.go:buildAuditRepoContext: rows iter error: %v", rErr)
+	}
 	if len(entries) == 0 {
 		return ""
 	}

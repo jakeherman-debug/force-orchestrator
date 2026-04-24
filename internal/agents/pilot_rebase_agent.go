@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -90,7 +91,9 @@ func QueueRebaseAgentBranch(db *sql.DB, p rebaseAgentPayload) (int, error) {
 	return id, nil
 }
 
-func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnPilot's claim ctx so the network rebase/
+// force-push cancels on daemon shutdown.
+func runRebaseAgentBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var p rebaseAgentPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &p); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
@@ -107,7 +110,7 @@ func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pr
 		return
 	}
 
-	newTip, rebaseErr := igit.RebaseBranchOnto(repo.LocalPath, p.Branch, p.AskBranch)
+	newTip, rebaseErr := igit.RebaseBranchOnto(ctx, repo.LocalPath, p.Branch, p.AskBranch)
 	if rebaseErr != nil {
 		// Rebase conflict — spawn (or reuse) a CodeEdit task for the astromech to
 		// resolve, then complete Pilot's task (resolution is the astromech's job).
@@ -146,7 +149,7 @@ func runRebaseAgentBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pr
 	}
 
 	// Clean rebase — force-push the agent branch so the open sub-PR auto-updates.
-	if pushErr := igit.ForcePushBranch(repo.LocalPath, p.Branch); pushErr != nil {
+	if pushErr := igit.ForcePushBranch(ctx, repo.LocalPath, p.Branch); pushErr != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push %s failed: %v", p.Branch, pushErr)); fbErr != nil {
 			logger.Printf("RebaseAgentBranch #%d: FailBounty after force-push failure failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
 		}

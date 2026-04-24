@@ -1,6 +1,8 @@
 package agents
 
 import (
+	"log"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -220,7 +222,9 @@ func QueueConvoyReview(db *sql.DB, convoyID int) (int, error) {
 	return id, nil
 }
 
-func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnDiplomat's claim ctx so the diff lookups
+// cancel on daemon shutdown.
+func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload convoyReviewPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if ferr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); ferr != nil {
@@ -295,9 +299,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		// as "missing work" even after the work had merged to the ask-branch).
 		base := ab.AskBranchBaseSHA
 		if base == "" {
-			base = igit.GetDefaultBranch(repoCfg.LocalPath)
+			base = igit.GetDefaultBranch(ctx, repoCfg.LocalPath)
 		}
-		diff := igit.GetDiffFromBase(repoCfg.LocalPath, base, ab.AskBranch)
+		diff := igit.GetDiffFromBase(ctx, repoCfg.LocalPath, base, ab.AskBranch)
 		if diff == "" {
 			fmt.Fprintf(&diffBlocks, "=== %s/%s ===\n(no changes vs base %s)\n\n",
 				ab.Repo, ab.AskBranch, util.TruncateStr(base, 12))
@@ -585,7 +589,10 @@ func runConvoyReviewLLM(userPrompt string, logger interface{ Printf(string, ...a
 // dogConvoyReviewWatch re-triggers ConvoyReview for DraftPROpen convoys whose
 // previous fix tasks have all completed. Also acts as a safety net for convoys
 // that missed the Diplomat fast-path trigger.
-func dogConvoyReviewWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+// Fix #8e: ctx threads from RunDogs → runDog. Body is pure DB so ctx unused
+// here; signature aligns dog functions for per-site P11 enforcement.
+func dogConvoyReviewWatch(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	_ = ctx
 	rows, err := db.Query(`SELECT id, name FROM Convoys WHERE status = 'DraftPROpen'`)
 	if err != nil {
 		return err
@@ -601,6 +608,9 @@ func dogConvoyReviewWatch(db *sql.DB, logger interface{ Printf(string, ...any) }
 			continue
 		}
 		convoys = append(convoys, c)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy_review.go:dogConvoyReviewWatch: rows iter error: %v", rErr)
 	}
 
 	for _, c := range convoys {

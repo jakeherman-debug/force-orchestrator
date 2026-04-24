@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
@@ -71,7 +72,7 @@ func TestCompleteAskBranchResolution_ForcePushesAndUpdatesSHA(t *testing.T) {
 	store.SetBranchName(db, tid, "force/ask-1-conflict-resolution")
 	bounty, _ := store.GetBounty(db, tid)
 
-	errClass, err := openSubPRForApprovedTask(db, bounty, "Council-Yoda",
+	errClass, err := openSubPRForApprovedTask(context.Background(), db, bounty, "Council-Yoda",
 		"force/ask-1-conflict-resolution", "title", "body", log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("resolution path should succeed, got err=%v class=%s", err, errClass)

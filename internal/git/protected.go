@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -66,7 +67,9 @@ var refNamePrefixesToStrip = []string{
 // This is the common guard installed at every destructive git op's entry
 // point: ForcePushBranch, TriggerCIRerun, DeleteAskBranch, MergeAndCleanup,
 // and completeAskBranchResolution.
-func AssertNotDefaultBranch(repoPath, branch string) error {
+// Fix #8e: ctx threads through GetDefaultBranch so the symbolic-ref/rev-parse
+// lookup cancels on daemon shutdown.
+func AssertNotDefaultBranch(ctx context.Context, repoPath, branch string) error {
 	if strings.TrimSpace(branch) == "" {
 		return fmt.Errorf("%w: empty branch name", ErrProtectedBranch)
 	}
@@ -75,7 +78,7 @@ func AssertNotDefaultBranch(repoPath, branch string) error {
 		return fmt.Errorf("%w: %q is a protected/default branch name", ErrProtectedBranch, branch)
 	}
 	if repoPath != "" {
-		def := GetDefaultBranch(repoPath)
+		def := GetDefaultBranch(ctx, repoPath)
 		// GetDefaultBranch falls back to "main" when discovery fails. Match
 		// exactly; the denylist above already handles the common names.
 		if def != "" && strings.EqualFold(canonical, def) {

@@ -318,31 +318,31 @@ func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 		}
 
 		if bounty, claimed := store.ClaimBounty(db, "FindPRTemplate", name); claimed {
-			runFindPRTemplate(db, bounty, logger)
+			runFindPRTemplate(ctx, db, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "CreateAskBranch", name); claimed {
-			runCreateAskBranch(db, bounty, logger)
+			runCreateAskBranch(ctx, db, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "CleanupAskBranch", name); claimed {
-			runCleanupAskBranch(db, bounty, logger)
+			runCleanupAskBranch(ctx, db, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "RebaseAskBranch", name); claimed {
-			runRebaseAskBranch(db, bounty, logger)
+			runRebaseAskBranch(ctx, db, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "RebaseAgentBranch", name); claimed {
-			runRebaseAgentBranch(db, bounty, logger)
+			runRebaseAgentBranch(ctx, db, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "WorktreeReset", name); claimed {
-			runWorktreeReset(db, bounty, logger)
+			runWorktreeReset(ctx, db, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "RevalidateRepoConfig", name); claimed {
-			runRevalidateRepoConfig(db, bounty, logger)
+			runRevalidateRepoConfig(ctx, db, bounty, logger)
 			continue
 		}
 
@@ -351,7 +351,9 @@ func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 }
 
 // runFindPRTemplate handles a single FindPRTemplate claim.
-func runFindPRTemplate(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnPilot's claim ctx.
+func runFindPRTemplate(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+	_ = ctx // FindPRTemplate is filesystem-only; no subprocess to thread ctx into
 	var payload findPRTemplatePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {

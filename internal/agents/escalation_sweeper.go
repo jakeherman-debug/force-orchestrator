@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"log"
 	"database/sql"
 
 	"force-orchestrator/internal/store"
@@ -46,6 +47,9 @@ func dogEscalationSweeper(db *sql.DB, logger interface{ Printf(string, ...any) }
 		if err := rows.Scan(&r.escID, &r.taskID, &r.newStat); err == nil {
 			taskTargets = append(taskTargets, r)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("escalation_sweeper.go:dogEscalationSweeper: rows iter error: %v", rErr)
 	}
 	rows.Close()
 
@@ -113,6 +117,9 @@ func dogEscalationSweeper(db *sql.DB, logger interface{ Printf(string, ...any) }
 		if err := rows.Scan(&r.escID, &r.taskID, &r.prNumber, &r.prState); err == nil {
 			prTargets = append(prTargets, r)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("escalation_sweeper.go:dogEscalationSweeper: rows iter error: %v", rErr)
 	}
 	rows.Close()
 

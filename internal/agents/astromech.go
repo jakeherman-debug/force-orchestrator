@@ -31,25 +31,30 @@ const shortGitTimeout = 60 * time.Second
 
 // runShortGit runs a git command with a 60s context timeout. Replaces the
 // pre-fix chained-and-Run form. AUDIT-158 (Fix #8d).
-func runShortGit(args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), shortGitTimeout)
+// Fix #8e: ctx threads from the caller (typically SpawnAstromech's daemon ctx)
+// so daemon shutdown / e-stop cancels in-flight subprocesses; the prior
+// fabricated context.Background root made the helper deaf to daemon
+// cancellation.
+func runShortGit(ctx context.Context, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "git", args...).Run()
 }
 
 // combinedShortGit runs a git command with a 60s context timeout and
 // returns combined output. Replaces the pre-fix chained-and-CombinedOutput
-// form. AUDIT-158 (Fix #8d).
-func combinedShortGit(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), shortGitTimeout)
+// form. AUDIT-158 (Fix #8d). Fix #8e: ctx threads from the caller.
+func combinedShortGit(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
 }
 
 // combinedShortGitArgs is identical to combinedShortGit but accepts a
 // pre-built arg slice (for callers assembling positional slots).
-func combinedShortGitArgs(args []string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), shortGitTimeout)
+// Fix #8e: ctx threads from the caller.
+func combinedShortGitArgs(ctx context.Context, args []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
 }
@@ -133,6 +138,9 @@ func pruneRateLimitRetries(db *sql.DB) {
 		if sErr := rows.Scan(&n); sErr == nil {
 			live[n] = true
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("astromech.go:pruneRateLimitRetries: rows iter error: %v", rErr)
 	}
 	rows.Close()
 	rateLimitRetries.Range(func(key, _ any) bool {
@@ -383,13 +391,15 @@ func SpawnAstromech(ctx context.Context, db *sql.DB, name string) {
 			time.Sleep(delay)
 		}
 
-		runAstromechTask(db, name, bounty, logger)
+		runAstromechTask(ctx, db, name, bounty, logger)
 	}
 }
 
 // runAstromechTask executes a single CodeEdit task end-to-end: sets up the worktree,
 // runs Claude CLI, and processes the output (signals, commits, status updates).
-func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
+// Fix #8e: ctx threads from SpawnAstromech (the daemon ctx) so subprocess
+// invocations cancel on shutdown / e-stop.
+func runAstromechTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed task %d: [%s] %s", sessionID, bounty.ID, bounty.TargetRepo, bounty.Payload)
 	telemetry.EmitEvent(telemetry.EventTaskClaimed(sessionID, name, bounty.ID, bounty.TargetRepo, bounty.Payload))
@@ -406,7 +416,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		return
 	}
 
-	worktreeDir, wtErr := igit.GetOrCreateAgentWorktree(db, name, repoPath)
+	worktreeDir, wtErr := igit.GetOrCreateAgentWorktree(ctx, db, name, repoPath)
 	if wtErr != nil {
 		msg := fmt.Sprintf("Worktree Err: %v", wtErr)
 		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
@@ -420,7 +430,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		// Conflict resolution task — check out the existing branch and start the merge
 		// so Claude sees the conflict markers and can resolve them.
 		logger.Printf("Task %d: conflict resolution for branch %s", bounty.ID, cb)
-		if cbErr := igit.PrepareConflictBranch(worktreeDir, repoPath, cb); cbErr != nil {
+		if cbErr := igit.PrepareConflictBranch(ctx, worktreeDir, repoPath, cb); cbErr != nil {
 			msg := fmt.Sprintf("Conflict Branch Err: %v", cbErr)
 			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
 			handleInfraFailure(db, name, "branch preparation", bounty, sessionID, msg, "Pending", true, logger)
@@ -439,7 +449,7 @@ func runAstromechTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 			}
 		}
 		var branchErr error
-		branchName, isResume, branchErr = igit.PrepareAgentBranch(worktreeDir, repoPath, bounty.ID, name, bounty.BranchName, baseBranch)
+		branchName, isResume, branchErr = igit.PrepareAgentBranch(ctx, worktreeDir, repoPath, bounty.ID, name, bounty.BranchName, baseBranch)
 		if branchErr != nil {
 			msg := fmt.Sprintf("Branch Err: %v", branchErr)
 			logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
@@ -519,7 +529,11 @@ Do not re-do work that is already correctly committed.`
 	// off before e-stop would run to completion, burning tokens during an
 	// emergency halt. Poll interval is short (5s) so e-stop response is bounded
 	// at ~5s regardless of how long Claude has been running.
-	claudeCtx, cancelClaude := context.WithCancel(context.Background())
+	// Fix #8e: derive the Claude session ctx from the daemon ctx so SIGINT/
+	// e-stop cancellation propagates without relying on the heartbeat poll
+	// alone. Pre-fix this fabricated context.Background, leaving Claude
+	// sessions deaf to daemon shutdown until the explicit estop poll fired.
+	claudeCtx, cancelClaude := context.WithCancel(ctx)
 	defer cancelClaude()
 	heartbeatDone := make(chan struct{})
 	heartbeatStart := time.Now()
@@ -662,7 +676,7 @@ Do not re-do work that is already correctly committed.`
 			// and the timeout branch both route through the same decomposition
 			// logic. Error propagation of the inner FailBounty is a Fix #8b
 			// concern (marked in the helper).
-			if autoShardIfNoCommits(db, bounty, name, sessionID, repoPath, branchName, outputStr, injectedMemoryIDs, "timeout", logger) {
+			if autoShardIfNoCommits(ctx, db, bounty, name, sessionID, repoPath, branchName, outputStr, injectedMemoryIDs, "timeout", logger) {
 				return
 			}
 		}
@@ -683,7 +697,7 @@ Do not re-do work that is already correctly committed.`
 	rateLimitRetries.Delete(name)
 	claude.ClearRateLimitHits(db, name)
 
-	processAstromechOutput(db, name, bounty, sessionID, outputStr, worktreeDir, branchName, repoPath, logger, true, injectedMemoryIDs)
+	processAstromechOutput(ctx, db, name, bounty, sessionID, outputStr, worktreeDir, branchName, repoPath, logger, true, injectedMemoryIDs)
 }
 
 // autoShardIfNoCommits fails the current bounty and spawns a Decompose shard
@@ -698,9 +712,10 @@ Do not re-do work that is already correctly committed.`
 // kind="timeout" from the error branch and kind="zero-commits" from the
 // non-error retry-path once retry_count >= 2, giving both failure modes
 // the same bounded Decompose shard handling.
-func autoShardIfNoCommits(db *sql.DB, bounty *store.Bounty, name, sessionID, repoPath, branchName, outputStr string, injectedMemoryIDs []int, kind string, logger interface{ Printf(string, ...any) }) bool {
-	base := igit.GetDefaultBranch(repoPath)
-	logOut, _ := igit.RunCmd(repoPath, "log", base+".."+branchName, "--oneline")
+// Fix #8e: ctx threads from the caller so igit lookups cancel on shutdown.
+func autoShardIfNoCommits(ctx context.Context, db *sql.DB, bounty *store.Bounty, name, sessionID, repoPath, branchName, outputStr string, injectedMemoryIDs []int, kind string, logger interface{ Printf(string, ...any) }) bool {
+	base := igit.GetDefaultBranch(ctx, repoPath)
+	logOut, _ := igit.RunCmd(ctx, repoPath, "log", base+".."+branchName, "--oneline")
 	if strings.TrimSpace(logOut) != "" {
 		return false
 	}
@@ -732,7 +747,10 @@ func autoShardIfNoCommits(db *sql.DB, bounty *store.Bounty, name, sessionID, rep
 // scanning, optional ownership check, output size circuit breaker, signal parsing
 // (ESCALATED, SHARD_NEEDED, DONE), commit inference, and history recording.
 // checkOwnership should be true for daemon runs to guard against inquisitor races.
+// Fix #8e: ctx threads from the caller (daemon ctx or CLI ctx) so subprocess
+// invocations from cleanup paths cancel on shutdown.
 func processAstromechOutput(
+	ctx context.Context,
 	db *sql.DB,
 	name string,
 	bounty *store.Bounty,
@@ -799,9 +817,9 @@ func processAstromechOutput(
 			recordHist(outputStr, "Discarded")
 			store.LogAudit(db, name, "ownership-lost", taskID,
 				"Claude completed work but ownership changed mid-run — work discarded")
-			base := igit.GetDefaultBranch(repoPath)
-			_ = runShortGit("-C", worktreeDir, "checkout", "--detach", base)
-			_ = runShortGit("-C", repoPath, "branch", "-D", branchName)
+			base := igit.GetDefaultBranch(ctx, repoPath)
+			_ = runShortGit(ctx, "-C", worktreeDir, "checkout", "--detach", base)
+			_ = runShortGit(ctx, "-C", repoPath, "branch", "-D", branchName)
 			return
 		}
 	}
@@ -814,9 +832,9 @@ func processAstromechOutput(
 			fmt.Sprintf("Task produced %d bytes of output (context blown) — was re-queued for decomposition.\nTask: %s",
 				len(outputStr), util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"", "context-blown, scope-too-large")
-		base := igit.GetDefaultBranch(repoPath)
-		_ = runShortGit("-C", worktreeDir, "checkout", "--detach", base)
-		_ = runShortGit("-C", repoPath, "branch", "-D", branchName)
+		base := igit.GetDefaultBranch(ctx, repoPath)
+		_ = runShortGit(ctx, "-C", worktreeDir, "checkout", "--detach", base)
+		_ = runShortGit(ctx, "-C", repoPath, "branch", "-D", branchName)
 		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
 		if err := store.UpdateBountyStatus(db, taskID, "Completed"); err != nil {
 			// Decompose shard is already queued; if this status update fails the
@@ -864,9 +882,9 @@ func processAstromechOutput(
 			fmt.Sprintf("Task scope was too large for a single session — sharded for re-decomposition.\nTask: %s",
 				util.TruncateStr(directiveText(bounty.Payload), 300)),
 			"", "scope-too-large, shard-needed")
-		base := igit.GetDefaultBranch(repoPath)
-		_ = runShortGit("-C", worktreeDir, "checkout", "--detach", base)
-		_ = runShortGit("-C", repoPath, "branch", "-D", branchName)
+		base := igit.GetDefaultBranch(ctx, repoPath)
+		_ = runShortGit(ctx, "-C", worktreeDir, "checkout", "--detach", base)
+		_ = runShortGit(ctx, "-C", repoPath, "branch", "-D", branchName)
 		store.AddBounty(db, taskID, "Decompose", bounty.Payload)
 		if err := store.UpdateBountyStatus(db, taskID, "Completed"); err != nil {
 			// Decompose shard is already queued; if this status update fails the
@@ -901,22 +919,22 @@ func processAstromechOutput(
 
 	// ── Commit inference ─────────────────────────────────────────────────
 
-	gitAddOut, _ := combinedShortGit("-C", worktreeDir, "add", ".")
+	gitAddOut, _ := combinedShortGit(ctx, "-C", worktreeDir, "add", ".")
 	logger.Printf("Task %d: git add output: %s", taskID, strings.TrimSpace(string(gitAddOut)))
 
-	gitStatusOut, _ := combinedShortGit("-C", worktreeDir, "status", "--short")
+	gitStatusOut, _ := combinedShortGit(ctx, "-C", worktreeDir, "status", "--short")
 	logger.Printf("Task %d: git status after add: %s", taskID, strings.TrimSpace(string(gitStatusOut)))
 
 	// Truncate payload to 72 chars for the commit subject line
 	commitSubject := util.TruncateStr(strings.SplitN(bounty.Payload, "\n", 2)[0], 72)
-	commitOut, commitErr := combinedShortGitArgs([]string{"-C", worktreeDir, "commit", "-m",
+	commitOut, commitErr := combinedShortGitArgs(ctx, []string{"-C", worktreeDir, "commit", "-m",
 		fmt.Sprintf("task(%d): %s", taskID, commitSubject)})
 	logger.Printf("Task %d: git commit output: %s", taskID, strings.TrimSpace(string(commitOut)))
 
 	if commitErr != nil {
 		// Claude may have already committed — check for commits ahead of the default branch
-		base := igit.GetDefaultBranch(repoPath)
-		aheadOut, _ := combinedShortGit("-C", worktreeDir, "log", base+"..HEAD", "--oneline")
+		base := igit.GetDefaultBranch(ctx, repoPath)
+		aheadOut, _ := combinedShortGit(ctx, "-C", worktreeDir, "log", base+"..HEAD", "--oneline")
 		logger.Printf("Task %d: commits ahead of base: %s", taskID, strings.TrimSpace(string(aheadOut)))
 
 		if len(strings.TrimSpace(string(aheadOut))) == 0 {
@@ -935,7 +953,7 @@ func processAstromechOutput(
 			// doesn't change the diagnosis. Promote to auto-shard at the same
 			// threshold (retryCount >= 2) before burning a third cycle.
 			if retryCount >= 2 {
-				if autoShardIfNoCommits(db, bounty, name, sessionID, repoPath, branchName, outputStr, injectedMemoryIDs, "zero-commits", logger) {
+				if autoShardIfNoCommits(ctx, db, bounty, name, sessionID, repoPath, branchName, outputStr, injectedMemoryIDs, "zero-commits", logger) {
 					return
 				}
 			}
@@ -972,7 +990,9 @@ func processAstromechOutput(
 // RunTaskForeground claims a specific task by ID and runs it in the foreground,
 // streaming Claude output directly to stdout. This is a one-shot mode for
 // debugging or manually re-running a specific task.
-func RunTaskForeground(db *sql.DB, taskID int) {
+// Fix #8e: ctx threads from cmd/force/main.go (the CLI command ctx) so a
+// stuck `git worktree add` or claude session can be cancelled by SIGINT.
+func RunTaskForeground(ctx context.Context, db *sql.DB, taskID int) {
 	b, err := store.GetBounty(db, taskID)
 	if err != nil {
 		fmt.Printf("Task %d not found.\n", taskID)
@@ -1000,7 +1020,7 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 	}
 	store.LogAudit(db, "operator", "run", taskID, "one-shot foreground run")
 
-	worktreeDir, wtErr := igit.GetOrCreateAgentWorktree(db, fgAgent, repoPath)
+	worktreeDir, wtErr := igit.GetOrCreateAgentWorktree(ctx, db, fgAgent, repoPath)
 	if wtErr != nil {
 		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '' WHERE id = ?`, taskID)
 		fmt.Printf("Worktree error: %v\n", wtErr)
@@ -1015,7 +1035,7 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 			baseBranch = ab.AskBranch
 		}
 	}
-	branchName, _, branchErr := igit.PrepareAgentBranch(worktreeDir, repoPath, taskID, fgAgent, "", baseBranch)
+	branchName, _, branchErr := igit.PrepareAgentBranch(ctx, worktreeDir, repoPath, taskID, fgAgent, "", baseBranch)
 	if branchErr != nil {
 		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '' WHERE id = ?`, taskID)
 		fmt.Printf("Branch error: %v\n", branchErr)
@@ -1060,11 +1080,14 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 
 	sessionID := telemetry.NewSessionID()
 
-	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
+	// Fix #8e: derive session ctx from caller ctx (CLI command ctx) so
+	// SIGINT cancels the claude subprocess instead of letting it run for
+	// the full sessionTimeout. Pre-fix this fabricated context.Background.
+	sessionCtx, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
 
 	var outputBuf strings.Builder
-	cmd := exec.CommandContext(ctx, "claude", "-p", fullPrompt,
+	cmd := exec.CommandContext(sessionCtx, "claude", "-p", fullPrompt,
 		"--dangerously-skip-permissions",
 		"--allowedTools", "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools,
 		"--max-turns", maxTurns)
@@ -1083,5 +1106,5 @@ func RunTaskForeground(db *sql.DB, taskID int) {
 		os.Exit(1)
 	}
 
-	processAstromechOutput(db, fgAgent, b, sessionID, outputStr, worktreeDir, branchName, repoPath, fgLogger, false, injectedMemoryIDs)
+	processAstromechOutput(ctx, db, fgAgent, b, sessionID, outputStr, worktreeDir, branchName, repoPath, fgLogger, false, injectedMemoryIDs)
 }

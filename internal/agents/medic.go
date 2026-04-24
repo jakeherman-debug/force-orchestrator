@@ -111,11 +111,11 @@ func SpawnMedic(ctx context.Context, db *sql.DB, name string) {
 		}
 
 		if bounty, claimed := store.ClaimBounty(db, "MedicReview", name); claimed {
-			runMedicTask(db, name, bounty, logger)
+			runMedicTask(ctx, db, name, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "CIFailureTriage", name); claimed {
-			runMedicCITriage(db, name, bounty, logger)
+			runMedicCITriage(ctx, db, name, bounty, logger)
 			continue
 		}
 
@@ -123,7 +123,9 @@ func SpawnMedic(ctx context.Context, db *sql.DB, name string) {
 	}
 }
 
-func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *log.Logger) {
+// Fix #8e: ctx threads from SpawnMedic's claim ctx so reviewDiff's git
+// subprocess cancels on daemon shutdown.
+func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger *log.Logger) {
 	logger.Printf("Medic claimed MedicReview #%d (parent task #%d)", bounty.ID, bounty.ParentID)
 
 	// Parse the failure context queued by permanentInfraFail / council / captain.
@@ -159,7 +161,7 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 	if parent.BranchName != "" {
 		repoPath := store.GetRepoPath(db, parent.TargetRepo)
 		if repoPath != "" {
-			diff = util.TruncateStr(reviewDiff(db, repoPath, parent), 4000)
+			diff = util.TruncateStr(reviewDiff(ctx, db, repoPath, parent), 4000)
 		}
 	}
 
@@ -170,7 +172,7 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 	// correctly identifies the work is already done but escalates anyway"
 	// pattern (task 470 in production: directive fully present on ask-branch
 	// baseline, all six clauses map to existing merged code).
-	if autoCompletedMedicTask(db, agentName, bounty, parent, logger) {
+	if autoCompletedMedicTask(ctx, db, agentName, bounty, parent, logger) {
 		return
 	}
 
@@ -255,7 +257,9 @@ func runMedicTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *lo
 // so the correct action is to mark the parent Completed, resolve any Open
 // escalations it triggered, unblock dependents, and move on. Returns false
 // when the task still has real work to debug (normal Medic flow continues).
-func autoCompletedMedicTask(db *sql.DB, agentName string, medicBounty, parent *store.Bounty, logger *log.Logger) bool {
+// Fix #8e: ctx threads from runMedicTask so reviewDiff/reviewCommitsAhead
+// cancel on daemon shutdown.
+func autoCompletedMedicTask(ctx context.Context, db *sql.DB, agentName string, medicBounty, parent *store.Bounty, logger *log.Logger) bool {
 	if parent.BranchName == "" {
 		return false
 	}
@@ -273,10 +277,10 @@ func autoCompletedMedicTask(db *sql.DB, agentName string, medicBounty, parent *s
 	// than main is critical: main drifts independently, so "no diff vs main"
 	// would incorrectly fail for convoys whose ask-branch hasn't been rebased
 	// in hours.
-	if reviewDiff(db, repoPath, parent) != "" {
+	if reviewDiff(ctx, db, repoPath, parent) != "" {
 		return false
 	}
-	if reviewCommitsAhead(db, repoPath, parent) != "" {
+	if reviewCommitsAhead(ctx, db, repoPath, parent) != "" {
 		return false
 	}
 

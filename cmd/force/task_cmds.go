@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"fmt"
@@ -403,7 +404,9 @@ func cmdTree(db *sql.DB, id int) {
 	printTree(db, id, 0)
 }
 
-func cmdDiff(db *sql.DB, id int) {
+// Fix #8e: ctx threads from main's signal-cancellation ctx so the diff
+// subprocess cancels on Ctrl-C.
+func cmdDiff(ctx context.Context, db *sql.DB, id int) {
 	b, err := store.GetBounty(db, id)
 	if err != nil {
 		fmt.Printf("Task %d not found\n", id)
@@ -418,7 +421,7 @@ func cmdDiff(db *sql.DB, id int) {
 		fmt.Printf("Unknown repo '%s'\n", b.TargetRepo)
 		os.Exit(1)
 	}
-	diff := igit.GetDiff(repoPath, b.BranchName)
+	diff := igit.GetDiff(ctx, repoPath, b.BranchName)
 	if diff == "" {
 		fmt.Printf("No diff found for branch %s — branch may not have any commits yet\n", b.BranchName)
 	} else {
@@ -428,7 +431,8 @@ func cmdDiff(db *sql.DB, id int) {
 }
 
 // cmdApproveTask handles operator manual task approval (NOT convoy approve).
-func cmdApproveTask(db *sql.DB, id int) {
+// Fix #8e: ctx threads from main's signal-cancellation ctx.
+func cmdApproveTask(ctx context.Context, db *sql.DB, id int) {
 	b, err := store.GetBounty(db, id)
 	if err != nil {
 		fmt.Printf("Task %d not found\n", id)
@@ -450,8 +454,8 @@ func cmdApproveTask(db *sql.DB, id int) {
 	}
 	worktreeDir := igit.ResolveWorktreeDir(db, branchName, repoPath, id, agents.BranchAgentName)
 	// Get diff before merge — branch is deleted by MergeAndCleanup.
-	diff := igit.GetDiff(repoPath, branchName)
-	if mergeErr := igit.MergeAndCleanup(repoPath, branchName, worktreeDir); mergeErr != nil {
+	diff := igit.GetDiff(ctx, repoPath, branchName)
+	if mergeErr := igit.MergeAndCleanup(ctx, repoPath, branchName, worktreeDir); mergeErr != nil {
 		fmt.Printf("Merge failed: %v\n", mergeErr)
 		os.Exit(1)
 	}

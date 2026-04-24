@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"force-orchestrator/internal/agents"
 	"force-orchestrator/internal/store"
@@ -27,6 +30,14 @@ func main() {
 	if len(os.Args) >= 2 {
 		command = os.Args[1]
 	}
+
+	// Fix #8e: top-level CLI ctx cancelled on SIGINT/SIGTERM so subprocess
+	// invocations launched by force subcommands (foreground astromech, dog
+	// runs, etc.) terminate cleanly instead of running to their fabricated
+	// timeout. The daemon command has its own deeper ctx wiring that takes
+	// precedence; this is the catch-all for one-shot CLI commands.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	db := store.InitHolocron()
 	defer db.Close()
@@ -158,7 +169,7 @@ func main() {
 			fmt.Println("Usage: force diff <task-id>")
 			os.Exit(1)
 		}
-		cmdDiff(db, mustParseID(os.Args[2]))
+		cmdDiff(ctx, db, mustParseID(os.Args[2]))
 
 	case "approve":
 		// Operator manually approves a task, bypassing the Jedi Council
@@ -166,7 +177,7 @@ func main() {
 			fmt.Println("Usage: force approve <task-id>")
 			os.Exit(1)
 		}
-		cmdApproveTask(db, mustParseID(os.Args[2]))
+		cmdApproveTask(ctx, db, mustParseID(os.Args[2]))
 
 	case "reject":
 		// Operator manually rejects a task, sending it back with feedback
@@ -336,7 +347,7 @@ func main() {
 				confirmed = true
 			}
 		}
-		cmdPurge(db, confirmed)
+		cmdPurge(ctx, db, confirmed)
 
 	case "hard-reset":
 		// Usage: force hard-reset [--purge-repos] [--confirm]
@@ -350,7 +361,7 @@ func main() {
 				purgeRepos = true
 			}
 		}
-		cmdHardReset(db, confirmed, purgeRepos)
+		cmdHardReset(ctx, db, confirmed, purgeRepos)
 
 	case "scale":
 		// Dynamically scale agent counts via named flags.
@@ -375,10 +386,10 @@ func main() {
 		cmdEscalations(db, os.Args[2:])
 
 	case "dogs":
-		cmdDogs(db, os.Args[2:])
+		cmdDogs(ctx, db, os.Args[2:])
 
 	case "cleanup":
-		cmdCleanup(db)
+		cmdCleanup(ctx, db)
 
 	case "doctor":
 		clean := false
@@ -418,7 +429,7 @@ func main() {
 			fmt.Println("Usage: force run <task-id>")
 			os.Exit(1)
 		}
-		agents.RunTaskForeground(db, mustParseID(os.Args[2]))
+		agents.RunTaskForeground(ctx, db, mustParseID(os.Args[2]))
 
 	case "bounty":
 		if len(os.Args) < 3 {

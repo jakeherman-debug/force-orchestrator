@@ -77,13 +77,15 @@ func SpawnJediCouncil(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runCouncilTask(db, agentName, b, logger)
+		runCouncilTask(ctx, db, agentName, b, logger)
 	}
 }
 
 // runCouncilTask reviews a single task's diff and either approves (merge + complete)
 // or rejects it (retry or permanent failure).
-func runCouncilTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.Logger) {
+// Fix #8e: ctx threads from SpawnJediCouncil's claim ctx so the merge subprocess
+// + sub-PR push cancel on daemon shutdown.
+func runCouncilTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 
 	// Hard-reject if the Chancellor has placed a hold on this convoy.
@@ -162,12 +164,12 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 	// Diff against ask-branch tip when this task is part of a convoy with an
 	// ask-branch; otherwise main. See review_diff.go for the scope-violation
 	// avalanche this prevents.
-	diff := reviewDiff(db, repoPath, b)
+	diff := reviewDiff(ctx, db, repoPath, b)
 	if diff == "" {
 		// Check whether the branch's commits are already in main — this happens when
 		// multiple convoy tasks touch overlapping files and one agent merges first,
 		// making subsequent agents' three-dot diffs empty.
-		if reviewCommitsAhead(db, repoPath, b) == "" {
+		if reviewCommitsAhead(ctx, db, repoPath, b) == "" {
 			// All commits already in main — auto-complete rather than fail.
 			logger.Printf("Task %d: diff empty and no unique commits — work already merged, auto-completing", b.ID)
 			// Pattern P7 (Fix #8d): source-status CAS so a concurrent operator
@@ -314,7 +316,7 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 			}
 			prTitle := buildSubPRTitle(b)
 			prBody := buildSubPRBody(b, ruling)
-			errClass, prErr := openSubPRForApprovedTask(db, b, agentName, branchName, prTitle, prBody, logger)
+			errClass, prErr := openSubPRForApprovedTask(ctx, db, b, agentName, branchName, prTitle, prBody, logger)
 			if prErr != nil {
 				// Transient/rate-limit → retry via AwaitingCouncilReview (handleInfraFailure).
 				// Auth-expired / BranchProtection / Permanent → escalate immediately so the
@@ -363,7 +365,7 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 		}
 
 		logger.Printf("Task %d: APPROVED — merging branch %s", b.ID, branchName)
-		if mergeErr := igit.MergeAndCleanup(repoPath, branchName, worktreeDir); mergeErr != nil {
+		if mergeErr := igit.MergeAndCleanup(ctx, repoPath, branchName, worktreeDir); mergeErr != nil {
 			msg := fmt.Sprintf("Merge Err: %v", mergeErr)
 			logger.Printf("Task %d: merge failed: %v", b.ID, mergeErr)
 			errStr := mergeErr.Error()

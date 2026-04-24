@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -71,7 +72,7 @@ func TestRunCleanup_EmptyDB(t *testing.T) {
 	defer db.Close()
 
 	// No repos, no agents registered → should complete without error
-	out := captureOutput(func() { runCleanup(db) })
+	out := captureOutput(func() { runCleanup(context.Background(), db) })
 	if !strings.Contains(out, "Cleanup complete") {
 		t.Errorf("expected 'Cleanup complete' in output, got: %s", out)
 	}
@@ -85,7 +86,7 @@ func TestRunCleanup_RemovesStaleAgents(t *testing.T) {
 	db.Exec(`INSERT OR REPLACE INTO Agents (agent_name, repo, worktree_path) VALUES (?, ?, ?)`,
 		"K-2SO", "my-repo", "/nonexistent/worktree")
 
-	out := captureOutput(func() { runCleanup(db) })
+	out := captureOutput(func() { runCleanup(context.Background(), db) })
 	if !strings.Contains(out, "Removed stale agent entry") {
 		t.Errorf("expected 'Removed stale agent entry' in output, got: %s", out)
 	}
@@ -108,7 +109,7 @@ func TestRunCleanup_WithRepo(t *testing.T) {
 	dir := initTestRepo(t)
 	store.AddRepo(db, "test-repo", dir, "test")
 
-	out := captureOutput(func() { runCleanup(db) })
+	out := captureOutput(func() { runCleanup(context.Background(), db) })
 	if !strings.Contains(out, "Cleanup complete") {
 		t.Errorf("expected 'Cleanup complete', got: %s", out)
 	}

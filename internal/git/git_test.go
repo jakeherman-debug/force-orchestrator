@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,7 +55,7 @@ func TestGitCmd_ValidCommand(t *testing.T) {
 		t.Skip("git not found in PATH")
 	}
 
-	out, err := RunCmd(dir, "--version")
+	out, err := RunCmd(context.Background(), dir, "--version")
 	if err != nil {
 		t.Fatalf("gitCmd --version failed: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestGitCmd_InvalidCommand(t *testing.T) {
 		t.Skip("git not found in PATH")
 	}
 
-	_, err := RunCmd("/nonexistent", "invalid-subcommand-xyz")
+	_, err := RunCmd(context.Background(), "/nonexistent", "invalid-subcommand-xyz")
 	if err == nil {
 		t.Error("expected error for invalid git subcommand")
 	}
@@ -78,7 +79,7 @@ func TestGitCmd_InvalidCommand(t *testing.T) {
 
 func TestGetDefaultBranch(t *testing.T) {
 	dir := initTestRepo(t)
-	branch := GetDefaultBranch(dir)
+	branch := GetDefaultBranch(context.Background(), dir)
 	if branch != "main" {
 		t.Errorf("expected 'main', got %q", branch)
 	}
@@ -106,7 +107,7 @@ func TestGetDefaultBranch_MasterFallback(t *testing.T) {
 	gitRun("add", ".")
 	gitRun("commit", "-m", "initial")
 
-	branch := GetDefaultBranch(dir)
+	branch := GetDefaultBranch(context.Background(), dir)
 	if branch != "master" {
 		t.Errorf("expected 'master', got %q", branch)
 	}
@@ -133,7 +134,7 @@ func TestGetDefaultBranch_DevelopFallback(t *testing.T) {
 	run("add", ".")
 	run("commit", "-m", "initial")
 
-	branch := GetDefaultBranch(dir)
+	branch := GetDefaultBranch(context.Background(), dir)
 	if branch != "develop" {
 		t.Errorf("expected 'develop', got %q", branch)
 	}
@@ -149,7 +150,7 @@ func TestGetDefaultBranch_FinalFallback(t *testing.T) {
 	exec.Command("git", "-C", dir, "config", "user.email", "t@t.com").Run()
 	exec.Command("git", "-C", dir, "config", "user.name", "Test").Run()
 
-	branch := GetDefaultBranch(dir)
+	branch := GetDefaultBranch(context.Background(), dir)
 	if branch != "main" {
 		t.Errorf("expected 'main' as final fallback, got %q", branch)
 	}
@@ -173,7 +174,7 @@ func TestGetDefaultBranch_SymbolicRefSuccess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(refsDir, "HEAD"), []byte("ref: refs/remotes/origin/develop\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	result := GetDefaultBranch(dir)
+	result := GetDefaultBranch(context.Background(), dir)
 	if result != "develop" {
 		t.Errorf("expected 'develop' from symbolic-ref, got %q", result)
 	}
@@ -186,7 +187,7 @@ func TestGetOrCreateAgentWorktree(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	wt, err := GetOrCreateAgentWorktree(db, "R2-D2", dir)
+	wt, err := GetOrCreateAgentWorktree(context.Background(), db, "R2-D2", dir)
 	if err != nil {
 		t.Fatalf("GetOrCreateAgentWorktree: %v", err)
 	}
@@ -205,8 +206,8 @@ func TestGetOrCreateAgentWorktree_Idempotent(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	wt1, err1 := GetOrCreateAgentWorktree(db, "BB-8", dir)
-	wt2, err2 := GetOrCreateAgentWorktree(db, "BB-8", dir)
+	wt1, err1 := GetOrCreateAgentWorktree(context.Background(), db, "BB-8", dir)
+	wt2, err2 := GetOrCreateAgentWorktree(context.Background(), db, "BB-8", dir)
 	if err1 != nil || err2 != nil {
 		t.Fatalf("errors: %v, %v", err1, err2)
 	}
@@ -230,7 +231,7 @@ func TestGetOrCreateAgentWorktree_StaleEntry(t *testing.T) {
 
 	// GetOrCreateAgentWorktree should detect the stale entry and recreate
 	// (it will try to create a new worktree at ../.force-worktrees/<repo>/BB-8)
-	path, err := GetOrCreateAgentWorktree(db, "BB-8", dir)
+	path, err := GetOrCreateAgentWorktree(context.Background(), db, "BB-8", dir)
 	if err != nil {
 		// Expected to fail if there's no remote HEAD, but covers the stale-entry path
 		_ = path
@@ -245,7 +246,7 @@ func TestGetOrCreateAgentWorktree_ExistingValid(t *testing.T) {
 	db.Exec(`INSERT OR REPLACE INTO Agents (agent_name, repo, worktree_path) VALUES (?, ?, ?)`,
 		"C-3PO", "/some/repo", dir)
 
-	path, err := GetOrCreateAgentWorktree(db, "C-3PO", "/some/repo")
+	path, err := GetOrCreateAgentWorktree(context.Background(), db, "C-3PO", "/some/repo")
 	if err != nil {
 		t.Errorf("expected no error for valid existing path, got: %v", err)
 	}
@@ -264,7 +265,7 @@ func TestGetOrCreateAgentWorktree_NoExisting(t *testing.T) {
 	dir := initTestRepo(t)
 
 	// No existing entry — should attempt to create a new worktree
-	path, err := GetOrCreateAgentWorktree(db, "NewBot", dir)
+	path, err := GetOrCreateAgentWorktree(context.Background(), db, "NewBot", dir)
 	if err != nil {
 		// Expected to fail (bare worktree needs detached HEAD, which requires a branch)
 		// This covers the creation attempt code path
@@ -284,12 +285,12 @@ func TestPrepareAgentBranch(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	wt, err := GetOrCreateAgentWorktree(db, "R5-D4", dir)
+	wt, err := GetOrCreateAgentWorktree(context.Background(), db, "R5-D4", dir)
 	if err != nil {
 		t.Fatalf("GetOrCreateAgentWorktree: %v", err)
 	}
 
-	branch, isResume, err := PrepareAgentBranch(wt, dir, 42, "R5-D4", "", "")
+	branch, isResume, err := PrepareAgentBranch(context.Background(), wt, dir, 42, "R5-D4", "", "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch: %v", err)
 	}
@@ -313,7 +314,7 @@ func TestPrepareAgentBranch_DirtyWorktree(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	wt, err := GetOrCreateAgentWorktree(db, "K-2SO", dir)
+	wt, err := GetOrCreateAgentWorktree(context.Background(), db, "K-2SO", dir)
 	if err != nil {
 		t.Fatalf("GetOrCreateAgentWorktree: %v", err)
 	}
@@ -324,7 +325,7 @@ func TestPrepareAgentBranch_DirtyWorktree(t *testing.T) {
 	}
 
 	// PrepareAgentBranch should succeed despite the dirty file
-	_, _, err = PrepareAgentBranch(wt, dir, 99, "K-2SO", "", "")
+	_, _, err = PrepareAgentBranch(context.Background(), wt, dir, 99, "K-2SO", "", "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch with dirty worktree: %v", err)
 	}
@@ -337,7 +338,7 @@ func TestPrepareAgentBranch_DirtyWorktree(t *testing.T) {
 
 func TestPrepareAgentBranch_InNonGitDir(t *testing.T) {
 	dir := t.TempDir() // not a git repo
-	_, _, err := PrepareAgentBranch(dir, dir, 1, "R2-D2", "", "")
+	_, _, err := PrepareAgentBranch(context.Background(), dir, dir, 1, "R2-D2", "", "")
 	if err == nil {
 		t.Error("expected error when PrepareAgentBranch called on non-git dir")
 	}
@@ -370,11 +371,11 @@ func TestPrepareAgentBranch_CrossWorktreeResume(t *testing.T) {
 	}
 
 	// Agent A (R5-D4) creates a branch, commits work, and pushes to origin.
-	wtA, err := GetOrCreateAgentWorktree(db, "R5-D4", wt)
+	wtA, err := GetOrCreateAgentWorktree(context.Background(), db, "R5-D4", wt)
 	if err != nil {
 		t.Fatalf("worktree A: %v", err)
 	}
-	branchA, _, err := PrepareAgentBranch(wtA, wt, 311, "R5-D4", "", "")
+	branchA, _, err := PrepareAgentBranch(context.Background(), wtA, wt, 311, "R5-D4", "", "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch A: %v", err)
 	}
@@ -390,11 +391,11 @@ func TestPrepareAgentBranch_CrossWorktreeResume(t *testing.T) {
 	}
 
 	// Agent B (K-2SO) picks up the same task for rework. It tries to resume branchA.
-	wtB, err := GetOrCreateAgentWorktree(db, "K-2SO", wt)
+	wtB, err := GetOrCreateAgentWorktree(context.Background(), db, "K-2SO", wt)
 	if err != nil {
 		t.Fatalf("worktree B: %v", err)
 	}
-	newBranch, isResume, err := PrepareAgentBranch(wtB, wt, 311, "K-2SO", branchA, "")
+	newBranch, isResume, err := PrepareAgentBranch(context.Background(), wtB, wt, 311, "K-2SO", branchA, "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch B (cross-worktree resume): %v", err)
 	}
@@ -421,12 +422,12 @@ func TestGetDiffAndMerge(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	wt, err := GetOrCreateAgentWorktree(db, "BD-1", dir)
+	wt, err := GetOrCreateAgentWorktree(context.Background(), db, "BD-1", dir)
 	if err != nil {
 		t.Fatalf("GetOrCreateAgentWorktree: %v", err)
 	}
 
-	branch, _, err := PrepareAgentBranch(wt, dir, 7, "BD-1", "", "")
+	branch, _, err := PrepareAgentBranch(context.Background(), wt, dir, 7, "BD-1", "", "")
 	if err != nil {
 		t.Fatalf("PrepareAgentBranch: %v", err)
 	}
@@ -446,7 +447,7 @@ func TestGetDiffAndMerge(t *testing.T) {
 	}
 
 	// GetDiff should return non-empty diff
-	diff := GetDiff(dir, branch)
+	diff := GetDiff(context.Background(), dir, branch)
 	if diff == "" {
 		t.Error("expected non-empty diff after committing a change")
 	}
@@ -455,7 +456,7 @@ func TestGetDiffAndMerge(t *testing.T) {
 	}
 
 	// MergeAndCleanup should merge successfully
-	if mergeErr := MergeAndCleanup(dir, branch, wt); mergeErr != nil {
+	if mergeErr := MergeAndCleanup(context.Background(), dir, branch, wt); mergeErr != nil {
 		t.Fatalf("MergeAndCleanup: %v", mergeErr)
 	}
 
@@ -473,7 +474,7 @@ func TestGetDiffAndMerge(t *testing.T) {
 
 func TestGetDiff_NonexistentRepo(t *testing.T) {
 	// Should return empty string without panicking
-	diff := GetDiff("/nonexistent/repo", "some-branch")
+	diff := GetDiff(context.Background(), "/nonexistent/repo", "some-branch")
 	_ = diff // empty is fine
 }
 
@@ -485,7 +486,7 @@ func TestMergeAndCleanup_MergeFail(t *testing.T) {
 	}
 	dir := initTestRepo(t)
 	// Try to merge a branch that doesn't exist → merge should fail
-	err := MergeAndCleanup(dir, "nonexistent-branch", dir)
+	err := MergeAndCleanup(context.Background(), dir, "nonexistent-branch", dir)
 	if err == nil {
 		t.Error("expected error when merging nonexistent branch")
 	}
@@ -497,7 +498,7 @@ func TestMergeAndCleanup_CheckoutFail(t *testing.T) {
 	}
 	// Non-git directory causes `git checkout <branch>` to fail immediately
 	dir := t.TempDir()
-	err := MergeAndCleanup(dir, "some-branch", dir)
+	err := MergeAndCleanup(context.Background(), dir, "some-branch", dir)
 	if err == nil {
 		t.Error("expected error from MergeAndCleanup with non-git directory")
 	}
@@ -531,7 +532,7 @@ func TestMergeAndCleanup_Success(t *testing.T) {
 	cmd3.Env = gitEnv
 	cmd3.Run()
 
-	err := MergeAndCleanup(dir, branchName, dir)
+	err := MergeAndCleanup(context.Background(), dir, branchName, dir)
 	if err != nil {
 		t.Errorf("expected successful merge, got: %v", err)
 	}

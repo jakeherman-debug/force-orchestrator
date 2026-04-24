@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ func TestRunRevalidateRepoConfig_AllGood_NoChange(t *testing.T) {
 
 	id, _ := QueueRevalidateRepoConfig(db, "api")
 	b, _ := store.GetBounty(db, id)
-	runRevalidateRepoConfig(db, b, testLogger{})
+	runRevalidateRepoConfig(context.Background(), db, b, testLogger{})
 
 	updated, _ := store.GetBounty(db, id)
 	if updated.Status != "Completed" {
@@ -57,7 +58,7 @@ func TestRunRevalidateRepoConfig_RemoteUnreachable_Quarantines(t *testing.T) {
 
 	id, _ := QueueRevalidateRepoConfig(db, "broken")
 	b, _ := store.GetBounty(db, id)
-	runRevalidateRepoConfig(db, b, testLogger{})
+	runRevalidateRepoConfig(context.Background(), db, b, testLogger{})
 
 	r := store.GetRepo(db, "broken")
 	if r.PRFlowEnabled {
@@ -85,7 +86,7 @@ func TestRunRevalidateRepoConfig_TemplateMoved_RequeuesFindPRTemplate(t *testing
 
 	id, _ := QueueRevalidateRepoConfig(db, "api")
 	b, _ := store.GetBounty(db, id)
-	runRevalidateRepoConfig(db, b, testLogger{})
+	runRevalidateRepoConfig(context.Background(), db, b, testLogger{})
 
 	// The handler should have cleared the stale path and queued FindPRTemplate.
 	r := store.GetRepo(db, "api")
@@ -111,7 +112,7 @@ func TestRunRevalidateRepoConfig_RemoteURLChanged_Updates(t *testing.T) {
 
 	id, _ := QueueRevalidateRepoConfig(db, "api")
 	b, _ := store.GetBounty(db, id)
-	runRevalidateRepoConfig(db, b, testLogger{})
+	runRevalidateRepoConfig(context.Background(), db, b, testLogger{})
 
 	r := store.GetRepo(db, "api")
 	if r.RemoteURL != actualRemote {
@@ -131,7 +132,7 @@ func TestRunRevalidateRepoConfig_NoLocalPath_Quarantines(t *testing.T) {
 
 	id, _ := QueueRevalidateRepoConfig(db, "nopath")
 	b, _ := store.GetBounty(db, id)
-	runRevalidateRepoConfig(db, b, testLogger{})
+	runRevalidateRepoConfig(context.Background(), db, b, testLogger{})
 
 	r := store.GetRepo(db, "nopath")
 	if r.PRFlowEnabled {
@@ -150,7 +151,7 @@ func TestRunRevalidateRepoConfig_RepoRemovedCompletes(t *testing.T) {
 	store.RemoveRepo(db, "temp")
 
 	b, _ := store.GetBounty(db, id)
-	runRevalidateRepoConfig(db, b, testLogger{})
+	runRevalidateRepoConfig(context.Background(), db, b, testLogger{})
 	updated, _ := store.GetBounty(db, id)
 	if updated.Status != "Completed" {
 		t.Errorf("removed-repo should complete as no-op, got %q", updated.Status)
@@ -167,7 +168,7 @@ func TestDogRepoConfigCheck_QueuesOncePerRepo(t *testing.T) {
 	store.AddRepo(db, "b", "/b", "")
 	store.AddRepo(db, "c", "/c", "")
 
-	if err := dogRepoConfigCheck(db, testLogger{}); err != nil {
+	if err := dogRepoConfigCheck(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	var queued int
@@ -185,7 +186,7 @@ func TestDogRepoConfigCheck_SkipsExistingPending(t *testing.T) {
 	// Pre-queue one manually.
 	_, _ = QueueRevalidateRepoConfig(db, "a")
 
-	_ = dogRepoConfigCheck(db, testLogger{})
+	_ = dogRepoConfigCheck(context.Background(), db, testLogger{})
 	var queued int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'RevalidateRepoConfig' AND status = 'Pending'`).Scan(&queued)
 	if queued != 1 {

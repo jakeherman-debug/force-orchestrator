@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -307,7 +308,7 @@ func TestRunFindPRTemplate_StoresResultAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runFindPRTemplate(db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
 
 	r := store.GetRepo(db, "api")
 	if r.PRTemplatePath == "" {
@@ -334,7 +335,7 @@ func TestRunFindPRTemplate_HandlesNoTemplate(t *testing.T) {
 	taskID, _ := QueueFindPRTemplate(db, "api", dir)
 	bounty, _ := store.GetBounty(db, taskID)
 
-	runFindPRTemplate(db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
 
 	r := store.GetRepo(db, "api")
 	if r.PRTemplatePath != "" {
@@ -357,7 +358,7 @@ func TestRunFindPRTemplate_InvalidPayloadFails(t *testing.T) {
 	id, _ := res.LastInsertId()
 	bounty, _ := store.GetBounty(db, int(id))
 
-	runFindPRTemplate(db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
 
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
@@ -378,7 +379,7 @@ func TestRunFindPRTemplate_DiscoveryFailureIsFatal(t *testing.T) {
 	bounty, _ := store.GetBounty(db, int(id))
 	store.AddRepo(db, "api", "/real/path", "")
 
-	runFindPRTemplate(db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
 
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {

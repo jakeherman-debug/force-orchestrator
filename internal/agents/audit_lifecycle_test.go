@@ -247,8 +247,12 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		if !strings.Contains(m, `worktree`) || !strings.Contains(m, `remove`) {
 			t.Fatalf("AUDIT-165 precondition missing: worktree remove not found near MkdirTemp")
 		}
-		// RGR inversion: fail if worktree remove does not yet use CommandContext.
-		if !strings.Contains(m, "exec.CommandContext") {
+		// RGR inversion: fail if worktree remove is not ctx-bounded. Fix #8e
+		// migrated this site from a literal exec.CommandContext to the
+		// bestEffortRun helper which derives its timeout from the caller's
+		// ctx (so daemon shutdown propagates). Either form is a ctx-bounded
+		// call; a bare exec.Command would still be a regression.
+		if !strings.Contains(m, "exec.CommandContext") && !strings.Contains(m, "bestEffortRun(") {
 			t.Fatal("AUDIT-165: worktree remove using bare exec.Command without timeout still present")
 		}
 		if !strings.Contains(m, "os.RemoveAll(wtPath)") {

@@ -99,6 +99,9 @@ func RecoverStaleConvoys(db *sql.DB) {
 		}
 		ids = append(ids, id)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy.go:RecoverStaleConvoys: rows iter error: %v", rErr)
+	}
 	rows.Close()
 	for _, id := range ids {
 		AutoRecoverConvoy(db, id, nil)
@@ -133,6 +136,9 @@ func ListConvoys(db *sql.DB) []Convoy {
 		}
 		c.Coordinated = coordinated == 1
 		convoys = append(convoys, c)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy.go:ListConvoys: rows iter error: %v", rErr)
 	}
 	return convoys
 }
@@ -260,6 +266,9 @@ func ActiveConvoysMissingAskBranch(db *sql.DB) []int {
 		if err := rows.Scan(&id); err == nil {
 			ids = append(ids, id)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy.go:ActiveConvoysMissingAskBranch: rows iter error: %v", rErr)
 	}
 	return ids
 }

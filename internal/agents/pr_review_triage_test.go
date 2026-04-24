@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -90,7 +91,7 @@ func TestPRReviewTriage_InScopeFix_SpawnsCodeEditOnAskBranch(t *testing.T) {
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
 	bounty.Status = "Locked"
-	runPRReviewTriage(db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
 
 	// Row classified in_scope_fix with a spawned CodeEdit.
 	after := store.GetPRReviewComment(db, rowID)
@@ -155,7 +156,7 @@ func TestPRReviewTriage_OutOfScope_SpawnsFeatureTask(t *testing.T) {
 
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
-	runPRReviewTriage(db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
 
 	after := store.GetPRReviewComment(db, rowID)
 	if after.Classification != "out_of_scope" {
@@ -199,7 +200,7 @@ func TestPRReviewTriage_NotActionable_RepliesOnly(t *testing.T) {
 
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
-	runPRReviewTriage(db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
 
 	after := store.GetPRReviewComment(db, rowID)
 	if after.Classification != "not_actionable" {
@@ -250,7 +251,7 @@ func TestPRReviewTriage_ConflictedLoop_EscalatesNoReply(t *testing.T) {
 
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
-	runPRReviewTriage(db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
 
 	after := store.GetPRReviewComment(db, rowID)
 	if after.Classification != "conflicted_loop" {
@@ -299,7 +300,7 @@ func TestPRReviewTriage_HumanNeverPosts(t *testing.T) {
 
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
-	runPRReviewTriage(db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
 
 	after := store.GetPRReviewComment(db, rowID)
 	if after.Classification != "human" {
@@ -367,7 +368,7 @@ func TestPRReviewTriage_BatchCapRespected(t *testing.T) {
 
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
-	runPRReviewTriage(db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
 
 	var classified, unclassified int
 	db.QueryRow(`SELECT COUNT(*) FROM PRReviewComments WHERE convoy_id = ? AND classification != ''`, convoyID).Scan(&classified)
@@ -475,7 +476,7 @@ func TestPRReviewTriage_InjectionPayload_DoesNotBypassBoundary(t *testing.T) {
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
 	bounty.Status = "Locked"
-	runPRReviewTriage(db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
 
 	// Assertion: no BountyBoard row has a payload containing signal tokens.
 	var taintedRows int

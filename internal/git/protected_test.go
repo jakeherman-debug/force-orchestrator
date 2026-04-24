@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,7 +37,7 @@ func TestAssertNotDefaultBranch_HardDenylist(t *testing.T) {
 		branch := branch
 		t.Run("denies_"+branch, func(t *testing.T) {
 			t.Parallel()
-			err := AssertNotDefaultBranch("", branch)
+			err := AssertNotDefaultBranch(context.Background(), "", branch)
 			if err == nil {
 				t.Fatalf("AssertNotDefaultBranch(%q) returned nil; want ErrProtectedBranch", branch)
 			}
@@ -66,7 +67,7 @@ func TestAssertNotDefaultBranch_AllowsAskBranches(t *testing.T) {
 		branch := branch
 		t.Run("allows_"+strings.ReplaceAll(branch, "/", "_"), func(t *testing.T) {
 			t.Parallel()
-			if err := AssertNotDefaultBranch("", branch); err != nil {
+			if err := AssertNotDefaultBranch(context.Background(), "", branch); err != nil {
 				t.Errorf("AssertNotDefaultBranch(%q) rejected unexpectedly: %v", branch, err)
 			}
 		})
@@ -85,16 +86,16 @@ func TestAssertNotDefaultBranch_HonoursRepoDefault(t *testing.T) {
 	// GetDefaultBranch for this fresh repo should be "main" (created by
 	// makeTempRepoForGuardTest via `git init -b main`). Confirm the resolved
 	// default matches what we expect, then assert the guard rejects it.
-	got := GetDefaultBranch(repo)
+	got := GetDefaultBranch(context.Background(), repo)
 	if got == "" {
 		t.Fatalf("GetDefaultBranch returned empty for %s", repo)
 	}
-	if err := AssertNotDefaultBranch(repo, got); err == nil {
-		t.Fatalf("AssertNotDefaultBranch(%s, %q) must reject the repo's own default branch", repo, got)
+	if err := AssertNotDefaultBranch(context.Background(), repo, got); err == nil {
+		t.Fatalf("AssertNotDefaultBranch(context.Background(), %s, %q) must reject the repo's own default branch", repo, got)
 	}
 	// A sibling ask-branch on the same repo must still be accepted.
-	if err := AssertNotDefaultBranch(repo, "force/ask-1-hello"); err != nil {
-		t.Fatalf("AssertNotDefaultBranch(%s, ask-branch) unexpectedly refused: %v", repo, err)
+	if err := AssertNotDefaultBranch(context.Background(), repo, "force/ask-1-hello"); err != nil {
+		t.Fatalf("AssertNotDefaultBranch(context.Background(), %s, ask-branch) unexpectedly refused: %v", repo, err)
 	}
 }
 
@@ -110,7 +111,7 @@ func TestForcePushBranch_RefusesProtectedBeforeShellout(t *testing.T) {
 	t.Parallel()
 	// Path never touched. The guard must fire first. If shellout happened,
 	// we'd see a "not a git repository" error instead.
-	err := ForcePushBranch("/definitely/does/not/exist", "main")
+	err := ForcePushBranch(context.Background(), "/definitely/does/not/exist", "main")
 	if err == nil {
 		t.Fatalf("ForcePushBranch(main) returned nil; expected protected-branch error")
 	}
@@ -122,14 +123,14 @@ func TestForcePushBranch_RefusesProtectedBeforeShellout(t *testing.T) {
 	}
 	// Belt-and-suspenders: also test with a real repo whose HEAD is main.
 	repo := makeTempRepoForGuardTest(t)
-	if err := ForcePushBranch(repo, "main"); err == nil {
+	if err := ForcePushBranch(context.Background(), repo, "main"); err == nil {
 		t.Fatalf("ForcePushBranch(%s, main) on real repo returned nil", repo)
 	}
 }
 
 func TestTriggerCIRerun_RefusesProtectedBeforeShellout(t *testing.T) {
 	t.Parallel()
-	err := TriggerCIRerun("/definitely/does/not/exist", "main", "")
+	err := TriggerCIRerun(context.Background(), "/definitely/does/not/exist", "main", "")
 	if err == nil {
 		t.Fatalf("TriggerCIRerun(main) returned nil; expected protected-branch error")
 	}
@@ -137,7 +138,7 @@ func TestTriggerCIRerun_RefusesProtectedBeforeShellout(t *testing.T) {
 		t.Fatalf("error does not identify refusal: %v", err)
 	}
 	// Empty-branch attack surface (formerly defaulted to pr.Repo in pr_flow.go).
-	if err := TriggerCIRerun("/tmp", "", "msg"); err == nil {
+	if err := TriggerCIRerun(context.Background(), "/tmp", "", "msg"); err == nil {
 		t.Fatalf("TriggerCIRerun(empty) returned nil; empty branch must be rejected")
 	}
 }

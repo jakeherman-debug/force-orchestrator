@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -134,6 +135,9 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 							continue
 						}
 						parts = append(parts, fmt.Sprintf("Task %d[^0-9]", tid))
+					}
+					if rErr := taskRows.Err(); rErr != nil {
+						log.Printf("obs_cmds.go:cmdLogsFleet: rows iter error: %v", rErr)
 					}
 					taskRows.Close()
 					if len(parts) > 0 {
@@ -337,6 +341,9 @@ func cmdSearch(db *sql.DB, query string) {
 		}
 		fmt.Printf("[#%d] %s | %s | %s | %s\n", id, status, taskType, repo, payloadSummary(payload, 80))
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("obs_cmds.go:cmdSearch: rows iter error: %v", rErr)
+	}
 	if !found {
 		fmt.Println("No tasks match your query.")
 	}
@@ -365,7 +372,9 @@ func cmdPrune(db *sql.DB, keepDays int, dryRun bool) {
 	pruneFleet(db, keepDays, dryRun)
 }
 
-func cmdDogs(db *sql.DB, args []string) {
+// Fix #8e: ctx threads from main's signal-cancellation ctx so RunDogByName's
+// downstream subprocess invocations cancel on SIGINT.
+func cmdDogs(ctx context.Context, db *sql.DB, args []string) {
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
@@ -409,7 +418,7 @@ func cmdDogs(db *sql.DB, args []string) {
 		}
 		fmt.Printf("Running %s...\n", name)
 		logger := log.New(os.Stdout, "["+name+"] ", log.LstdFlags)
-		if err := agents.RunDogByName(db, name, logger); err != nil {
+		if err := agents.RunDogByName(ctx, db, name, logger); err != nil {
 			fmt.Printf("Dog %s failed: %v\n", name, err)
 			os.Exit(1)
 		}

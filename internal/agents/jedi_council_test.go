@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -58,7 +59,7 @@ func TestRunCouncilTask_UnknownRepo(t *testing.T) {
 
 	withStubCLIRunner(t, "", nil)
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -83,7 +84,7 @@ func TestRunCouncilTask_CLIError(t *testing.T) {
 
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI failed: network error"))
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "AwaitingCouncilReview" {
@@ -108,7 +109,7 @@ func TestRunCouncilTask_JSONError(t *testing.T) {
 
 	withStubCLIRunner(t, "This is not JSON at all", nil)
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "AwaitingCouncilReview" {
@@ -134,7 +135,7 @@ func TestRunCouncilTask_Rejected_RetryRemaining(t *testing.T) {
 	ruling := `{"approved":false,"feedback":"missing test coverage"}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -163,7 +164,7 @@ func TestRunCouncilTask_Approved(t *testing.T) {
 	ruling := `{"approved":true,"feedback":""}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Completed" {
@@ -214,7 +215,7 @@ func TestRunCouncilTask_Rejected_MaxRetries(t *testing.T) {
 	ruling := `{"approved":false,"feedback":"still broken"}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,7 +63,7 @@ func TestBranchNameSlug(t *testing.T) {
 
 func TestCreateAskBranch_HappyPath(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
-	sha, err := CreateAskBranch(wt, "force/ask-1-test")
+	sha, err := CreateAskBranch(context.Background(), wt, "force/ask-1-test")
 	if err != nil {
 		t.Fatalf("CreateAskBranch: %v", err)
 	}
@@ -81,11 +82,11 @@ func TestCreateAskBranch_HappyPath(t *testing.T) {
 
 func TestCreateAskBranch_IdempotentOnRerun(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
-	sha1, err1 := CreateAskBranch(wt, "force/ask-1-test")
+	sha1, err1 := CreateAskBranch(context.Background(), wt, "force/ask-1-test")
 	if err1 != nil {
 		t.Fatal(err1)
 	}
-	sha2, err2 := CreateAskBranch(wt, "force/ask-1-test")
+	sha2, err2 := CreateAskBranch(context.Background(), wt, "force/ask-1-test")
 	if err2 != nil {
 		t.Fatalf("second run should succeed: %v", err2)
 	}
@@ -96,7 +97,7 @@ func TestCreateAskBranch_IdempotentOnRerun(t *testing.T) {
 
 func TestCreateAskBranch_EmptyName(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
-	if _, err := CreateAskBranch(wt, ""); err == nil {
+	if _, err := CreateAskBranch(context.Background(), wt, ""); err == nil {
 		t.Errorf("expected error for empty branch name")
 	}
 }
@@ -105,9 +106,9 @@ func TestCreateAskBranch_EmptyName(t *testing.T) {
 
 func TestDeleteAskBranch_RemovesBothLocalAndRemote(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
-	_, _ = CreateAskBranch(wt, "force/ask-1-doomed")
+	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-doomed")
 
-	if err := DeleteAskBranch(wt, "force/ask-1-doomed"); err != nil {
+	if err := DeleteAskBranch(context.Background(), wt, "force/ask-1-doomed"); err != nil {
 		t.Fatalf("DeleteAskBranch: %v", err)
 	}
 	// Gone from origin.
@@ -125,7 +126,7 @@ func TestDeleteAskBranch_RemovesBothLocalAndRemote(t *testing.T) {
 func TestDeleteAskBranch_IdempotentOnMissingBranch(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
 	// Branch was never created — delete should succeed without error.
-	if err := DeleteAskBranch(wt, "force/ask-1-neverexisted"); err != nil {
+	if err := DeleteAskBranch(context.Background(), wt, "force/ask-1-neverexisted"); err != nil {
 		t.Errorf("expected clean exit for missing branch: %v", err)
 	}
 }
@@ -134,7 +135,7 @@ func TestDeleteAskBranch_IdempotentOnMissingBranch(t *testing.T) {
 
 func TestRemoteHeadSHA(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
-	sha, err := RemoteHeadSHA(wt)
+	sha, err := RemoteHeadSHA(context.Background(), wt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,11 +146,11 @@ func TestRemoteHeadSHA(t *testing.T) {
 
 func TestFetchMain_MatchesRemoteHead(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
-	fetchSHA, err := FetchMain(wt)
+	fetchSHA, err := FetchMain(context.Background(), wt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	remoteSHA, err := RemoteHeadSHA(wt)
+	remoteSHA, err := RemoteHeadSHA(context.Background(), wt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func advanceOriginMain(t *testing.T, wt string) string {
 
 func TestRebaseBranchOnto_CleanRebaseAdvancesTip(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
-	_, err := CreateAskBranch(wt, "force/ask-1-clean")
+	_, err := CreateAskBranch(context.Background(), wt, "force/ask-1-clean")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +196,7 @@ func TestRebaseBranchOnto_CleanRebaseAdvancesTip(t *testing.T) {
 	advanceOriginMain(t, wt)
 
 	// Rebase the ask-branch onto main.
-	newTip, err := RebaseBranchOnto(wt, "force/ask-1-clean", "main")
+	newTip, err := RebaseBranchOnto(context.Background(), wt, "force/ask-1-clean", "main")
 	if err != nil {
 		t.Fatalf("rebase should succeed (non-conflicting): %v", err)
 	}
@@ -213,7 +214,7 @@ func TestRebaseBranchOnto_CleanRebaseAdvancesTip(t *testing.T) {
 
 func TestRebaseBranchOnto_ConflictReturnsErrorAndAborts(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
-	_, _ = CreateAskBranch(wt, "force/ask-1-conflict")
+	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-conflict")
 
 	// Ask-branch modifies README, then pushes (RebaseBranchOnto operates on
 	// origin/<branch>, not the local ref).
@@ -231,7 +232,7 @@ func TestRebaseBranchOnto_ConflictReturnsErrorAndAborts(t *testing.T) {
 	exec.Command("git", "-C", wt, "push", "origin", "main").Run()
 
 	// Rebase must fail with an error message.
-	_, err := RebaseBranchOnto(wt, "force/ask-1-conflict", "main")
+	_, err := RebaseBranchOnto(context.Background(), wt, "force/ask-1-conflict", "main")
 	if err == nil {
 		t.Fatal("expected rebase conflict to return error")
 	}
@@ -264,7 +265,7 @@ func TestRebaseBranchOnto_ConflictReturnsErrorAndAborts(t *testing.T) {
 // rebase has the real branch contents (A + merge commits) and preserves them.
 func TestRebaseBranchOnto_StaleLocalBranchDoesNotLoseMergeCommits(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
-	_, err := CreateAskBranch(wt, "force/ask-stale-test")
+	_, err := CreateAskBranch(context.Background(), wt, "force/ask-stale-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +290,7 @@ func TestRebaseBranchOnto_StaleLocalBranchDoesNotLoseMergeCommits(t *testing.T) 
 
 	// Now run the rebase from the "operator repo" (wt) — where the local
 	// ask-branch ref is still stale at the original creation point.
-	newTip, err := RebaseBranchOnto(wt, "force/ask-stale-test", "main")
+	newTip, err := RebaseBranchOnto(context.Background(), wt, "force/ask-stale-test", "main")
 	if err != nil {
 		t.Fatalf("rebase should succeed (non-conflicting): %v", err)
 	}
@@ -314,12 +315,12 @@ func TestRebaseBranchOnto_StaleLocalBranchDoesNotLoseMergeCommits(t *testing.T) 
 // the production bug ("branch is already used by worktree at ...").
 func TestTriggerCIRerun_PushesEmptyCommit(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
-	_, _ = CreateAskBranch(wt, "force/ask-1-rerun")
+	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-rerun")
 
 	beforeOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-rerun").Output()
 	before := strings.TrimSpace(string(beforeOut))
 
-	if err := TriggerCIRerun(wt, "force/ask-1-rerun", "ci: retrigger"); err != nil {
+	if err := TriggerCIRerun(context.Background(), wt, "force/ask-1-rerun", "ci: retrigger"); err != nil {
 		t.Fatalf("TriggerCIRerun: %v", err)
 	}
 
@@ -349,12 +350,12 @@ func TestTriggerCIRerun_PushesEmptyCommit(t *testing.T) {
 // leave the local branch ref completely untouched.
 func TestTriggerCIRerun_DoesNotMoveLocalBranch(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
-	_, _ = CreateAskBranch(wt, "force/ask-1-nolocal")
+	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-nolocal")
 
 	localBefore, _ := exec.Command("git", "-C", wt, "rev-parse", "force/ask-1-nolocal").Output()
 	headBefore, _ := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
 
-	if err := TriggerCIRerun(wt, "force/ask-1-nolocal", "ci: retrigger"); err != nil {
+	if err := TriggerCIRerun(context.Background(), wt, "force/ask-1-nolocal", "ci: retrigger"); err != nil {
 		t.Fatalf("TriggerCIRerun: %v", err)
 	}
 
@@ -370,9 +371,9 @@ func TestTriggerCIRerun_DoesNotMoveLocalBranch(t *testing.T) {
 
 func TestTriggerCIRerun_DefaultMessageWhenEmpty(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
-	_, _ = CreateAskBranch(wt, "force/ask-1-default-msg")
+	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-default-msg")
 
-	if err := TriggerCIRerun(wt, "force/ask-1-default-msg", ""); err != nil {
+	if err := TriggerCIRerun(context.Background(), wt, "force/ask-1-default-msg", ""); err != nil {
 		t.Fatalf("TriggerCIRerun: %v", err)
 	}
 	tipOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-default-msg").Output()
@@ -423,7 +424,7 @@ func TestMergeWithUnionStrategy_AppendOnlyConflictResolves(t *testing.T) {
 	// origin/<branch> as the reset source).
 	run("push", "-u", "origin", "feature")
 
-	tipSHA, err := MergeWithUnionStrategy(wt, "feature", "refs/remotes/origin/main", "union integrate")
+	tipSHA, err := MergeWithUnionStrategy(context.Background(), wt, "feature", "refs/remotes/origin/main", "union integrate")
 	if err != nil {
 		t.Fatalf("expected union merge to resolve append-only conflict, got: %v", err)
 	}
@@ -483,7 +484,7 @@ func TestMergeWithUnionStrategy_StructuralConflictStillFails(t *testing.T) {
 
 	run("checkout", "feature")
 	run("push", "-u", "origin", "feature")
-	if _, err := MergeWithUnionStrategy(wt, "feature", "refs/remotes/origin/main", ""); err == nil {
+	if _, err := MergeWithUnionStrategy(context.Background(), wt, "feature", "refs/remotes/origin/main", ""); err == nil {
 		t.Error("binary conflict should NOT be silently resolved by union merge")
 	}
 	// The caller's main worktree should be untouched (temp worktree pattern).
@@ -497,14 +498,14 @@ func TestMergeWithUnionStrategy_StructuralConflictStillFails(t *testing.T) {
 
 func TestForcePushBranch_SucceedsAfterLocalCommit(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
-	_, _ = CreateAskBranch(wt, "force/ask-1-push")
+	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-push")
 
 	exec.Command("git", "-C", wt, "checkout", "force/ask-1-push").Run()
 	os.WriteFile(filepath.Join(wt, "new.txt"), []byte("x"), 0644)
 	exec.Command("git", "-C", wt, "add", "new.txt").Run()
 	exec.Command("git", "-C", wt, "commit", "-q", "-m", "add new").Run()
 
-	if err := ForcePushBranch(wt, "force/ask-1-push"); err != nil {
+	if err := ForcePushBranch(context.Background(), wt, "force/ask-1-push"); err != nil {
 		t.Fatalf("force-push: %v", err)
 	}
 	// Origin should have the new commit.

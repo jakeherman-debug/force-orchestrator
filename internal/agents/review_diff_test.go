@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
@@ -107,7 +108,7 @@ func TestReviewDiff_UsesAskBranchNotMain(t *testing.T) {
 		BranchName: "agent/R2-D2/task-1",
 	}
 
-	diff := reviewDiff(db, repoPath, b)
+	diff := reviewDiff(context.Background(), db, repoPath, b)
 
 	// The reviewer's diff MUST include the agent's file.
 	if !strings.Contains(diff, "agent-work.txt") {
@@ -153,7 +154,7 @@ func TestReviewDiff_FallsBackToMainWithoutAskBranch(t *testing.T) {
 		TargetRepo: "api",
 		BranchName: "agent/legacy-task",
 	}
-	diff := reviewDiff(db, repoPath, b)
+	diff := reviewDiff(context.Background(), db, repoPath, b)
 	if !strings.Contains(diff, "legacy.txt") {
 		t.Error("legacy path should still produce a meaningful diff")
 	}
@@ -183,7 +184,7 @@ func TestReviewCommitsAhead_OnlyCountsAgentCommits(t *testing.T) {
 	}
 
 	// Against ask-branch: no unique commits — should be empty, signaling auto-complete.
-	if got := reviewCommitsAhead(db, repoPath, b); got != "" {
+	if got := reviewCommitsAhead(context.Background(), db, repoPath, b); got != "" {
 		t.Errorf("expected no commits ahead of ask-branch, got %q", got)
 	}
 }

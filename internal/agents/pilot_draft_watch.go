@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -55,6 +56,9 @@ func dogDraftPRWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) err
 			continue
 		}
 		convoys = append(convoys, c)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pilot_draft_watch.go:dogDraftPRWatch: rows iter error: %v", rErr)
 	}
 	rows.Close()
 	if len(convoys) == 0 {
@@ -232,6 +236,9 @@ func dogShipItNag(db *sql.DB, logger interface{ Printf(string, ...any) }) error 
 			continue
 		}
 		convoys = append(convoys, e)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pilot_draft_watch.go:dogShipItNag: rows iter error: %v", rErr)
 	}
 	rows.Close()
 

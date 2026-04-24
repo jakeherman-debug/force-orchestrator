@@ -75,6 +75,9 @@ func loadKnownRepos(db *sql.DB) map[string]bool {
 		}
 		repos[name] = true
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("commander.go:loadKnownRepos: rows iter error: %v", rErr)
+	}
 	return repos
 }
 

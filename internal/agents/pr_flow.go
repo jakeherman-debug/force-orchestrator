@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -37,7 +38,9 @@ const subPRCITaskStatus = "AwaitingSubPRCI"
 // Returns nil on success. On push/gh failure, classifies the error so the
 // caller can decide whether to retry (ErrClassTransient/RateLimited) or
 // escalate (ErrClassAuthExpired / BranchProtection / Permanent).
-func openSubPRForApprovedTask(db *sql.DB, bounty *store.Bounty, agentName, branchName, prTitle, prBody string, logger interface{ Printf(string, ...any) }) (classifiedErr gh.ErrorClass, err error) {
+// Fix #8e: ctx threads from runCouncilTask (the council claim ctx) so the
+// network push cancels on daemon shutdown.
+func openSubPRForApprovedTask(ctx context.Context, db *sql.DB, bounty *store.Bounty, agentName, branchName, prTitle, prBody string, logger interface{ Printf(string, ...any) }) (classifiedErr gh.ErrorClass, err error) {
 	if bounty.ConvoyID <= 0 {
 		return gh.ErrClassPermanent, fmt.Errorf("openSubPRForApprovedTask: bounty %d has no convoy_id", bounty.ID)
 	}
@@ -56,12 +59,16 @@ func openSubPRForApprovedTask(db *sql.DB, bounty *store.Bounty, agentName, branc
 	// is nonsense — we just need to force-push the resolved branch and update
 	// the stored base SHA. No sub-PR needed.
 	if branchName == ab.AskBranch {
-		return completeAskBranchResolution(db, bounty, ab, repo, logger)
+		return completeAskBranchResolution(ctx, db, bounty, ab, repo, logger)
 	}
 
 	// Step 1: push the branch. Use --force-with-lease so we can retry safely
 	// if the astromech pushed and then we pushed again in a rework cycle.
-	pushOut, pushErr := exec.Command("git", "-C", repo.LocalPath, "push",
+	// Fix #8e: ctx-bounded push so daemon shutdown cancels the network op.
+	// Pre-fix this site sat on the Pattern P11 allowlist labelled "short
+	// (rev-parse)" — but the call is `git push`, a network op. Now it
+	// inherits the council claim ctx so SIGINT cancels it cleanly.
+	pushOut, pushErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "push",
 		"--force-with-lease", "-u", "origin", branchName).CombinedOutput()
 	if pushErr != nil {
 		msg := strings.TrimSpace(string(pushOut))
@@ -168,12 +175,14 @@ func buildSubPRBody(b *store.Bounty, ruling store.CouncilRuling) string {
 // conflict resolutions directly onto the ask-branch; all we need to do is
 // force-push the branch and update ConvoyAskBranch.ask_branch_base_sha to the
 // new tip. No sub-PR is created — the resolved commits ARE the ask-branch.
-func completeAskBranchResolution(db *sql.DB, bounty *store.Bounty, ab *store.ConvoyAskBranch, repo *store.Repository, logger interface{ Printf(string, ...any) }) (gh.ErrorClass, error) {
+// Fix #8e: ctx threads from runCouncilTask via openSubPRForApprovedTask so
+// the force-push cancels on daemon shutdown.
+func completeAskBranchResolution(ctx context.Context, db *sql.DB, bounty *store.Bounty, ab *store.ConvoyAskBranch, repo *store.Repository, logger interface{ Printf(string, ...any) }) (gh.ErrorClass, error) {
 	// Fix #0: refuse to force-push if ab.AskBranch has somehow become the
 	// default branch (DB corruption, manual edit) or doesn't look like a
 	// well-formed ask-branch. completeAskBranchResolution is the one path
 	// where a DB-supplied string flows straight into `git push --force`.
-	if err := igit.AssertNotDefaultBranch(repo.LocalPath, ab.AskBranch); err != nil {
+	if err := igit.AssertNotDefaultBranch(ctx, repo.LocalPath, ab.AskBranch); err != nil {
 		logger.Printf("Task %d: ask-branch %q rejected by protected-branch guard: %v", bounty.ID, ab.AskBranch, err)
 		return gh.ErrClassPermanent, fmt.Errorf("protected-branch guard: %w", err)
 	}
@@ -183,7 +192,8 @@ func completeAskBranchResolution(db *sql.DB, bounty *store.Bounty, ab *store.Con
 	}
 	// Force-push the ask-branch with lease so a concurrent rewrite can't be
 	// silently clobbered.
-	pushOut, pushErr := exec.Command("git", "-C", repo.LocalPath, "push",
+	// Fix #8e: ctx-bounded so daemon shutdown cancels this network push.
+	pushOut, pushErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "push",
 		"--force-with-lease", "origin", ab.AskBranch).CombinedOutput()
 	if pushErr != nil {
 		msg := strings.TrimSpace(string(pushOut))
@@ -193,8 +203,9 @@ func completeAskBranchResolution(db *sql.DB, bounty *store.Bounty, ab *store.Con
 	}
 
 	// Capture the new tip SHA. The new tip is the local HEAD of the ask-branch
-	// after astromech committed.
-	tipOut, tipErr := exec.Command("git", "-C", repo.LocalPath, "rev-parse", ab.AskBranch).CombinedOutput()
+	// after astromech committed. Short rev-parse stays unbounded — sub-second
+	// expected and the repo is local-only.
+	tipOut, tipErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "rev-parse", ab.AskBranch).CombinedOutput()
 	if tipErr != nil {
 		return gh.ErrClassPermanent, fmt.Errorf("rev-parse %s: %s", ab.AskBranch, strings.TrimSpace(string(tipOut)))
 	}
@@ -320,14 +331,16 @@ func subPRAutoMergeStrategy(db *sql.DB) string {
 //   - on externally Closed: mark the task Escalated with reason.
 //   - if the PR was opened >10 min ago and still has zero checks reported,
 //     escalate with guidance about missing CI config.
-func dogSubPRCIWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+// Fix #8e: ctx threads from RunDogs → runDog (per-dog 5m ctx, derived from
+// inquisitor tick ctx) so onSubPRStalled's network rerun cancels on shutdown.
+func dogSubPRCIWatch(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 	prs := store.ListOpenAskBranchPRs(db)
 	if len(prs) == 0 {
 		return nil
 	}
 	ghc := newGHClient()
 	for _, pr := range prs {
-		handleSubPRPoll(db, ghc, pr, logger)
+		handleSubPRPoll(ctx, db, ghc, pr, logger)
 	}
 	return nil
 }
@@ -346,9 +359,11 @@ func SetGHClientFactory(f func() *gh.Client) (restore func()) {
 	return func() { newGHClient = prev }
 }
 
+// Fix #8e: ctx threads from dogSubPRCIWatch (per-dog 5m ctx) so the
+// onSubPRStalled stall-rerun network ops cancel on shutdown.
 // handleSubPRPoll processes a single sub-PR's state change. Split out so it's
 // unit-testable with a fake gh client.
-func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+func handleSubPRPoll(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
 	repo := store.GetRepo(db, pr.Repo)
 	var cwd, ghRepo string
 	if repo != nil {
@@ -504,7 +519,7 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 		}
 		age := time.Since(createdAt)
 		if age > subPRCIStaleLimit {
-			onSubPRStalled(db, ghc, pr, logger)
+			onSubPRStalled(ctx, db, ghc, pr, logger)
 			return
 		}
 		if age > missingCITimeout && len(checks) == 0 {
@@ -677,14 +692,16 @@ func escalateSubPR(db *sql.DB, pr store.AskBranchPR, severity store.EscalationSe
 
 // triggerStalledRerunFn is the dependency-injection point for re-triggering
 // a stuck CI run by force-pushing an empty commit. Tests swap it out.
-var triggerStalledRerunFn = func(repoPath, branch, message string) error {
-	return igit.TriggerCIRerun(repoPath, branch, message)
+// Fix #8e: signature now takes ctx so the underlying TriggerCIRerun (network
+// fetch + push) cancels on daemon shutdown.
+var triggerStalledRerunFn = func(ctx context.Context, repoPath, branch, message string) error {
+	return igit.TriggerCIRerun(ctx, repoPath, branch, message)
 }
 
 // SetTriggerStalledRerunForTest lets external packages install a fake re-trigger
 // function for the duration of a test. Call the returned restore fn (or use
 // t.Cleanup) to put the real impl back.
-func SetTriggerStalledRerunForTest(fn func(repoPath, branch, message string) error) (restore func()) {
+func SetTriggerStalledRerunForTest(fn func(ctx context.Context, repoPath, branch, message string) error) (restore func()) {
 	prev := triggerStalledRerunFn
 	triggerStalledRerunFn = fn
 	return func() { triggerStalledRerunFn = prev }
@@ -708,7 +725,9 @@ func SetTriggerStalledRerunForTest(fn func(repoPath, branch, message string) err
 //
 // The counter (stall_retrigger_count on AskBranchPRs) persists across dog
 // ticks so we can't loop forever — two re-triggers then escalate.
-func onSubPRStalled(db *sql.DB, ghc interface {
+// Fix #8e: ctx threads from dogSubPRCIWatch (per-dog 5m ctx, derived from
+// inquisitor tick ctx) so the stall-rerun network ops cancel on shutdown.
+func onSubPRStalled(ctx context.Context, db *sql.DB, ghc interface {
 	PRChecks(cwd, repo string, number int) ([]gh.PRCheck, gh.ChecksState, error)
 }, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
 	// Age calc — hard-limit shortcut so we don't burn cycles diagnosing a
@@ -796,7 +815,7 @@ func onSubPRStalled(db *sql.DB, ghc interface {
 	}
 
 	retriggerMsg := fmt.Sprintf("ci: retrigger stalled run (sub-PR #%d)", pr.PRNumber)
-	if err := triggerStalledRerunFn(cwd, branch, retriggerMsg); err != nil {
+	if err := triggerStalledRerunFn(ctx, cwd, branch, retriggerMsg); err != nil {
 		logger.Printf("sub-pr-ci-watch: sub-PR #%d re-trigger push failed: %v — escalating", pr.PRNumber, err)
 		msg := fmt.Sprintf("sub-PR #%d: CI stall re-trigger failed: %v", pr.PRNumber, err)
 		if escErr := escalateSubPR(db, pr, store.SeverityMedium, msg); escErr != nil {

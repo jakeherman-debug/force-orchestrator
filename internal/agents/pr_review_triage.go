@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -86,7 +87,11 @@ type prReviewTriagePayload struct {
 // runPRReviewTriage is the handler for one PRReviewTriage task. Iterates over
 // every unclassified PRReviewComment in the convoy (capped per run), runs the
 // classifier, and dispatches.
-func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnDiplomat's claim ctx. Body is LLM + DB +
+// gh-client (which already accepts ctx separately) so ctx is not propagated
+// further today; the parameter aligns the signature with peer claim handlers.
+func runPRReviewTriage(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+	_ = ctx
 	var payload prReviewTriagePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if failErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); failErr != nil {
@@ -302,6 +307,9 @@ func summarizeConvoyTasks(db *sql.DB, convoyID int) string {
 			continue
 		}
 		fmt.Fprintf(&b, "  #%d %s [%s] — %s\n", id, typ, status, util.TruncateStr(payload, 160))
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pr_review_triage.go:summarizeConvoyTasks: rows iter error: %v", rErr)
 	}
 	out := b.String()
 	if out == "" {

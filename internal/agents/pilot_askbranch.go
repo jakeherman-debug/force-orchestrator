@@ -1,6 +1,8 @@
 package agents
 
 import (
+	"log"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -68,6 +70,9 @@ func QueueCreateAskBranch(db *sql.DB, convoyID int) (int, error) {
 			codeEditIDs = append(codeEditIDs, id)
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pilot_askbranch.go:QueueCreateAskBranch: rows iter error: %v", rErr)
+	}
 	rows.Close()
 	for _, codeEditID := range codeEditIDs {
 		store.AddDependency(db, codeEditID, pilotTaskID)
@@ -89,7 +94,9 @@ func AskBranchNameForConvoy(convoyID int, convoyName string) string {
 	return fmt.Sprintf("%sforce/ask-%d-%s", igit.BranchPrefix(), convoyID, slug)
 }
 
-func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnPilot's claim ctx so the network
+// fetch/branch/push for each repo cancels on daemon shutdown.
+func runCreateAskBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload createAskBranchPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
@@ -158,7 +165,7 @@ func runCreateAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Prin
 			continue
 		}
 
-		baseSHA, err := igit.CreateAskBranch(repo.LocalPath, branchName)
+		baseSHA, err := igit.CreateAskBranch(ctx, repo.LocalPath, branchName)
 		if err != nil {
 			cls := gh.ClassifyError(err.Error())
 			failures = append(failures, fmt.Sprintf("%s: %v (class=%s)", repoName, err, cls))
@@ -248,7 +255,9 @@ func QueueCleanupAskBranchTx(tx *sql.Tx, convoyID int) (int, error) {
 	return int(id), nil
 }
 
-func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnPilot's claim ctx so DeleteAskBranch's
+// remote-push cancels on daemon shutdown.
+func runCleanupAskBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload cleanupAskBranchPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
@@ -276,7 +285,7 @@ func runCleanupAskBranch(db *sql.DB, bounty *store.Bounty, logger interface{ Pri
 			deleted = append(deleted, ab.Repo+"(row-only)")
 			continue
 		}
-		if err := igit.DeleteAskBranch(repo.LocalPath, ab.AskBranch); err != nil {
+		if err := igit.DeleteAskBranch(ctx, repo.LocalPath, ab.AskBranch); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", ab.Repo, err))
 			continue
 		}

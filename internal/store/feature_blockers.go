@@ -53,6 +53,9 @@ func ResolveFeatureBlockers(db *sql.DB, blockingFeatureID, newConvoyID int) int 
 		}
 		blockedConvoyIDs = append(blockedConvoyIDs, id)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("feature_blockers.go:ResolveFeatureBlockers: rows iter error: %v", rErr)
+	}
 	rows.Close()
 
 	tailIDs := GetConvoyTailTaskIDs(db, newConvoyID)
@@ -76,6 +79,9 @@ func ResolveFeatureBlockers(db *sql.DB, blockingFeatureID, newConvoyID int) int 
 				continue
 			}
 			rootIDs = append(rootIDs, id)
+		}
+		if rErr := rootRows.Err(); rErr != nil {
+			log.Printf("feature_blockers.go:ResolveFeatureBlockers: rows iter error: %v", rErr)
 		}
 		rootRows.Close()
 
@@ -152,6 +158,9 @@ func GetUnresolvedBlockers(db *sql.DB, blockedConvoyID int) []int {
 			continue
 		}
 		ids = append(ids, id)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("feature_blockers.go:GetUnresolvedBlockers: rows iter error: %v", rErr)
 	}
 	return ids
 }

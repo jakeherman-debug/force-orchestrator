@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -99,7 +100,7 @@ func TestRunConvoyReview_CleanPass_Completes(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (999, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 999`).Scan(&status)
@@ -140,7 +141,7 @@ func TestRunConvoyReview_NeedsWork_SpawnsFixTasks(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (998, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 998`).Scan(&status)
@@ -186,7 +187,7 @@ func TestRunConvoyReview_ActiveConvoyTasks_NoSpawn(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (994, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
 
 	// Should complete without spawning any fix tasks.
 	var status string
@@ -211,7 +212,7 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveConvoyTasks(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (0, 'api', 'CodeEdit', 'Pending', 'in-flight work', ?, 5, datetime('now'))`, convoyID)
 
-	dogConvoyReviewWatch(db, testLogger{})
+	dogConvoyReviewWatch(context.Background(), db, testLogger{})
 
 	var count int
 	// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
@@ -251,7 +252,7 @@ func TestRunConvoyReview_MaxFindingsCap(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (997, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
 
 	var fixCount int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = 997 AND type = 'CodeEdit'`).Scan(&fixCount)
@@ -281,7 +282,7 @@ func TestRunConvoyReview_LoopCapEscalates(t *testing.T) {
 		VALUES (996, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	// No LLM stub needed — loop cap check fires before LLM call.
-	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 996`).Scan(&status)
@@ -304,7 +305,7 @@ func TestDogConvoyReviewWatch_QueuesForDraftPROpen(t *testing.T) {
 
 	convoyID := seedDraftPROpenConvoy(t, db)
 
-	if err := dogConvoyReviewWatch(db, testLogger{}); err != nil {
+	if err := dogConvoyReviewWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatalf("dog error: %v", err)
 	}
 
@@ -325,7 +326,7 @@ func TestDogConvoyReviewWatch_SkipsWhenPendingExists(t *testing.T) {
 	// Pre-queue one.
 	QueueConvoyReview(db, convoyID)
 
-	dogConvoyReviewWatch(db, testLogger{})
+	dogConvoyReviewWatch(context.Background(), db, testLogger{})
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'ConvoyReview'
@@ -360,7 +361,7 @@ func TestRunConvoyReview_ActiveAskBranchConflict_NoSpawn(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (993, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 993`).Scan(&status)
@@ -385,7 +386,7 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveAskBranchConflict(t *testing.T) {
 		VALUES (0, 'api', 'CodeEdit', 'Pending', '[REBASE_CONFLICT for convoy #' || ? || ' repo api] resolve', ?, 5, datetime('now'))`,
 		convoyID, convoyID)
 
-	if err := dogConvoyReviewWatch(db, testLogger{}); err != nil {
+	if err := dogConvoyReviewWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatalf("dog error: %v", err)
 	}
 
@@ -445,7 +446,7 @@ func TestDogConvoyReviewWatch_SkipsWhenActiveFixTasks(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (?, 'api', 'CodeEdit', 'Pending', 'fix regression', ?, 5, datetime('now'))`, reviewID, convoyID)
 
-	dogConvoyReviewWatch(db, testLogger{})
+	dogConvoyReviewWatch(context.Background(), db, testLogger{})
 
 	// No new ConvoyReview should be queued while fix task is still running.
 	var count int

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -278,7 +279,7 @@ func TestRunShipConvoy_NotReady_Requeues(t *testing.T) {
 
 	shipID, _ := QueueShipConvoy(db, cid)
 	b, _ := store.GetBounty(db, shipID)
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, shipID)
 	if updated.Status != "Pending" {
@@ -293,7 +294,7 @@ func TestRunShipConvoy_NoAskBranchesCompletes(t *testing.T) {
 	cid, _ := store.CreateConvoy(db, "[1] legacy")
 	shipID, _ := QueueShipConvoy(db, cid)
 	b, _ := store.GetBounty(db, shipID)
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, shipID)
 	if updated.Status != "Completed" {
@@ -325,7 +326,7 @@ func TestRunShipConvoy_HappyPath_OpensDraftPR(t *testing.T) {
 
 	shipID, _ := QueueShipConvoy(db, cid)
 	b, _ := store.GetBounty(db, shipID)
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, shipID)
 	if updated.Status != "Completed" {
@@ -385,7 +386,7 @@ func TestRunShipConvoy_PRCreateFailurePropagates(t *testing.T) {
 
 	shipID, _ := QueueShipConvoy(db, cid)
 	b, _ := store.GetBounty(db, shipID)
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, shipID)
 	if updated.Status != "Failed" {
@@ -428,7 +429,7 @@ func TestRunShipConvoy_SanityFailureFallsBackToLLMThenEscalates(t *testing.T) {
 
 	shipID, _ := QueueShipConvoy(db, cid)
 	b, _ := store.GetBounty(db, shipID)
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 
 	updated, _ := store.GetBounty(db, shipID)
 	if updated.Status != "Failed" {
@@ -451,7 +452,7 @@ func TestRunShipConvoy_SkipAlreadyDraftedBranches(t *testing.T) {
 
 	shipID, _ := QueueShipConvoy(db, cid)
 	b, _ := store.GetBounty(db, shipID)
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 
 	// gh pr create should NOT have been called.
 	for _, c := range stub.calls {

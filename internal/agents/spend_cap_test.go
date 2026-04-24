@@ -170,7 +170,7 @@ func TestRunDogs_SkippedWhenEstopped(t *testing.T) {
 	db.QueryRow(`SELECT COUNT(*) FROM Dogs`).Scan(&beforeCount)
 
 	rl := &recordingLogger{}
-	RunDogs(db, rl)
+	RunDogs(context.Background(), db, rl)
 
 	var afterCount int
 	db.QueryRow(`SELECT COUNT(*) FROM Dogs`).Scan(&afterCount)

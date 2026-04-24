@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -72,7 +73,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	// ── Step 2: Pilot cuts the ask-branch ──────────────────────────────────
 	createID, _ := QueueCreateAskBranch(db, convoyID)
 	cb, _ := store.GetBounty(db, createID)
-	runCreateAskBranch(db, cb, testLogger{})
+	runCreateAskBranch(context.Background(), db, cb, testLogger{})
 	ab := store.GetConvoyAskBranch(db, convoyID, "api")
 	if ab == nil {
 		t.Fatal("ask-branch was not created")
@@ -101,7 +102,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":"lgtm"}`, nil)
 
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(db, "Council-Yoda", b, log.New(io.Discard, "", 0))
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, log.New(io.Discard, "", 0))
 
 	taskAfter, _ := store.GetBounty(db, taskID)
 	if taskAfter.Status != subPRCITaskStatus {
@@ -118,7 +119,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 		"pr checks 123": {stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`},
 		"pr merge 123":  {stdout: ""},
 	})
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,7 +127,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	installGHStub(t, map[string]ghStubResp{
 		"pr view 123": {stdout: `{"number":123,"url":"u","state":"MERGED","isDraft":false,"merged":true,"mergedAt":"2024-01-01"}`},
 	})
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	taskAfter, _ = store.GetBounty(db, taskID)
@@ -157,7 +158,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	withStubCLIRunner(t, "## Summary\n\nAdds feature X.\n\n## Testing\n\nVerified via CI.\n", nil)
 
 	shipB, _ := store.GetBounty(db, shipTaskID)
-	runShipConvoy(db, "Diplomat", shipB, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", shipB, testLogger{})
 
 	conv = store.GetConvoy(db, convoyID)
 	if conv.Status != "DraftPROpen" {
@@ -228,7 +229,7 @@ func TestPRFlow_CIFailure_SelfHealsViaMedic(t *testing.T) {
 		"pr view 1":   {stdout: `{"number":1,"state":"OPEN","merged":false}`},
 		"pr checks 1": {stdout: `[{"name":"test","state":"FAILURE","bucket":"fail"}]`, err: fmt.Errorf("exit 1")},
 	})
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -242,7 +243,7 @@ func TestPRFlow_CIFailure_SelfHealsViaMedic(t *testing.T) {
 	// Medic runs, classifies as RealBug.
 	withStubCLIRunner(t, `{"classification":"RealBug","diagnosis":"assertion wrong","fix_guidance":"update expect(3) to expect(4)","operator_note":""}`, nil)
 	triageB, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(db, "Medic-Bacta", triageB, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", triageB, testLogger{})
 
 	// A CodeEdit fix task should have been spawned with the astromech branch.
 	var fixID int
@@ -286,7 +287,7 @@ func TestPRFlow_LegacyPath_StillWorksWhenPRFlowDisabled(t *testing.T) {
 	// skip pr_flow_enabled=false repos.
 	createID, _ := QueueCreateAskBranch(db, cid)
 	cb, _ := store.GetBounty(db, createID)
-	runCreateAskBranch(db, cb, testLogger{})
+	runCreateAskBranch(context.Background(), db, cb, testLogger{})
 	if ab := store.GetConvoyAskBranch(db, cid, "legacy"); ab != nil {
 		t.Errorf("no ask-branch should exist for pr_flow_enabled=false repo, got %+v", ab)
 	}
@@ -317,7 +318,7 @@ func TestPRFlow_LegacyPath_StillWorksWhenPRFlowDisabled(t *testing.T) {
 
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	b, _ := store.GetBounty(db, tid)
-	runCouncilTask(db, "Council-Yoda", b, log.New(io.Discard, "", 0))
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, log.New(io.Discard, "", 0))
 
 	after, _ := store.GetBounty(db, tid)
 	if after.Status != "Completed" {

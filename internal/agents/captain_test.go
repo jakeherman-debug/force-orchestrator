@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -145,7 +146,7 @@ func TestRunCaptainTask_UnknownRepo(t *testing.T) {
 
 	withStubCLIRunner(t, "", nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -172,7 +173,7 @@ func TestRunCaptainTask_CLIError(t *testing.T) {
 
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI failed: timeout"))
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "AwaitingCaptainReview" {
@@ -200,7 +201,7 @@ func TestRunCaptainTask_Approve(t *testing.T) {
 	ruling := `{"decision":"approve","feedback":"","task_updates":[],"new_tasks":[]}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "AwaitingCouncilReview" {
@@ -228,7 +229,7 @@ func TestRunCaptainTask_Reject_RetryRemaining(t *testing.T) {
 	ruling := `{"decision":"reject","feedback":"plan divergence","task_updates":[],"new_tasks":[]}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -259,7 +260,7 @@ func TestRunCaptainTask_Reject_MaxRetries(t *testing.T) {
 	ruling := `{"decision":"reject","feedback":"still wrong","task_updates":[],"new_tasks":[]}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -287,7 +288,7 @@ func TestRunCaptainTask_Escalate(t *testing.T) {
 	ruling := `{"decision":"escalate","feedback":"convoy plan is fundamentally broken","task_updates":[],"new_tasks":[]}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, id).Scan(&count)
@@ -323,7 +324,7 @@ func TestRunCaptainTask_TaskUpdatePersistsInDB(t *testing.T) {
 	ruling := fmt.Sprintf(`{"decision":"approve","feedback":"","task_updates":[{"id":%d,"new_payload":"updated description with implementation context"}],"new_tasks":[]}`, downstreamID)
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	downstream, _ := store.GetBounty(db, downstreamID)
 	if downstream.Payload != "updated description with implementation context" {
@@ -360,7 +361,7 @@ func TestRunCaptainTask_NewSubtaskWithBlockedByWritesDependency(t *testing.T) {
 	ruling := fmt.Sprintf(`{"decision":"approve","feedback":"","task_updates":[],"new_tasks":[{"repo":"myrepo","task":"write integration tests for new endpoint","blocked_by":[%d]}]}`, blockerID)
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	var newTaskID int
 	if err := db.QueryRow(`SELECT id FROM BountyBoard WHERE payload = 'write integration tests for new endpoint' AND convoy_id = ?`, convoyID).Scan(&newTaskID); err != nil {
@@ -393,7 +394,7 @@ func TestRunCaptainTask_UnknownRepoInNewTasksCreatesEscalation(t *testing.T) {
 	ruling := `{"decision":"approve","feedback":"","task_updates":[],"new_tasks":[{"repo":"phantom-repo","task":"do something in unregistered repo","blocked_by":[]}]}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, reviewID).Scan(&count)
@@ -431,7 +432,7 @@ func TestRunCaptainTask_UnknownDecision(t *testing.T) {
 	ruling := `{"decision":"bogus","feedback":"","task_updates":[],"new_tasks":[],"rejected_files":[]}`
 	withStubCLIRunner(t, ruling, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCaptainTask(db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	// Fix #8.5: unknown decision fails-closed. The task must NOT be

@@ -19,15 +19,16 @@ import (
 
 // FetchMain runs `git fetch origin <default>` to refresh main's tip. Returns
 // the new HEAD SHA, or error.
-func FetchMain(repoPath string) (string, error) {
-	base := GetDefaultBranch(repoPath)
+// Fix #8e: ctx threads from the caller so the network op cancels on shutdown.
+func FetchMain(ctx context.Context, repoPath string) (string, error) {
+	base := GetDefaultBranch(ctx, repoPath)
 	// `--` after the remote name keeps the refspec positional (Fix #9).
-	if out, err := runGitCtx("-C", repoPath, "fetch", "origin", "--", base); err != nil {
+	if out, err := runGitCtx(ctx, "-C", repoPath, "fetch", "origin", "--", base); err != nil {
 		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
 	}
 	// `--verify` + trailing `--` pins the arg to a single positional rev;
 	// plain `rev-parse <ref> --` would echo a spurious `--` line.
-	out, err := runGitCtx("-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/"+base, "--")
+	out, err := runGitCtx(ctx, "-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/"+base, "--")
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse: %s", strings.TrimSpace(string(out)))
 	}
@@ -37,10 +38,12 @@ func FetchMain(repoPath string) (string, error) {
 // RemoteHeadSHA returns the HEAD SHA of the default branch on origin via
 // `git ls-remote` — does NOT fetch, only queries. This is the cheap
 // event-detection call main-drift-watch uses every 15 minutes.
-func RemoteHeadSHA(repoPath string) (string, error) {
-	base := GetDefaultBranch(repoPath)
+// Fix #8e: ctx threads from the caller (the dog ctx) so daemon cancellation
+// stops the ls-remote network op.
+func RemoteHeadSHA(ctx context.Context, repoPath string) (string, error) {
+	base := GetDefaultBranch(ctx, repoPath)
 	// `--` before the refspec keeps it positional (Fix #9).
-	out, err := runGitCtx("-C", repoPath, "ls-remote", "--", "origin", "refs/heads/"+base)
+	out, err := runGitCtx(ctx, "-C", repoPath, "ls-remote", "--", "origin", "refs/heads/"+base)
 	if err != nil {
 		return "", fmt.Errorf("git ls-remote: %s", strings.TrimSpace(string(out)))
 	}
@@ -68,14 +71,16 @@ func RemoteHeadSHA(repoPath string) (string, error) {
 //
 // If the branch already exists locally or on origin, this is idempotent: the
 // local branch operation either no-ops or we force-reset to the remote SHA.
-func CreateAskBranch(repoPath, branchName string) (string, error) {
+// Fix #8e: ctx threads from the caller (Pilot's claim ctx) so a hung
+// fetch/push on a slow remote cancels on daemon shutdown.
+func CreateAskBranch(ctx context.Context, repoPath, branchName string) (string, error) {
 	if branchName == "" {
 		return "", fmt.Errorf("CreateAskBranch: branchName required")
 	}
-	base := GetDefaultBranch(repoPath)
+	base := GetDefaultBranch(ctx, repoPath)
 
 	// Step 1: fetch. `--` separator before the positional refspec (Fix #9).
-	if out, err := runGitCtx("-C", repoPath, "fetch", "origin", "--", base); err != nil {
+	if out, err := runGitCtx(ctx, "-C", repoPath, "fetch", "origin", "--", base); err != nil {
 		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
 	}
 
@@ -83,7 +88,7 @@ func CreateAskBranch(repoPath, branchName string) (string, error) {
 	// we're branching from. Using refs/remotes/origin/<base> is what origin's
 	// current HEAD actually is. `--verify` + trailing `--` keeps the rev
 	// positional and suppresses the stray `--` echo line.
-	shaOut, err := runGitCtx("-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/"+base, "--")
+	shaOut, err := runGitCtx(ctx, "-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/"+base, "--")
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse origin/%s: %s", base, strings.TrimSpace(string(shaOut)))
 	}
@@ -95,11 +100,11 @@ func CreateAskBranch(repoPath, branchName string) (string, error) {
 	// Step 2: create the branch locally. If it already exists, force-update it
 	// to the same SHA so we're idempotent. `--` after `-f` keeps (branch, sha)
 	// positional (Fix #9).
-	bestEffortRun("ask-branch create local", "-C", repoPath, "branch", "-f", "--", branchName, baseSHA)
+	bestEffortRun(ctx, "ask-branch create local", "-C", repoPath, "branch", "-f", "--", branchName, baseSHA)
 
 	// Step 3: push to origin. Accepts the case where origin already has the
 	// branch at the same SHA (no-op push). `--` keeps the branch positional.
-	if out, err := runGitCtxOutput("-C", repoPath, "push", "-u", "origin", "--", branchName); err != nil {
+	if out, err := runGitCtxOutput(ctx, "-C", repoPath, "push", "-u", "origin", "--", branchName); err != nil {
 		// If the branch already exists on origin at a different SHA, do not
 		// force-push here — that's for the rebase flow, not initial create.
 		return "", fmt.Errorf("git push: %s", strings.TrimSpace(string(out)))
@@ -109,19 +114,20 @@ func CreateAskBranch(repoPath, branchName string) (string, error) {
 
 // DeleteAskBranch deletes the branch both locally and on origin. Idempotent:
 // missing branches are not errors.
-func DeleteAskBranch(repoPath, branchName string) error {
+// Fix #8e: ctx threads from the caller.
+func DeleteAskBranch(ctx context.Context, repoPath, branchName string) error {
 	if branchName == "" {
 		return fmt.Errorf("DeleteAskBranch: branchName required")
 	}
-	if err := AssertNotDefaultBranch(repoPath, branchName); err != nil {
+	if err := AssertNotDefaultBranch(ctx, repoPath, branchName); err != nil {
 		return fmt.Errorf("DeleteAskBranch refused: %w", err)
 	}
 	// Local delete — ignore errors (branch may not exist locally). `--` keeps
 	// the branch positional (Fix #9).
-	bestEffortRun("ask-branch local delete", "-C", repoPath, "branch", "-D", "--", branchName)
+	bestEffortRun(ctx, "ask-branch local delete", "-C", repoPath, "branch", "-D", "--", branchName)
 	// Remote delete — a 404-style response is fine. `--` after `--delete`
 	// keeps the branch positional.
-	out, err := runGitCtx("-C", repoPath, "push", "origin", "--delete", "--", branchName)
+	out, err := runGitCtx(ctx, "-C", repoPath, "push", "origin", "--delete", "--", branchName)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if strings.Contains(msg, "remote ref does not exist") || strings.Contains(msg, "unable to delete") {
@@ -141,11 +147,13 @@ func DeleteAskBranch(repoPath, branchName string) error {
 //
 // This deliberately does NOT force-push — the caller (Pilot) decides whether
 // to push after classifying the outcome.
-func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err error) {
+// Fix #8e: ctx threads from the caller (Pilot's claim ctx) so a hung
+// fetch/rebase cancels on daemon shutdown.
+func RebaseBranchOnto(ctx context.Context, repoPath, branch, onto string) (newTipSHA string, err error) {
 	// Fetch both branches so origin refs are current. This updates
 	// refs/remotes/origin/<name>, but NOT the local refs/heads/<name>.
 	// `--` separator keeps the refspecs positional (Fix #9).
-	if out, fetchErr := runGitCtx("-C", repoPath, "fetch", "origin", "--", onto, branch); fetchErr != nil {
+	if out, fetchErr := runGitCtx(ctx, "-C", repoPath, "fetch", "origin", "--", onto, branch); fetchErr != nil {
 		return "", fmt.Errorf("git fetch: %s", strings.TrimSpace(string(out)))
 	}
 
@@ -155,13 +163,13 @@ func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err erro
 		return "", fmt.Errorf("mktemp: %w", wtErr)
 	}
 	defer func() {
-		// AUDIT-165 (Fix #8d): wrap the worktree-remove in exec.CommandContext
-		// so a hung `git worktree remove` can't wedge this deferred cleanup.
-		// os.RemoveAll runs unconditionally — we'd rather leave a stale git
-		// metadata entry than leak the tmpdir on a hung remove.
-		rmCtx, rmCancel := context.WithTimeout(context.Background(), shortGitOpTimeout)
-		_ = exec.CommandContext(rmCtx, "git", "-C", repoPath, "worktree", "remove", "--force", wtPath).Run()
-		rmCancel()
+		// AUDIT-165 (Fix #8d): wrap the worktree-remove so a hung
+		// `git worktree remove` can't wedge this deferred cleanup.
+		// Fix #8e: routed through bestEffortRun, which now derives its
+		// timeout from the caller ctx so daemon shutdown cancels even
+		// the cleanup. os.RemoveAll runs unconditionally — we'd rather
+		// leave a stale git metadata entry than leak the tmpdir.
+		bestEffortRun(ctx, "rebase-temp worktree remove", "-C", repoPath, "worktree", "remove", "--force", wtPath)
 		os.RemoveAll(wtPath)
 	}()
 
@@ -177,7 +185,7 @@ func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err erro
 	// starting point, only against concurrent writes — so this would have
 	// looked clean but was catastrophic.
 	// `--` separator before (branch, wtPath, ref) positionals (Fix #9).
-	if out, wtAddErr := runGitCtx("-C", repoPath, "worktree", "add",
+	if out, wtAddErr := runGitCtx(ctx, "-C", repoPath, "worktree", "add",
 		"-B", branch, "--", wtPath, "refs/remotes/origin/"+branch); wtAddErr != nil {
 		return "", fmt.Errorf("git worktree add: %s", strings.TrimSpace(string(out)))
 	}
@@ -185,15 +193,15 @@ func RebaseBranchOnto(repoPath, branch, onto string) (newTipSHA string, err erro
 	// Rebase. Conflicts leave the worktree mid-rebase; we abort and return an
 	// error with conflict output so Pilot can spawn a RebaseConflict task.
 	// `--` separator before the positional onto-ref (Fix #9).
-	if out, rbErr := runGitCtx("-C", wtPath, "rebase", "--", "refs/remotes/origin/"+onto); rbErr != nil {
+	if out, rbErr := runGitCtx(ctx, "-C", wtPath, "rebase", "--", "refs/remotes/origin/"+onto); rbErr != nil {
 		// Wrapped to keep shell-boundary grep clean — see abortOp doc.
-		abortOp(wtPath, "rebase")
+		abortOp(ctx, wtPath, "rebase")
 		return "", fmt.Errorf("git rebase: %s", strings.TrimSpace(string(out)))
 	}
 
 	// Capture the new tip SHA from the worktree. `--verify` + trailing `--`
 	// pins the rev and suppresses the spurious `--` echo (Fix #9).
-	shaOut, shaErr := runGitCtx("-C", wtPath, "rev-parse", "--verify", "HEAD", "--")
+	shaOut, shaErr := runGitCtx(ctx, "-C", wtPath, "rev-parse", "--verify", "HEAD", "--")
 	if shaErr != nil {
 		return "", fmt.Errorf("git rev-parse HEAD: %s", strings.TrimSpace(string(shaOut)))
 	}
@@ -234,7 +242,8 @@ var unionMergeableGlobs = []string{
 // Returns the new merge-commit SHA on success. Returns error when conflicts
 // are structural (binary files, concurrent edits to same function body) —
 // caller should fall through to LLM-driven astromech resolution.
-func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, error) {
+// Fix #8e: ctx threads from the caller (Pilot's claim ctx).
+func MergeWithUnionStrategy(ctx context.Context, repoPath, branch, baseRef, message string) (string, error) {
 	if branch == "" || baseRef == "" {
 		return "", fmt.Errorf("branch and baseRef required")
 	}
@@ -253,14 +262,14 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 
 	// Fetch both refs so we're merging against current origin state.
 	// `--` separator before the branch refspec (Fix #9).
-	if out, err := runGitCtx("-C", repoPath, "fetch", "origin", "--", branch); err != nil {
+	if out, err := runGitCtx(ctx, "-C", repoPath, "fetch", "origin", "--", branch); err != nil {
 		// Non-fatal — the branch may exist only locally. Record and continue.
 		_ = out
 	}
 	// For baseRef like "refs/remotes/origin/main", fetch the short name.
 	shortBase := strings.TrimPrefix(baseRef, "refs/remotes/origin/")
 	if shortBase != baseRef {
-		runGitCtx("-C", repoPath, "fetch", "origin", "--", shortBase)
+		runGitCtx(ctx, "-C", repoPath, "fetch", "origin", "--", shortBase)
 	}
 
 	wtPath, wtErr := os.MkdirTemp("", "force-union-merge-*")
@@ -268,14 +277,14 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 		return "", fmt.Errorf("mktemp: %w", wtErr)
 	}
 	defer func() {
-		bestEffortRun("worktree remove after union merge", "-C", repoPath, "worktree", "remove", "--force", wtPath)
+		bestEffortRun(ctx, "worktree remove after union merge", "-C", repoPath, "worktree", "remove", "--force", wtPath)
 		os.RemoveAll(wtPath)
 	}()
 
 	// Check out the branch in the temp worktree, resetting local ref from
 	// origin — same `-B` discipline as RebaseBranchOnto. `--` separator
 	// before positional (path, ref) pair (Fix #9).
-	if out, err := runGitCtx("-C", repoPath, "worktree", "add", "-B", branch, "--", wtPath,
+	if out, err := runGitCtx(ctx, "-C", repoPath, "worktree", "add", "-B", branch, "--", wtPath,
 		"refs/remotes/origin/"+branch); err != nil {
 		return "", fmt.Errorf("worktree add %s: %s", branch, strings.TrimSpace(string(out)))
 	}
@@ -340,7 +349,10 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 
 	// Merge with identity env so git doesn't refuse on a missing global config.
 	// `--` separator before the positional baseRef (Fix #9).
-	mergeCtx, mergeCancel := context.WithTimeout(context.Background(), shortGitOpTimeout)
+	// Fix #8e: derive the timeout-bounded ctx from the caller's ctx so
+	// daemon shutdown / e-stop cancels the merge subprocess. Pre-fix this
+	// site fabricated a context.Background root.
+	mergeCtx, mergeCancel := context.WithTimeout(ctx, shortGitOpTimeout)
 	defer mergeCancel()
 	cmd := exec.CommandContext(mergeCtx, "git", "-C", wtPath, "merge", "--no-ff", "-m", message, "--", baseRef)
 	cmd.Env = append(os.Environ(),
@@ -351,18 +363,18 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		bestEffortRun("merge --abort after union-merge failure", "-C", wtPath, "merge", "--abort")
+		bestEffortRun(ctx, "merge --abort after union-merge failure", "-C", wtPath, "merge", "--abort")
 		return "", fmt.Errorf("union merge %s into %s: %s", baseRef, branch, strings.TrimSpace(string(out)))
 	}
 	// Paranoid: verify no unresolved paths even when git exits 0.
-	if statusOut, _ := runGitCtxOutput("-C", wtPath, "diff", "--name-only", "--diff-filter=U"); strings.TrimSpace(string(statusOut)) != "" {
-		bestEffortRun("merge --abort after unresolved-paths detection", "-C", wtPath, "merge", "--abort")
+	if statusOut, _ := runGitCtxOutput(ctx, "-C", wtPath, "diff", "--name-only", "--diff-filter=U"); strings.TrimSpace(string(statusOut)) != "" {
+		bestEffortRun(ctx, "merge --abort after unresolved-paths detection", "-C", wtPath, "merge", "--abort")
 		return "", fmt.Errorf("union merge left unresolved paths: %s", strings.TrimSpace(string(statusOut)))
 	}
 
 	// `--verify` + trailing `--` pins the rev and suppresses the spurious
 	// `--` echo that plain rev-parse prints (Fix #9).
-	tipOut, tipErr := runGitCtxOutput("-C", wtPath, "rev-parse", "--verify", "HEAD", "--")
+	tipOut, tipErr := runGitCtxOutput(ctx, "-C", wtPath, "rev-parse", "--verify", "HEAD", "--")
 	if tipErr != nil {
 		return "", fmt.Errorf("rev-parse HEAD: %w", tipErr)
 	}
@@ -372,12 +384,14 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 // ForcePushBranch force-pushes a branch to origin with lease. Used after a
 // rebase — --force-with-lease fails if the remote has advanced, preventing us
 // from clobbering another push that raced us.
-func ForcePushBranch(repoPath, branch string) error {
-	if err := AssertNotDefaultBranch(repoPath, branch); err != nil {
+// Fix #8e: ctx threads from the caller (Pilot/Diplomat claim ctx) so the
+// network push cancels on daemon shutdown.
+func ForcePushBranch(ctx context.Context, repoPath, branch string) error {
+	if err := AssertNotDefaultBranch(ctx, repoPath, branch); err != nil {
 		return fmt.Errorf("ForcePushBranch refused: %w", err)
 	}
 	// `--` separator before the branch positional (Fix #9).
-	out, err := runGitCtxOutput("-C", repoPath, "push", "--force-with-lease", "origin", "--", branch)
+	out, err := runGitCtxOutput(ctx, "-C", repoPath, "push", "--force-with-lease", "origin", "--", branch)
 	if err != nil {
 		return fmt.Errorf("git push --force-with-lease: %s", strings.TrimSpace(string(out)))
 	}
@@ -406,21 +420,23 @@ func ForcePushBranch(repoPath, branch string) error {
 //
 // None of those commands read or write the working tree. Safe regardless of
 // what else is checked out.
-func TriggerCIRerun(repoPath, branch, message string) error {
-	if err := AssertNotDefaultBranch(repoPath, branch); err != nil {
+// Fix #8e: ctx threads from the caller (the dog ctx for stall retriggers)
+// so the network fetch/push cancels on daemon shutdown.
+func TriggerCIRerun(ctx context.Context, repoPath, branch, message string) error {
+	if err := AssertNotDefaultBranch(ctx, repoPath, branch); err != nil {
 		return fmt.Errorf("TriggerCIRerun refused: %w", err)
 	}
 	if message == "" {
 		message = "ci: trigger stalled check run"
 	}
 	// `--` separator before the branch refspec (Fix #9).
-	if out, err := runGitCtx("-C", repoPath, "fetch", "origin", "--", branch); err != nil {
+	if out, err := runGitCtx(ctx, "-C", repoPath, "fetch", "origin", "--", branch); err != nil {
 		return fmt.Errorf("git fetch %s: %s", branch, strings.TrimSpace(string(out)))
 	}
 
 	// `--verify` + trailing `--` pins the rev positional and suppresses the
 	// spurious `--` echo plain rev-parse would print (Fix #9).
-	treeOut, err := runGitCtx("-C", repoPath, "rev-parse", "--verify", "origin/"+branch+"^{tree}", "--")
+	treeOut, err := runGitCtx(ctx, "-C", repoPath, "rev-parse", "--verify", "origin/"+branch+"^{tree}", "--")
 	if err != nil {
 		stderr := ""
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -434,7 +450,9 @@ func TriggerCIRerun(repoPath, branch, message string) error {
 	// when the caller passes arbitrary text. Parent is origin/<branch>^{0}
 	// (dereferenced commit OID) so the new commit FFs cleanly from the tip.
 	// Trailing `--` defence-in-depth on the positional tree SHA (Fix #9).
-	ctCtx, ctCancel := context.WithTimeout(context.Background(), shortGitOpTimeout)
+	// Fix #8e: derive the bounded ctx from the caller's ctx so daemon
+	// shutdown cancels commit-tree.
+	ctCtx, ctCancel := context.WithTimeout(ctx, shortGitOpTimeout)
 	defer ctCancel()
 	cmd := exec.CommandContext(ctCtx, "git", "-C", repoPath, "commit-tree", treeSHA, "-p", "origin/"+branch, "-m", message, "--")
 	// Inherit the real environment (PATH, HOME, etc.) and OVERRIDE just the
@@ -456,7 +474,7 @@ func TriggerCIRerun(repoPath, branch, message string) error {
 	}
 	newSHA := strings.TrimSpace(string(newOut))
 
-	if out, err := runGitCtx("-C", repoPath, "push", "origin", newSHA+":refs/heads/"+branch); err != nil {
+	if out, err := runGitCtx(ctx, "-C", repoPath, "push", "origin", newSHA+":refs/heads/"+branch); err != nil {
 		return fmt.Errorf("git push origin %s:refs/heads/%s: %s",
 			newSHA[:minInt(8, len(newSHA))], branch, strings.TrimSpace(string(out)))
 	}

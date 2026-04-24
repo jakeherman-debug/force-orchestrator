@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -81,7 +82,7 @@ func TestAutoCompletedMedicTask_BranchHasNoDiff(t *testing.T) {
 	mb, _ := store.GetBounty(db, medicID)
 
 	logger := log.New(io.Discard, "", 0)
-	runMedicTask(db, "Medic-1", mb, logger)
+	runMedicTask(context.Background(), db, "Medic-1", mb, logger)
 
 	// Parent must be Completed.
 	parent, _ := store.GetBounty(db, taskID)
@@ -130,7 +131,7 @@ func TestAutoCompletedMedicTask_BranchHasDiff(t *testing.T) {
 
 	medicBounty := &store.Bounty{ID: 9999, ParentID: parent.ID}
 
-	if autoCompletedMedicTask(db, "Medic-1", medicBounty, parent, log.New(io.Discard, "", 0)) {
+	if autoCompletedMedicTask(context.Background(), db, "Medic-1", medicBounty, parent, log.New(io.Discard, "", 0)) {
 		t.Error("must NOT auto-complete when branch has real diff — normal Medic flow should run")
 	}
 }
@@ -275,7 +276,7 @@ func TestRunWorktreeReset_CleansAndRequeuesParent(t *testing.T) {
 		ParentTaskID: taskID, Repo: "api", TargetBranch: "main", Reason: "test contamination",
 	})
 	rb, _ := store.GetBounty(db, resetID)
-	runWorktreeReset(db, rb, testLogger{})
+	runWorktreeReset(context.Background(), db, rb, testLogger{})
 
 	// Reset task must have completed.
 	rbAfter, _ := store.GetBounty(db, resetID)

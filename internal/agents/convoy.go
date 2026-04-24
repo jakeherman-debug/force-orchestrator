@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 
@@ -30,6 +31,9 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 			continue
 		}
 		active = append(active, c)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy.go:CheckConvoyCompletions: rows iter error: %v", rErr)
 	}
 	rows.Close()
 

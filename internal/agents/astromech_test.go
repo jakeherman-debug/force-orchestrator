@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -221,7 +222,7 @@ func TestRunAstromechTask_UnknownRepo(t *testing.T) {
 
 	withStubCLIRunner(t, "", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -245,7 +246,7 @@ func TestRunAstromechTask_DoneSignal(t *testing.T) {
 
 	withStubCLIRunner(t, "[DONE]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "AwaitingCouncilReview" {
@@ -269,7 +270,7 @@ func TestRunAstromechTask_ShardNeeded(t *testing.T) {
 
 	withStubCLIRunner(t, "[SHARD_NEEDED]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
 
 	// Original task should be Completed; a Decompose task should be queued
 	b, _ = store.GetBounty(db, id)
@@ -301,7 +302,7 @@ func TestRunAstromechTask_RateLimit(t *testing.T) {
 	stub := withStubCLIRunner(t, "rate limit exceeded", fmt.Errorf("claude CLI failed: 429"))
 	rateLimitRetries.Delete("R2-D2")
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -332,7 +333,7 @@ func TestRunAstromechTask_Escalated(t *testing.T) {
 
 	withStubCLIRunner(t, "[ESCALATED:HIGH:Cannot determine correct API version]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, id).Scan(&count)
@@ -358,7 +359,7 @@ func TestRunAstromechTask_CLIError(t *testing.T) {
 	withStubCLIRunner(t, "some output", fmt.Errorf("claude CLI failed: exit 1"))
 	rateLimitRetries.Delete("R2-D2")
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -383,7 +384,7 @@ func TestRunAstromechTask_Timeout(t *testing.T) {
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI timed out after 15m0s"))
 	rateLimitRetries.Delete("R2-D2")
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -404,7 +405,7 @@ func TestRunTaskForeground_DoneSignal(t *testing.T) {
 
 	withClaudeStub(t, map[string]string{"CLAUDE_STUB_OUTPUT": "[DONE]"})
 
-	captureOutput(func() { RunTaskForeground(db, id) })
+	captureOutput(func() { RunTaskForeground(context.Background(), db, id) })
 
 	b, _ := store.GetBounty(db, id)
 	if b.Status != "AwaitingCouncilReview" {
@@ -428,7 +429,7 @@ func TestRunTaskForeground_ShardNeeded(t *testing.T) {
 
 	withClaudeStub(t, map[string]string{"CLAUDE_STUB_OUTPUT": "[SHARD_NEEDED]"})
 
-	captureOutput(func() { RunTaskForeground(db, id) })
+	captureOutput(func() { RunTaskForeground(context.Background(), db, id) })
 
 	b, _ := store.GetBounty(db, id)
 	if b.Status != "Completed" {
@@ -454,7 +455,7 @@ func TestRunTaskForeground_Escalated(t *testing.T) {
 		"CLAUDE_STUB_OUTPUT": "[ESCALATED:HIGH:Cannot determine correct API version]",
 	})
 
-	captureOutput(func() { RunTaskForeground(db, id) })
+	captureOutput(func() { RunTaskForeground(context.Background(), db, id) })
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, id).Scan(&count)
@@ -477,7 +478,7 @@ func TestRunTaskForeground_CheckpointRecorded(t *testing.T) {
 		"CLAUDE_STUB_OUTPUT": "[CHECKPOINT: schema_written]\n[DONE]",
 	})
 
-	captureOutput(func() { RunTaskForeground(db, id) })
+	captureOutput(func() { RunTaskForeground(context.Background(), db, id) })
 
 	b, _ := store.GetBounty(db, id)
 	if b.Checkpoint != "schema_written" {
@@ -497,7 +498,7 @@ func TestRunTaskForeground_NoCommits_ReturnsToPending(t *testing.T) {
 	// Claude exits cleanly but makes no commits and sends no signals
 	withClaudeStub(t, map[string]string{"CLAUDE_STUB_OUTPUT": "nothing done"})
 
-	captureOutput(func() { RunTaskForeground(db, id) })
+	captureOutput(func() { RunTaskForeground(context.Background(), db, id) })
 
 	b, _ := store.GetBounty(db, id)
 	if b.Status != "Pending" {

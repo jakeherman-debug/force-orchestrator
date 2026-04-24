@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -142,7 +143,7 @@ func createTestAskBranch(repoPath, branchName string) (string, error) {
 
 // igitGetOrCreate is a thin wrapper to keep test imports tight.
 func igitGetOrCreate(db *sql.DB, name, repo string) (string, error) {
-	return igit.GetOrCreateAgentWorktree(db, name, repo)
+	return igit.GetOrCreateAgentWorktree(context.Background(), db, name, repo)
 }
 
 // TestJediCouncilApproval_UsesSubPRPath proves that when a repo is pr_flow_enabled
@@ -163,7 +164,7 @@ func TestJediCouncilApproval_UsesSubPRPath(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":"lgtm"}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	// Task status should be AwaitingSubPRCI.
 	after, _ := store.GetBounty(db, taskID)
@@ -240,7 +241,7 @@ func TestJediCouncilApproval_FallsBackToLegacyMergeWhenPRFlowDisabled(t *testing
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	// Task should be Completed (legacy merge path).
 	after, _ := store.GetBounty(db, taskID)
@@ -283,7 +284,7 @@ func TestJediCouncilApproval_PRCreateFailureEscalates(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
 
 	after, _ := store.GetBounty(db, taskID)
 	if after.Status != "Escalated" {
@@ -302,7 +303,7 @@ func TestJediCouncilApproval_PRCreateFailureEscalates(t *testing.T) {
 func TestDogSubPRCIWatch_NoPRs_IsNoOp(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -323,7 +324,7 @@ func TestDogSubPRCIWatch_ChecksSuccess_TriggersAutoMerge(t *testing.T) {
 		"pr merge 5":  {stdout: ""},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -362,7 +363,7 @@ func TestDogSubPRCIWatch_PRMerged_CompletesTaskAndSpawnsMemory(t *testing.T) {
 		"pr view 9": {stdout: `{"number":9,"url":"u","state":"MERGED","isDraft":false,"merged":true,"mergedAt":"2024-01-01","closedAt":"","reviews":[]}`},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := store.GetBounty(db, taskID)
@@ -393,7 +394,7 @@ func TestDogSubPRCIWatch_ExternallyClosed_EscalatesTask(t *testing.T) {
 		"pr view 10": {stdout: `{"number":10,"url":"u","state":"CLOSED","isDraft":false,"merged":false,"mergedAt":"","closedAt":"2024-01-01","reviews":[]}`},
 	})
 
-	_ = dogSubPRCIWatch(db, testLogger{})
+	_ = dogSubPRCIWatch(context.Background(), db, testLogger{})
 	after, _ := store.GetBounty(db, taskID)
 	if after.Status != "Escalated" {
 		t.Errorf("externally-closed PR should escalate task: %q", after.Status)
@@ -465,7 +466,7 @@ func TestDogSubPRCIWatch_CIFailure_QueuesMedicTriage(t *testing.T) {
 	})
 
 	// Tick 1 — count=1, Medic triage queued, task stays AwaitingSubPRCI.
-	_ = dogSubPRCIWatch(db, testLogger{})
+	_ = dogSubPRCIWatch(context.Background(), db, testLogger{})
 	pr := store.GetAskBranchPR(db, prRowID)
 	if pr.FailureCount != 1 {
 		t.Errorf("after first failure, count should be 1, got %d", pr.FailureCount)
@@ -478,8 +479,8 @@ func TestDogSubPRCIWatch_CIFailure_QueuesMedicTriage(t *testing.T) {
 
 	// Tick 2 & 3 — still only ONE triage task queued (duplicate prevention).
 	// The existing triage task is Pending, so the dog should not queue another.
-	_ = dogSubPRCIWatch(db, testLogger{})
-	_ = dogSubPRCIWatch(db, testLogger{})
+	_ = dogSubPRCIWatch(context.Background(), db, testLogger{})
+	_ = dogSubPRCIWatch(context.Background(), db, testLogger{})
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE type = 'CIFailureTriage'`).Scan(&triageCount)
 	if triageCount != 1 {
 		t.Errorf("duplicate CIFailureTriage tasks must be prevented, got %d", triageCount)
@@ -563,7 +564,7 @@ func TestDogSubPRCIWatch_NoCIConfigured_MergesDirectly(t *testing.T) {
 		"pr merge 7": {stdout: ""},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -608,7 +609,7 @@ func TestDogSubPRCIWatch_NoCIFallback(t *testing.T) {
 		"pr merge 8":  {stdout: ""},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -642,7 +643,7 @@ func TestDogSubPRCIWatch_BranchProtectionBlocked(t *testing.T) {
 		"pr checks 9": {stdout: `[]`}, // no failing checks
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -766,7 +767,7 @@ func TestDogSubPRCIWatch_Behind_QueuesRebaseAgentBranch(t *testing.T) {
 		"pr view 11": {stdout: `{"number":11,"url":"u","state":"OPEN","isDraft":false,"merged":false,"mergedAt":"","closedAt":"","reviews":[],"mergeStateStatus":"BEHIND","mergeable":"MERGEABLE"}`},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -814,7 +815,7 @@ func TestDogSubPRCIWatch_Dirty_QueuesRebaseAgentBranch(t *testing.T) {
 		"pr view 13": {stdout: `{"number":13,"url":"u","state":"OPEN","isDraft":false,"merged":false,"mergedAt":"","closedAt":"","reviews":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}`},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -910,7 +911,7 @@ func TestDogSubPRCIWatch_BlockedWithCIRunning(t *testing.T) {
 		"pr checks 10": {stdout: `[{"name":"jenkins","state":"IN_PROGRESS","bucket":"pending","link":""}]`},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -948,7 +949,7 @@ func TestDogSubPRCIWatch_EscalatedTask_ClosesPRAndStopsTracking(t *testing.T) {
 		"pr close 77": {stdout: ""},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -987,7 +988,7 @@ func TestDogSubPRCIWatch_FailedTask_ClosesPR(t *testing.T) {
 	stub := installGHStub(t, map[string]ghStubResp{
 		"pr close 78": {stdout: ""},
 	})
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1023,7 +1024,7 @@ func TestDogSubPRCIWatch_CancelledTask_ClosesPR(t *testing.T) {
 	installGHStub(t, map[string]ghStubResp{
 		"pr close 79": {stdout: ""},
 	})
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1050,7 +1051,7 @@ func TestDogSubPRCIWatch_TerminalTask_NoPRView(t *testing.T) {
 	stub := installGHStub(t, map[string]ghStubResp{
 		"pr close 80": {stdout: ""},
 	})
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1185,7 +1186,7 @@ func TestDogSubPRCIWatch_Dirty_LoopCapEscalates(t *testing.T) {
 		"pr view 88": {stdout: `{"number":88,"url":"u","state":"OPEN","isDraft":false,"merged":false,"mergedAt":"","closedAt":"","reviews":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}`},
 	})
 
-	if err := dogSubPRCIWatch(db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 

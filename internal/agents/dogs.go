@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"log"
 	"context"
 	"database/sql"
 	"fmt"
@@ -92,7 +93,12 @@ var dogOrder = []string{
 // The spend-burn-watch dog itself is skipped when estopped — its job is
 // to auto-flip e-stop, which is already done. Re-running it mid-estop
 // would just emit another no-op log line.
-func RunDogs(db *sql.DB, logger interface{ Printf(string, ...any) }) {
+//
+// Fix #8e: ctx threads from SpawnInquisitor (the per-tick ctx, ultimately
+// the daemon ctx) so per-dog timeouts derive from a cancellable parent;
+// pre-fix the per-dog 5-min context used a fabricated context.Background
+// root, leaving in-flight dogs deaf to daemon shutdown.
+func RunDogs(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) {
 	if IsEstopped(db) {
 		logger.Printf("RunDogs: e-stop active — skipping all dogs this cycle")
 		return
@@ -125,9 +131,12 @@ func RunDogs(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 		// pr view` inside Inquisitor would previously wedge the whole
 		// watchdog. Each dog now gets a 5-minute budget; past that we log
 		// and move on so the cycle keeps running.
-		dogCtx, dogCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		// Fix #8e: derive the dog ctx from the inquisitor tick ctx so a
+		// daemon SIGINT cancels in-flight dogs at their next ctx-aware
+		// subprocess invocation.
+		dogCtx, dogCancel := context.WithTimeout(ctx, 5*time.Minute)
 		errCh := make(chan error, 1)
-		go func(name string) { errCh <- runDog(db, name, logger) }(dogName)
+		go func(name string) { errCh <- runDog(dogCtx, db, name, logger) }(dogName)
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -149,10 +158,12 @@ func RunDogs(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 // RunDogByName force-runs the named dog exactly once, bypassing the cooldown.
 // Used by CLI ("force dogs run <name>") and dashboard ("Run now") buttons.
 // Returns an error with the list of valid dog names if the name is unknown.
-func RunDogByName(db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
+// Fix #8e: ctx threads from the caller (CLI command ctx) so SIGINT cancels
+// the manually-triggered dog.
+func RunDogByName(ctx context.Context, db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
 	// Mark the run before executing so a crashed dog still shows up as attempted.
 	store.DogMarkRun(db, name)
-	return runDog(db, name, logger)
+	return runDog(ctx, db, name, logger)
 }
 
 // DogNames returns the canonical order of registered dogs. Used for CLI
@@ -163,10 +174,10 @@ func DogNames() []string {
 	return out
 }
 
-func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
+func runDog(ctx context.Context, db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
 	switch name {
 	case "git-hygiene":
-		return dogGitHygiene(db, logger)
+		return dogGitHygiene(ctx, db, logger)
 	case "db-vacuum":
 		return dogDBVacuum(db, logger)
 	case "holonet-rotate":
@@ -184,21 +195,21 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 	case "stale-convoys-report":
 		return runStaleConvoysReport(db, logger)
 	case "sub-pr-ci-watch":
-		return dogSubPRCIWatch(db, logger)
+		return dogSubPRCIWatch(ctx, db, logger)
 	case "main-drift-watch":
-		return dogMainDriftWatch(db, logger)
+		return dogMainDriftWatch(ctx, db, logger)
 	case "draft-pr-watch":
 		return dogDraftPRWatch(db, logger)
 	case "ship-it-nag":
 		return dogShipItNag(db, logger)
 	case "repo-config-check":
-		return dogRepoConfigCheck(db, logger)
+		return dogRepoConfigCheck(ctx, db, logger)
 	case "pr-review-poll":
 		return dogPRReviewPoll(db, logger)
 	case "pr-review-resolve":
 		return dogPRReviewResolve(db, logger)
 	case "convoy-review-watch":
-		return dogConvoyReviewWatch(db, logger)
+		return dogConvoyReviewWatch(ctx, db, logger)
 	case "escalation-sweeper":
 		return dogEscalationSweeper(db, logger)
 	case "spend-burn-watch":
@@ -208,7 +219,7 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 	}
 }
 
-func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+func dogGitHygiene(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 	// Collect repos first, then close rows before doing any further DB work.
 	// AUDIT-159: defer the close so a scan-error exit doesn't leak the FD
 	// (manual `rows.Close()` on the tail only ran on the happy path).
@@ -236,13 +247,13 @@ func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error
 			logger.Printf("ERROR: Dog git-hygiene: repo '%s' path not accessible (%s) — check registration with: force repos", r.name, r.path)
 			continue
 		}
-		if out, gitErr := igit.RunCmd(r.path, "fetch", "--prune", "--quiet"); gitErr != nil {
+		if out, gitErr := igit.RunCmd(ctx, r.path, "fetch", "--prune", "--quiet"); gitErr != nil {
 			logger.Printf("Dog git-hygiene: fetch failed for %s: %s", r.name, out)
 		} else {
 			logger.Printf("Dog git-hygiene: fetched %s", r.name)
 		}
-		igit.RunCmd(r.path, "gc", "--auto", "--quiet")
-		igit.RunCmd(r.path, "worktree", "prune")
+		igit.RunCmd(ctx, r.path, "gc", "--auto", "--quiet")
+		igit.RunCmd(ctx, r.path, "worktree", "prune")
 	}
 
 	// Detach agent worktrees that are on branches no longer referenced by any live task,
@@ -443,6 +454,9 @@ func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 		}
 		tasks = append(tasks, t)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("dogs.go:dogStalledReviews: rows iter error: %v", rErr)
+	}
 	rows.Close()
 
 	// Sub-PR-CI stall: AwaitingSubPRCI tasks have owner='' (Jedi clears it when
@@ -590,6 +604,9 @@ func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) 
 			continue
 		}
 		convoys = append(convoys, c)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("dogs.go:runStaleConvoysReport: rows iter error: %v", rErr)
 	}
 	rows.Close()
 

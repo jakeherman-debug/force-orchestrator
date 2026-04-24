@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"bytes"
 	"encoding/json"
 	"log"
@@ -60,7 +61,7 @@ func TestFix8B_RunFindPRTemplate_FailBountyErrorSurfaces(t *testing.T) {
 	}
 
 	buf, lg := newLoggerBuf()
-	runFindPRTemplate(db, bounty, lg)
+	runFindPRTemplate(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty after invalid payload failed") {
@@ -93,7 +94,7 @@ func TestFix8B_RunCreateAskBranch_FailBountyErrorSurfaces(t *testing.T) {
 	}
 
 	buf, lg := newLoggerBuf()
-	runCreateAskBranch(db, bounty, lg)
+	runCreateAskBranch(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty after invalid payload failed") {
@@ -124,7 +125,7 @@ func TestFix8B_RunCleanupAskBranch_FailBountyErrorSurfaces(t *testing.T) {
 	}
 
 	buf, lg := newLoggerBuf()
-	runCleanupAskBranch(db, bounty, lg)
+	runCleanupAskBranch(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty after invalid payload failed") {
@@ -161,7 +162,7 @@ func TestFix8B_RunRebaseAskBranch_FailBountyErrorSurfaces(t *testing.T) {
 	}
 
 	buf, lg := newLoggerBuf()
-	runRebaseAskBranch(db, bounty, lg)
+	runRebaseAskBranch(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty after invalid payload failed") {
@@ -199,7 +200,7 @@ func TestFix8B_RunRebaseAskBranch_NoAskBranchPath_MarkCompletedErrorSurfaces(t *
 	}
 
 	buf, lg := newLoggerBuf()
-	runRebaseAskBranch(db, bounty, lg)
+	runRebaseAskBranch(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "failed to mark Completed after no-op") {
@@ -232,7 +233,7 @@ func TestFix8B_RunRebaseAgentBranch_FailBountyErrorSurfaces(t *testing.T) {
 	}
 
 	buf, lg := newLoggerBuf()
-	runRebaseAgentBranch(db, bounty, lg)
+	runRebaseAgentBranch(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty after invalid payload failed") {
@@ -265,7 +266,7 @@ func TestFix8B_RunRevalidateRepoConfig_FailBountyErrorSurfaces(t *testing.T) {
 	}
 
 	buf, lg := newLoggerBuf()
-	runRevalidateRepoConfig(db, bounty, lg)
+	runRevalidateRepoConfig(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty after invalid payload failed") {
@@ -301,7 +302,7 @@ func TestFix8B_RunRevalidateRepoConfig_RepoRemovedPath_MarkCompletedErrorSurface
 	}
 
 	buf, lg := newLoggerBuf()
-	runRevalidateRepoConfig(db, bounty, lg)
+	runRevalidateRepoConfig(context.Background(), db, bounty, lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "failed to mark Completed after repo") {

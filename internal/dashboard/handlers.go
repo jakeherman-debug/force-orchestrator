@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
@@ -59,6 +60,9 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 				}
 				s.Tasks[status] = n
 			}
+			if rErr := rows.Err(); rErr != nil {
+				log.Printf("handlers.go:handleStatus: rows iter error: %v", rErr)
+			}
 			rows.Close()
 		}
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open'`).Scan(&s.OpenEscalations)
@@ -115,6 +119,9 @@ func handleStats(db *sql.DB) http.HandlerFunc {
 					continue
 				}
 				s.Tasks[status] = n
+			}
+			if rErr := rows.Err(); rErr != nil {
+				log.Printf("handlers.go:handleStats: rows iter error: %v", rErr)
 			}
 			rows.Close()
 		}
@@ -262,6 +269,9 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			}
 			tasks = append(tasks, t)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("handlers.go:handleTasks: rows iter error: %v", rErr)
+		}
 		if tasks == nil {
 			tasks = []DashboardTask{}
 		}
@@ -348,7 +358,7 @@ func handleTasksSubroutes(db *sql.DB) http.HandlerFunc {
 				}
 
 			case "approve":
-				if err := approveTask(db, id, w); err != nil {
+				if err := approveTask(r.Context(), db, id, w); err != nil {
 					return
 				}
 				fmt.Fprintf(w, `{"ok":true,"id":%d}`, id)
@@ -380,7 +390,9 @@ func handleTasksSubroutes(db *sql.DB) http.HandlerFunc {
 }
 
 // approveTask mirrors cmdApproveTask, adapted for HTTP (no os.Exit).
-func approveTask(db *sql.DB, id int, w http.ResponseWriter) error {
+// Fix #8e: ctx threads from the http.Request so the merge subprocess
+// cancels if the client disconnects or the dashboard server shuts down.
+func approveTask(ctx context.Context, db *sql.DB, id int, w http.ResponseWriter) error {
 	b, err := store.GetBounty(db, id)
 	if err != nil {
 		http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
@@ -408,8 +420,8 @@ func approveTask(db *sql.DB, id int, w http.ResponseWriter) error {
 		branchName = fmt.Sprintf("agent/task-%d", id)
 	}
 	worktreeDir := igit.ResolveWorktreeDir(db, branchName, repoPath, id, agents.BranchAgentName)
-	diff := igit.GetDiff(repoPath, branchName)
-	if mergeErr := igit.MergeAndCleanup(repoPath, branchName, worktreeDir); mergeErr != nil {
+	diff := igit.GetDiff(ctx, repoPath, branchName)
+	if mergeErr := igit.MergeAndCleanup(ctx, repoPath, branchName, worktreeDir); mergeErr != nil {
 		http.Error(w,
 			fmt.Sprintf(`{"error":"merge failed: %s"}`, strings.ReplaceAll(mergeErr.Error(), `"`, `'`)),
 			http.StatusInternalServerError)
@@ -656,6 +668,9 @@ func fetchMailForTask(db *sql.DB, taskID int) []DashboardMail {
 		}
 		out = append(out, m)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("handlers.go:fetchMailForTask: rows iter error: %v", rErr)
+	}
 	if out == nil {
 		out = []DashboardMail{}
 	}
@@ -898,7 +913,7 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 			if !requireGET() {
 				return
 			}
-			handleConvoyDiffSummary(db, id, w)
+			handleConvoyDiffSummary(r.Context(), db, id, w)
 		default:
 			http.NotFound(w, r)
 		}
@@ -971,6 +986,9 @@ func handleAgents(db *sql.DB) http.HandlerFunc {
 			ag.Role = deriveAgentRole(ag.AgentName)
 			out = append(out, ag)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("handlers.go:handleAgents: rows iter error: %v", rErr)
+		}
 		if out == nil {
 			out = []DashboardAgent{}
 		}
@@ -997,6 +1015,9 @@ func handleRepos(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			names = append(names, n)
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("handlers.go:handleRepos: rows iter error: %v", rErr)
 		}
 		if names == nil {
 			names = []string{}
@@ -1027,6 +1048,9 @@ func handleMailList(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			out = append(out, m)
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("handlers.go:handleMailList: rows iter error: %v", rErr)
 		}
 		if out == nil {
 			out = []DashboardMail{}
@@ -1146,6 +1170,9 @@ func handleMemories(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			out = append(out, m)
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("handlers.go:handleMemories: rows iter error: %v", rErr)
 		}
 		if out == nil {
 			out = []MemoryRow{}

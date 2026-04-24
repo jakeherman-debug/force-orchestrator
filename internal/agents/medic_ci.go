@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -126,7 +127,11 @@ func QueueCIFailureTriageTx(tx *sql.Tx, payload ciTriagePayload) (int, error) {
 }
 
 // runMedicCITriage is the handler for a single CIFailureTriage task.
-func runMedicCITriage(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnMedic's claim ctx. Body uses LLM + DB +
+// gh-client (ctx already passed there); no new subprocess sites need ctx
+// today, so the parameter aligns the signature with peer handlers.
+func runMedicCITriage(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+	_ = ctx
 	var payload ciTriagePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {

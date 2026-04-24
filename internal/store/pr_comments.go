@@ -1,6 +1,7 @@
 package store
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 )
@@ -72,6 +73,9 @@ func ListUnclassifiedPRComments(db *sql.DB, convoyID, limit int) []PRReviewComme
 			out = append(out, *c)
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pr_comments.go:ListUnclassifiedPRComments: rows iter error: %v", rErr)
+	}
 	return out
 }
 
@@ -88,6 +92,9 @@ func ListConvoyPRComments(db *sql.DB, convoyID int) []PRReviewComment {
 		if c := scanPRReviewCommentRow(rows); c != nil {
 			out = append(out, *c)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pr_comments.go:ListConvoyPRComments: rows iter error: %v", rErr)
 	}
 	return out
 }
@@ -111,6 +118,9 @@ func LoadThreadHistory(db *sql.DB, convoyID int, reviewThreadID string) []PRRevi
 		if c := scanPRReviewCommentRow(rows); c != nil {
 			out = append(out, *c)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pr_comments.go:LoadThreadHistory: rows iter error: %v", rErr)
 	}
 	return out
 }
@@ -225,6 +235,9 @@ func ListPendingThreadResolves(db *sql.DB) []PRReviewComment {
 			out = append(out, *c)
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pr_comments.go:ListPendingThreadResolves: rows iter error: %v", rErr)
+	}
 	return out
 }
 
@@ -281,6 +294,9 @@ func ComputePRReviewRollup(db *sql.DB, convoyID int) PRReviewCommentRollup {
 			// or '' before triage — operator still needs to look either way).
 			r.HumanAwaiting += n
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("pr_comments.go:ComputePRReviewRollup: rows iter error: %v", rErr)
 	}
 
 	// BotBlocking: unclassified bots + in_scope_fix whose fix hasn't landed yet.

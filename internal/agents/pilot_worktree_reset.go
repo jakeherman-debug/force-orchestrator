@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -72,7 +73,9 @@ func QueueWorktreeReset(db *sql.DB, p worktreeResetPayload) (int, error) {
 	return id, nil
 }
 
-func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnPilot's claim ctx so the fetch/reset/clean
+// network and worktree subprocesses cancel on daemon shutdown.
+func runWorktreeReset(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	// Fix #8d / CLAUDE.md "No silent failures": every FailBounty /
 	// UpdateBountyStatus return is checked and a clear recovery hint is logged
 	// — on DB failure the stale-lock detector (45-min timeout) sweeps the row
@@ -112,7 +115,12 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	// us honest — we reset to what's actually on the remote, not whatever
 	// stale refs/remotes/origin/* happen to be cached locally. `--` keeps the
 	// refspec positional.
-	if out, err := exec.Command("git", "-C", repo.LocalPath, "fetch", "origin", "--", p.TargetBranch).CombinedOutput(); err != nil {
+	// Fix #8e: ctx-bounded fetch so daemon shutdown cancels this network op.
+	// AUDIT-127 / AUDIT-165: this remains a direct exec.CommandContext (not
+	// igit.RunCmd) because the call site is intentionally ctx-bounded with
+	// the caller's daemon ctx and we want a tight error-path that fails the
+	// task rather than going through RunCmd's CombinedOutput shape.
+	if out, err := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "fetch", "origin", "--", p.TargetBranch).CombinedOutput(); err != nil {
 		failTask(fmt.Sprintf("fetch %s: %s", p.TargetBranch, strings.TrimSpace(string(out))))
 		return
 	}
@@ -132,7 +140,7 @@ func runWorktreeReset(db *sql.DB, bounty *store.Bounty, logger interface{ Printf
 	wiped := 0
 	var failures []string
 	for _, wt := range worktreeRoots {
-		if err := resetAndCleanWorktree(wt, targetRef); err != nil {
+		if err := resetAndCleanWorktree(ctx, wt, targetRef); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", filepath.Base(wt), err))
 			continue
 		}
@@ -247,7 +255,9 @@ func discoverWorktrees(mainRepoPath, repoName string, agents []string) []string 
 // (AUDIT-123). A malicious symlink under .force-worktrees/... pointing at
 // e.g. /etc would otherwise let `git clean -fdx` wipe arbitrary files.
 // Also enforces the ref validator on targetRef (AUDIT-140).
-func resetAndCleanWorktree(worktreePath, targetRef string) error {
+// Fix #8e: ctx threads from the caller (Pilot's claim ctx) so the rebase/
+// merge --abort + reset/clean subprocesses cancel on daemon shutdown.
+func resetAndCleanWorktree(ctx context.Context, worktreePath, targetRef string) error {
 	// Validate the target ref at ingress — the LLM's medicDecision carries
 	// this value directly, so it's untrusted input.
 	if err := igit.ValidateRef(targetRef); err != nil {
@@ -277,16 +287,17 @@ func resetAndCleanWorktree(worktreePath, targetRef string) error {
 	}
 
 	// Abort any in-progress rebase / merge — those leave HEAD detached and
-	// make reset behave unexpectedly. Wrapped in the git-package helper so
-	// the shell-boundary audit doesn't mis-flag the subcommand name.
-	exec.Command("git", "-C", worktreePath, "rebase", "--abort").Run()
-	exec.Command("git", "-C", worktreePath, "merge", "--abort").Run()
+	// make reset behave unexpectedly.
+	// Fix #8e: each subprocess runs under the caller's daemon ctx so a
+	// shutdown signal propagates instantly.
+	exec.CommandContext(ctx, "git", "-C", worktreePath, "rebase", "--abort").Run()
+	exec.CommandContext(ctx, "git", "-C", worktreePath, "merge", "--abort").Run()
 	// Trailing `--` keeps the ref in the positional slot (Fix #9).
 	// (reset --hard -- <ref> is ambiguous: git treats it as pathspec.)
-	if out, err := exec.Command("git", "-C", worktreePath, "reset", "--hard", targetRef, "--").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "reset", "--hard", targetRef, "--").CombinedOutput(); err != nil {
 		return fmt.Errorf("reset --hard %s: %s", targetRef, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("git", "-C", worktreePath, "clean", "-fdx").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "clean", "-fdx").CombinedOutput(); err != nil {
 		return fmt.Errorf("clean -fdx: %s", strings.TrimSpace(string(out)))
 	}
 	return nil

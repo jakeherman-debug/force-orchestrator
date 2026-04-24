@@ -202,6 +202,9 @@ func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
 			}
 			lines = append(lines, fmt.Sprintf("  #%d [%s] %s", id, repo, util.TruncateStr(firstLine, 100)))
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("captain.go:buildConvoyContext: rows iter error: %v", rErr)
+		}
 		rows.Close()
 		if len(lines) > 0 {
 			sb.WriteString("## Completed tasks (already merged into main):\n")
@@ -236,6 +239,9 @@ func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
 				line += fmt.Sprintf(" (blocked by #%d)", activeDep)
 			}
 			lines = append(lines, line)
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("captain.go:buildConvoyContext: rows iter error: %v", rErr)
 		}
 		rows.Close()
 		if len(lines) > 0 {
@@ -283,13 +289,15 @@ func SpawnCaptain(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runCaptainTask(db, agentName, b, logger)
+		runCaptainTask(ctx, db, agentName, b, logger)
 	}
 }
 
 // runCaptainTask reviews a single task's diff for convoy plan coherence and routes
 // it to council (approve), back to Pending (reject), or escalates to a human.
-func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.Logger) {
+// Fix #8e: ctx threads from SpawnCaptain's claim ctx so reviewDiff's git
+// subprocess cancels on daemon shutdown.
+func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed task %d for captain review [convoy %d]", sessionID, b.ID, b.ConvoyID)
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -339,9 +347,9 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	// Diff against the ask-branch tip (not main) when this task is part of a
 	// convoy with an ask-branch. See review_diff.go for rationale — reviewing
 	// against main produces phantom "scope violations" from main's drift.
-	diff := reviewDiff(db, repoPath, b)
+	diff := reviewDiff(ctx, db, repoPath, b)
 	if diff == "" {
-		if reviewCommitsAhead(db, repoPath, b) == "" {
+		if reviewCommitsAhead(ctx, db, repoPath, b) == "" {
 			// No diff and no unique commits — work was already merged into main.
 			// Auto-complete rather than failing; unblock dependents and recover convoy.
 			if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {

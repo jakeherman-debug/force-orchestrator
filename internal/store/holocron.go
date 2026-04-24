@@ -126,6 +126,9 @@ func ListRepos(db *sql.DB) []Repository {
 		r.PRFlowEnabled = prFlowEnabled == 1
 		repos = append(repos, r)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("holocron.go:ListRepos: rows iter error: %v", rErr)
+	}
 	return repos
 }
 
@@ -232,6 +235,9 @@ func ListAuditLog(db *sql.DB, limit int) []AuditEntry {
 			continue
 		}
 		entries = append(entries, e)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("holocron.go:ListAuditLog: rows iter error: %v", rErr)
 	}
 	return entries
 }

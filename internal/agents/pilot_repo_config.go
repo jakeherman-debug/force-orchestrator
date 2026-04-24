@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -53,7 +54,9 @@ func QueueRevalidateRepoConfig(db *sql.DB, repoName string) (int, error) {
 // runRevalidateRepoConfig is Pilot's handler. Read the stored repo config,
 // verify each field against reality, heal what can be healed, quarantine
 // what can't.
-func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnPilot's claim ctx so the ls-remote network
+// op cancels on daemon shutdown.
+func runRevalidateRepoConfig(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload revalidatePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
@@ -149,7 +152,14 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 	}
 
 	// 4. Ping origin to confirm reachability (cheap ls-remote HEAD).
-	if out, pingErr := exec.Command("git", "-C", repo.LocalPath, "ls-remote", "--heads",
+	// Fix #8e: ctx-bounded so daemon shutdown cancels the network call.
+	// Pre-fix this was a bare exec.Command on the Pattern P11 allowlist
+	// labelled "ls-remote under dog-level 5m timeout" — accurate in mechanism
+	// but the dog timeout descended from a fabricated context.Background, so
+	// daemon SIGINT could not cancel a hung ls-remote. Now ctx is the daemon
+	// ctx via SpawnPilot → runRevalidateRepoConfig and the dog ctx (5min)
+	// derives from the same root.
+	if out, pingErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "ls-remote", "--heads",
 		"origin", currentDefault).CombinedOutput(); pingErr != nil {
 		msg := strings.TrimSpace(string(out))
 		if qErr := store.QuarantineRepo(db, payload.Repo, fmt.Sprintf("origin ls-remote failed: %s", msg)); qErr != nil {
@@ -180,7 +190,11 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 
 // dogRepoConfigCheck is the per-24h dog that enqueues RevalidateRepoConfig
 // per registered repo. Guards against duplicates so repeated runs don't pile up.
-func dogRepoConfigCheck(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+// Fix #8e: ctx threads from RunDogs → runDog. Body is pure DB so ctx is
+// unused here, but the parameter aligns the dog signature with its peers
+// for the per-site P11 enforcement.
+func dogRepoConfigCheck(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	_ = ctx
 	repos := store.ListRepos(db)
 	for _, r := range repos {
 		var existing int

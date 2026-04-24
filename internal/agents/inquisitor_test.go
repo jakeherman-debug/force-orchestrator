@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -268,7 +269,7 @@ func TestCleanOrphanedBranches_NoOrphans(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 
 	// Should not panic or deadlock
-	cleanOrphanedBranches(db, logger)
+	cleanOrphanedBranches(context.Background(), db, logger)
 }
 
 func TestCleanOrphanedBranches_WithFailedTask(t *testing.T) {
@@ -284,7 +285,7 @@ func TestCleanOrphanedBranches_WithFailedTask(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	// Should not deadlock (loop body reached) and should skip gracefully when repoPath has no git
-	cleanOrphanedBranches(db, logger)
+	cleanOrphanedBranches(context.Background(), db, logger)
 }
 
 func TestCleanOrphanedBranches_BranchNotFound(t *testing.T) {
@@ -304,7 +305,7 @@ func TestCleanOrphanedBranches_BranchNotFound(t *testing.T) {
 	store.SetBranchName(db, id, "agent/R2-D2/task-nonexistent")
 
 	logger := log.New(io.Discard, "", 0)
-	cleanOrphanedBranches(db, logger)
+	cleanOrphanedBranches(context.Background(), db, logger)
 
 	// DB record should be cleared (branch_name = '')
 	b, _ := store.GetBounty(db, id)
@@ -334,7 +335,7 @@ func TestCleanOrphanedBranches_BranchDeletedSuccessfully(t *testing.T) {
 	store.SetBranchName(db, id, branchName)
 
 	logger := log.New(io.Discard, "", 0)
-	cleanOrphanedBranches(db, logger)
+	cleanOrphanedBranches(context.Background(), db, logger)
 
 	// DB record should be cleared
 	b, _ := store.GetBounty(db, id)

@@ -105,22 +105,24 @@ func SpawnDiplomat(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "ShipConvoy", name); claimed {
-			runShipConvoy(db, name, bounty, logger)
+			runShipConvoy(ctx, db, name, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "PRReviewTriage", name); claimed {
-			runPRReviewTriage(db, name, bounty, logger)
+			runPRReviewTriage(ctx, db, name, bounty, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "ConvoyReview", name); claimed {
-			runConvoyReview(db, name, bounty, logger)
+			runConvoyReview(ctx, db, name, bounty, logger)
 			continue
 		}
 		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
 	}
 }
 
-func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from SpawnDiplomat's claim ctx so the rebase/push +
+// PR-body LLM calls cancel on daemon shutdown.
+func runShipConvoy(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload shipConvoyPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
@@ -164,7 +166,7 @@ func runShipConvoy(db *sql.DB, agentName string, bounty *store.Bounty, logger in
 			created = append(created, fmt.Sprintf("%s(existing:%s)", ab.Repo, ab.DraftPRURL))
 			continue
 		}
-		if err := openDraftPRForAskBranch(db, agentName, convoy, ab, logger); err != nil {
+		if err := openDraftPRForAskBranch(ctx, db, agentName, convoy, ab, logger); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", ab.Repo, err))
 			continue
 		}
@@ -235,7 +237,9 @@ func buildShipItMailBody(db *sql.DB, convoy *store.Convoy, branches []store.Conv
 
 // openDraftPRForAskBranch does a final rebase of the ask-branch on main, then
 // generates and posts a draft PR. Runs per (convoy, repo).
-func openDraftPRForAskBranch(db *sql.DB, agentName string, convoy *store.Convoy, ab store.ConvoyAskBranch, logger interface{ Printf(string, ...any) }) error {
+// Fix #8e: ctx threads from runShipConvoy so the rebase/push and PR-body
+// generation cancel on daemon shutdown.
+func openDraftPRForAskBranch(ctx context.Context, db *sql.DB, agentName string, convoy *store.Convoy, ab store.ConvoyAskBranch, logger interface{ Printf(string, ...any) }) error {
 	repo := store.GetRepo(db, ab.Repo)
 	if repo == nil || repo.LocalPath == "" {
 		return fmt.Errorf("repo %s not registered or missing local_path", ab.Repo)
@@ -250,12 +254,12 @@ func openDraftPRForAskBranch(db *sql.DB, agentName string, convoy *store.Convoy,
 	// The plan's "fallback to merge commit" was discussed but rejected in favor
 	// of explicit escalation: at least the operator knows the convoy needs
 	// manual rebasing before ship.
-	newTip, rebaseErr := igit.RebaseBranchOnto(repo.LocalPath, ab.AskBranch, defaultBranch)
+	newTip, rebaseErr := igit.RebaseBranchOnto(ctx, repo.LocalPath, ab.AskBranch, defaultBranch)
 	if rebaseErr != nil {
 		return fmt.Errorf("final rebase of %s onto %s failed: %w — manual intervention needed",
 			ab.AskBranch, defaultBranch, rebaseErr)
 	}
-	if err := igit.ForcePushBranch(repo.LocalPath, ab.AskBranch); err != nil {
+	if err := igit.ForcePushBranch(ctx, repo.LocalPath, ab.AskBranch); err != nil {
 		return fmt.Errorf("force-push after rebase failed: %w", err)
 	}
 	if err := store.UpdateConvoyAskBranchBase(db, ab.ConvoyID, ab.Repo, newTip); err != nil {
@@ -263,7 +267,7 @@ func openDraftPRForAskBranch(db *sql.DB, agentName string, convoy *store.Convoy,
 	}
 
 	// Build the PR body.
-	body, bodyErr := generatePRBody(db, convoy, ab, repo, logger)
+	body, bodyErr := generatePRBody(ctx, db, convoy, ab, repo, logger)
 	if bodyErr != nil {
 		return fmt.Errorf("generatePRBody: %w", bodyErr)
 	}
@@ -272,7 +276,7 @@ func openDraftPRForAskBranch(db *sql.DB, agentName string, convoy *store.Convoy,
 	if sanityErr := sanityCheckPRBody(body); sanityErr != nil {
 		// Retry once with critic feedback.
 		logger.Printf("ShipConvoy: first body failed sanity (%v) — retrying LLM", sanityErr)
-		body2, retryErr := generatePRBodyWithCritic(db, convoy, ab, repo, sanityErr.Error(), logger)
+		body2, retryErr := generatePRBodyWithCritic(ctx, db, convoy, ab, repo, sanityErr.Error(), logger)
 		if retryErr != nil {
 			return fmt.Errorf("retry body generation failed: %w", retryErr)
 		}
@@ -307,8 +311,11 @@ func openDraftPRForAskBranch(db *sql.DB, agentName string, convoy *store.Convoy,
 
 // generatePRBody reads the repo's template and asks Claude to populate it.
 // If the repo has no template, returns a structured fallback body.
-func generatePRBody(db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, logger interface{ Printf(string, ...any) }) (string, error) {
-	context := buildDiplomatConvoyContext(db, convoy, ab, repo)
+// Fix #8e: ctx is reserved for future use when AskClaudeCLI gains a Context
+// variant; today it is unused but the signature aligns with caller propagation.
+func generatePRBody(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, logger interface{ Printf(string, ...any) }) (string, error) {
+	_ = ctx
+	context := buildDiplomatConvoyContext(ctx, db, convoy, ab, repo)
 	var template string
 	if repo.PRTemplatePath != "" {
 		if data, err := os.ReadFile(repo.PRTemplatePath); err == nil {
@@ -348,8 +355,10 @@ func generatePRBody(db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, 
 	return stripMarkdownFences(raw), nil
 }
 
-func generatePRBodyWithCritic(db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, criticFeedback string, logger interface{ Printf(string, ...any) }) (string, error) {
-	context := buildDiplomatConvoyContext(db, convoy, ab, repo)
+// Fix #8e: ctx threads from runShipConvoy.
+func generatePRBodyWithCritic(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, criticFeedback string, logger interface{ Printf(string, ...any) }) (string, error) {
+	_ = ctx
+	context := buildDiplomatConvoyContext(ctx, db, convoy, ab, repo)
 	var template string
 	if repo.PRTemplatePath != "" {
 		if data, err := os.ReadFile(repo.PRTemplatePath); err == nil {
@@ -372,7 +381,9 @@ func generatePRBodyWithCritic(db *sql.DB, convoy *store.Convoy, ab store.ConvoyA
 	return stripMarkdownFences(raw), nil
 }
 
-func buildDiplomatConvoyContext(db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository) string {
+// Fix #8e: ctx threads from generatePRBody so the diff subprocess used to
+// summarise file changes cancels on daemon shutdown.
+func buildDiplomatConvoyContext(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository) string {
 	var sb strings.Builder
 	sb.WriteString("Convoy name: ")
 	sb.WriteString(convoy.Name)
@@ -406,6 +417,9 @@ func buildDiplomatConvoyContext(db *sql.DB, convoy *store.Convoy, ab store.Convo
 					id, status, util.TruncateStr(strings.Split(clean, "\n")[0], 200)))
 			}
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("diplomat.go:buildDiplomatConvoyContext: rows iter error: %v", rErr)
+		}
 	}
 
 	// Relevant memory excerpts — FTS over-fetches, re-ranker trims to top 3.
@@ -424,7 +438,7 @@ func buildDiplomatConvoyContext(db *sql.DB, convoy *store.Convoy, ab store.Convo
 	}
 
 	// Diff summary — files changed on the ask-branch relative to main.
-	diff := igit.GetDiff(repo.LocalPath, ab.AskBranch)
+	diff := igit.GetDiff(ctx, repo.LocalPath, ab.AskBranch)
 	files := igit.ExtractDiffFiles(diff)
 	if len(files) > 0 {
 		sb.WriteString("\nFiles changed:\n")

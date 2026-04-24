@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"context"
 	"database/sql"
 	"fmt"
@@ -557,6 +558,9 @@ func cmdRepos(db *sql.DB, args []string) {
 			}
 			fmt.Printf("%-20s %-35s %s%s\n", name, truncate(path, 35), truncate(desc, 35), exists)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("fleet_cmds.go:cmdRepos: rows iter error: %v", rErr)
+		}
 		if !found {
 			fmt.Println("No repositories registered. Run: force add-repo <name> <path> <desc>")
 		}
@@ -658,8 +662,9 @@ func cmdResume(db *sql.DB) {
 	fmt.Println("E-stop cleared. Agents will resume on their next cycle.")
 }
 
-func cmdCleanup(db *sql.DB) {
-	runCleanup(db)
+// Fix #8e: ctx threads from main's signal-cancellation ctx.
+func cmdCleanup(ctx context.Context, db *sql.DB) {
+	runCleanup(ctx, db)
 }
 
 func cmdDoctor(db *sql.DB, clean bool) {

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -17,7 +19,8 @@ import (
 	"force-orchestrator/internal/store"
 )
 
-func runCleanup(db *sql.DB) {
+// Fix #8e: ctx threads from main's signal-cancellation ctx.
+func runCleanup(ctx context.Context, db *sql.DB) {
 	fmt.Println("Running cleanup...")
 
 	// Prune git worktree metadata for all registered repos
@@ -26,7 +29,7 @@ func runCleanup(db *sql.DB) {
 		for rows.Next() {
 			var repoPath string
 			if err := rows.Scan(&repoPath); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
-			if out, pruneErr := igit.RunCmd(repoPath, "worktree", "prune"); pruneErr != nil {
+			if out, pruneErr := igit.RunCmd(ctx, repoPath, "worktree", "prune"); pruneErr != nil {
 				fmt.Printf("  worktree prune [%s]: ERROR %v\n", repoPath, pruneErr)
 			} else {
 				msg := strings.TrimSpace(out)
@@ -35,6 +38,9 @@ func runCleanup(db *sql.DB) {
 				}
 				fmt.Printf("  worktree prune [%s]: %s\n", repoPath, msg)
 			}
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("maintenance.go:runCleanup: rows iter error: %v", rErr)
 		}
 		rows.Close()
 	}
@@ -51,6 +57,9 @@ func runCleanup(db *sql.DB) {
 			if _, statErr := os.Stat(e.path); statErr != nil {
 				staleAgents = append(staleAgents, e)
 			}
+		}
+		if rErr := agentRows.Err(); rErr != nil {
+			log.Printf("maintenance.go:runCleanup: rows iter error: %v", rErr)
 		}
 		agentRows.Close()
 		for _, e := range staleAgents {
@@ -144,6 +153,9 @@ func runDoctor(db *sql.DB, clean bool) {
 			} else {
 				check(name, path, true)
 			}
+		}
+		if rErr := repoRows.Err(); rErr != nil {
+			log.Printf("maintenance.go:runDoctor: rows iter error: %v", rErr)
 		}
 		repoRows.Close()
 		if !found {
@@ -314,6 +326,9 @@ func exportFleet(db *sql.DB, outFile string) error {
 		if err := repoRows.Scan(&r.Name, &r.LocalPath, &r.Description); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 		export.Repositories = append(export.Repositories, r)
 	}
+	if rErr := repoRows.Err(); rErr != nil {
+		log.Printf("maintenance.go:exportFleet: rows iter error: %v", rErr)
+	}
 	repoRows.Close()
 
 	// Tasks
@@ -329,6 +344,9 @@ func exportFleet(db *sql.DB, outFile string) error {
 		var t TaskExport
 		if err := taskRows.Scan(&t.ID, &t.ParentID, &t.TargetRepo, &t.Type, &t.Status, &t.Payload, &t.ErrorLog, &t.RetryCount, &t.InfraFailures, &t.ConvoyID, &t.Checkpoint, &t.BranchName); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 		export.Tasks = append(export.Tasks, t)
+	}
+	if rErr := taskRows.Err(); rErr != nil {
+		log.Printf("maintenance.go:exportFleet: rows iter error: %v", rErr)
 	}
 	taskRows.Close()
 
@@ -349,6 +367,9 @@ func exportFleet(db *sql.DB, outFile string) error {
 			if err := memRows.Scan(&m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged, &m.TopicTags); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			export.Memories = append(export.Memories, m)
 		}
+		if rErr := memRows.Err(); rErr != nil {
+			log.Printf("maintenance.go:exportFleet: rows iter error: %v", rErr)
+		}
 		memRows.Close()
 	}
 
@@ -360,6 +381,9 @@ func exportFleet(db *sql.DB, outFile string) error {
 			if err := escRows.Scan(&e.TaskID, &e.Severity, &e.Message, &e.Status); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			export.Escalations = append(export.Escalations, e)
 		}
+		if rErr := escRows.Err(); rErr != nil {
+			log.Printf("maintenance.go:exportFleet: rows iter error: %v", rErr)
+		}
 		escRows.Close()
 	}
 
@@ -370,6 +394,9 @@ func exportFleet(db *sql.DB, outFile string) error {
 			var a AuditExport
 			if err := auditRows.Scan(&a.Actor, &a.Action, &a.TaskID, &a.Detail, &a.CreatedAt); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			export.AuditLog = append(export.AuditLog, a)
+		}
+		if rErr := auditRows.Err(); rErr != nil {
+			log.Printf("maintenance.go:exportFleet: rows iter error: %v", rErr)
 		}
 		auditRows.Close()
 	}
@@ -554,7 +581,8 @@ func pruneFleet(db *sql.DB, keepDays int, dryRun bool) {
 // purgeFilesystem removes all filesystem artifacts created by fleet runs:
 // log files, rotated telemetry, agent git worktrees, agent branches, and the
 // Dogs cooldown table. Safe to call while the daemon is stopped.
-func purgeFilesystem(db *sql.DB) {
+// Fix #8e: ctx threads from main's signal-cancellation ctx.
+func purgeFilesystem(ctx context.Context, db *sql.DB) {
 	// Log and telemetry files
 	for _, name := range []string{"fleet.log", "holonet.jsonl", "fleet.pid"} {
 		if err := os.Remove(name); err == nil {
@@ -581,6 +609,9 @@ func purgeFilesystem(db *sql.DB) {
 			}
 			repos = append(repos, r)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("maintenance.go:purgeFilesystem: rows iter error: %v", rErr)
+		}
 		rows.Close()
 
 		for _, r := range repos {
@@ -589,7 +620,7 @@ func purgeFilesystem(db *sql.DB) {
 			if readErr == nil {
 				for _, e := range entries {
 					wtPath := filepath.Join(worktreeBase, e.Name())
-					out, rmErr := igit.RunCmd(r.path, "worktree", "remove", "--force", wtPath)
+					out, rmErr := igit.RunCmd(ctx, r.path, "worktree", "remove", "--force", wtPath)
 					if rmErr == nil {
 						fmt.Printf("  Removed worktree %s/%s\n", r.name, e.Name())
 					} else if !strings.Contains(out, "not a working tree") {
@@ -599,7 +630,7 @@ func purgeFilesystem(db *sql.DB) {
 					}
 				}
 				// Prune any remaining stale git refs
-				igit.RunCmd(r.path, "worktree", "prune")
+				igit.RunCmd(ctx, r.path, "worktree", "prune")
 				// Remove the now-empty worktree base dir
 				os.Remove(worktreeBase)
 			}
@@ -635,7 +666,8 @@ func purgeFilesystem(db *sql.DB) {
 
 // cmdPurge cleans all filesystem run artifacts and dog timers without touching
 // task data in the database.
-func cmdPurge(db *sql.DB, confirmed bool) {
+// Fix #8e: ctx threads from main's signal-cancellation ctx.
+func cmdPurge(ctx context.Context, db *sql.DB, confirmed bool) {
 	// Always print the warning regardless of --confirm (defense-in-depth).
 	fmt.Fprintln(os.Stderr, "WARNING: This will permanently delete:")
 	fmt.Fprintln(os.Stderr, "  - fleet.log and holonet.jsonl log files")
@@ -658,14 +690,15 @@ func cmdPurge(db *sql.DB, confirmed bool) {
 		os.Exit(1)
 	}
 	fmt.Println("Purging filesystem artifacts...")
-	purgeFilesystem(db)
+	purgeFilesystem(ctx, db)
 	fmt.Println("Done.")
 }
 
 // cmdHardReset wipes all task data from the database, purges filesystem artifacts,
 // and resets the fleet to a factory-fresh state. Repositories and SystemConfig are
 // preserved unless --purge-repos is passed.
-func cmdHardReset(db *sql.DB, confirmed, purgeRepos bool) {
+// Fix #8e: ctx threads from main's signal-cancellation ctx.
+func cmdHardReset(ctx context.Context, db *sql.DB, confirmed, purgeRepos bool) {
 	// Always print the warning regardless of --confirm (defense-in-depth).
 	fmt.Fprintln(os.Stderr, "WARNING: This permanently destroys ALL fleet state:")
 	fmt.Fprintln(os.Stderr, "  - All task data, history, and dependencies")
@@ -694,7 +727,7 @@ func cmdHardReset(db *sql.DB, confirmed, purgeRepos bool) {
 	}
 
 	fmt.Println("Hard reset: purging filesystem artifacts...")
-	purgeFilesystem(db)
+	purgeFilesystem(ctx, db)
 
 	fmt.Println("Hard reset: wiping database...")
 	tables := []string{

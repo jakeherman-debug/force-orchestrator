@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 	"os"
@@ -83,6 +84,9 @@ func cmdConvoy(db *sql.DB, args []string) {
 				}
 				previewTasks = append(previewTasks, fmt.Sprintf("  #%d [%s] %s", pid, previewRepo, truncate(firstLine, 70)))
 			}
+			if rErr := previewRows.Err(); rErr != nil {
+				log.Printf("convoy.go:cmdConvoy: rows iter error: %v", rErr)
+			}
 			previewRows.Close()
 			if len(previewTasks) == 0 {
 				fmt.Printf("No Planned tasks in convoy %d (already approved or wrong convoy).\n", convoyApproveID)
@@ -144,6 +148,9 @@ func cmdConvoy(db *sql.DB, args []string) {
 					continue
 				}
 				locked = append(locked, fmt.Sprintf("  #%d [%s] owned by %s", lid, lrepo, lowner))
+			}
+			if rErr := lockedRows.Err(); rErr != nil {
+				log.Printf("convoy.go:cmdConvoy: rows iter error: %v", rErr)
 			}
 			lockedRows.Close()
 			if len(locked) > 0 {

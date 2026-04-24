@@ -873,6 +873,9 @@ func GetDependencies(db *sql.DB, taskID int) []int {
 		}
 		ids = append(ids, id)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("tasks.go:GetDependencies: rows iter error: %v", rErr)
+	}
 	return ids
 }
 
@@ -1033,6 +1036,9 @@ func GetFleetMemoriesByIDs(db *sql.DB, ids []int) []FleetMemoryEntry {
 			byID[e.ID] = e
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("tasks.go:GetFleetMemoriesByIDs: rows iter error: %v", rErr)
+	}
 	// Preserve caller's order; skip any IDs that no longer exist.
 	out := make([]FleetMemoryEntry, 0, len(ids))
 	for _, id := range ids {
@@ -1079,6 +1085,9 @@ func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 			continue
 		}
 		entries = append(entries, e)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("tasks.go:GetTaskHistory: rows iter error: %v", rErr)
 	}
 	return entries
 }
@@ -1217,6 +1226,9 @@ func ftsMemoryLookup(db *sql.DB, repo, ftsQ string, limit int) []FleetMemoryEntr
 			rankedIDs = append(rankedIDs, id)
 		}
 	}
+	if rErr := ftsRows.Err(); rErr != nil {
+		log.Printf("tasks.go:ftsMemoryLookup: rows iter error: %v", rErr)
+	}
 	ftsRows.Close()
 	if len(rankedIDs) == 0 {
 		return nil
@@ -1267,6 +1279,9 @@ func recencyMemoryLookup(db *sql.DB, repo string, limit int) []FleetMemoryEntry 
 			continue
 		}
 		entries = append(entries, e)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("tasks.go:recencyMemoryLookup: rows iter error: %v", rErr)
 	}
 	return entries
 }
@@ -1332,6 +1347,9 @@ func ListAllFleetMemories(db *sql.DB, repo string, limit int) []FleetMemoryEntry
 			continue
 		}
 		entries = append(entries, e)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("tasks.go:ListAllFleetMemories: rows iter error: %v", rErr)
 	}
 	return entries
 }

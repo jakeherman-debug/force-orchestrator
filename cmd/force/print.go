@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 	"os"
@@ -77,6 +78,9 @@ func printList(db *sql.DB, statusFilter, repoFilter, typeFilter string, limit in
 			abbrev = fmt.Sprintf("Blocked#%d", activeDep)
 		}
 		fmt.Printf("%-4d %-12s %-22s %-15s %-15s %s\n", id, truncate(abbrev, 12), truncate(taskType, 22), truncate(repo, 15), truncate(owner, 15), taskPreview)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("print.go:printList: rows iter error: %v", rErr)
 	}
 	if n == 0 {
 		fmt.Println("(no tasks)")
@@ -184,6 +188,9 @@ func printStats(db *sql.DB) {
 			}
 			fmt.Printf("  %-25s %d\n", status, count)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("print.go:printStats: rows iter error: %v", rErr)
+		}
 		rows.Close()
 	}
 
@@ -219,6 +226,9 @@ func printStats(db *sql.DB) {
 				continue
 			}
 			fmt.Printf("  %-20s %d\n", agent, n)
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("print.go:printStats: rows iter error: %v", rErr)
 		}
 		rows.Close()
 	}
@@ -273,6 +283,9 @@ func printBountyStats(db *sql.DB) {
 			}
 			fmt.Printf("  %-25s %d\n", status, count)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("print.go:printBountyStats: rows iter error: %v", rErr)
+		}
 		rows.Close()
 	}
 
@@ -313,6 +326,9 @@ func printBountyStats(db *sql.DB) {
 			}
 			fmt.Printf("  %-25s %d\n", agent, count)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("print.go:printBountyStats: rows iter error: %v", rErr)
+		}
 		rows.Close()
 		if n == 0 {
 			fmt.Println("  no data")
@@ -351,6 +367,9 @@ func printCosts(db *sql.DB) {
 			}
 			fmt.Printf("  %-22s %6d in  %6d out\n", agent, in, out)
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("print.go:printCosts: rows iter error: %v", rErr)
+		}
 		rows.Close()
 	}
 
@@ -376,6 +395,9 @@ func printStatus(db *sql.DB) {
 				continue
 			}
 			counts[status] = count
+		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("print.go:printStatus: rows iter error: %v", rErr)
 		}
 		rows.Close()
 	}
@@ -474,6 +496,9 @@ func printWho(db *sql.DB) {
 		fmt.Printf("%-20s %-4d %-14s %-15s %s\n", owner, id, abbrev, truncate(repo, 15),
 			payloadSummary(payload, 40))
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("print.go:printWho: rows iter error: %v", rErr)
+	}
 	if !found {
 		fmt.Println("No agents currently active.")
 	}
@@ -520,6 +545,9 @@ func printTree(db *sql.DB, id int, depth int) {
 		}
 		childIDs = append(childIDs, childID)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("print.go:printTree: rows iter error: %v", rErr)
+	}
 	rows.Close()
 	for _, childID := range childIDs {
 		printTree(db, childID, depth+1)
@@ -550,6 +578,9 @@ func printAgents(db *sql.DB) {
 			exists = "MISSING"
 		}
 		fmt.Printf("%-20s %-20s %s [%s]\n", agent, repo, path, exists)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("print.go:printAgents: rows iter error: %v", rErr)
 	}
 	if !found {
 		fmt.Println("No agent worktrees registered.")
@@ -587,6 +618,9 @@ func printConvoyShow(db *sql.DB, convoyID int, name, status string, completed, t
 			abbrev = a
 		}
 		fmt.Printf("%-6d %-18s %-20s %s\n", id, truncate(abbrev, 18), truncate(owner, 20), payloadSummary(payload, 60))
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("print.go:printConvoyShow: rows iter error: %v", rErr)
 	}
 	if n == 0 {
 		fmt.Println("(no tasks)")

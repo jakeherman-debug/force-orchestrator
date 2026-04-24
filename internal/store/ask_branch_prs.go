@@ -1,6 +1,7 @@
 package store
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 )
@@ -110,6 +111,9 @@ func ListOpenAskBranchPRs(db *sql.DB) []AskBranchPR {
 			prs = append(prs, p)
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("ask_branch_prs.go:ListOpenAskBranchPRs: rows iter error: %v", rErr)
+	}
 	return prs
 }
 
@@ -137,6 +141,9 @@ func ListAskBranchPRsByConvoy(db *sql.DB, convoyID int) []AskBranchPR {
 			&p.MergedAt, &p.CreatedAt); err == nil {
 			prs = append(prs, p)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("ask_branch_prs.go:ListAskBranchPRsByConvoy: rows iter error: %v", rErr)
 	}
 	return prs
 }
@@ -326,6 +333,9 @@ func RollupAskBranchPRs(db *sql.DB, convoyID int) AskBranchPRRollup {
 		case "Failure":
 			r.ChecksFailure++
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("ask_branch_prs.go:RollupAskBranchPRs: rows iter error: %v", rErr)
 	}
 	return r
 }

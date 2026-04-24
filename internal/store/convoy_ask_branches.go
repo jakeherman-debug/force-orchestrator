@@ -1,6 +1,7 @@
 package store
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -134,6 +135,9 @@ func ListConvoyAskBranches(db *sql.DB, convoyID int) []ConvoyAskBranch {
 			out = append(out, c)
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy_ask_branches.go:ListConvoyAskBranches: rows iter error: %v", rErr)
+	}
 	return out
 }
 
@@ -158,6 +162,9 @@ func ListAllConvoyAskBranches(db *sql.DB) []ConvoyAskBranch {
 			&c.LastRebasedAt, &c.CreatedAt); err == nil {
 			out = append(out, c)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy_ask_branches.go:ListAllConvoyAskBranches: rows iter error: %v", rErr)
 	}
 	return out
 }
@@ -312,6 +319,9 @@ func ListReadyToShipConvoyIDs(db *sql.DB) []int {
 			ids = append(ids, id)
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy_ask_branches.go:ListReadyToShipConvoyIDs: rows iter error: %v", rErr)
+	}
 	return ids
 }
 
@@ -349,6 +359,9 @@ func ConvoyReposTouched(db *sql.DB, convoyID int) []string {
 		if err := rows.Scan(&r); err == nil {
 			repos = append(repos, r)
 		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy_ask_branches.go:ConvoyReposTouched: rows iter error: %v", rErr)
 	}
 	return repos
 }

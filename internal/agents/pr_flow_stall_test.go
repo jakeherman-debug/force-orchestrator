@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestOnSubPRStalled_AllQueuedChecks_TriggersRerun(t *testing.T) {
 		called bool
 		branch string
 	}
-	restore := SetTriggerStalledRerunForTest(func(repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
 		triggered.called = true
 		triggered.branch = branch
 		return nil
@@ -69,7 +70,7 @@ func TestOnSubPRStalled_AllQueuedChecks_TriggersRerun(t *testing.T) {
 		state: gh.ChecksPending,
 	}
 
-	onSubPRStalled(db, stub, pr, testLogger{})
+	onSubPRStalled(context.Background(), db, stub, pr, testLogger{})
 
 	if !triggered.called {
 		t.Fatal("expected empty-commit re-trigger to be called")
@@ -101,7 +102,7 @@ func TestOnSubPRStalled_InProgressCheck_WaitsWithoutAction(t *testing.T) {
 	db, pr := seedStalePRScenario(t, 3*time.Hour)
 
 	var rerunCalled bool
-	restore := SetTriggerStalledRerunForTest(func(repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
 		rerunCalled = true
 		return nil
 	})
@@ -115,7 +116,7 @@ func TestOnSubPRStalled_InProgressCheck_WaitsWithoutAction(t *testing.T) {
 		state: gh.ChecksPending,
 	}
 
-	onSubPRStalled(db, stub, pr, testLogger{})
+	onSubPRStalled(context.Background(), db, stub, pr, testLogger{})
 
 	if rerunCalled {
 		t.Error("IN_PROGRESS check means CI is slow-but-alive; must not re-trigger")
@@ -141,7 +142,7 @@ func TestOnSubPRStalled_RetriggerCapHit_Escalates(t *testing.T) {
 	pr.StallRetriggerCount = subPRMaxStallRetriggers
 
 	var rerunCalled bool
-	restore := SetTriggerStalledRerunForTest(func(repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
 		rerunCalled = true
 		return nil
 	})
@@ -152,7 +153,7 @@ func TestOnSubPRStalled_RetriggerCapHit_Escalates(t *testing.T) {
 		state:  gh.ChecksPending,
 	}
 
-	onSubPRStalled(db, stub, pr, testLogger{})
+	onSubPRStalled(context.Background(), db, stub, pr, testLogger{})
 
 	if rerunCalled {
 		t.Error("cap hit: must not issue another re-trigger")
@@ -176,7 +177,7 @@ func TestOnSubPRStalled_HardLimitReached_EscalatesRegardless(t *testing.T) {
 	db, pr := seedStalePRScenario(t, subPRCIHardLimit+30*time.Minute)
 
 	var rerunCalled bool
-	restore := SetTriggerStalledRerunForTest(func(repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
 		rerunCalled = true
 		return nil
 	})
@@ -187,7 +188,7 @@ func TestOnSubPRStalled_HardLimitReached_EscalatesRegardless(t *testing.T) {
 		state:  gh.ChecksPending,
 	}
 
-	onSubPRStalled(db, stub, pr, testLogger{})
+	onSubPRStalled(context.Background(), db, stub, pr, testLogger{})
 
 	if rerunCalled {
 		t.Error("hard limit reached: must not attempt re-trigger")
@@ -205,7 +206,7 @@ func TestOnSubPRStalled_HardLimitReached_EscalatesRegardless(t *testing.T) {
 func TestOnSubPRStalled_RetriggerFailure_Escalates(t *testing.T) {
 	db, pr := seedStalePRScenario(t, 3*time.Hour)
 
-	restore := SetTriggerStalledRerunForTest(func(repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
 		return &triggerFailErr{msg: "git push: auth rejected"}
 	})
 	defer restore()
@@ -215,7 +216,7 @@ func TestOnSubPRStalled_RetriggerFailure_Escalates(t *testing.T) {
 		state:  gh.ChecksPending,
 	}
 
-	onSubPRStalled(db, stub, pr, testLogger{})
+	onSubPRStalled(context.Background(), db, stub, pr, testLogger{})
 
 	var taskStatus string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, pr.TaskID).Scan(&taskStatus)

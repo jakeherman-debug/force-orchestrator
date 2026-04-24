@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"log"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -367,6 +368,9 @@ func enforceHolds(db *sql.DB, newConvoyID int, ruling chancellorRuling, feature 
 						continue
 					}
 					rootIDs = append(rootIDs, id)
+				}
+				if rErr := heldRootRows.Err(); rErr != nil {
+					log.Printf("chancellor.go:enforceHolds: rows iter error: %v", rErr)
 				}
 				heldRootRows.Close()
 				for _, rootID := range rootIDs {

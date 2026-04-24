@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"database/sql"
 	"fmt"
 	"io"
@@ -142,6 +143,9 @@ func runCommandCenterTo(db *sql.DB, out io.Writer) {
 				completed = append(completed, line)
 			}
 		}
+		if rErr := rows.Err(); rErr != nil {
+			log.Printf("watch.go:runCommandCenterTo: rows iter error: %v", rErr)
+		}
 		rows.Close()
 
 		fmt.Fprintln(out, "--- PENDING & BLOCKED ---")
@@ -211,6 +215,9 @@ func runCommandCenterTo(db *sql.DB, out io.Writer) {
 					}
 					fmt.Fprintf(out, " [ESC-%02d] task %-3d [%s] %s\n", id, taskID, sev, truncate(msg, 60))
 				}
+				if rErr := escRows.Err(); rErr != nil {
+					log.Printf("watch.go:runCommandCenterTo: rows iter error: %v", rErr)
+				}
 				escRows.Close()
 			}
 		}
@@ -230,6 +237,9 @@ func runCommandCenterTo(db *sql.DB, out io.Writer) {
 					continue
 				}
 				convoys = append(convoys, c)
+			}
+			if rErr := convoyRows.Err(); rErr != nil {
+				log.Printf("watch.go:runCommandCenterTo: rows iter error: %v", rErr)
 			}
 			convoyRows.Close()
 			if len(convoys) > 0 {

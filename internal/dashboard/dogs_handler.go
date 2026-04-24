@@ -63,7 +63,7 @@ func handleDogsRun(db *sql.DB) http.HandlerFunc {
 		// Capture the dog's log output in a buffer so we can return it in the response.
 		var buf strings.Builder
 		logger := log.New(&buf, "["+name+"] ", log.LstdFlags)
-		runErr := agents.RunDogByName(db, name, logger)
+		runErr := agents.RunDogByName(r.Context(), db, name, logger)
 
 		resp := map[string]any{
 			"dog":    name,

@@ -107,6 +107,9 @@ func ListEscalations(db *sql.DB, status string) []store.Escalation {
 		}
 		escalations = append(escalations, e)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("escalation.go:ListEscalations: rows iter error: %v", rErr)
+	}
 	return escalations
 }
 
@@ -156,6 +159,9 @@ func CheckStaleEscalations(db *sql.DB) {
 			continue
 		}
 		stale = append(stale, e)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("escalation.go:CheckStaleEscalations: rows iter error: %v", rErr)
 	}
 	rows.Close()
 

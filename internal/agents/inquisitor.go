@@ -62,11 +62,10 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB) {
 // context (AUDIT-047) without the enclosing for-loop needing deferred
 // cancellation book-keeping.
 func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
-	_ = ctx // ctx is honoured by downstream gh / claude calls that take it explicitly
-	// The original body (preserved below) doesn't yet take ctx everywhere —
-	// threading it through the stale-lock UPDATE / classifier is a future
-	// work item; for now the tick-level timeout prevents a single sweep
-	// from running longer than 15 min.
+	// Fix #8e: ctx now threads into cleanOrphanedBranches (igit.RunCmd) and
+	// RunDogs (per-dog ctx); the prior _=ctx discard reflected the pre-Fix-#8e
+	// state where the only consumers were gh/claude calls that took ctx
+	// directly.
 
 		rows, err := db.Query(`
 			SELECT id FROM BountyBoard
@@ -84,6 +83,9 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
 					continue
 				}
 				staleIDs = append(staleIDs, id)
+			}
+			if rErr := rows.Err(); rErr != nil {
+				log.Printf("inquisitor.go:runInquisitorTick: rows iter error: %v", rErr)
 			}
 			rows.Close()
 		}
@@ -118,7 +120,7 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
 		CheckStaleEscalations(db)
 		CheckConvoyCompletions(db, logger)
 		store.RecoverStaleConvoys(db)
-		cleanOrphanedBranches(db, logger)
+		cleanOrphanedBranches(ctx, db, logger)
 		detectStalledTasks(db, logger)
 		backfillMissingAskBranches(db, logger)
 
@@ -140,7 +142,7 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
 		// lives in astromech.go next to the map declaration.
 		pruneRateLimitRetries(db)
 
-		RunDogs(db, logger)
+		RunDogs(ctx, db, logger)
 
 		db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 }
@@ -188,6 +190,9 @@ func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }
 			continue
 		}
 		tasks = append(tasks, t)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("inquisitor.go:classifyPendingTasks: rows iter error: %v", rErr)
 	}
 	rows.Close()
 
@@ -238,6 +243,9 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 			continue
 		}
 		tasks = append(tasks, t)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("inquisitor.go:detectStalledTasks: rows iter error: %v", rErr)
 	}
 	rows.Close()
 
@@ -338,6 +346,9 @@ func validateWorktrees(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 			stale = append(stale, e)
 		}
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("inquisitor.go:validateWorktrees: rows iter error: %v", rErr)
+	}
 	rows.Close()
 
 	for _, e := range stale {
@@ -357,7 +368,9 @@ func validateWorktrees(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 }
 
 // cleanOrphanedBranches deletes git branches for tasks that are permanently done.
-func cleanOrphanedBranches(db *sql.DB, logger interface{ Printf(string, ...any) }) {
+// Fix #8e: ctx threads from runInquisitorTick (the per-tick ctx) so the
+// branch-delete subprocess cancels on daemon shutdown.
+func cleanOrphanedBranches(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) {
 	rows, err := db.Query(`
 		SELECT id, target_repo, branch_name FROM BountyBoard
 		WHERE status IN ('Failed', 'Escalated')
@@ -380,6 +393,9 @@ func cleanOrphanedBranches(db *sql.DB, logger interface{ Printf(string, ...any) 
 		}
 		branches = append(branches, b)
 	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("inquisitor.go:cleanOrphanedBranches: rows iter error: %v", rErr)
+	}
 	rows.Close()
 
 	for _, b := range branches {
@@ -388,7 +404,7 @@ func cleanOrphanedBranches(db *sql.DB, logger interface{ Printf(string, ...any) 
 			continue
 		}
 
-		out, delErr := igit.RunCmd(repoPath, "branch", "-D", b.branchName)
+		out, delErr := igit.RunCmd(ctx, repoPath, "branch", "-D", b.branchName)
 		if delErr == nil {
 			logger.Printf("Cleaned up orphaned branch %s for task %d", b.branchName, b.id)
 			db.Exec(`UPDATE BountyBoard SET branch_name = '' WHERE id = ?`, b.id)

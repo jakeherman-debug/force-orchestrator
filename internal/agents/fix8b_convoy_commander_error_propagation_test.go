@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"bytes"
 	"encoding/json"
 	"log"
@@ -53,7 +54,7 @@ func TestFix8B_ConvoyReview_FailBountyErrorSurfacesToLogger(t *testing.T) {
 
 	// payload.ConvoyID == 0 → hits the "payload missing convoy_id" FailBounty
 	// branch (line ~230 in convoy_review.go post-fix).
-	runConvoyReview(db, "Diplomat-test", bounty, logger)
+	runConvoyReview(context.Background(), db, "Diplomat-test", bounty, logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty(missing convoy_id) failed") {
@@ -92,7 +93,7 @@ func TestFix8B_ConvoyReview_UpdateBountyStatusErrorSurfacesToLogger(t *testing.T
 
 	buf, logger := bufferLogger()
 
-	runConvoyReview(db, "Diplomat-test", bounty, logger)
+	runConvoyReview(context.Background(), db, "Diplomat-test", bounty, logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "UpdateBountyStatus(Completed, no ask-branches) failed") {

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -47,7 +48,7 @@ func TestRunCreateAskBranch_PartialFailureFailsTaskButKeepsSuccessfulRows(t *tes
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	// Task is Failed (partial success triggers FailBounty per the handler).
 	updated, _ := store.GetBounty(db, taskID)
@@ -81,7 +82,7 @@ func TestRunCreateAskBranch_HappyPath_OriginHasBranch(t *testing.T) {
 
 	taskID, _ := QueueCreateAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCreateAskBranch(db, b, testLogger{})
+	runCreateAskBranch(context.Background(), db, b, testLogger{})
 
 	ab := store.GetConvoyAskBranch(db, cid, "api")
 	if ab == nil {
@@ -110,7 +111,7 @@ func TestRunCleanupAskBranch_NoRowsIsNoOp(t *testing.T) {
 	cid, _ := store.CreateConvoy(db, "[1] nothing")
 	taskID, _ := QueueCleanupAskBranch(db, cid)
 	b, _ := store.GetBounty(db, taskID)
-	runCleanupAskBranch(db, b, testLogger{})
+	runCleanupAskBranch(context.Background(), db, b, testLogger{})
 
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Completed" {
@@ -127,7 +128,7 @@ func TestRunMedicCITriage_InvalidPayloadFails(t *testing.T) {
 		VALUES (0, 'api', 'CIFailureTriage', 'Pending', 'not-json', datetime('now'))`)
 	id, _ := res.LastInsertId()
 	b, _ := store.GetBounty(db, int(id))
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
 		t.Errorf("invalid payload must fail task, got %q", updated.Status)
@@ -144,7 +145,7 @@ func TestRunMedicCITriage_SubPRRowMissingFails(t *testing.T) {
 		Branch: "agent/x/task-1", TaskID: 1,
 	})
 	b, _ := store.GetBounty(db, taskID)
-	runMedicCITriage(db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Failed" {
 		t.Errorf("missing sub-PR row must fail task, got %q", updated.Status)
@@ -167,7 +168,7 @@ func TestHandleSubPRPoll_PRViewErrorLeavesStateUntouched(t *testing.T) {
 
 	ghc := newGHClient()
 	pr := store.GetAskBranchPR(db, prRowID)
-	handleSubPRPoll(db, ghc, *pr, testLogger{})
+	handleSubPRPoll(context.Background(), db, ghc, *pr, testLogger{})
 
 	// State must NOT advance on transient view errors.
 	after, _ := store.GetBounty(db, taskID)
@@ -187,7 +188,7 @@ func TestRunShipConvoy_ConvoyNotFoundFails(t *testing.T) {
 	// Queue a ShipConvoy for a convoy that doesn't exist.
 	taskID, _ := QueueShipConvoy(db, 9999)
 	b, _ := store.GetBounty(db, taskID)
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Failed" {
 		t.Errorf("missing convoy must fail task, got %q", updated.Status)
@@ -203,7 +204,7 @@ func TestRunShipConvoy_InvalidPayloadFails(t *testing.T) {
 		VALUES (0, '', 'ShipConvoy', 'Pending', 'not-json', datetime('now'))`)
 	id, _ := res.LastInsertId()
 	b, _ := store.GetBounty(db, int(id))
-	runShipConvoy(db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
 		t.Errorf("invalid payload must fail, got %q", updated.Status)
@@ -230,7 +231,7 @@ func TestCountCommitsAheadBehind_HappyPath(t *testing.T) {
 	run("push", "-u", "origin", "feature")
 
 	// feature is 1 ahead, 0 behind origin/main.
-	behind, ahead, err := countCommitsAheadBehind(wt, "feature", "main")
+	behind, ahead, err := countCommitsAheadBehind(context.Background(), wt, "feature", "main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +258,7 @@ func TestSubPRStateStringTransition_PersistsOnChange(t *testing.T) {
 
 	ghc := newGHClient()
 	pr := store.GetAskBranchPR(db, prRowID)
-	handleSubPRPoll(db, ghc, *pr, testLogger{})
+	handleSubPRPoll(context.Background(), db, ghc, *pr, testLogger{})
 
 	updated := store.GetAskBranchPR(db, prRowID)
 	if updated.ChecksState != "Success" {
