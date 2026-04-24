@@ -249,8 +249,16 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 		if nParse >= councilParseFailureCap {
 			escMsg := fmt.Sprintf("Council unable to parse LLM output for task %d after %d attempts — escalating to Medic", b.ID, nParse)
 			logger.Printf("Task %d: %s", b.ID, escMsg)
-			_, _ = CreateEscalation(db, b.ID, store.SeverityMedium, escMsg) // TODO(Fix #8b): propagate error
-			store.FailBounty(db, b.ID, escMsg)
+			if _, err := CreateEscalation(db, b.ID, store.SeverityMedium, escMsg); err != nil {
+				// Fix #8a (AUDIT-041) pattern: escalation insert failed. Fall through to
+				// FailBounty below with an appended note so the task still terminates visibly;
+				// stale-lock detector will recover if even that fails.
+				logger.Printf("Task %d: CreateEscalation failed (%v); falling back to FailBounty alone", b.ID, err)
+				escMsg = escMsg + " (escalation insert failed: " + err.Error() + ")"
+			}
+			if fbErr := store.FailBounty(db, b.ID, escMsg); fbErr != nil {
+				logger.Printf("Task %d: FailBounty after parse-cap failed (%v); stale-lock detector will recover", b.ID, fbErr)
+			}
 			return
 		}
 		handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
