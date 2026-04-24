@@ -56,18 +56,24 @@ func QueueRevalidateRepoConfig(db *sql.DB, repoName string) (int, error) {
 func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload revalidatePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
+			logger.Printf("RevalidateRepoConfig #%d: FailBounty after invalid payload failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 	repo := store.GetRepo(db, payload.Repo)
 	if repo == nil {
 		// Repo was removed; nothing to do.
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: failed to mark Completed after repo %s removed: %v — stale-lock detector will recover", bounty.ID, payload.Repo, err)
+		}
 		return
 	}
 	if repo.LocalPath == "" {
 		_ = store.QuarantineRepo(db, payload.Repo, "no local_path recorded")
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: failed to mark Completed after quarantining %s: %v — stale-lock detector will recover", bounty.ID, payload.Repo, err)
+		}
 		logger.Printf("RevalidateRepoConfig: %s quarantined — no local_path", payload.Repo)
 		return
 	}
@@ -86,7 +92,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 				payload.Repo, remoteErr, payload.Repo),
 			0, store.MailTypeAlert)
 		logger.Printf("RevalidateRepoConfig: %s quarantined — %v", payload.Repo, remoteErr)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: failed to mark Completed after remote-unreachable quarantine of %s: %v — stale-lock detector will recover", bounty.ID, payload.Repo, err)
+		}
 		return
 	}
 	if currentRemote != repo.RemoteURL {
@@ -103,7 +111,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 			fmt.Sprintf("[QUARANTINED] %s — default branch undetectable", payload.Repo),
 			fmt.Sprintf("Repo '%s' no longer has a detectable default branch (main/master/develop).\n\nFix the repo and re-run `force repo sync`.", payload.Repo),
 			0, store.MailTypeAlert)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: failed to mark Completed after default-branch-undetectable quarantine of %s: %v — stale-lock detector will recover", bounty.ID, payload.Repo, err)
+		}
 		return
 	}
 	if currentDefault != repo.DefaultBranch {
@@ -136,7 +146,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 			fmt.Sprintf("Repo '%s' ls-remote failed: %s\n\nCheck network/auth; re-run `force repo set-pr-flow %s on` to re-enable.",
 				payload.Repo, msg, payload.Repo),
 			0, store.MailTypeAlert)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("RevalidateRepoConfig #%d: failed to mark Completed after ls-remote-failed quarantine of %s: %v — stale-lock detector will recover", bounty.ID, payload.Repo, err)
+		}
 		return
 	}
 
@@ -147,7 +159,9 @@ func runRevalidateRepoConfig(db *sql.DB, bounty *store.Bounty, logger interface{
 		store.LogAudit(db, "Pilot", "repo-config-healed", bounty.ID,
 			fmt.Sprintf("%s: %s", payload.Repo, strings.Join(issues, "; ")))
 	}
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("RevalidateRepoConfig #%d: failed to mark Completed for %s: %v — stale-lock detector will recover", bounty.ID, payload.Repo, err)
+	}
 }
 
 // dogRepoConfigCheck is the per-24h dog that enqueues RevalidateRepoConfig

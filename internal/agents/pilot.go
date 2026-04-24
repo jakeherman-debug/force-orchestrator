@@ -354,23 +354,31 @@ func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 func runFindPRTemplate(db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload findPRTemplatePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
+			logger.Printf("FindPRTemplate #%d: FailBounty after invalid payload failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 	if payload.Repo == "" || payload.LocalPath == "" {
-		_ = store.FailBounty(db, bounty.ID, "payload missing repo or local_path") // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, "payload missing repo or local_path"); fbErr != nil {
+			logger.Printf("FindPRTemplate #%d: FailBounty after payload validation failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
 	path, err := FindPRTemplatePathLLM(payload.LocalPath, claude.AskClaudeCLI)
 	if err != nil {
 		// Directory-level failure (not-a-dir etc.) — escalate via normal retry path.
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("discovery failed: %v", err)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("discovery failed: %v", err)); fbErr != nil {
+			logger.Printf("FindPRTemplate #%d: FailBounty after discovery failure failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
 	if storeErr := store.SetRepoPRTemplatePath(db, payload.Repo, path); storeErr != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("could not persist template path: %v", storeErr)) // TODO(Fix #8b): propagate error
+		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("could not persist template path: %v", storeErr)); fbErr != nil {
+			logger.Printf("FindPRTemplate #%d: FailBounty after template-path persist failure failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
+		}
 		return
 	}
 
@@ -380,5 +388,7 @@ func runFindPRTemplate(db *sql.DB, bounty *store.Bounty, logger interface{ Print
 	} else {
 		logger.Printf("FindPRTemplate #%d: template for %s → %s", bounty.ID, payload.Repo, path)
 	}
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("FindPRTemplate #%d: failed to mark Completed: %v — stale-lock detector will recover", bounty.ID, err)
+	}
 }
