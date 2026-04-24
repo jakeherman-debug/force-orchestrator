@@ -655,11 +655,18 @@ func ListDogs(db *sql.DB) []DogStatus {
 		db.QueryRow(`SELECT last_run_at, run_count FROM Dogs WHERE name = ?`, name).Scan(&lastRun, &count)
 		var nextRun string
 		if lastRun != "" {
-			t, err := time.ParseInLocation("2006-01-02 15:04:05", lastRun, time.UTC)
+			// Fix #8c (AUDIT-146): SQLite-UTC column on the DB side compared
+			// to a UTC `time.Now().UTC()` on the Go side — apples-to-apples.
+			// The prior code used raw `time.Now()` (local) against a
+			// ParseInLocation-UTC'd value; it worked by coincidence because
+			// time.Time values carry their own Location, but was fragile to
+			// any future refactor of the parse.
+			t, err := store.ParseSQLiteTime(lastRun)
 			if err == nil {
 				next := t.Add(cooldown)
-				if time.Now().Before(next) {
-					nextRun = fmt.Sprintf("in %v", next.Sub(time.Now()).Round(time.Minute))
+				now := time.Now().UTC()
+				if now.Before(next) {
+					nextRun = fmt.Sprintf("in %v", next.Sub(now).Round(time.Minute))
 				} else {
 					nextRun = "overdue"
 				}

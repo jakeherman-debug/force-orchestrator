@@ -137,9 +137,23 @@ func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logge
 			// classifyAttemptsCap and flag for human review when exceeded.
 			attempts := store.IncrementClassifyAttempts(db, c.ID)
 			if attempts >= classifyAttemptsCap {
-				logger.Printf("PRReviewTriage: comment row %d classifier failed %d times (cap=%d) — marking for human review",
+				logger.Printf("PRReviewTriage: comment row %d classifier failed %d times (cap=%d) — marking for human review + escalating",
 					c.ID, attempts, classifyAttemptsCap)
 				store.MarkClassifyUnrecoverable(db, c.ID, classifyErr.Error())
+				// Fix #8c (AUDIT-143): after the bounded retry is exhausted,
+				// escalate via CreateEscalation so the operator sees a row on
+				// the dashboard instead of only a silent 'human' flag. The
+				// parent PRReviewTriage bounty takes the escalation target —
+				// there is no separate BountyBoard row per PRReviewComment.
+				msg := fmt.Sprintf("PR review classifier exceeded %d attempts on comment #%d (github id %d, author %s): %v",
+					classifyAttemptsCap, c.ID, c.GitHubCommentID, c.Author, classifyErr)
+				if _, err := CreateEscalation(db, bounty.ID, store.SeverityMedium, msg); err != nil {
+					logger.Printf("PRReviewTriage: CreateEscalation for comment row %d failed: %v — falling back to operator mail",
+						c.ID, err)
+					store.SendMail(db, "diplomat", "operator",
+						fmt.Sprintf("PR review classifier exhausted retries on comment #%d", c.ID),
+						msg, bounty.ID, store.MailTypeAlert)
+				}
 				continue
 			}
 			logger.Printf("PRReviewTriage: comment row %d classify failed: %v — leaving unclassified for retry (%d/%d)",

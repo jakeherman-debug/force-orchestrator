@@ -99,8 +99,12 @@ func TestRunCommandCenter_WithEscalations(t *testing.T) {
 	// Seed an open escalation.
 	taskID := store.AddBounty(db, 0, "CodeEdit", "escalated task")
 	db.Exec(`UPDATE BountyBoard SET status = 'Escalated' WHERE id = ?`, taskID)
-	db.Exec(`INSERT INTO Escalations (task_id, severity, reason, status, created_at)
-		VALUES (?, 'medium', 'test escalation', 'open', datetime('now'))`, taskID)
+	// Fix #8c (AUDIT-082): column is `message`, not `reason`. The prior
+	// INSERT failed silently (unchecked db.Exec return); the test was
+	// asserting only the absence of panic against an empty Escalations
+	// table.
+	db.Exec(`INSERT INTO Escalations (task_id, severity, message, status, created_at)
+		VALUES (?, 'medium', 'test escalation', 'Open', datetime('now'))`, taskID)
 
 	panicked := make(chan any, 1)
 	go func() {

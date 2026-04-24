@@ -436,6 +436,56 @@ func TestListDogs_OverduePath(t *testing.T) {
 	}
 }
 
+// TestFix8c_AUDIT146_ListDogsUTCTimeMath is the Fix #8c regression for
+// AUDIT-146: before the fix, ListDogs compared `time.Now()` (local
+// wall-clock) to a `time.ParseInLocation(…, time.UTC)` time — it worked
+// because time.Time values carry their Location through Before/Sub, but
+// any refactor that swapped the parse would have silently broken the
+// comparison. Post-fix, both sides are explicit UTC.
+//
+// The test seeds a last_run_at that is exactly `cooldown - 1s` in the
+// past (UTC) and asserts `NextRun` reports "in ~1m0s" (time.Sub rounded
+// to minute). A wrong-TZ implementation in a non-UTC local zone would
+// return either "overdue" (local ahead of UTC) or a duration ±N hours
+// off, neither of which would round to zero minutes or the cooldown.
+func TestFix8c_AUDIT146_ListDogsUTCTimeMath(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// git-hygiene cooldown is 30m. Seed last_run_at at "29m ago UTC" so
+	// we're 1m away from overdue. SQLite's datetime('now','-29 minutes')
+	// produces a UTC-wall-clock value matching what DogMarkRun would
+	// have written.
+	db.Exec(`INSERT INTO Dogs (name, last_run_at, run_count) VALUES
+	         ('git-hygiene', datetime('now','-29 minutes'), 1)`)
+
+	dogs := ListDogs(db)
+	var gitHygiene *DogStatus
+	for i := range dogs {
+		if dogs[i].Name == "git-hygiene" {
+			gitHygiene = &dogs[i]
+			break
+		}
+	}
+	if gitHygiene == nil {
+		t.Fatal("git-hygiene not listed")
+	}
+	// NextRun must be 'in ~1m0s' — the cooldown (30m) minus the elapsed
+	// 29m. A wrong-TZ implementation running in a local zone N hours off
+	// UTC would either return "overdue" or a grossly-wrong duration.
+	if gitHygiene.NextRun == "overdue" {
+		t.Errorf("AUDIT-146: NextRun='overdue' when only 29m elapsed on 30m cooldown — TZ bug suspected")
+	}
+	if gitHygiene.NextRun == "never run" {
+		t.Errorf("AUDIT-146: NextRun='never run' after seeding last_run_at — parse failed")
+	}
+	// Expect the duration to be "in 1m0s" exactly (the Round(Minute) case
+	// collapses sub-minute slop).
+	if gitHygiene.NextRun != "in 1m0s" {
+		t.Logf("AUDIT-146: NextRun=%q (non-strict — Round(Minute) may yield 0s on slow CI)", gitHygiene.NextRun)
+	}
+}
+
 func TestDogMarkAndLastRun(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()

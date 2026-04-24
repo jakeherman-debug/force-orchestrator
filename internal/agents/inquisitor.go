@@ -204,7 +204,12 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 		}
 		worktreePath := igit.ResolveWorktreeDir(db, t.branchName, repoPath, t.id, BranchAgentName)
 
-		lockedAtTime, parseErr := time.Parse("2006-01-02 15:04:05", strings.TrimSpace(t.lockedAt))
+		// Fix #8c (AUDIT-147): route SQLite-shaped parsing through
+		// store.ParseSQLiteTime so the UTC assumption is spelled out at the
+		// call site (the prior raw time.Parse returned UTC by stdlib default
+		// but coupled every caller to that implicit contract). Any future
+		// caller that wants a comparable "now" should use store.NowSQLite().
+		lockedAtTime, parseErr := store.ParseSQLiteTime(strings.TrimSpace(t.lockedAt))
 		if parseErr != nil {
 			continue
 		}

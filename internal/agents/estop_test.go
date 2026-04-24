@@ -135,6 +135,42 @@ func TestRateLimitBackoff_ExponentialGrowth(t *testing.T) {
 	}
 }
 
+// TestRateLimitBackoff_NoOverflowOnCorruptedCount is the Fix #8c (AUDIT-148)
+// regression. A corrupted persisted count (e.g. read from a truncated
+// SystemConfig row) was previously doubled in a loop BEFORE the cap check,
+// overflowing int64 nanoseconds to a negative duration. The negative value
+// failed the `if d > 10*time.Minute` guard and was returned to the caller,
+// who then `time.Sleep(d)`'d for zero nanoseconds and spun the retry loop.
+//
+// Post-fix the count is clamped to rateLimitBackoffMaxShifts pre-loop so no
+// count value (including pathological ones) can produce a non-positive
+// duration.
+func TestRateLimitBackoff_NoOverflowOnCorruptedCount(t *testing.T) {
+	for count := 0; count <= 100; count++ {
+		got := RateLimitBackoff(count)
+		if got <= 0 {
+			t.Errorf("RateLimitBackoff(%d) = %v; must always be > 0", count, got)
+		}
+		if got > 10*time.Minute {
+			t.Errorf("RateLimitBackoff(%d) = %v; must be ≤ 10m cap", count, got)
+		}
+	}
+	// Negative-count corruption: equivalent to count=0 under the fix.
+	for count := -10; count < 0; count++ {
+		got := RateLimitBackoff(count)
+		if got != 60*time.Second {
+			t.Errorf("RateLimitBackoff(%d) = %v; want 60s (clamp-negative-to-zero)", count, got)
+		}
+	}
+	// Pathological extremes that would have overflowed before the fix.
+	for _, count := range []int{62, 63, 1000, 1 << 30} {
+		got := RateLimitBackoff(count)
+		if got != 10*time.Minute {
+			t.Errorf("RateLimitBackoff(%d) = %v; want 10m cap (post-clamp)", count, got)
+		}
+	}
+}
+
 // ── IsThrottledByBatchSize ────────────────────────────────────────────────────
 // Disabled and under-limit cases covered in holocron_test.go.
 // This test covers the case where recent claims exceed the limit.

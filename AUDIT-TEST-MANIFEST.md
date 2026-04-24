@@ -163,7 +163,7 @@ These are Medium findings where the pattern test in the table above structurally
 - **P10 (shell injection) covers:** AUDIT-098, -099, -140, -153, -154 — Closed by: Fix #9 (`fix/ref-path-validators`). AUDIT-099 (.git/info/attributes atomic rewrite) still needs a signal handler; kept open for Fix #10.
 - **P12 (prompt injection) covers:** AUDIT-139, -141, -142, -143 (also time), -144, -145
 - **Concurrency batch covers:** AUDIT-092, -093, -096, -097
-- **Schema+time batch covers:** AUDIT-077, -078, -080, -082, -143, -146, -147, -148
+- **Schema+time batch covers:** AUDIT-077, -078, -080, -082, -143, -146, -147, -148 — *Closed by: Fix #8c (Campaign 4)*. AUDIT-077 gated on `columnExists`; AUDIT-078 backfills empty-string rows; AUDIT-080 schema.sql drift ratcheted by TestSchemaParity; AUDIT-082 column renamed; AUDIT-143 CreateEscalation after cap; AUDIT-146/147 routed through `store.NowSQLite`/`store.ParseSQLiteTime`; AUDIT-148 `count` clamped pre-loop to `rateLimitBackoffMaxShifts` (10).
 - **Lifecycle batch covers:** AUDIT-158, -164, -165
 
 ## Low findings (4 of 4 pattern-covered)
