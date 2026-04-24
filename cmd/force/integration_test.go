@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func TestRunCommandCenter_ConvoyDisplay_NoDeadlock(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		captureOutput(func() { RunCommandCenter(db) })
+		runCommandCenterTo(db, io.Discard)
 	}()
 
 	select {
@@ -79,7 +80,7 @@ func TestRunCommandCenter_AllStatusCategories(t *testing.T) {
 			}
 			close(done)
 		}()
-		captureOutput(func() { RunCommandCenter(db) })
+		runCommandCenterTo(db, io.Discard)
 	}()
 
 	select {
@@ -113,7 +114,7 @@ func TestRunCommandCenter_WithEscalations(t *testing.T) {
 				panicked <- r
 			}
 		}()
-		captureOutput(func() { RunCommandCenter(db) })
+		runCommandCenterTo(db, io.Discard)
 	}()
 
 	select {

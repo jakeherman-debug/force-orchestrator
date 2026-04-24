@@ -298,7 +298,6 @@ func TestAUDIT_schema_and_time(t *testing.T) {
 	// Astromech claim loop (SpawnAstromech, ~lines 244-266) does not consult
 	// Repositories.quarantined_at. Grep the file.
 	t.Run("TestAUDIT_130_astromech_claim_ignores_quarantine", func(t *testing.T) {
-		t.Skip("AUDIT-130: remove when astromech claim loop checks quarantined_at (Fix #8)")
 		// Without skip, fails with: AUDIT-130: astromech.go SpawnAstromech claim
 		// loop never consults Repositories.quarantined_at after ClaimBounty.
 		// Enforcement lives in openSubPRForApprovedTask (post-Claude), so a
@@ -337,7 +336,6 @@ func TestAUDIT_schema_and_time(t *testing.T) {
 	// ParseInLocation. SQLite `datetime('now')` output is "YYYY-MM-DD HH:MM:SS"
 	// with no TZ — UnmarshalText always fails on it.
 	t.Run("TestAUDIT_131_dog_cooldown_tz_parse", func(t *testing.T) {
-		t.Skip("AUDIT-131: remove when TZ parse centralized through store.NowSQLite (Fix #8)")
 		// Without skip, fails with: AUDIT-131: RunDogs (dogs.go:80-88) keeps a
 		// UnmarshalText branch that ALWAYS fails on SQLite's `datetime('now')`
 		// output ("YYYY-MM-DD HH:MM:SS" has no TZ; UnmarshalText needs RFC3339).
@@ -372,7 +370,6 @@ func TestAUDIT_schema_and_time(t *testing.T) {
 	// handleSubPRPoll returns on parseErr; timeSinceCreatedAt returns 0. Both
 	// mean malformed data goes unseen.
 	t.Run("TestAUDIT_132_askbranchpr_created_at_parse_swallow", func(t *testing.T) {
-		t.Skip("AUDIT-132: remove when handleSubPRPoll escalates after parseErr (Fix #8)")
 		// Without skip, fails with: AUDIT-132: pr_flow.go swallows time.Parse
 		// errors on AskBranchPRs.created_at. handleSubPRPoll silently returns on
 		// parseErr; timeSinceCreatedAt returns 0 on err. Malformed timestamps →

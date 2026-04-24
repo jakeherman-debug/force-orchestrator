@@ -872,14 +872,23 @@ func TestEscalateSubPR_IsAtomic(t *testing.T) {
 		t.Errorf("task status should be Escalated, got %q", after.Status)
 	}
 
-	// Re-running must NOT double-insert escalations (PR is now Closed so the
-	// dog won't call escalateSubPR again, but guard the function itself too).
-	_ = escalateSubPR(db, *pr, store.SeverityMedium, "test escalation")
-	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, taskID).Scan(&escCount)
-	if escCount != 2 {
-		// Second call inserts a second escalation, which is fine — the dog gate
-		// (PR state=Closed filtered from ListOpenAskBranchPRs) prevents re-entry.
-		// We just confirm the tx itself works correctly.
+	// AUDIT-137 (Fix #8d): re-running escalateSubPR on the same PR must
+	// NOT produce a second Open escalation. The Fix #3 partial UNIQUE
+	// idx_escalations_open_task ON Escalations(task_id) WHERE status='Open'
+	// causes the second INSERT to CONFLICT; escalateSubPR returns an error
+	// and the tx rolls back. Callers treat the error as "already
+	// escalated" idempotently. This is the contract — repeated dog ticks
+	// cannot pile up Open escalations for the same task.
+	secondErr := escalateSubPR(db, *pr, store.SeverityMedium, "test escalation")
+	if secondErr == nil {
+		t.Error("AUDIT-137: expected escalateSubPR re-run to error on the partial-UNIQUE conflict; got nil")
+	}
+	var escCountAfter int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, taskID).Scan(&escCountAfter); err != nil {
+		t.Fatalf("post-re-run escalation count query: %v", err)
+	}
+	if escCountAfter != 1 {
+		t.Errorf("AUDIT-137: expected exactly 1 Escalation row after re-run (Fix #3 partial UNIQUE collapse); got %d", escCountAfter)
 	}
 }
 

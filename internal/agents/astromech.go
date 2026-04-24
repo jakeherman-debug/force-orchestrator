@@ -355,6 +355,24 @@ func SpawnAstromech(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
+		// AUDIT-130 (Fix #8d): check Repositories.quarantined_at before
+		// spending a Claude session. Pre-fix, enforcement lived only in
+		// openSubPRForApprovedTask — so a quarantined repo burned a full
+		// astromech session before the PR step rejected. Post-fix, we
+		// requeue Pending with an error_log and skip to the next claim.
+		if bounty.TargetRepo != "" {
+			if repo := store.GetRepo(db, bounty.TargetRepo); repo != nil && repo.QuarantinedAt != "" {
+				logger.Printf("Task %d: repo %s is quarantined (%s) — requeuing Pending without Claude session",
+					bounty.ID, bounty.TargetRepo, repo.QuarantineReason)
+				if _, err := db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', locked_at = '',
+					error_log = 'Astromech: repo quarantined (' || ? || ') — requeued without Claude session'
+					WHERE id = ?`, repo.QuarantineReason, bounty.ID); err != nil {
+					logger.Printf("Task %d: quarantine-requeue UPDATE failed: %v — stale-lock detector will recover", bounty.ID, err)
+				}
+				continue
+			}
+		}
+
 		// Restore persisted rate-limit hit count from DB on first claim by this agent
 		if _, seen := rateLimitRetries.Load(name); !seen {
 			rateLimitRetries.Store(name, claude.LoadRateLimitHits(db, name))

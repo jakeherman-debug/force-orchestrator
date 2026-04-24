@@ -160,10 +160,24 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 
 	case "SEQUENCE":
 		if len(ruling.SequenceAfterConvoyIDs) == 0 {
-			logger.Printf("Feature #%d: SEQUENCE with no convoy IDs — auto-approving", feature.ID)
-			if err := approveProposal(db, feature, tasks, ruling, logger); err != nil {
-				logger.Printf("Feature #%d: approveProposal reported error (%v) — stale-lock detector will recover", feature.ID, err)
+			// Fix #8d (Track H): fail CLOSED on empty required subfield
+			// instead of silently re-routing to APPROVE. Pre-fix, a LLM
+			// SEQUENCE ruling with a missing sequence_after_convoy_ids
+			// array dropped into the auto-approve fall-through — the
+			// sequencing intent was lost and the convoy landed wired as
+			// a top-level feature. Post-fix, the operator sees the
+			// [CHANCELLOR FAIL-CLOSED] mail and can correct the ruling
+			// manually.
+			msg := fmt.Sprintf("Chancellor returned SEQUENCE with empty sequence_after_convoy_ids — failing closed for operator review")
+			logger.Printf("Feature #%d: %s", feature.ID, msg)
+			if failErr := store.FailBounty(db, feature.ID, msg); failErr != nil {
+				logger.Printf("Feature #%d: FailBounty after SEQUENCE empty-subfield failed (%v); stale-lock detector will recover", feature.ID, failErr)
 			}
+			store.SendMail(db, "Chancellor", "operator",
+				fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — SEQUENCE with empty sequence_after_convoy_ids", feature.ID),
+				fmt.Sprintf("Feature #%d: Chancellor's LLM returned action=SEQUENCE but the sequence_after_convoy_ids array was empty. This is a structural error — we cannot sequence after no-op. The feature has been marked Failed for operator review.\n\nReason: %s\n\nFeature payload:\n%s",
+					feature.ID, ruling.Reason, util.TruncateStr(feature.Payload, 500)),
+				feature.ID, store.MailTypeAlert)
 			return
 		}
 		logger.Printf("Feature #%d: SEQUENCE after convoy(s) %v — %s", feature.ID, ruling.SequenceAfterConvoyIDs, ruling.Reason)
@@ -177,10 +191,20 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 
 	case "MERGE":
 		if ruling.MergeWithFeatureID <= 0 {
-			logger.Printf("Feature #%d: MERGE with no target feature_id — auto-approving", feature.ID)
-			if err := approveProposal(db, feature, tasks, ruling, logger); err != nil {
-				logger.Printf("Feature #%d: approveProposal reported error (%v) — stale-lock detector will recover", feature.ID, err)
+			// Fix #8d (Track H): fail CLOSED on empty required subfield.
+			// Pre-fix, MERGE with no target auto-approved, losing the
+			// merge intent entirely. Post-fix, the operator is alerted
+			// and the feature sits Failed until they decide.
+			msg := fmt.Sprintf("Chancellor returned MERGE with empty merge_with_feature_id — failing closed for operator review")
+			logger.Printf("Feature #%d: %s", feature.ID, msg)
+			if failErr := store.FailBounty(db, feature.ID, msg); failErr != nil {
+				logger.Printf("Feature #%d: FailBounty after MERGE empty-subfield failed (%v); stale-lock detector will recover", feature.ID, failErr)
 			}
+			store.SendMail(db, "Chancellor", "operator",
+				fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — MERGE with empty merge_with_feature_id", feature.ID),
+				fmt.Sprintf("Feature #%d: Chancellor's LLM returned action=MERGE but the merge_with_feature_id field was <= 0. This is a structural error — we cannot merge into a nonexistent target. The feature has been marked Failed for operator review.\n\nReason: %s\n\nFeature payload:\n%s",
+					feature.ID, ruling.Reason, util.TruncateStr(feature.Payload, 500)),
+				feature.ID, store.MailTypeAlert)
 			return
 		}
 		logger.Printf("Feature #%d: MERGE with Feature #%d — %s", feature.ID, ruling.MergeWithFeatureID, ruling.Reason)

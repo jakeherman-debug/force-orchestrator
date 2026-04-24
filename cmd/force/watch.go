@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -30,21 +31,36 @@ func payloadSummary(payload string, maxLen int) string {
 	return truncate(strings.ReplaceAll(s, "\n", " "), maxLen)
 }
 
+// RunCommandCenter is the terminal-based fleet dashboard. Writes ANSI
+// escape codes + status summaries to stdout in an infinite loop. Called
+// by `force watch`.
+//
+// AUDIT G4 (Fix #8d): delegates to runCommandCenterTo so tests can pass
+// an isolated io.Writer per call (bytes.Buffer, io.Discard) instead of
+// racing on the shared os.Stdout global. The production CLI still uses
+// os.Stdout directly.
 func RunCommandCenter(db *sql.DB) {
-	fmt.Print("\033[?25l")
-	defer fmt.Print("\033[?25h")
+	runCommandCenterTo(db, os.Stdout)
+}
+
+// runCommandCenterTo is the io.Writer-parameterised body. Tests call
+// this with io.Discard or a bytes.Buffer so there's no shared-global
+// race with parallel test goroutines.
+func runCommandCenterTo(db *sql.DB, out io.Writer) {
+	fmt.Fprint(out, "\033[?25l")
+	defer fmt.Fprint(out, "\033[?25h")
 
 	for {
-		fmt.Print("\033[H\033[2J")
-		fmt.Println("=========================================================================================")
-		fmt.Println("                     GALACTIC FLEET COMMAND CENTER — ORDER 66 MONITORING               ")
-		fmt.Println("=========================================================================================")
+		fmt.Fprint(out, "\033[H\033[2J")
+		fmt.Fprintln(out, "=========================================================================================")
+		fmt.Fprintln(out, "                     GALACTIC FLEET COMMAND CENTER — ORDER 66 MONITORING               ")
+		fmt.Fprintln(out, "=========================================================================================")
 
 		// Show e-stop status if active
 		if agents.IsEstopped(db) {
-			fmt.Println("  *** E-STOP ACTIVE — all agents halted. Run: force resume ***")
+			fmt.Fprintln(out, "  *** E-STOP ACTIVE — all agents halted. Run: force resume ***")
 		}
-		fmt.Println()
+		fmt.Fprintln(out)
 
 		// Show all non-completed tasks plus the 10 most recent completed ones
 		rows, err := db.Query(`
@@ -63,7 +79,7 @@ func RunCommandCenter(db *sql.DB) {
 			      FROM BountyBoard WHERE status = 'Completed' ORDER BY id DESC LIMIT 10)
 			ORDER BY id ASC`)
 		if err != nil {
-			fmt.Printf("  DATABASE ERROR: %v\n", err)
+			fmt.Fprintf(out, "  DATABASE ERROR: %v\n", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
@@ -128,49 +144,49 @@ func RunCommandCenter(db *sql.DB) {
 		}
 		rows.Close()
 
-		fmt.Println("--- PENDING & BLOCKED ---")
+		fmt.Fprintln(out, "--- PENDING & BLOCKED ---")
 		for _, p := range pending {
-			fmt.Println(p)
+			fmt.Fprintln(out, p)
 		}
 		if len(planned) > 0 {
-			fmt.Println("\n--- PLANNED (awaiting convoy approve) ---")
+			fmt.Fprintln(out, "\n--- PLANNED (awaiting convoy approve) ---")
 			for _, p := range planned {
-				fmt.Println(p)
+				fmt.Fprintln(out, p)
 			}
 		}
-		fmt.Println("\n--- ACTIVE OPERATIONS ---")
+		fmt.Fprintln(out, "\n--- ACTIVE OPERATIONS ---")
 		for _, a := range active {
-			fmt.Println(a)
+			fmt.Fprintln(out, a)
 		}
 		if len(chancellor) > 0 {
-			fmt.Println("\n--- CHANCELLOR REVIEW ---")
+			fmt.Fprintln(out, "\n--- CHANCELLOR REVIEW ---")
 			for _, c := range chancellor {
-				fmt.Println(c)
+				fmt.Fprintln(out, c)
 			}
 		}
 		if len(coordinating) > 0 {
-			fmt.Println("\n--- CAPTAIN REVIEW ---")
+			fmt.Fprintln(out, "\n--- CAPTAIN REVIEW ---")
 			for _, c := range coordinating {
-				fmt.Println(c)
+				fmt.Fprintln(out, c)
 			}
 		}
-		fmt.Println("\n--- JEDI COUNCIL ---")
+		fmt.Fprintln(out, "\n--- JEDI COUNCIL ---")
 		for _, r := range reviewing {
-			fmt.Println(r)
+			fmt.Fprintln(out, r)
 		}
-		fmt.Println("\n--- COMPLETED ---")
+		fmt.Fprintln(out, "\n--- COMPLETED ---")
 		for _, c := range completed {
-			fmt.Println(c)
+			fmt.Fprintln(out, c)
 		}
-		fmt.Println("\n--- FAILED ---")
+		fmt.Fprintln(out, "\n--- FAILED ---")
 		for _, f := range failed {
-			fmt.Println(f)
+			fmt.Fprintln(out, f)
 		}
 
 		if len(escalated) > 0 {
-			fmt.Println("\n--- ESCALATED (awaiting operator) ---")
+			fmt.Fprintln(out, "\n--- ESCALATED (awaiting operator) ---")
 			for _, e := range escalated {
-				fmt.Println(e)
+				fmt.Fprintln(out, e)
 			}
 		}
 
@@ -179,11 +195,11 @@ func RunCommandCenter(db *sql.DB) {
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open'`).Scan(&openEscalations)
 		db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE status = 'Open' AND severity = 'HIGH'`).Scan(&highEscalations)
 		if openEscalations > 0 {
-			fmt.Printf("\n--- ESCALATIONS (%d open", openEscalations)
+			fmt.Fprintf(out, "\n--- ESCALATIONS (%d open", openEscalations)
 			if highEscalations > 0 {
-				fmt.Printf(", %d HIGH severity", highEscalations)
+				fmt.Fprintf(out, ", %d HIGH severity", highEscalations)
 			}
-			fmt.Println(") ---")
+			fmt.Fprintln(out, ") ---")
 			escRows, escErr := db.Query(`SELECT id, task_id, severity, message FROM Escalations WHERE status = 'Open' ORDER BY severity DESC, created_at ASC LIMIT 5`)
 			if escErr == nil {
 				for escRows.Next() {
@@ -193,7 +209,7 @@ func RunCommandCenter(db *sql.DB) {
 						fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
 						continue
 					}
-					fmt.Printf(" [ESC-%02d] task %-3d [%s] %s\n", id, taskID, sev, truncate(msg, 60))
+					fmt.Fprintf(out, " [ESC-%02d] task %-3d [%s] %s\n", id, taskID, sev, truncate(msg, 60))
 				}
 				escRows.Close()
 			}
@@ -217,7 +233,7 @@ func RunCommandCenter(db *sql.DB) {
 			}
 			convoyRows.Close()
 			if len(convoys) > 0 {
-				fmt.Println("\n--- ACTIVE CONVOYS ---")
+				fmt.Fprintln(out, "\n--- ACTIVE CONVOYS ---")
 				for _, c := range convoys {
 					completed, total := store.ConvoyProgress(db, c.id)
 					pct := 0
@@ -225,13 +241,13 @@ func RunCommandCenter(db *sql.DB) {
 						pct = completed * 100 / total
 					}
 					bar := strings.Repeat("#", pct/5) + strings.Repeat(".", 20-pct/5)
-					fmt.Printf(" [%d] [%s] %d%% %s\n", c.id, bar, pct, truncate(c.name, 40))
+					fmt.Fprintf(out, " [%d] [%s] %d%% %s\n", c.id, bar, pct, truncate(c.name, 40))
 				}
 			}
 		}
 
-		fmt.Println("\n=========================================================================================")
-		fmt.Printf("Last updated: %-30s  Press Ctrl+C to exit\n", time.Now().Format("2006-01-02 15:04:05"))
+		fmt.Fprintln(out, "\n=========================================================================================")
+		fmt.Fprintf(out, "Last updated: %-30s  Press Ctrl+C to exit\n", time.Now().Format("2006-01-02 15:04:05"))
 		time.Sleep(2 * time.Second)
 	}
 }

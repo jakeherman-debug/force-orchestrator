@@ -195,8 +195,6 @@ func TestAuditTestQualityMetaFindings(t *testing.T) {
 
 	// ── AUDIT-137 — TestEscalateSubPR second-call block has no assertion ──
 	t.Run("AUDIT_137_SecondCallBlockLacksAssertion", func(t *testing.T) {
-		t.Skip("AUDIT-137: remove when TestEscalateSubPR_IsAtomic asserts escCount==1 (Fix #8)")
-		// Without skip, fails with: audit_test_quality_test.go:278: AUDIT-137: TestEscalateSubPR_IsAtomic second-call block without assertion still present
 		path := filepath.Join(agentsDir, "pr_flow_test.go")
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)

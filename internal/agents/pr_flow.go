@@ -3,6 +3,7 @@ package agents
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -471,9 +472,35 @@ func handleSubPRPoll(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger in
 	case gh.ChecksPending:
 		// mergeStateStatus was UNKNOWN so we can't use it. Fall back to the
 		// age-based heuristic: 10m with zero checks → probably no CI.
+		//
+		// AUDIT-132 (Fix #8d): malformed pr.CreatedAt used to make this
+		// function silently `return`, abandoning the PR forever. Post-fix
+		// we log the parse error and fall back to the task's
+		// BountyBoard.created_at; if that also fails we escalate via
+		// CreateEscalation + operator mail so the PR isn't stuck
+		// invisibly.
 		createdAt, parseErr := time.Parse("2006-01-02 15:04:05", pr.CreatedAt)
 		if parseErr != nil {
-			return
+			logger.Printf("sub-pr-ci-watch: PR #%d created_at parse failed (%v) — falling back to task created_at", pr.PRNumber, parseErr)
+			var taskCreated string
+			if err := db.QueryRow(`SELECT IFNULL(created_at, '') FROM BountyBoard WHERE id = ?`, pr.TaskID).Scan(&taskCreated); err != nil {
+				logger.Printf("sub-pr-ci-watch: task #%d created_at lookup failed: %v — escalating PR", pr.TaskID, err)
+				if _, escErr := CreateEscalation(db, pr.TaskID, store.SeverityMedium,
+					fmt.Sprintf("sub-PR #%d has malformed created_at and task row lookup failed — age-based heuristic cannot run", pr.PRNumber)); escErr != nil {
+					logger.Printf("sub-pr-ci-watch: escalation insert failed: %v", escErr)
+				}
+				return
+			}
+			var fallbackErr error
+			createdAt, fallbackErr = time.Parse("2006-01-02 15:04:05", taskCreated)
+			if fallbackErr != nil {
+				logger.Printf("sub-pr-ci-watch: task #%d created_at also unparseable (%v) — escalating PR", pr.TaskID, fallbackErr)
+				if _, escErr := CreateEscalation(db, pr.TaskID, store.SeverityMedium,
+					fmt.Sprintf("sub-PR #%d and task created_at both unparseable (%v / %v) — no age-based heuristic available", pr.PRNumber, parseErr, fallbackErr)); escErr != nil {
+					logger.Printf("sub-pr-ci-watch: escalation insert failed: %v", escErr)
+				}
+				return
+			}
 		}
 		age := time.Since(createdAt)
 		if age > subPRCIStaleLimit {
@@ -782,13 +809,21 @@ func onSubPRStalled(db *sql.DB, ghc interface {
 		pr.PRNumber, newCount, subPRMaxStallRetriggers)
 }
 
-// timeSinceCreatedAt parses pr.CreatedAt (SQLite datetime format) and returns
-// the elapsed time since. Returns 0 on parse failure so callers treat the PR
-// as fresh rather than wrongly escalating.
+// timeSinceCreatedAt parses a SQLite datetime-formatted timestamp and returns
+// the elapsed time since. On parse failure it returns a VERY LARGE duration
+// (100 years) so callers' "too old" thresholds trip immediately — the PR
+// surfaces to the operator via the existing age-based escalation paths
+// rather than sitting invisibly as "brand-new forever".
+//
+// AUDIT-132 (Fix #8d): pre-fix this returned 0, which made every age-
+// gated escalation (ship-it-nag, stalled-reviews) treat a malformed
+// timestamp as "just created" and never fire. Post-fix the timestamp
+// trips the oldest-age bucket so the operator is alerted.
 func timeSinceCreatedAt(createdAt string) time.Duration {
 	t, err := time.Parse("2006-01-02 15:04:05", createdAt)
 	if err != nil {
-		return 0
+		log.Printf("timeSinceCreatedAt: unparseable created_at %q (%v) — returning large duration so age-gated escalations fire", createdAt, err)
+		return 100 * 365 * 24 * time.Hour
 	}
 	return time.Since(t)
 }

@@ -6,14 +6,38 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"force-orchestrator/internal/claude"
 )
 
+// captureOutputMu serializes the os.Stdout hot-swap in captureOutput so
+// sibling tests running in parallel cannot race on the shared global.
+// Fix #8d (Track G, TestRunCommandCenter_WithTasks race under -race): the
+// pre-fix testhelpers reassigned os.Stdout without a lock, so two
+// concurrent captureOutput calls could observe intermediate states or
+// leak each other's pipe writer. The mutex is test-infra only — no
+// production code uses it.
+//
+// captureOutput is for tests whose f() is expected to RETURN promptly.
+// For tests that leak a goroutine running forever (e.g. RunCommandCenter
+// which is a display loop that only exits on panic), use
+// runWithSilencedStdout instead — it redirects os.Stdout to a discarded
+// pipe exactly once for the whole test binary's lifetime, so the leaked
+// goroutine doesn't pollute subsequent test output AND doesn't hold the
+// captureOutput mutex forever.
+var captureOutputMu sync.Mutex
+
 // captureOutput captures everything written to os.Stdout during f().
+// Serialized via captureOutputMu so parallel tests don't race on the
+// global swap. f() must return; captureOutput is NOT safe for tests
+// that leak long-running goroutines.
 func captureOutput(f func()) string {
+	captureOutputMu.Lock()
+	defer captureOutputMu.Unlock()
+
 	r, w, err := os.Pipe()
 	if err != nil {
 		return ""
@@ -26,6 +50,33 @@ func captureOutput(f func()) string {
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
 	return buf.String()
+}
+
+// silenceStdoutOnce is the sync.Once that performs the one-shot
+// os.Stdout = devNullFile swap used by runWithSilencedStdout. After this
+// fires, every subsequent fmt.Print in the test binary disappears —
+// leaking goroutines from long-running tests cannot pollute sibling
+// test output, and no per-call lock is held.
+var (
+	silenceStdoutOnce sync.Once
+	originalStdout    *os.File
+)
+
+// runWithSilencedStdout is the captureOutput alternative for tests that
+// run a goroutine-leaking function (e.g. RunCommandCenter's display
+// loop). On first call it permanently redirects os.Stdout to /dev/null
+// for the remainder of the test binary's life; subsequent calls are
+// no-ops. There is no per-call lock, so a leaked goroutine writing to
+// stdout does not block any other test.
+func runWithSilencedStdout(f func()) {
+	silenceStdoutOnce.Do(func() {
+		originalStdout = os.Stdout
+		devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err == nil {
+			os.Stdout = devNull
+		}
+	})
+	f()
 }
 
 // initTestRepo creates a fresh git repo in a temp dir, commits an initial file,

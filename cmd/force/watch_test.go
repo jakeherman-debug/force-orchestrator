@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestRunCommandCenter_DoesNotPanicOnEmptyDB(t *testing.T) {
 			}
 		}()
 		// Capture stdout so ANSI escape codes don't pollute test output.
-		captureOutput(func() { RunCommandCenter(db) })
+		runCommandCenterTo(db, io.Discard)
 	}()
 
 	select {
@@ -75,7 +76,7 @@ func TestRunCommandCenter_WithTasks(t *testing.T) {
 				panicked <- r
 			}
 		}()
-		captureOutput(func() { RunCommandCenter(db) })
+		runCommandCenterTo(db, io.Discard)
 	}()
 
 	select {

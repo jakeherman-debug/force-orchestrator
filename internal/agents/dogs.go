@@ -101,16 +101,18 @@ func RunDogs(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 		cooldown := dogCooldowns[dogName]
 		last := store.DogLastRun(db, dogName)
 		if last != "" {
-			var lastT time.Time
-			if err := (&lastT).UnmarshalText([]byte(last)); err == nil {
-				if time.Since(lastT) < cooldown {
-					continue
-				}
-			} else {
-				t, err := time.ParseInLocation("2006-01-02 15:04:05", last, time.UTC)
-				if err == nil && time.Since(t) < cooldown {
-					continue
-				}
+			// AUDIT-131 (Fix #8d): parse directly with the known SQLite
+			// datetime shape ("YYYY-MM-DD HH:MM:SS", no TZ), in UTC. Pre-
+			// fix this chained off an RFC3339-binary-probe branch that
+			// always failed on the SQLite shape; post-fix we try the
+			// SQLite shape first and fall back to RFC3339 via time.Parse
+			// for legacy rows that happen to carry TZ-bearing timestamps
+			// (from older fleet versions).
+			if t, err := time.ParseInLocation("2006-01-02 15:04:05", last, time.UTC); err == nil && time.Since(t) < cooldown {
+				continue
+			}
+			if t, err := time.Parse(time.RFC3339, last); err == nil && time.Since(t) < cooldown {
+				continue
 			}
 		}
 		logger.Printf("Dog %s: running (cooldown %v)", dogName, cooldown)
