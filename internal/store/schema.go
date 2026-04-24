@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+// columnExists reports whether a given column exists on a given SQLite table.
+// Used by runMigrations to gate DDL statements that must not re-run on DBs
+// where the column has already been migrated away (e.g. DROP COLUMN after
+// the first startup). SQLite 3.35+ errors "no such column" on a second
+// DROP COLUMN; the error was previously swallowed by the unchecked db.Exec
+// return value (AUDIT-077). Using pragma_table_info is the cheapest check
+// that doesn't require a separate reflection round-trip.
+func columnExists(db *sql.DB, table, column string) bool {
+	var one int
+	err := db.QueryRow(
+		`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`,
+		table, column,
+	).Scan(&one)
+	return err == nil && one == 1
+}
+
 // createSchema creates all Holocron tables if they don't already exist.
 // Safe to call on every startup — all statements are idempotent.
 func createSchema(db *sql.DB) {
@@ -395,7 +411,13 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN task_timeout   INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN created_at      TEXT    DEFAULT ''`)
 	// Backfill existing rows that have no created_at so they don't get pruned immediately.
-	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now') WHERE created_at = ''`)
+	// Fix #8c (AUDIT-078): the ALTER above sets default '' which drifts from
+	// createSchema's DEFAULT (datetime('now')). A row inserted via the upgrade
+	// path before this backfill would have '' and be excluded from
+	// `WHERE created_at < datetime('now','-12 hours')` priority aging forever.
+	// Running the UPDATE on both the '' and NULL cases re-stamps them in one
+	// idempotent sweep (a second run matches zero rows).
+	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now') WHERE created_at = '' OR created_at IS NULL`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN idempotency_key TEXT    DEFAULT ''`)
 	// Fix #6 — Break the Medic-requeue infinite loop.
 	// medic_requeue_count caps the Astromech→Council→Medic→Astromech loop at
@@ -454,10 +476,16 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCaptainReview' WHERE status = 'AwaitingCoordinatorReview'`)
 	db.Exec(`UPDATE BountyBoard SET status = 'UnderCaptainReview'    WHERE status = 'UnderCoordinatorReview'`)
 
-	// Migrate blocked_by column → TaskDependencies table (no-op on fresh DBs)
-	db.Exec(`INSERT OR IGNORE INTO TaskDependencies (task_id, depends_on)
-		SELECT id, blocked_by FROM BountyBoard WHERE blocked_by > 0`)
-	db.Exec(`ALTER TABLE BountyBoard DROP COLUMN blocked_by`)
+	// Migrate blocked_by column → TaskDependencies table (no-op on fresh DBs).
+	// Fix #8c (AUDIT-077): gate the DROP on pragma_table_info so the second
+	// startup doesn't error with "no such column: blocked_by". The underlying
+	// db.Exec return value is unchecked here — without the gate, an error was
+	// swallowed silently on every subsequent startup.
+	if columnExists(db, "BountyBoard", "blocked_by") {
+		db.Exec(`INSERT OR IGNORE INTO TaskDependencies (task_id, depends_on)
+			SELECT id, blocked_by FROM BountyBoard WHERE blocked_by > 0`)
+		db.Exec(`ALTER TABLE BountyBoard DROP COLUMN blocked_by`)
+	}
 
 	// TaskNotes — operator notes injected into agent context at claim time.
 	// The ON DELETE CASCADE clause is required once PRAGMA foreign_keys=ON is

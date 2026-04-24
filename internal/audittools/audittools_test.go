@@ -69,17 +69,9 @@ var remainingAuditSkips = map[string]string{
 	"AUDIT-164": "Fix #8b lifecycle batch (low, pattern-covered)",
 	"AUDIT-165": "Fix #8b lifecycle batch (low, pattern-covered)",
 
-	// Schema+time batch (AUDIT-077, -078, -080, -082, -143, -146, -147, -148):
-	// each requires a DDL or time-handling migration separate from the
-	// Fix #4 hot-table index pass.
-	"AUDIT-077": "Fix #8c schema+time batch",
-	"AUDIT-078": "Fix #8c schema+time batch",
-	"AUDIT-080": "Fix #8c schema+time batch (stall_retrigger_count column defaulted)",
-	"AUDIT-082": "Fix #8c schema+time batch",
-	"AUDIT-143": "Fix #8c schema+time batch",
-	"AUDIT-146": "Fix #8c schema+time batch",
-	"AUDIT-147": "Fix #8c schema+time batch",
-	"AUDIT-148": "Fix #8c schema+time batch",
+	// Schema+time batch (AUDIT-077, -078, -080, -082, -143, -146, -147,
+	// -148) closed by Fix #8c (Campaign 4). Every skip removed; remainder
+	// is permanent regression coverage.
 
 	// Concurrency batch: the remaining races covered by Pattern P1/P7
 	// need Fix #8's UpdateBountyStatusFrom variant.

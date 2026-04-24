@@ -77,10 +77,34 @@ func InfraBackoff(count int) time.Duration {
 	return d
 }
 
+// rateLimitBackoffMaxShifts is the bound on how many times RateLimitBackoff
+// will double its base duration before the cap check. The sequence
+// 60s, 120s, 240s, 480s, 960s already blows past the 10-minute cap, so any
+// count above 4 would just clamp to 10 minutes — but the old implementation
+// performed the shift BEFORE the cap check, so a corrupted persisted count
+// of e.g. 62 overflowed int64 nanoseconds and wrapped to a negative duration,
+// making callers spin with near-zero sleep (AUDIT-148). Clamping pre-loop
+// bounds the shift regardless of what the counter says.
+const rateLimitBackoffMaxShifts = 10
+
 // RateLimitBackoff returns an exponential backoff for rate-limit errors:
 // 60s, 120s, 240s … capped at 10 minutes. Longer than infra backoff because
 // rate limits are external quota events, not transient infrastructure hiccups.
+//
+// Fix #8c (AUDIT-148): `count` is clamped to rateLimitBackoffMaxShifts
+// before the loop runs. Without the clamp, a corrupted count (e.g. 62)
+// overflowed int64 ns after the 63rd shift and produced a negative
+// duration; the `if d > 10*time.Minute` guard is false for negatives so
+// the negative value propagated to the caller, which `time.Sleep`'d for
+// zero nanoseconds and spun the retry loop. A negative count (another
+// corruption vector) short-circuits to the base 60s.
 func RateLimitBackoff(count int) time.Duration {
+	if count < 0 {
+		count = 0
+	}
+	if count > rateLimitBackoffMaxShifts {
+		count = rateLimitBackoffMaxShifts
+	}
 	d := 60 * time.Second
 	for i := 0; i < count; i++ {
 		d *= 2
