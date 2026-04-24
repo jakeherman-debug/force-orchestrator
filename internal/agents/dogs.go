@@ -249,7 +249,11 @@ func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error
 	// the old agent's worktree stays on the old branch until we clean it up here.
 	agentRows, agentErr := db.Query(`SELECT agent_name, repo, worktree_path FROM Agents`)
 	if agentErr != nil {
-		return nil // non-fatal — skip orphan cleanup this cycle
+		// AUDIT-091 (Fix #8d): propagate the query error to the caller so
+		// RunDogs routes it to the operator-mail path. Pre-fix a broken
+		// schema or locked DB was swallowed and the orphan-cleanup silently
+		// skipped with no operator signal.
+		return fmt.Errorf("dog git-hygiene: Agents query failed: %w", agentErr)
 	}
 	defer agentRows.Close()
 	type agentEntry struct{ name, repo, path string }
@@ -452,13 +456,23 @@ func dogStalledReviews(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 		  AND abp.state = 'Open'
 		  AND abp.created_at < datetime('now', '-12 hours')
 		ORDER BY abp.created_at ASC`)
-	if sErr == nil {
+	if sErr != nil {
+		logger.Printf("Dog stalled-reviews: sub-PR query failed: %v", sErr)
+	} else {
 		for subPRRows.Next() {
 			var id int64
 			var hours float64
-			if err := subPRRows.Scan(&id, &hours); err == nil {
-				tasks = append(tasks, stalledTask{id: id, status: "AwaitingSubPRCI", hoursWaiting: hours})
+			// AUDIT-090 (Fix #8d): log scan errors — pre-fix the err==nil
+			// path silently dropped rows, so a legitimate 12h+ AwaitingSubPRCI
+			// stall that happened to scan-fail never raised an alarm.
+			if err := subPRRows.Scan(&id, &hours); err != nil {
+				logger.Printf("Dog stalled-reviews: sub-PR scan failed for next row: %v", err)
+				continue
 			}
+			tasks = append(tasks, stalledTask{id: id, status: "AwaitingSubPRCI", hoursWaiting: hours})
+		}
+		if iterErr := subPRRows.Err(); iterErr != nil {
+			logger.Printf("Dog stalled-reviews: sub-PR iteration error: %v", iterErr)
 		}
 		subPRRows.Close()
 	}
@@ -569,7 +583,10 @@ func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) 
 	var convoys []convoy
 	for rows.Next() {
 		var c convoy
-		rows.Scan(&c.id, &c.name)
+		if err := rows.Scan(&c.id, &c.name); err != nil {
+			logger.Printf("dog convoy-reconcile: scan failed: %v", err)
+			continue
+		}
 		convoys = append(convoys, c)
 	}
 	rows.Close()

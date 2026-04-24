@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"log"
 )
 
 // ── Fleet mail ────────────────────────────────────────────────────────────────
@@ -44,7 +45,10 @@ func ListMail(db *sql.DB, toAgent string) []FleetMail {
 	for sqlRows.Next() {
 		var m FleetMail
 		var mt string
-		sqlRows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.ConsumedAt, &m.CreatedAt)
+		if err := sqlRows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.ConsumedAt, &m.CreatedAt); err != nil {
+			log.Printf("ListMail: scan failed: %v", err)
+			continue
+		}
 		m.MessageType = MailType(mt)
 		mails = append(mails, m)
 	}
@@ -107,7 +111,10 @@ func ReadInboxForAgent(db *sql.DB, agentName, role string, taskID int) []FleetMa
 	for rows.Next() {
 		var m FleetMail
 		var mt string
-		rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.ConsumedAt, &m.CreatedAt)
+		if err := rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body, &m.TaskID, &mt, &m.ReadAt, &m.ConsumedAt, &m.CreatedAt); err != nil {
+			log.Printf("ReadInboxForAgent: scan failed: %v", err)
+			continue
+		}
 		m.MessageType = MailType(mt)
 		mails = append(mails, m)
 	}

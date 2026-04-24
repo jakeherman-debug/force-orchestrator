@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -72,7 +73,10 @@ func RunCommandCenter(db *sql.DB) {
 		for rows.Next() {
 			var id, activeDep, retryCount int
 			var repo, status, payload, owner, errorLog, lockedAt string
-			rows.Scan(&id, &repo, &activeDep, &status, &payload, &owner, &errorLog, &retryCount, &lockedAt)
+			if err := rows.Scan(&id, &repo, &activeDep, &status, &payload, &owner, &errorLog, &retryCount, &lockedAt); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 
 			repoStr := truncate(repo, 15)
 			taskStr := payloadSummary(payload, 40)
@@ -185,7 +189,10 @@ func RunCommandCenter(db *sql.DB) {
 				for escRows.Next() {
 					var id, taskID int
 					var sev, msg string
-					escRows.Scan(&id, &taskID, &sev, &msg)
+					if err := escRows.Scan(&id, &taskID, &sev, &msg); err != nil {
+						fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+						continue
+					}
 					fmt.Printf(" [ESC-%02d] task %-3d [%s] %s\n", id, taskID, sev, truncate(msg, 60))
 				}
 				escRows.Close()
@@ -202,7 +209,10 @@ func RunCommandCenter(db *sql.DB) {
 			var convoys []convoyInfo
 			for convoyRows.Next() {
 				var c convoyInfo
-				convoyRows.Scan(&c.id, &c.name)
+				if err := convoyRows.Scan(&c.id, &c.name); err != nil {
+					fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+					continue
+				}
 				convoys = append(convoys, c)
 			}
 			convoyRows.Close()

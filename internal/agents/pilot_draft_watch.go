@@ -50,7 +50,10 @@ func dogDraftPRWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) err
 	var convoys []convoyRef
 	for rows.Next() {
 		var c convoyRef
-		rows.Scan(&c.id, &c.name)
+		if err := rows.Scan(&c.id, &c.name); err != nil {
+			logger.Printf("dogDraftPRWatch: scan failed: %v", err)
+			continue
+		}
 		convoys = append(convoys, c)
 	}
 	rows.Close()
@@ -224,7 +227,10 @@ func dogShipItNag(db *sql.DB, logger interface{ Printf(string, ...any) }) error 
 	var convoys []entry
 	for rows.Next() {
 		var e entry
-		rows.Scan(&e.id, &e.name)
+		if err := rows.Scan(&e.id, &e.name); err != nil {
+			logger.Printf("dogShipItNag: scan failed: %v", err)
+			continue
+		}
 		convoys = append(convoys, e)
 	}
 	rows.Close()

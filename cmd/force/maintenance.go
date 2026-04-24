@@ -25,7 +25,7 @@ func runCleanup(db *sql.DB) {
 	if err == nil {
 		for rows.Next() {
 			var repoPath string
-			rows.Scan(&repoPath)
+			if err := rows.Scan(&repoPath); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			if out, pruneErr := igit.RunCmd(repoPath, "worktree", "prune"); pruneErr != nil {
 				fmt.Printf("  worktree prune [%s]: ERROR %v\n", repoPath, pruneErr)
 			} else {
@@ -47,7 +47,7 @@ func runCleanup(db *sql.DB) {
 		var staleAgents []agentEntry
 		for agentRows.Next() {
 			var e agentEntry
-			agentRows.Scan(&e.agent, &e.repo, &e.path)
+			if err := agentRows.Scan(&e.agent, &e.repo, &e.path); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			if _, statErr := os.Stat(e.path); statErr != nil {
 				staleAgents = append(staleAgents, e)
 			}
@@ -126,7 +126,7 @@ func runDoctor(db *sql.DB, clean bool) {
 		for repoRows.Next() {
 			found = true
 			var name, path string
-			repoRows.Scan(&name, &path)
+			if err := repoRows.Scan(&name, &path); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			// Check dir exists
 			fi, statErr := os.Stat(path)
 			if statErr != nil {
@@ -311,7 +311,7 @@ func exportFleet(db *sql.DB, outFile string) error {
 	defer repoRows.Close()
 	for repoRows.Next() {
 		var r RepoExport
-		repoRows.Scan(&r.Name, &r.LocalPath, &r.Description)
+		if err := repoRows.Scan(&r.Name, &r.LocalPath, &r.Description); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 		export.Repositories = append(export.Repositories, r)
 	}
 	repoRows.Close()
@@ -327,8 +327,7 @@ func exportFleet(db *sql.DB, outFile string) error {
 	defer taskRows.Close()
 	for taskRows.Next() {
 		var t TaskExport
-		taskRows.Scan(&t.ID, &t.ParentID, &t.TargetRepo, &t.Type, &t.Status,
-			&t.Payload, &t.ErrorLog, &t.RetryCount, &t.InfraFailures, &t.ConvoyID, &t.Checkpoint, &t.BranchName)
+		if err := taskRows.Scan(&t.ID, &t.ParentID, &t.TargetRepo, &t.Type, &t.Status, &t.Payload, &t.ErrorLog, &t.RetryCount, &t.InfraFailures, &t.ConvoyID, &t.Checkpoint, &t.BranchName); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 		export.Tasks = append(export.Tasks, t)
 	}
 	taskRows.Close()
@@ -347,7 +346,7 @@ func exportFleet(db *sql.DB, outFile string) error {
 	if err == nil {
 		for memRows.Next() {
 			var m MemoryExport
-			memRows.Scan(&m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged, &m.TopicTags)
+			if err := memRows.Scan(&m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged, &m.TopicTags); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			export.Memories = append(export.Memories, m)
 		}
 		memRows.Close()
@@ -358,7 +357,7 @@ func exportFleet(db *sql.DB, outFile string) error {
 	if err == nil {
 		for escRows.Next() {
 			var e EscalationExport
-			escRows.Scan(&e.TaskID, &e.Severity, &e.Message, &e.Status)
+			if err := escRows.Scan(&e.TaskID, &e.Severity, &e.Message, &e.Status); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			export.Escalations = append(export.Escalations, e)
 		}
 		escRows.Close()
@@ -369,7 +368,7 @@ func exportFleet(db *sql.DB, outFile string) error {
 	if err == nil {
 		for auditRows.Next() {
 			var a AuditExport
-			auditRows.Scan(&a.Actor, &a.Action, &a.TaskID, &a.Detail, &a.CreatedAt)
+			if err := auditRows.Scan(&a.Actor, &a.Action, &a.TaskID, &a.Detail, &a.CreatedAt); err != nil { fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err); continue }
 			export.AuditLog = append(export.AuditLog, a)
 		}
 		auditRows.Close()
@@ -576,7 +575,10 @@ func purgeFilesystem(db *sql.DB) {
 		var repos []repo
 		for rows.Next() {
 			var r repo
-			rows.Scan(&r.name, &r.path)
+			if err := rows.Scan(&r.name, &r.path); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			repos = append(repos, r)
 		}
 		rows.Close()

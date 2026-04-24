@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -296,7 +297,10 @@ func summarizeConvoyTasks(db *sql.DB, convoyID int) string {
 	for rows.Next() {
 		var id int
 		var typ, status, payload string
-		rows.Scan(&id, &typ, &status, &payload)
+		if err := rows.Scan(&id, &typ, &status, &payload); err != nil {
+			log.Printf("summarizeConvoyTasks: scan failed: %v", err)
+			continue
+		}
 		fmt.Fprintf(&b, "  #%d %s [%s] — %s\n", id, typ, status, util.TruncateStr(payload, 160))
 	}
 	out := b.String()

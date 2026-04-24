@@ -182,117 +182,67 @@ func TestAUDIT_MiscSecurity(t *testing.T) {
 	})
 
 	// ── AUDIT-099 ────────────────────────────────────────────────────────
-	t.Run("AUDIT_099_attributes_no_atomic_rename", func(t *testing.T) {
-		t.Skip("AUDIT-099: remove when attributes rewrite uses atomic rename + signal handler (Fix #9)")
-		// Without skip, fails with: AUDIT-099: internal/git/askbranch.go rewrites
-		// .git/info/attributes in-place with os.WriteFile and uses a `defer` to
-		// restore it. A crash or SIGKILL between write and defer leaves the repo
-		// with globally-scoped `*.md merge=union` rules corrupting ALL future
-		// merges. Also: no SIGINT/SIGTERM handler to restore attributes.
+	// Post-fix contract (Fix #8d): MergeWithUnionStrategy writes
+	// .git/info/attributes atomically (write to tmp + os.Rename) and
+	// installs a SIGINT/SIGTERM handler that restores the original
+	// attributes on operator-initiated shutdown. Pre-fix, a crash or
+	// signal between the WriteFile and the deferred restore would
+	// leave the repo with globally-scoped `*.md merge=union` rules.
+	t.Run("AUDIT_099_attributes_atomic_rename_and_signal_handler", func(t *testing.T) {
 		src := mustReadFile(t, askBranchPath)
 
 		// Anchors — the write+restore pattern on .git/info/attributes.
 		if !strings.Contains(src, ".git") || !strings.Contains(src, "attributes") {
-			t.Fatalf("AUDIT-099 anchor lost: no .git/info/attributes "+
-				"references in %s", askBranchPath)
-		}
-		if !strings.Contains(src, "os.WriteFile(attrPath") {
-			t.Fatalf("AUDIT-099 anchor lost: attrPath WriteFile pattern "+
-				"not in %s", askBranchPath)
+			t.Fatalf("AUDIT-099 anchor lost: no .git/info/attributes references in %s", askBranchPath)
 		}
 
-		// (a) No atomic rename (`.tmp` + os.Rename) pattern. A real fix
-		//     would write to attrPath+".tmp" then os.Rename into place.
-		hasTmpWrite := regexp.MustCompile(`attrPath\s*\+\s*\"\.tmp\"`).MatchString(src) ||
-			strings.Contains(src, `".tmp"`) && strings.Contains(src, "os.Rename(")
+		// (a) Atomic rename: writes go to attrPath + ".tmp" then os.Rename.
+		hasTmpWrite := regexp.MustCompile(`attrPath\s*\+\s*"\.tmp"`).MatchString(src)
 		hasRename := strings.Contains(src, "os.Rename(")
-		if hasTmpWrite && hasRename {
-			t.Errorf("AUDIT-099 appears fixed in %s — atomic rename "+
-				"pattern detected. Update test to assert rename order.",
-				askBranchPath)
-		} else {
-			t.Errorf("AUDIT-099: %s rewrites .git/info/attributes "+
-				"in-place with os.WriteFile and uses a `defer` to "+
-				"restore it. A crash or SIGKILL between write and "+
-				"defer leaves the repo with globally-scoped "+
-				"`*.md merge=union` rules corrupting ALL future "+
-				"merges. Missing .tmp + os.Rename atomic swap.",
-				askBranchPath)
+		if !hasTmpWrite || !hasRename {
+			t.Errorf("AUDIT-099 REGRESSION: %s no longer writes attributes "+
+				"atomically (tmp + os.Rename). hasTmpWrite=%v hasRename=%v",
+				askBranchPath, hasTmpWrite, hasRename)
 		}
 
-		// (b) No signal handler for SIGINT/SIGTERM that restores the
-		//     original attributes content before exit.
-		hasSignalHandler := strings.Contains(src, "signal.Notify(") ||
-			strings.Contains(src, "syscall.SIGINT") ||
-			strings.Contains(src, "syscall.SIGTERM") ||
-			strings.Contains(src, "os.Interrupt")
-		if hasSignalHandler {
-			t.Errorf("AUDIT-099 partial-fix: signal handling now present "+
-				"in %s — verify it actually restores attributes on "+
-				"SIGINT/SIGTERM.", askBranchPath)
-		} else {
-			t.Errorf("AUDIT-099: %s has no SIGINT/SIGTERM handler to "+
-				"restore .git/info/attributes if the daemon is killed "+
-				"mid-union-merge. defer is not enough — signals "+
-				"bypass deferred functions on SIGKILL and race with "+
-				"the handler on SIGTERM.", askBranchPath)
+		// (b) SIGINT/SIGTERM handler restores attributes on signal.
+		hasSignalHandler := strings.Contains(src, "signal.Notify(") &&
+			(strings.Contains(src, "syscall.SIGINT") || strings.Contains(src, "syscall.SIGTERM"))
+		if !hasSignalHandler {
+			t.Errorf("AUDIT-099 REGRESSION: %s no longer installs a "+
+				"signal.Notify handler for SIGINT/SIGTERM that restores "+
+				"attributes on operator-initiated shutdown.", askBranchPath)
 		}
 	})
 
 	// ── AUDIT-100 ────────────────────────────────────────────────────────
-	t.Run("AUDIT_100_worktree_perms_too_loose", func(t *testing.T) {
-		t.Skip("AUDIT-100: remove when worktree dirs 0700 / task logs 0600 (Fix #9)")
-		// Without skip, fails with: AUDIT-100: internal/git/git.go creates
-		// .force-worktrees with mode 0755 (expected 0700); and
-		// internal/agents/astromech.go uses os.Create(taskLogPath) which defaults
-		// to 0644 (expected os.OpenFile(..., 0600)). Task logs contain Claude
-		// stdout including injected inbox mail and prior agent transcripts.
+	// Post-fix contract (Fix #8d): .force-worktrees base is 0700, and
+	// the per-task log file is chmod'd to 0600 after creation. Both
+	// contain Claude output (including injected inbox mail and prior
+	// transcripts) which must not be world-readable on multi-user hosts.
+	t.Run("AUDIT_100_worktree_perms_tightened", func(t *testing.T) {
 		gitSrc := mustReadFile(t, gitPath)
 		astroSrc := mustReadFile(t, astromechPath)
 
-		// (a) .force-worktrees base directory MkdirAll uses 0755.
-		// Expected fix: 0700. Current code: 0755.
-		if !strings.Contains(gitSrc, "os.MkdirAll(worktreeBase, 0755)") {
-			t.Errorf("AUDIT-100 anchor drift in %s: expected "+
-				"`os.MkdirAll(worktreeBase, 0755)`; check whether the "+
-				"fix landed or the code shape moved.", gitPath)
+		// (a) worktree base uses 0700.
+		if !strings.Contains(gitSrc, "os.MkdirAll(worktreeBase, 0700)") {
+			t.Errorf("AUDIT-100 REGRESSION: %s no longer creates "+
+				".force-worktrees base with mode 0700.", gitPath)
 		}
-		if strings.Contains(gitSrc, "os.MkdirAll(worktreeBase, 0700)") {
-			t.Errorf("AUDIT-100 appears fixed in %s — worktree base is "+
-				"now 0700. Update this test to assert the owner-only "+
-				"permission directly.", gitPath)
-		} else {
-			t.Errorf("AUDIT-100: %s creates the .force-worktrees base "+
-				"directory with mode 0755 (world-readable on multi-user "+
-				"hosts). Expected 0700. Claude output and injected "+
-				"inbox-mail payloads live under this tree.", gitPath)
+		if strings.Contains(gitSrc, "os.MkdirAll(worktreeBase, 0755)") {
+			t.Errorf("AUDIT-100 REGRESSION: %s reintroduced "+
+				"os.MkdirAll(worktreeBase, 0755).", gitPath)
 		}
 
-		// (b) Per-task log file — os.Create yields 0644 by default.
-		// Expected fix: os.OpenFile with 0600.
-		if !strings.Contains(astroSrc, `os.Create(taskLogPath)`) {
-			t.Errorf("AUDIT-100 anchor drift in %s: expected "+
-				"`os.Create(taskLogPath)`; verify shape.", astromechPath)
-		}
-		if strings.Contains(astroSrc, "0600") &&
-			strings.Contains(astroSrc, "os.OpenFile(taskLogPath") {
-			t.Errorf("AUDIT-100 appears fixed in %s — log file now "+
-				"opened with mode 0600. Update this test.", astromechPath)
-		} else {
-			t.Errorf("AUDIT-100: %s uses os.Create(taskLogPath) which "+
-				"defaults to 0644 (world-readable). Task logs contain "+
-				"Claude stdout including injected inbox mail and prior "+
-				"agent transcripts. Expected os.OpenFile(..., 0600).",
-				astromechPath)
-		}
-
-		// (c) Counter-assert: mode 0700/0600 must NOT be the current
-		// shape — if it is, the test framing is stale.
-		if strings.Contains(gitSrc, "os.MkdirAll(worktreeBase, 0700)") &&
-			strings.Contains(astroSrc, "0600") {
-			t.Errorf("AUDIT-100: both permissions have been tightened — "+
-				"this sub-test should be rewritten to pin the new "+
-				"invariant rather than flag the old one.")
+		// (b) Task log file is chmod'd to 0600 after os.Create.
+		// We allow either a literal os.OpenFile(..., 0600) form OR
+		// os.Chmod(taskLogPath, 0600) directly after os.Create.
+		hasChmod := regexp.MustCompile(`os\.Chmod\(taskLogPath,\s*0600\)`).MatchString(astroSrc)
+		hasOpenFile := regexp.MustCompile(`os\.OpenFile\(taskLogPath[^)]+0600`).MatchString(astroSrc)
+		if !hasChmod && !hasOpenFile {
+			t.Errorf("AUDIT-100 REGRESSION: %s no longer tightens the "+
+				"task log file mode to 0600 (neither os.Chmod nor "+
+				"os.OpenFile with 0600 found).", astromechPath)
 		}
 	})
 }

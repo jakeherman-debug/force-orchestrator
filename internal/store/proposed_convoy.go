@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 )
 
 // StoreProposedConvoy upserts a Commander's plan for Chancellor review.
@@ -104,7 +105,10 @@ func GetActiveConvoyContext(db *sql.DB) []ActiveConvoyInfo {
 	var convoys []ActiveConvoyInfo
 	for rows.Next() {
 		var c ActiveConvoyInfo
-		rows.Scan(&c.ID, &c.Name)
+		if err := rows.Scan(&c.ID, &c.Name); err != nil {
+			log.Printf("GetActiveConvoyContext: scan failed: %v", err)
+			continue
+		}
 		convoys = append(convoys, c)
 	}
 	rows.Close()
@@ -119,7 +123,10 @@ func GetActiveConvoyContext(db *sql.DB) []ActiveConvoyInfo {
 		}
 		for taskRows.Next() {
 			var payload string
-			taskRows.Scan(&payload)
+			if err := taskRows.Scan(&payload); err != nil {
+				log.Printf("GetActiveConvoyContext: taskRows scan failed: %v", err)
+				continue
+			}
 			if len(payload) > 100 {
 				payload = payload[:100] + "…"
 			}
@@ -145,7 +152,10 @@ func GetPendingProposals(db *sql.DB, excludeFeatureID int) []PendingProposalInfo
 	var proposals []PendingProposalInfo
 	for rows.Next() {
 		var p PendingProposalInfo
-		rows.Scan(&p.FeatureID, &p.Payload, &p.PlanJSON)
+		if err := rows.Scan(&p.FeatureID, &p.Payload, &p.PlanJSON); err != nil {
+			log.Printf("GetPendingProposals: scan failed: %v", err)
+			continue
+		}
 		proposals = append(proposals, p)
 	}
 	return proposals
@@ -171,7 +181,10 @@ func GetPendingFeatures(db *sql.DB, excludeFeatureID int) []PendingFeatureInfo {
 	var features []PendingFeatureInfo
 	for rows.Next() {
 		var f PendingFeatureInfo
-		rows.Scan(&f.FeatureID, &f.Payload)
+		if err := rows.Scan(&f.FeatureID, &f.Payload); err != nil {
+			log.Printf("GetPendingFeatures: scan failed: %v", err)
+			continue
+		}
 		features = append(features, f)
 	}
 	return features
@@ -197,7 +210,10 @@ func GetConvoyTailTaskIDs(db *sql.DB, convoyID int) []int {
 	var ids []int
 	for rows.Next() {
 		var id int
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			log.Printf("GetConvoyTailTaskIDs: scan failed: %v", err)
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids

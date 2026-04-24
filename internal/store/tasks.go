@@ -867,7 +867,10 @@ func GetDependencies(db *sql.DB, taskID int) []int {
 	var ids []int
 	for rows.Next() {
 		var id int
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			log.Printf("GetDependencies: scan failed: %v", err)
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids
@@ -1070,8 +1073,11 @@ func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 	var entries []TaskHistoryEntry
 	for rows.Next() {
 		var e TaskHistoryEntry
-		rows.Scan(&e.ID, &e.TaskID, &e.Attempt, &e.Agent, &e.SessionID, &e.ClaudeOutput, &e.Outcome,
-			&e.TokensIn, &e.TokensOut, &e.MemoryIDs, &e.CreatedAt)
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.Attempt, &e.Agent, &e.SessionID, &e.ClaudeOutput, &e.Outcome,
+			&e.TokensIn, &e.TokensOut, &e.MemoryIDs, &e.CreatedAt); err != nil {
+			log.Printf("GetTaskHistory: scan failed: %v", err)
+			continue
+		}
 		entries = append(entries, e)
 	}
 	return entries
@@ -1256,7 +1262,10 @@ func recencyMemoryLookup(db *sql.DB, repo string, limit int) []FleetMemoryEntry 
 	var entries []FleetMemoryEntry
 	for rows.Next() {
 		var e FleetMemoryEntry
-		rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt)
+		if err := rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt); err != nil {
+			log.Printf("recencyMemoryLookup: scan failed: %v", err)
+			continue
+		}
 		entries = append(entries, e)
 	}
 	return entries
@@ -1318,7 +1327,10 @@ func ListAllFleetMemories(db *sql.DB, repo string, limit int) []FleetMemoryEntry
 	var entries []FleetMemoryEntry
 	for rows.Next() {
 		var e FleetMemoryEntry
-		rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt)
+		if err := rows.Scan(&e.ID, &e.Repo, &e.TaskID, &e.Outcome, &e.Summary, &e.FilesChanged, &e.TopicTags, &e.CreatedAt); err != nil {
+			log.Printf("ListAllFleetMemories: scan failed: %v", err)
+			continue
+		}
 		entries = append(entries, e)
 	}
 	return entries

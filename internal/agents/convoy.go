@@ -25,7 +25,10 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 	var active []convoy
 	for rows.Next() {
 		var c convoy
-		rows.Scan(&c.id, &c.name)
+		if err := rows.Scan(&c.id, &c.name); err != nil {
+			logger.Printf("CheckConvoyCompletions: scan failed: %v", err)
+			continue
+		}
 		active = append(active, c)
 	}
 	rows.Close()

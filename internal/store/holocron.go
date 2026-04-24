@@ -227,7 +227,10 @@ func ListAuditLog(db *sql.DB, limit int) []AuditEntry {
 	var entries []AuditEntry
 	for rows.Next() {
 		var e AuditEntry
-		rows.Scan(&e.ID, &e.Actor, &e.Action, &e.TaskID, &e.Detail, &e.CreatedAt)
+		if err := rows.Scan(&e.ID, &e.Actor, &e.Action, &e.TaskID, &e.Detail, &e.CreatedAt); err != nil {
+			log.Printf("ListAudit: scan failed: %v", err)
+			continue
+		}
 		entries = append(entries, e)
 	}
 	return entries

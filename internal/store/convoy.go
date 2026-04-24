@@ -93,7 +93,10 @@ func RecoverStaleConvoys(db *sql.DB) {
 	var ids []int
 	for rows.Next() {
 		var id int
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			log.Printf("RecoverStaleConvoys: scan failed: %v", err)
+			continue
+		}
 		ids = append(ids, id)
 	}
 	rows.Close()

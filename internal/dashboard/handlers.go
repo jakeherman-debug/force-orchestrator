@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -52,7 +53,10 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 			for rows.Next() {
 				var status string
 				var n int
-				rows.Scan(&status, &n)
+				if err := rows.Scan(&status, &n); err != nil {
+					log.Printf("handleStatus: scan failed: %v", err)
+					continue
+				}
 				s.Tasks[status] = n
 			}
 			rows.Close()
@@ -106,7 +110,10 @@ func handleStats(db *sql.DB) http.HandlerFunc {
 			for rows.Next() {
 				var status string
 				var n int
-				rows.Scan(&status, &n)
+				if err := rows.Scan(&status, &n); err != nil {
+					log.Printf("handleStats: scan failed: %v", err)
+					continue
+				}
 				s.Tasks[status] = n
 			}
 			rows.Close()
@@ -242,9 +249,12 @@ func handleTasks(db *sql.DB) http.HandlerFunc {
 			var t DashboardTask
 			var activeBlockersStr sql.NullString
 			var tokensIn, tokensOut int
-			rows.Scan(&t.ID, &t.Type, &t.Status, &t.Repo, &t.Owner, &t.RetryCount,
+			if err := rows.Scan(&t.ID, &t.Type, &t.Status, &t.Repo, &t.Owner, &t.RetryCount,
 				&t.ConvoyID, &t.Payload, &t.ErrorLog, &t.LockedAt, &t.Priority,
-				&t.RuntimeSeconds, &activeBlockersStr, &tokensIn, &tokensOut, &t.CreatedAt)
+				&t.RuntimeSeconds, &activeBlockersStr, &tokensIn, &tokensOut, &t.CreatedAt); err != nil {
+				log.Printf("handleTasks: scan failed: %v", err)
+				continue
+			}
 			t.BlockedBy = parseBlockers(activeBlockersStr.String)
 			t.CostDollars = store.TaskCostDollars(tokensIn, tokensOut)
 			if len(t.Payload) > 300 {
@@ -639,8 +649,11 @@ func fetchMailForTask(db *sql.DB, taskID int) []DashboardMail {
 	var out []DashboardMail
 	for rows.Next() {
 		var m DashboardMail
-		rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body,
-			&m.TaskID, &m.MessageType, &m.ReadAt, &m.CreatedAt)
+		if err := rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body,
+			&m.TaskID, &m.MessageType, &m.ReadAt, &m.CreatedAt); err != nil {
+			log.Printf("fetchMailForTask: scan failed: %v", err)
+			continue
+		}
 		out = append(out, m)
 	}
 	if out == nil {
@@ -951,7 +964,10 @@ func handleAgents(db *sql.DB) http.HandlerFunc {
 		var out []DashboardAgent
 		for rows.Next() {
 			var ag DashboardAgent
-			rows.Scan(&ag.AgentName, &ag.Repo, &ag.CurrentTaskID, &ag.TaskStatus, &ag.LockedAt)
+			if err := rows.Scan(&ag.AgentName, &ag.Repo, &ag.CurrentTaskID, &ag.TaskStatus, &ag.LockedAt); err != nil {
+				log.Printf("handleAgents: scan failed: %v", err)
+				continue
+			}
 			ag.Role = deriveAgentRole(ag.AgentName)
 			out = append(out, ag)
 		}
@@ -976,7 +992,10 @@ func handleRepos(db *sql.DB) http.HandlerFunc {
 		var names []string
 		for rows.Next() {
 			var n string
-			rows.Scan(&n)
+			if err := rows.Scan(&n); err != nil {
+				log.Printf("handleRepos: scan failed: %v", err)
+				continue
+			}
 			names = append(names, n)
 		}
 		if names == nil {
@@ -1002,8 +1021,11 @@ func handleMailList(db *sql.DB) http.HandlerFunc {
 		var out []DashboardMail
 		for rows.Next() {
 			var m DashboardMail
-			rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body,
-				&m.TaskID, &m.MessageType, &m.ReadAt, &m.CreatedAt)
+			if err := rows.Scan(&m.ID, &m.FromAgent, &m.ToAgent, &m.Subject, &m.Body,
+				&m.TaskID, &m.MessageType, &m.ReadAt, &m.CreatedAt); err != nil {
+				log.Printf("handleMailList: scan failed: %v", err)
+				continue
+			}
 			out = append(out, m)
 		}
 		if out == nil {
@@ -1119,7 +1141,10 @@ func handleMemories(db *sql.DB) http.HandlerFunc {
 		var out []MemoryRow
 		for rows.Next() {
 			var m MemoryRow
-			rows.Scan(&m.ID, &m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged, &m.CreatedAt)
+			if err := rows.Scan(&m.ID, &m.Repo, &m.TaskID, &m.Outcome, &m.Summary, &m.FilesChanged, &m.CreatedAt); err != nil {
+				log.Printf("handleMemories: scan failed: %v", err)
+				continue
+			}
 			out = append(out, m)
 		}
 		if out == nil {

@@ -327,7 +327,21 @@ func generatePRBody(db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, 
 		util.TruncateStr(context, 8000))
 	raw, err := claude.AskClaudeCLI(diplomatSystemPrompt, userPrompt, "", 2)
 	if err != nil {
-		logger.Printf("ShipConvoy: Claude failed (%v) — falling back to structured body", err)
+		// AUDIT-095 (Fix #8d): classify the error. Transient / rate-limit
+		// errors should NOT silently fall back to the bare PR body — the
+		// caller's handleInfraFailure path retries them. Permanent errors
+		// (auth, config) fall back to the structured body AND send an
+		// operator-visible mail so a quiet-but-degraded PR body isn't
+		// mistaken for a happy path.
+		cls := gh.ClassifyError(err.Error())
+		if cls == gh.ErrClassTransient || cls == gh.ErrClassRateLimited {
+			return "", fmt.Errorf("generatePRBody: classify=%s: %w", cls, err)
+		}
+		logger.Printf("ShipConvoy: Claude failed (%v, class=%s) — falling back to structured PR body; mailing operator", err, cls)
+		store.SendMail(db, "Diplomat", "operator",
+			"[PR BODY DEGRADED] Diplomat Claude call failed — PR body is a structured fallback, not the LLM-composed version",
+			fmt.Sprintf("generatePRBody for convoy %d (%s) fell back to buildFallbackPRBody because the Claude call failed:\n\n%v\n\nThe PR will still open but the body is the structured template fallback. Inspect the PR and revise manually if needed.", convoy.ID, convoy.Name, err),
+			0, store.MailTypeAlert)
 		return buildFallbackPRBody(convoy, ab, context), nil
 	}
 	// Strip any markdown code fences Claude accidentally wraps around the body.

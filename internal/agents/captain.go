@@ -192,7 +192,10 @@ func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
 		for rows.Next() {
 			var id int
 			var repo, payload string
-			rows.Scan(&id, &repo, &payload)
+			if err := rows.Scan(&id, &repo, &payload); err != nil {
+				log.Printf("captain: scan failed in completed-tasks query: %v", err)
+				continue
+			}
 			firstLine := payload
 			if nl := strings.Index(payload, "\n"); nl != -1 {
 				firstLine = payload[:nl]
@@ -220,7 +223,10 @@ func buildConvoyContext(db *sql.DB, b *store.Bounty) string {
 		for rows.Next() {
 			var id, activeDep int
 			var repo, payload string
-			rows.Scan(&id, &repo, &payload, &activeDep)
+			if err := rows.Scan(&id, &repo, &payload, &activeDep); err != nil {
+				log.Printf("captain: scan failed in remaining-tasks query: %v", err)
+				continue
+			}
 			firstLine := payload
 			if nl := strings.Index(payload, "\n"); nl != -1 {
 				firstLine = payload[:nl]

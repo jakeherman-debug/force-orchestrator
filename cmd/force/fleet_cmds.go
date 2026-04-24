@@ -547,7 +547,10 @@ func cmdRepos(db *sql.DB, args []string) {
 		for rows.Next() {
 			found = true
 			var name, path, desc string
-			rows.Scan(&name, &path, &desc)
+			if err := rows.Scan(&name, &path, &desc); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			exists := ""
 			if _, statErr := os.Stat(path); statErr != nil {
 				exists = " [PATH MISSING]"

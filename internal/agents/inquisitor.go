@@ -79,7 +79,10 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
 		if err == nil {
 			for rows.Next() {
 				var id int
-				rows.Scan(&id)
+				if err := rows.Scan(&id); err != nil {
+					logger.Printf("inquisitor: scan failed on stale-lock query: %v", err)
+					continue
+				}
 				staleIDs = append(staleIDs, id)
 			}
 			rows.Close()
@@ -180,7 +183,10 @@ func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }
 	var tasks []classTask
 	for rows.Next() {
 		var t classTask
-		rows.Scan(&t.id, &t.payload)
+		if err := rows.Scan(&t.id, &t.payload); err != nil {
+			logger.Printf("classifyPendingTasks: scan failed: %v", err)
+			continue
+		}
 		tasks = append(tasks, t)
 	}
 	rows.Close()
@@ -227,7 +233,10 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 	var tasks []stalledTask
 	for rows.Next() {
 		var t stalledTask
-		rows.Scan(&t.id, &t.owner, &t.repo, &t.branchName, &t.lockedAt, &t.lockedMinutes)
+		if err := rows.Scan(&t.id, &t.owner, &t.repo, &t.branchName, &t.lockedAt, &t.lockedMinutes); err != nil {
+			logger.Printf("detectStalledTasks: scan failed: %v", err)
+			continue
+		}
 		tasks = append(tasks, t)
 	}
 	rows.Close()
@@ -321,7 +330,10 @@ func validateWorktrees(db *sql.DB, logger interface{ Printf(string, ...any) }) {
 	for rows.Next() {
 		total++
 		var e entry
-		rows.Scan(&e.agent, &e.repo, &e.path)
+		if err := rows.Scan(&e.agent, &e.repo, &e.path); err != nil {
+			logger.Printf("validateWorktrees: scan failed: %v", err)
+			continue
+		}
 		if _, statErr := os.Stat(e.path); statErr != nil {
 			stale = append(stale, e)
 		}
@@ -362,7 +374,10 @@ func cleanOrphanedBranches(db *sql.DB, logger interface{ Printf(string, ...any) 
 	var branches []orphanedBranch
 	for rows.Next() {
 		var b orphanedBranch
-		rows.Scan(&b.id, &b.repo, &b.branchName)
+		if err := rows.Scan(&b.id, &b.repo, &b.branchName); err != nil {
+			logger.Printf("cleanOrphanedBranches: scan failed: %v", err)
+			continue
+		}
 		branches = append(branches, b)
 	}
 	rows.Close()

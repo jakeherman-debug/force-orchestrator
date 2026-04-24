@@ -147,7 +147,10 @@ func GetUnresolvedBlockers(db *sql.DB, blockedConvoyID int) []int {
 	var ids []int
 	for rows.Next() {
 		var id int
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			log.Printf("GetUnresolvedBlockers: scan failed: %v", err)
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids

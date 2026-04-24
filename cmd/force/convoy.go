@@ -73,7 +73,10 @@ func cmdConvoy(db *sql.DB, args []string) {
 			for previewRows.Next() {
 				var pid int
 				var previewRepo, previewPayload string
-				previewRows.Scan(&pid, &previewRepo, &previewPayload)
+				if err := previewRows.Scan(&pid, &previewRepo, &previewPayload); err != nil {
+					fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+					continue
+				}
 				firstLine := previewPayload
 				if nl := strings.Index(previewPayload, "\n"); nl != -1 {
 					firstLine = previewPayload[:nl]
@@ -136,7 +139,10 @@ func cmdConvoy(db *sql.DB, args []string) {
 			for lockedRows.Next() {
 				var lid int
 				var lowner, lrepo string
-				lockedRows.Scan(&lid, &lowner, &lrepo)
+				if err := lockedRows.Scan(&lid, &lowner, &lrepo); err != nil {
+					fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+					continue
+				}
 				locked = append(locked, fmt.Sprintf("  #%d [%s] owned by %s", lid, lrepo, lowner))
 			}
 			lockedRows.Close()

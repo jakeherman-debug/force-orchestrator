@@ -55,7 +55,10 @@ func dogPRReviewPoll(db *sql.DB, logger interface{ Printf(string, ...any) }) err
 	var convoys []convoyRef
 	for rows.Next() {
 		var c convoyRef
-		rows.Scan(&c.id, &c.name)
+		if err := rows.Scan(&c.id, &c.name); err != nil {
+			logger.Printf("dogPRReviewPoll: scan failed: %v", err)
+			continue
+		}
 		convoys = append(convoys, c)
 	}
 	rows.Close()

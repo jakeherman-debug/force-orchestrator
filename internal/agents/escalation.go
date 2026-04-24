@@ -3,6 +3,7 @@ package agents
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -100,7 +101,10 @@ func ListEscalations(db *sql.DB, status string) []store.Escalation {
 	var escalations []store.Escalation
 	for rows.Next() {
 		var e store.Escalation
-		rows.Scan(&e.ID, &e.TaskID, &e.Severity, &e.Message, &e.Status, &e.CreatedAt, &e.AcknowledgedAt)
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.Severity, &e.Message, &e.Status, &e.CreatedAt, &e.AcknowledgedAt); err != nil {
+			log.Printf("ListEscalations: scan failed: %v", err)
+			continue
+		}
 		escalations = append(escalations, e)
 	}
 	return escalations
@@ -147,7 +151,10 @@ func CheckStaleEscalations(db *sql.DB) {
 	var stale []staleEsc
 	for rows.Next() {
 		var e staleEsc
-		rows.Scan(&e.id, &e.taskID, &e.sev, &e.msg)
+		if err := rows.Scan(&e.id, &e.taskID, &e.sev, &e.msg); err != nil {
+			log.Printf("CheckStaleEscalations: scan failed: %v", err)
+			continue
+		}
 		stale = append(stale, e)
 	}
 	rows.Close()

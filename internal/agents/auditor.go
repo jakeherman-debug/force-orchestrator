@@ -376,7 +376,10 @@ func buildAuditRepoContext(db *sql.DB, scopedRepo string) string {
 	var entries []string
 	for rows.Next() {
 		var name, path, desc string
-		rows.Scan(&name, &path, &desc)
+		if err := rows.Scan(&name, &path, &desc); err != nil {
+			log.Printf("auditor: scan failed in buildAuditRepoContext: %v", err)
+			continue
+		}
 		entries = append(entries, fmt.Sprintf("- %s (%s): %s", name, path, desc))
 	}
 	if len(entries) == 0 {

@@ -756,11 +756,27 @@ func processAstromechOutput(
 	// a no-op UPDATE that only matches when we still own the row. Zero rows
 	// affected means ownership was lost while Claude was running.
 	if checkOwnership {
-		ownerRes, _ := db.Exec(
+		// AUDIT-094 (Fix #8d): distinguish a real Exec error (SQLITE_BUSY,
+		// schema drift, etc.) from a legitimate rows=0 "ownership lost".
+		// Pre-fix, a transient DB flake right after a long Claude session
+		// was indistinguishable from the inquisitor reclaiming the row,
+		// so perfectly good work was discarded. Post-fix, a driver error
+		// logs + returns (leaves the row as-is for the next claim cycle);
+		// only an err==nil, rows==0 result routes to the discard path.
+		ownerRes, execErr := db.Exec(
 			`UPDATE BountyBoard SET status = 'Locked' WHERE id = ? AND owner = ? AND status = 'Locked'`,
 			taskID, name,
 		)
-		if n, _ := ownerRes.RowsAffected(); n == 0 {
+		if execErr != nil {
+			logger.Printf("Task %d: ownership-check UPDATE failed (%v); NOT treating as lost ownership — stale-lock detector will recover", taskID, execErr)
+			return
+		}
+		n, raErr := ownerRes.RowsAffected()
+		if raErr != nil {
+			logger.Printf("Task %d: ownership-check RowsAffected failed (%v); NOT treating as lost ownership — stale-lock detector will recover", taskID, raErr)
+			return
+		}
+		if n == 0 {
 			logger.Printf("Task %d: ownership lost mid-run — recording and discarding result", taskID)
 			recordHist(outputStr, "Discarded")
 			store.LogAudit(db, name, "ownership-lost", taskID,

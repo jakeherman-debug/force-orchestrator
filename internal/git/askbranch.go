@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // ── Ask-branch operations ────────────────────────────────────────────────────
@@ -273,18 +275,56 @@ func MergeWithUnionStrategy(repoPath, branch, baseRef, message string) (string, 
 
 	// Install union attributes locally. Written to .git/info/attributes —
 	// a working-copy-only file never committed.
+	//
+	// AUDIT-099 (Fix #8d): atomic write via .tmp + os.Rename. Pre-fix,
+	// os.WriteFile truncate-then-write left a window where a crash or
+	// SIGKILL between truncate and write-complete would produce an
+	// empty/partial attributes file whose deferred restore would still
+	// run (on normal exit) but whose content would have been half-
+	// written on abnormal exit. The atomic rename is crash-safe: either
+	// the new content is fully visible, or the old content is still
+	// there.
+	//
+	// Signal handler: we also register a SIGINT/SIGTERM handler so that
+	// on operator-initiated shutdown the original attributes are
+	// restored BEFORE the daemon exits (defer doesn't fire on SIGKILL
+	// and races with the signal on SIGTERM). The handler is set per-
+	// call and deregistered by the defer.
 	attrPath := filepath.Join(repoPath, ".git", "info", "attributes")
 	existing, _ := os.ReadFile(attrPath)
 	content := strings.Join(unionMergeableGlobs, "\n") + "\n" + string(existing)
-	if err := os.WriteFile(attrPath, []byte(content), 0644); err != nil {
-		return "", fmt.Errorf("write local attributes: %w", err)
+	tmpPath := attrPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("write local attributes tmp: %w", err)
 	}
-	defer func() {
+	if err := os.Rename(tmpPath, attrPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("rename local attributes tmp: %w", err)
+	}
+	restoreAttrs := func() {
 		if len(existing) == 0 {
 			os.Remove(attrPath) //nolint:errcheck
 		} else {
-			os.WriteFile(attrPath, existing, 0644) //nolint:errcheck
+			restoreTmp := attrPath + ".restore.tmp"
+			if werr := os.WriteFile(restoreTmp, existing, 0644); werr == nil {
+				_ = os.Rename(restoreTmp, attrPath)
+			}
 		}
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sigDone := make(chan struct{})
+	go func() {
+		select {
+		case <-sigCh:
+			restoreAttrs()
+		case <-sigDone:
+		}
+	}()
+	defer func() {
+		close(sigDone)
+		signal.Stop(sigCh)
+		restoreAttrs()
 	}()
 
 	if message == "" {

@@ -596,7 +596,10 @@ func dogConvoyReviewWatch(db *sql.DB, logger interface{ Printf(string, ...any) }
 	var convoys []convoy
 	for rows.Next() {
 		var c convoy
-		rows.Scan(&c.id, &c.name)
+		if err := rows.Scan(&c.id, &c.name); err != nil {
+			logger.Printf("dogConvoyReviewWatch: scan failed: %v", err)
+			continue
+		}
 		convoys = append(convoys, c)
 	}
 

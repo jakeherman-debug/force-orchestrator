@@ -338,7 +338,10 @@ func enforceHolds(db *sql.DB, newConvoyID int, ruling chancellorRuling, feature 
 				var rootIDs []int
 				for heldRootRows.Next() {
 					var id int
-					heldRootRows.Scan(&id)
+					if err := heldRootRows.Scan(&id); err != nil {
+						logger.Printf("chancellor: scan failed in heldRootRows: %v", err)
+						continue
+					}
 					rootIDs = append(rootIDs, id)
 				}
 				heldRootRows.Close()

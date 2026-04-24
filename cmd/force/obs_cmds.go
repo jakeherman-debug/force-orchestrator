@@ -129,7 +129,10 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 					var parts []string
 					for taskRows.Next() {
 						var tid int
-						taskRows.Scan(&tid)
+						if err := taskRows.Scan(&tid); err != nil {
+							fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+							continue
+						}
 						parts = append(parts, fmt.Sprintf("Task %d[^0-9]", tid))
 					}
 					taskRows.Close()
@@ -328,7 +331,10 @@ func cmdSearch(db *sql.DB, query string) {
 		found = true
 		var id int
 		var repo, taskType, status, payload string
-		rows.Scan(&id, &repo, &taskType, &status, &payload)
+		if err := rows.Scan(&id, &repo, &taskType, &status, &payload); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+			continue
+		}
 		fmt.Printf("[#%d] %s | %s | %s | %s\n", id, status, taskType, repo, payloadSummary(payload, 80))
 	}
 	if !found {

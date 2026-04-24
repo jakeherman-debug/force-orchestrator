@@ -60,7 +60,10 @@ func printList(db *sql.DB, statusFilter, repoFilter, typeFilter string, limit in
 		n++
 		var id, retryCount, activeDep int
 		var taskType, status, repo, owner, payload string
-		rows.Scan(&id, &taskType, &status, &repo, &owner, &retryCount, &activeDep, &payload)
+		if err := rows.Scan(&id, &taskType, &status, &repo, &owner, &retryCount, &activeDep, &payload); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+			continue
+		}
 		taskPreview := payloadSummary(payload, 35)
 
 		abbrev := status
@@ -175,7 +178,10 @@ func printStats(db *sql.DB) {
 		for rows.Next() {
 			var status string
 			var count int
-			rows.Scan(&status, &count)
+			if err := rows.Scan(&status, &count); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			fmt.Printf("  %-25s %d\n", status, count)
 		}
 		rows.Close()
@@ -208,7 +214,10 @@ func printStats(db *sql.DB) {
 		for rows.Next() {
 			var agent string
 			var n int
-			rows.Scan(&agent, &n)
+			if err := rows.Scan(&agent, &n); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			fmt.Printf("  %-20s %d\n", agent, n)
 		}
 		rows.Close()
@@ -258,7 +267,10 @@ func printBountyStats(db *sql.DB) {
 		for rows.Next() {
 			var status string
 			var count int
-			rows.Scan(&status, &count)
+			if err := rows.Scan(&status, &count); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			fmt.Printf("  %-25s %d\n", status, count)
 		}
 		rows.Close()
@@ -295,7 +307,10 @@ func printBountyStats(db *sql.DB) {
 			n++
 			var agent string
 			var count int
-			rows.Scan(&agent, &count)
+			if err := rows.Scan(&agent, &count); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			fmt.Printf("  %-25s %d\n", agent, count)
 		}
 		rows.Close()
@@ -330,7 +345,10 @@ func printCosts(db *sql.DB) {
 		for rows.Next() {
 			var agent string
 			var in, out int
-			rows.Scan(&agent, &in, &out)
+			if err := rows.Scan(&agent, &in, &out); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			fmt.Printf("  %-22s %6d in  %6d out\n", agent, in, out)
 		}
 		rows.Close()
@@ -353,7 +371,10 @@ func printStatus(db *sql.DB) {
 		for rows.Next() {
 			var status string
 			var count int
-			rows.Scan(&status, &count)
+			if err := rows.Scan(&status, &count); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			counts[status] = count
 		}
 		rows.Close()
@@ -442,7 +463,10 @@ func printWho(db *sql.DB) {
 		}
 		var id int
 		var taskType, status, repo, owner, payload string
-		rows.Scan(&id, &taskType, &status, &repo, &owner, &payload)
+		if err := rows.Scan(&id, &taskType, &status, &repo, &owner, &payload); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+			continue
+		}
 		abbrev := status
 		if a, ok := statusAbbrev[status]; ok {
 			abbrev = a
@@ -490,7 +514,10 @@ func printTree(db *sql.DB, id int, depth int) {
 	var childIDs []int
 	for rows.Next() {
 		var childID int
-		rows.Scan(&childID)
+		if err := rows.Scan(&childID); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+			continue
+		}
 		childIDs = append(childIDs, childID)
 	}
 	rows.Close()
@@ -513,7 +540,10 @@ func printAgents(db *sql.DB) {
 	for rows.Next() {
 		found = true
 		var agent, repo, path string
-		rows.Scan(&agent, &repo, &path)
+		if err := rows.Scan(&agent, &repo, &path); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+			continue
+		}
 
 		exists := "OK"
 		if _, err := os.Stat(path); err != nil {
@@ -548,7 +578,10 @@ func printConvoyShow(db *sql.DB, convoyID int, name, status string, completed, t
 		n++
 		var id int
 		var taskStatus, owner, payload string
-		rows.Scan(&id, &taskStatus, &owner, &payload)
+		if err := rows.Scan(&id, &taskStatus, &owner, &payload); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+			continue
+		}
 		abbrev := taskStatus
 		if a, ok := statusAbbrev[taskStatus]; ok {
 			abbrev = a

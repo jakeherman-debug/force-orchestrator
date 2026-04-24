@@ -53,12 +53,6 @@ var remainingAuditSkips = map[string]string{
 
 	// Concurrency batch: the remaining races covered by Pattern P1/P7
 	// need Fix #8's UpdateBountyStatusFrom variant.
-	"AUDIT-090": "Fix #8 pattern-covered (P1)",
-	"AUDIT-091": "Fix #8 pattern-covered (P1)",
-	"AUDIT-094": "Fix #8 pattern-covered (P1)",
-	"AUDIT-095": "Fix #8 pattern-covered (P1)",
-	"AUDIT-099": "Fix #10 pattern-covered / Fix #8 silent-failure",
-	"AUDIT-100": "Fix #8 pattern-covered (P1)",
 }
 
 var auditSkipRe = regexp.MustCompile(`t\.Skip\("(AUDIT-\d+)`)

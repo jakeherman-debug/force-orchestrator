@@ -265,8 +265,6 @@ func TestAUDIT_044_LibrarianSilentFallback(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_090_StalledReviewsSilentScan(t *testing.T) {
-	t.Skip("AUDIT-090: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
-	// Without skip, fails with: AUDIT-090: defective pattern still present — subPRRows.Scan errors silently drop rows in dogStalledReviews (err == nil only path, no logger.Printf of scan error); legitimate 12h+ stalls never alarm
 	src := silentReadFile(t, "internal/agents/dogs.go")
 
 	fnIdx := strings.Index(src, "func dogStalledReviews(")
@@ -298,8 +296,6 @@ func TestAUDIT_090_StalledReviewsSilentScan(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_091_GitHygieneReturnsNilOnError(t *testing.T) {
-	t.Skip("AUDIT-091: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
-	// Without skip, fails with: AUDIT-091: defective pattern still present — dogGitHygiene swallows Agents query error as `return nil` (non-fatal)
 	src := silentReadFile(t, "internal/agents/dogs.go")
 
 	fnIdx := strings.Index(src, "func dogGitHygiene(")
@@ -331,8 +327,6 @@ func TestAUDIT_091_GitHygieneReturnsNilOnError(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_094_AstromechOwnershipDropsErrors(t *testing.T) {
-	t.Skip("AUDIT-094: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
-	// Without skip, fails with: AUDIT-094: defective pattern still present — ownership check drops db.Exec error (`ownerRes, _ := db.Exec(`) AND RowsAffected error (`n, _ := ownerRes.RowsAffected()`); transient DB failures misread as lost ownership
 	src := silentReadFile(t, "internal/agents/astromech.go")
 
 	needle := "ownerRes, _ := db.Exec("
@@ -357,8 +351,6 @@ func TestAUDIT_094_AstromechOwnershipDropsErrors(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_095_DiplomatSilentFallback(t *testing.T) {
-	t.Skip("AUDIT-095: remove when rows.Scan errors checked / agent ownership distinguishes error from loss (Fix #8)")
-	// Without skip, fails with: AUDIT-095: defective pattern still present — Diplomat Claude error silently falls back to bare PR body (buildFallbackPRBody), no ErrClassTransient/handleInfraFailure, no retry, no operator mail
 	src := silentReadFile(t, "internal/agents/diplomat.go")
 
 	re := regexp.MustCompile(`claude\.AskClaudeCLI\([^)]*\)\s*\n\s*if err != nil \{\s*\n\s*logger\.Printf\("ShipConvoy: Claude failed[^"]*",[^)]*\)\s*\n\s*return buildFallbackPRBody\([^)]*\), nil`)

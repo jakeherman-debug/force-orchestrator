@@ -93,7 +93,10 @@ func cmdConfig(db *sql.DB, args []string) {
 		for rows.Next() {
 			found = true
 			var k, v string
-			rows.Scan(&k, &v)
+			if err := rows.Scan(&k, &v); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+				continue
+			}
 			fmt.Printf("%-25s = %s\n", k, v)
 		}
 		if !found {
