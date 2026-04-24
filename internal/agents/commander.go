@@ -333,7 +333,9 @@ func runCommanderTask(db *sql.DB, agentName string, bounty *store.Bounty, logger
 	// Load repo context — fail fast if no repos are registered.
 	repoList, err := loadRepoContext(db, logger)
 	if err != nil {
-		_ = store.FailBounty(db, bounty.ID, "Commander Err: "+err.Error()) // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, "Commander Err: "+err.Error()); ferr != nil {
+			logger.Printf("Commander task %d: FailBounty(repo-context load) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+		}
 		logger.Printf("Task %d FAILED: %v", bounty.ID, err)
 		return
 	}
@@ -438,14 +440,18 @@ EXAMPLE:
 	}
 
 	if len(tasks) == 0 {
-		_ = store.FailBounty(db, bounty.ID, "Commander Err: Claude returned an empty task list") // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, "Commander Err: Claude returned an empty task list"); ferr != nil {
+			logger.Printf("Commander task %d: FailBounty(empty task list) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+		}
 		return
 	}
 
 	// Validate the plan structure before any database writes.
 	knownRepos := loadKnownRepos(db)
 	if err := validateTaskPlan(tasks, knownRepos); err != nil {
-		_ = store.FailBounty(db, bounty.ID, "Commander Err: "+err.Error()) // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, "Commander Err: "+err.Error()); ferr != nil {
+			logger.Printf("Commander task %d: FailBounty(plan validation: %v) failed (%v); stale-lock detector will recover", bounty.ID, err, ferr)
+		}
 		return
 	}
 
@@ -461,7 +467,9 @@ EXAMPLE:
 		parent, perr := store.GetBounty(db, bounty.ParentID)
 		if perr == nil && parent != nil && parent.ConvoyID > 0 {
 			if err := autoInsertReshardTasks(db, bounty, parent, tasks, response, agentName, sessionID, logger); err != nil {
-				_ = store.FailBounty(db, bounty.ID, "auto-reshard insert: "+err.Error()) // TODO(Fix #8b): propagate error
+				if ferr := store.FailBounty(db, bounty.ID, "auto-reshard insert: "+err.Error()); ferr != nil {
+					logger.Printf("Commander task %d: FailBounty(auto-reshard insert: %v) failed (%v); stale-lock detector will recover", bounty.ID, err, ferr)
+				}
 				return
 			}
 			return
@@ -471,10 +479,15 @@ EXAMPLE:
 
 	// Submit plan to the Supreme Chancellor for conflict review before creating a convoy.
 	if _, storeErr := store.StoreProposedConvoy(db, bounty.ID, tasks); storeErr != nil {
-		_ = store.FailBounty(db, bounty.ID, "DB Err: could not store proposed convoy: "+storeErr.Error()) // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, "DB Err: could not store proposed convoy: "+storeErr.Error()); ferr != nil {
+			logger.Printf("Commander task %d: FailBounty(StoreProposedConvoy: %v) failed (%v); stale-lock detector will recover", bounty.ID, storeErr, ferr)
+		}
 		return
 	}
-	_ = store.UpdateBountyStatus(db, bounty.ID, "AwaitingChancellorReview") // TODO(Fix #8b): propagate error
+	if uerr := store.UpdateBountyStatus(db, bounty.ID, "AwaitingChancellorReview"); uerr != nil {
+		logger.Printf("Commander task %d: UpdateBountyStatus(AwaitingChancellorReview) failed (%v); stale-lock detector will recover", bounty.ID, uerr)
+		return
+	}
 
 	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "AwaitingChancellorReview")
 	if tokIn, tokOut := claude.ParseTokenUsage(response); tokIn > 0 || tokOut > 0 {

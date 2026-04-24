@@ -223,11 +223,15 @@ func QueueConvoyReview(db *sql.DB, convoyID int) (int, error) {
 func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload convoyReviewPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); ferr != nil {
+			logger.Printf("ConvoyReview #%d: FailBounty(invalid payload) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+		}
 		return
 	}
 	if payload.ConvoyID <= 0 {
-		_ = store.FailBounty(db, bounty.ID, "payload missing convoy_id") // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, "payload missing convoy_id"); ferr != nil {
+			logger.Printf("ConvoyReview #%d: FailBounty(missing convoy_id) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+		}
 		return
 	}
 
@@ -244,17 +248,23 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		escMsg := fmt.Sprintf("Convoy #%d has required %d+ ConvoyReview passes — manual inspection needed",
 			payload.ConvoyID, maxPasses)
 		logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
-		_, _ = CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg) // TODO(Fix #8b): propagate error
+		if _, eerr := CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg); eerr != nil {
+			logger.Printf("ConvoyReview #%d: CreateEscalation(loop cap, convoy %d) failed (%v); stale-lock detector will recover", bounty.ID, payload.ConvoyID, eerr)
+		}
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CONVOY REVIEW] Convoy #%d requires manual review", payload.ConvoyID),
 			escMsg, bounty.ID, store.MailTypeAlert)
-		_ = store.FailBounty(db, bounty.ID, escMsg) // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
+			logger.Printf("ConvoyReview #%d: FailBounty(loop cap) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+		}
 		return
 	}
 
 	convoy := store.GetConvoy(db, payload.ConvoyID)
 	if convoy == nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID)) // TODO(Fix #8b): propagate error
+		if ferr := store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID)); ferr != nil {
+			logger.Printf("ConvoyReview #%d: FailBounty(convoy %d not found) failed (%v); stale-lock detector will recover", bounty.ID, payload.ConvoyID, ferr)
+		}
 		return
 	}
 
@@ -264,7 +274,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 	if len(branches) == 0 {
 		logger.Printf("ConvoyReview #%d: convoy %d has no ask-branches — completing as clean",
 			bounty.ID, payload.ConvoyID)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
+			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, no ask-branches) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
+		}
 		return
 	}
 
@@ -329,11 +341,15 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 			escMsg := fmt.Sprintf("ConvoyReview #%d hit %d parse failures for convoy %d — LLM cannot produce valid JSON; manual inspection required",
 				bounty.ID, nFail, payload.ConvoyID)
 			logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
-			_, _ = CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg) // TODO(Fix #8b): propagate error
+			if _, eerr := CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg); eerr != nil {
+				logger.Printf("ConvoyReview #%d: CreateEscalation(parse-fail cap, convoy %d) failed (%v); stale-lock detector will recover", bounty.ID, payload.ConvoyID, eerr)
+			}
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("[CONVOY REVIEW PARSE FAILURE] Convoy #%d", payload.ConvoyID),
 				escMsg, bounty.ID, store.MailTypeAlert)
-			store.FailBounty(db, bounty.ID, escMsg)
+			if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
+				logger.Printf("ConvoyReview #%d: FailBounty(parse-fail cap) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+			}
 			return
 		}
 
@@ -348,11 +364,15 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 			escMsg := fmt.Sprintf("ConvoyReview #%d hit %d parse failures for convoy %d — LLM cannot produce valid JSON; manual inspection required",
 				bounty.ID, nFail, payload.ConvoyID)
 			logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
-			_, _ = CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg) // TODO(Fix #8b): propagate error
+			if _, eerr := CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg); eerr != nil {
+				logger.Printf("ConvoyReview #%d: CreateEscalation(parse-fail retry, convoy %d) failed (%v); stale-lock detector will recover", bounty.ID, payload.ConvoyID, eerr)
+			}
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("[CONVOY REVIEW PARSE FAILURE] Convoy #%d", payload.ConvoyID),
 				escMsg, bounty.ID, store.MailTypeAlert)
-			_ = store.FailBounty(db, bounty.ID, escMsg) // TODO(Fix #8b): propagate error
+			if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
+				logger.Printf("ConvoyReview #%d: FailBounty(parse-fail retry) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+			}
 			return
 		}
 	}
@@ -364,7 +384,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		// marker so hasPriorCleanPass can distinguish a true clean pass from a
 		// deferred-completion row (active tasks / ask-branch conflict gates).
 		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, convoyReviewCleanMarker, bounty.ID)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
+			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, clean pass) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
+		}
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CONVOY REVIEW PASSED] Convoy '%s' (#%d) — pass %d",
 				convoy.Name, payload.ConvoyID, completedPasses+1),
@@ -389,7 +411,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		escMsg := fmt.Sprintf("ConvoyReview #%d: convoy %d findings unchanged after pass %d (same %d finding(s) across consecutive passes) — conflicted_loop, fix tasks are not resolving the issues",
 			bounty.ID, payload.ConvoyID, completedPasses+1, len(result.Findings))
 		logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
-		_, _ = CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg) // TODO(Fix #8b): propagate error
+		if _, eerr := CreateEscalation(db, bounty.ID, store.SeverityHigh, escMsg); eerr != nil {
+			logger.Printf("ConvoyReview #%d: CreateEscalation(conflicted_loop, convoy %d) failed (%v); stale-lock detector will recover", bounty.ID, payload.ConvoyID, eerr)
+		}
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CONVOY REVIEW LOOP] Convoy '%s' (#%d) — %d fix tasks did not resolve findings",
 				convoy.Name, payload.ConvoyID, len(result.Findings)),
@@ -397,7 +421,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		// Persist the fingerprint so a future pass can also detect the
 		// identity and short-circuit without another LLM call.
 		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
-		store.FailBounty(db, bounty.ID, escMsg)
+		if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
+			logger.Printf("ConvoyReview #%d: FailBounty(conflicted_loop) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+		}
 		return
 	}
 
@@ -414,13 +440,17 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 		escMsg := fmt.Sprintf("ConvoyReview #%d: convoy %d had a prior clean pass but pass %d surfaced %d new finding(s) — either the ask-branch diff drifted or the LLM is re-reviewing inconsistently; escalating instead of spawning more fix tasks",
 			bounty.ID, payload.ConvoyID, completedPasses+1, len(result.Findings))
 		logger.Printf("ConvoyReview #%d: %s", bounty.ID, escMsg)
-		_, _ = CreateEscalation(db, bounty.ID, store.SeverityMedium, escMsg) // TODO(Fix #8b): propagate error
+		if _, eerr := CreateEscalation(db, bounty.ID, store.SeverityMedium, escMsg); eerr != nil {
+			logger.Printf("ConvoyReview #%d: CreateEscalation(post-clean drift, convoy %d) failed (%v); stale-lock detector will recover", bounty.ID, payload.ConvoyID, eerr)
+		}
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CONVOY REVIEW DRIFT] Convoy '%s' (#%d) — new findings after clean pass",
 				convoy.Name, payload.ConvoyID),
 			escMsg, bounty.ID, store.MailTypeAlert)
 		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
-		store.FailBounty(db, bounty.ID, escMsg)
+		if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
+			logger.Printf("ConvoyReview #%d: FailBounty(post-clean drift) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+		}
 		return
 	}
 
@@ -437,7 +467,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 	if activeConvoyTasks > 0 {
 		logger.Printf("ConvoyReview #%d: %d active task(s) in convoy %d — completing without spawning (diff still moving)",
 			bounty.ID, activeConvoyTasks, payload.ConvoyID)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
+			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, active-tasks defer) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
+		}
 		return
 	}
 
@@ -449,7 +481,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 	if store.HasActiveAskBranchConflict(db, payload.ConvoyID) {
 		logger.Printf("ConvoyReview #%d: convoy %d has an unresolved ask-branch REBASE_CONFLICT — deferring fix-task spawn",
 			bounty.ID, payload.ConvoyID)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
+			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, ask-branch conflict defer) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
+		}
 		return
 	}
 
@@ -510,7 +544,9 @@ func runConvoyReview(db *sql.DB, agentName string, bounty *store.Bounty, logger 
 	// pass can short-circuit on an identical set (same fix tasks didn't
 	// resolve the issues → conflicted_loop instead of another spawn).
 	db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
+		logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, %d fix tasks spawned) failed (%v); convoy-review-watch will retry", bounty.ID, spawned, uerr)
+	}
 }
 
 func runConvoyReviewLLM(userPrompt string, logger interface{ Printf(string, ...any) }) (convoyReviewResult, error) {
