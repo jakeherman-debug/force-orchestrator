@@ -36,8 +36,10 @@ var remainingAuditSkips = map[string]string{
 
 
 	// Fix #8 Phase A closed the three self-heal terminator signatures and
-	// two one-liners. Phase B/C migrate the remaining ~108 call sites. Each
-	// AUDIT-NNN below is tracked by a TODO(Fix #8b) marker in the code.
+	// two one-liners. Phase B (complete) migrated all 108 non-hot-path call
+	// sites across 18 files. The AUDIT IDs below remain because their
+	// specific tests cover adjacent defects (store-layer races, lifecycle
+	// sweeps) that Phase 8c is scheduled to address.
 	"AUDIT-015": "Fix #8b (onSubPRMerged mid-tx log)",
 	"AUDIT-026": "Fix #8 (ResetTask resurrect)",
 	"AUDIT-027": "Fix #8 (concurrent cancel-vs-approve)",
