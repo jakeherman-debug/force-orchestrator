@@ -141,8 +141,6 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// internal/git/git.go and askbranch.go — every `exec.Command("git", ...)` is
 	// bare, none use CommandContext. A hung `git fetch` wedges the caller.
 	t.Run("TestAUDIT_127_git_no_context_timeout", func(t *testing.T) {
-		t.Skip("AUDIT-127: remove when internal/git uses exec.CommandContext (Fix #8)")
-		// Without skip, fails with: audit_lifecycle_test.go:162: AUDIT-127: bare exec.Command for git subprocesses without CommandContext still present
 		gitSrc := lifecycleReadFile(t, "internal/git/git.go")
 		askSrc := lifecycleReadFile(t, "internal/git/askbranch.go")
 		cmdRe := regexp.MustCompile(`exec\.Command\(\s*"git"`)
@@ -153,12 +151,15 @@ func TestAuditLifecycleFindings(t *testing.T) {
 		askCtx := len(ctxRe.FindAllStringIndex(askSrc, -1))
 		total := gitCmd + askCmd
 		totalCtx := gitCtx + askCtx
-		if total == 0 {
-			t.Fatalf("AUDIT-127 precondition missing: no exec.Command(\"git\", ...) calls found")
+		// Post-fix contract (Fix #8d): totalCtx must be non-zero, and bare
+		// exec.Command("git", ...) must not dominate. total == 0 is the
+		// ideal state (every call migrated); total > 0 is tolerated only
+		// when at least half as many CommandContext calls exist.
+		if totalCtx == 0 {
+			t.Fatal("AUDIT-127: no exec.CommandContext calls in internal/git/* — migration regressed")
 		}
-		// RGR inversion: fail if bare Command still dominates over CommandContext.
-		if totalCtx == 0 || total > totalCtx*2 {
-			t.Fatal("AUDIT-127: bare exec.Command for git subprocesses without CommandContext still present")
+		if total > totalCtx*2 {
+			t.Fatalf("AUDIT-127: bare exec.Command for git subprocesses without CommandContext still dominates (total=%d, totalCtx=%d)", total, totalCtx)
 		}
 	})
 
@@ -221,8 +222,6 @@ func TestAuditLifecycleFindings(t *testing.T) {
 	// remove without a timeout. If `git worktree remove` hangs, the defer
 	// never returns and the caller wedges.
 	t.Run("TestAUDIT_165_worktree_remove_no_timeout", func(t *testing.T) {
-		t.Skip("AUDIT-165: remove when worktree-remove wrapped in CommandContext (Fix #8)")
-		// Without skip, fails with: audit_lifecycle_test.go:260: AUDIT-165: worktree remove using bare exec.Command without timeout still present
 		src := lifecycleReadFile(t, "internal/git/askbranch.go")
 		if !strings.Contains(src, `os.MkdirTemp("", "force-rebase-`) {
 			t.Fatalf("AUDIT-165 precondition missing: os.MkdirTemp(..., \"force-rebase-*\") not found")

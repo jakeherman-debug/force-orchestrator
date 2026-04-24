@@ -40,7 +40,6 @@ var remainingAuditSkips = map[string]string{
 	// sites across 18 files. The AUDIT IDs below remain because their
 	// specific tests cover adjacent defects (store-layer races, lifecycle
 	// sweeps) that Phase 8c is scheduled to address.
-	"AUDIT-127": "Fix #8b (lifecycle batch)",
 	"AUDIT-130": "Fix #8b (schema+time batch)",
 	"AUDIT-131": "Fix #8b (schema+time batch)",
 	"AUDIT-132": "Fix #8b (schema+time batch)",
