@@ -405,7 +405,17 @@ func approveTask(db *sql.DB, id int, w http.ResponseWriter) error {
 			http.StatusInternalServerError)
 		return mergeErr
 	}
-	_ = store.UpdateBountyStatus(db, id, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, id, "Completed"); err != nil {
+		// Merge already landed on disk; this is a bookkeeping miss. Surface
+		// as HTTP 500 so the operator sees it in the dashboard rather than
+		// the fleet believing the task is still awaiting review. Operator
+		// mail is surfaced by the stale-lock detector; dashboard log is
+		// operator-side.
+		http.Error(w,
+			fmt.Sprintf(`{"error":"merged but status update to Completed failed: %s"}`, strings.ReplaceAll(err.Error(), `"`, `'`)),
+			http.StatusInternalServerError)
+		return err
+	}
 	store.UnblockDependentsOf(db, id)
 	if diff != "" {
 		files := strings.Join(igit.ExtractDiffFiles(diff), ", ")
@@ -429,7 +439,15 @@ func rejectTask(db *sql.DB, id int, reason string, w http.ResponseWriter) {
 	}
 	retryCount := store.IncrementRetryCount(db, id)
 	if retryCount >= agents.MaxRetries {
-		_ = store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason)) // TODO(Fix #8b): propagate error
+		if err := store.FailBounty(db, id, fmt.Sprintf("Operator rejected (final): %s", reason)); err != nil {
+			// FailBounty write failed; surface via HTTP 500 so the operator
+			// sees the dashboard call didn't persist. The operator can retry
+			// the reject.
+			http.Error(w,
+				fmt.Sprintf(`{"error":"FailBounty write failed: %s"}`, strings.ReplaceAll(err.Error(), `"`, `'`)),
+				http.StatusInternalServerError)
+			return
+		}
 	} else {
 		newPayload := fmt.Sprintf("%s\n\nOPERATOR FEEDBACK (attempt %d/%d): %s",
 			b.Payload, retryCount, agents.MaxRetries, reason)

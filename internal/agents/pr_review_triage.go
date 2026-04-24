@@ -88,11 +88,15 @@ type prReviewTriagePayload struct {
 func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload prReviewTriagePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
-		_ = store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)) // TODO(Fix #8b): propagate error
+		if failErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); failErr != nil {
+			logger.Printf("PRReviewTriage #%d: FailBounty after bad payload failed: %v — stale-lock detector will recover", bounty.ID, failErr)
+		}
 		return
 	}
 	if payload.ConvoyID <= 0 {
-		_ = store.FailBounty(db, bounty.ID, "payload missing convoy_id") // TODO(Fix #8b): propagate error
+		if failErr := store.FailBounty(db, bounty.ID, "payload missing convoy_id"); failErr != nil {
+			logger.Printf("PRReviewTriage #%d: FailBounty after missing convoy_id failed: %v — stale-lock detector will recover", bounty.ID, failErr)
+		}
 		return
 	}
 
@@ -102,7 +106,9 @@ func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logge
 	comments := store.ListUnclassifiedPRComments(db, payload.ConvoyID, batchCap)
 	if len(comments) == 0 {
 		logger.Printf("PRReviewTriage #%d: no unclassified comments for convoy %d — completing", bounty.ID, payload.ConvoyID)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("PRReviewTriage #%d: Completed status update failed: %v — stale-lock detector will recover", bounty.ID, err)
+		}
 		return
 	}
 
@@ -156,7 +162,9 @@ func runPRReviewTriage(db *sql.DB, agentName string, bounty *store.Bounty, logge
 		}
 	}
 
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("PRReviewTriage #%d: Completed status update failed: %v — stale-lock detector will recover", bounty.ID, err)
+	}
 }
 
 // classifyPRReviewComment assembles the prompt, calls Claude, parses the JSON.
@@ -526,7 +534,16 @@ func dispatchConflictedLoop(
 		c.DraftPRNumber, c.ConvoyID, c.Repo, c.ThreadDepth, c.ReviewThreadID, c.Author,
 		util.TruncateStr(c.Body, 500),
 	)
-	_, _ = CreateEscalation(db, 0, store.SeverityMedium, msg) // TODO(Fix #8b): propagate error
+	if _, err := CreateEscalation(db, 0, store.SeverityMedium, msg); err != nil {
+		// Escalation row didn't land; surface via operator mail so the
+		// conflicted-loop signal isn't silently lost. task_id=0 here because
+		// the escalation is convoy-scoped, not task-scoped.
+		logger.Printf("PRReviewTriage: CreateEscalation for conflicted_loop comment #%d failed: %v — falling back to operator mail", c.GitHubCommentID, err)
+		store.SendMail(db, agentName, "operator",
+			fmt.Sprintf("[PR REVIEW LOOP] convoy #%d PR #%d — bot contradiction at depth %d", c.ConvoyID, c.DraftPRNumber, c.ThreadDepth),
+			fmt.Sprintf("%s\n\n(Escalation row insert failed: %v — this mail is the fallback surfacing path.)", msg, err),
+			0, store.MailTypeAlert)
+	}
 	store.LogAudit(db, agentName, "pr-review-conflicted-loop", 0,
 		fmt.Sprintf("comment #%d thread_depth=%d", c.GitHubCommentID, c.ThreadDepth))
 	logger.Printf("PRReviewTriage: comment #%d escalated — thread_depth=%d cap reached", c.GitHubCommentID, c.ThreadDepth)

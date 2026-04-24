@@ -115,7 +115,19 @@ func runInvestigatorTask(db *sql.DB, name string, bounty *store.Bounty, logger *
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 		}
-		_, _ = CreateEscalation(db, bounty.ID, sev, msg) // TODO(Fix #8b): propagate error
+		if _, err := CreateEscalation(db, bounty.ID, sev, msg); err != nil {
+			// Escalation row didn't land; fall back to FailBounty + operator
+			// mail so the task isn't left sitting in an Escalated-but-no-row
+			// state (the AUDIT-041 defect).
+			logger.Printf("Investigator #%d: CreateEscalation failed: %v — falling back to FailBounty + operator mail", bounty.ID, err)
+			if failErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("investigate-escalated (escalation insert failed: %v): %s", err, msg)); failErr != nil {
+				logger.Printf("Investigator #%d: FailBounty fallback also failed: %v — stale-lock detector will recover", bounty.ID, failErr)
+			}
+			store.SendMail(db, name, "operator",
+				fmt.Sprintf("[INVESTIGATE ESC FALLBACK] Task #%d — %s", bounty.ID, bounty.TargetRepo),
+				fmt.Sprintf("Investigator escalation insert failed (%v). Original message:\n\n%s", err, msg),
+				bounty.ID, store.MailTypeAlert)
+		}
 		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, bounty.ID, sev, msg))
 		store.LogAudit(db, name, "investigate-escalated", bounty.ID, msg)
 		return
@@ -146,7 +158,9 @@ func runInvestigatorTask(db *sql.DB, name string, bounty *store.Bounty, logger *
 		bounty.ID, util.TruncateStr(bounty.Payload, 60))
 	store.SendMail(db, name, "operator", subject, report, bounty.ID, store.MailTypeInfo)
 
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("Investigator #%d: Completed status update failed: %v — report already mailed; stale-lock detector will recover", bounty.ID, err)
+	}
 	histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Completed")
 	if tokIn > 0 || tokOut > 0 {
 		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)

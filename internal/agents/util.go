@@ -149,7 +149,12 @@ func handleInfraFailure(
 		if recordHistory {
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "", "Failed")
 		}
-		_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
+		if failErr := store.FailBounty(db, b.ID, msg); failErr != nil {
+			// DB write didn't land. Operator mail below is unconditional and
+			// still surfaces the failure; the stale-lock detector will sweep
+			// the row if it stuck in a non-terminal status.
+			logger.Printf("handleInfraFailure #%d: FailBounty failed: %v — operator mail below is the surfacing path; stale-lock detector will recover", b.ID, failErr)
+		}
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		store.LogAudit(db, agentName, "infra-fail", b.ID, msg)
 		store.StoreFleetMemory(db, b.TargetRepo, b.ID, "failure",
@@ -176,9 +181,13 @@ func handleInfraFailure(
 			// rather than silently letting the task die — this is a structural
 			// signal that further decomposition isn't going to help.
 			logger.Printf("Task %d: reshard refused (generation=%d >= cap=%d) — escalating", b.ID, b.ReshardGeneration, maxReshardGeneration)
-			_, _ = CreateEscalation(db, b.ID, store.SeverityHigh, // TODO(Fix #8b): propagate error
+			if _, escErr := CreateEscalation(db, b.ID, store.SeverityHigh,
 				fmt.Sprintf("Reshard cascade reached generation cap (%d). Further decomposition is unlikely to help — this task needs human review. Last error: %s",
-					maxReshardGeneration, msg))
+					maxReshardGeneration, msg)); escErr != nil {
+				// Escalation insert failed. The operator mail directly below
+				// (MailTypeAlert) is the guaranteed fallback surfacing path.
+				logger.Printf("handleInfraFailure #%d: CreateEscalation (reshard-cap) failed: %v — operator mail below is the fallback", b.ID, escErr)
+			}
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("[RESHARD CAP] Task #%d %s — cascade refused at generation %d", b.ID, stageName, b.ReshardGeneration),
 				fmt.Sprintf("Task #%d is a generation-%d reshard descendant that hit %d infra failures. The auto-reshard path is refused at the cap (%d) to avoid a 1→3→9→27 cascade.\n\nError: %s\n\nPlease review the task and either split it manually or close it.",
@@ -193,7 +202,13 @@ func handleInfraFailure(
 				b.ID, store.MailTypeAlert)
 		}
 	} else {
-		_ = store.UpdateBountyStatus(db, b.ID, retryStatus) // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, b.ID, retryStatus); err != nil {
+			// Status update to retryStatus failed; task may remain in its
+			// current (likely Locked) status. The stale-lock detector
+			// (45-min timeout) will sweep it back to Pending so the retry
+			// loop eventually resumes.
+			logger.Printf("handleInfraFailure #%d: status update to %s failed: %v — stale-lock detector will recover", b.ID, retryStatus, err)
+		}
 		backoff := InfraBackoff(count)
 		logger.Printf("Task %d: %s infra failure %d/%d, backing off %v", b.ID, stageName, count, MaxInfraFailures, backoff)
 		time.Sleep(backoff)

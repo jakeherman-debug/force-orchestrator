@@ -240,8 +240,12 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 				store.LogAudit(db, "boot-agent", "reset", t.id, verdict.Reason)
 			case BootEscalate:
 				logger.Printf("Task %d: Boot agent ordered ESCALATE — escalating at LOW severity", t.id)
-				_, _ = CreateEscalation(db, t.id, store.SeverityLow, // TODO(Fix #8b): propagate error
-					fmt.Sprintf("Boot agent: %s (locked %.0f min, no commits)", verdict.Reason, t.lockedMinutes))
+				if _, escErr := CreateEscalation(db, t.id, store.SeverityLow,
+					fmt.Sprintf("Boot agent: %s (locked %.0f min, no commits)", verdict.Reason, t.lockedMinutes)); escErr != nil {
+					// Escalation insert failed; the MailTypeAlert mail below
+					// is the unconditional fallback surfacing path.
+					logger.Printf("Inquisitor #%d: CreateEscalation (BootEscalate) failed: %v — operator mail below is the fallback", t.id, escErr)
+				}
 				store.LogAudit(db, "boot-agent", "escalate", t.id, verdict.Reason)
 				store.SendMail(db, "inquisitor", "operator",
 					fmt.Sprintf("[STALL ESCALATED] Task #%d — %s", t.id, t.repo),
@@ -252,8 +256,13 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 				logger.Printf("Task %d: Boot agent says IGNORE — agent may still be working", t.id)
 			default: // BootWarn
 				logger.Printf("Task %d: Boot agent says WARN — stall noted but not acting", t.id)
-				_, _ = CreateEscalation(db, t.id, store.SeverityLow, // TODO(Fix #8b): propagate error
-					fmt.Sprintf("Agent %s locked %.0f min with no commits — possible stall", t.owner, t.lockedMinutes))
+				if _, escErr := CreateEscalation(db, t.id, store.SeverityLow,
+					fmt.Sprintf("Agent %s locked %.0f min with no commits — possible stall", t.owner, t.lockedMinutes)); escErr != nil {
+					// Warn-level escalation insert failed; next inquisitor
+					// tick (5 min) will re-evaluate the stalled task and
+					// retry the escalation if it's still stuck.
+					logger.Printf("Inquisitor #%d: CreateEscalation (BootWarn) failed: %v — next inquisitor tick will re-evaluate", t.id, escErr)
+				}
 			}
 		}
 	}

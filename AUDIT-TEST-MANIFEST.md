@@ -88,7 +88,7 @@ Every test has a `// Without skip, fails with: ...` comment block directly below
 | AUDIT-041 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_041_CreateEscalationNoErrorReturn` | static (AST) | Fix #8 | Closed by: Fix #8a (CreateEscalation returns (int, error); callers fall back to FailBounty) |
 | AUDIT-042 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_042_UpdateAskBranchPRChecksDiscarded` | static grep | Fix #8 |
 | AUDIT-043 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_043_PRCloseUnconditionalMarkClosed` | static | Fix #8 |
-| AUDIT-044 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_044_LibrarianSilentFallback` | static | Fix #8 |
+| AUDIT-044 | `internal/agents/audit_silent_failures_test.go` | `TestAUDIT_044_LibrarianSilentFallback` | static | Fix #8 | Closed by: Fix #8b (remaining) — librarian.go fails task on invalid payload JSON instead of silently assigning raw payload |
 | AUDIT-045 | `internal/store/audit_concurrency_test.go` | `TestAUDIT_Concurrency/AUDIT_045_*` | static | Fix #4/#8 |
 | AUDIT-046 | `internal/store/audit_concurrency_test.go` | `.../AUDIT_046_*` | static | Fix #8 |
 | AUDIT-047 | `internal/store/audit_concurrency_test.go` | `.../AUDIT_047_*` | static | Fix #8 |

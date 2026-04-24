@@ -151,7 +151,19 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 		if tokIn > 0 || tokOut > 0 {
 			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
 		}
-		_, _ = CreateEscalation(db, bounty.ID, sev, msg) // TODO(Fix #8b): propagate error
+		if _, err := CreateEscalation(db, bounty.ID, sev, msg); err != nil {
+			// Escalation row didn't land; fall back to FailBounty + operator
+			// mail so the task isn't left sitting in an Escalated-but-no-row
+			// state (the AUDIT-041 defect).
+			logger.Printf("Auditor #%d: CreateEscalation failed: %v — falling back to FailBounty + operator mail", bounty.ID, err)
+			if failErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("audit-escalated (escalation insert failed: %v): %s", err, msg)); failErr != nil {
+				logger.Printf("Auditor #%d: FailBounty fallback also failed: %v — stale-lock detector will recover", bounty.ID, failErr)
+			}
+			store.SendMail(db, name, "operator",
+				fmt.Sprintf("[AUDIT ESC FALLBACK] Task #%d — %s", bounty.ID, bounty.TargetRepo),
+				fmt.Sprintf("Audit task escalation insert failed (%v). Original message:\n\n%s", err, msg),
+				bounty.ID, store.MailTypeAlert)
+		}
 		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, bounty.ID, sev, msg))
 		store.LogAudit(db, name, "audit-escalated", bounty.ID, msg)
 		return
@@ -195,7 +207,9 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 	nFindings := len(report.Findings)
 	if nFindings == 0 {
 		logger.Printf("Task %d: audit complete — no findings", bounty.ID)
-		_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+			logger.Printf("Auditor #%d: Completed status update failed: %v — stale-lock detector will recover", bounty.ID, err)
+		}
 		store.SendMail(db, name, "operator",
 			fmt.Sprintf("[Audit Complete] #%d — No Issues Found", bounty.ID),
 			fmt.Sprintf("Audit of task #%d completed with no findings.\n\nSummary: %s\n\nTask: %s",
@@ -210,7 +224,9 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 	if convoyErr != nil {
 		msg := fmt.Sprintf("Failed to create audit convoy: %v", convoyErr)
 		logger.Printf("Task %d: %s", bounty.ID, msg)
-		_ = store.FailBounty(db, bounty.ID, msg) // TODO(Fix #8b): propagate error
+		if failErr := store.FailBounty(db, bounty.ID, msg); failErr != nil {
+			logger.Printf("Auditor #%d: FailBounty after convoy-create failure failed: %v — stale-lock detector will recover", bounty.ID, failErr)
+		}
 		return
 	}
 
@@ -279,7 +295,9 @@ func runAuditorTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.L
 			len(queued), convoyID, util.TruncateStr(report.Summary, 400)),
 		"", "audit")
 
-	_ = store.UpdateBountyStatus(db, bounty.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, bounty.ID, "Completed"); err != nil {
+		logger.Printf("Auditor #%d: Completed status update failed: %v — stale-lock detector will recover", bounty.ID, err)
+	}
 
 	// Send summary mail to operator.
 	findingList := strings.Join(queued, "\n")

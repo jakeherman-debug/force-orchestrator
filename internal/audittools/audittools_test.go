@@ -44,7 +44,6 @@ var remainingAuditSkips = map[string]string{
 	"AUDIT-040": "Fix #8b (escalate CI-triage double UPDATE)",
 	"AUDIT-042": "Fix #8b (UpdateAskBranchPRChecks discarded)",
 	"AUDIT-043": "Fix #8b (PRCloseUnconditionalMarkClosed)",
-	"AUDIT-044": "Fix #8b (librarian silent fallback)",
 	"AUDIT-045": "Fix #4/#8 (concurrency batch)",
 	"AUDIT-046": "Fix #8b (concurrency batch)",
 	"AUDIT-047": "Fix #8b (concurrency batch)",

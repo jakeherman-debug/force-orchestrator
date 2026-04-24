@@ -242,8 +242,10 @@ func TestAUDIT_043_PRCloseUnconditionalMarkClosed(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_044_LibrarianSilentFallback(t *testing.T) {
-	t.Skip("AUDIT-044: remove when UpdateBountyStatus/CreateEscalation return error (Fix #8)")
-	// Without skip, fails with: AUDIT-044: defective pattern still present — Librarian silently falls back to raw payload on unmarshal error, no FailBounty/return before the fallback; poisons memory index
+	// Closed by Fix #8b (remaining): librarian.go's invalid-payload path now
+	// calls store.FailBounty + return rather than silently assigning the raw
+	// payload to payload.Task. The test still asserts the absence of the
+	// defective pattern so a regression fires.
 	src := silentReadFile(t, "internal/agents/librarian.go")
 
 	needle := "payload.Task = bounty.Payload"
