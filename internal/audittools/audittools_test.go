@@ -41,8 +41,6 @@ var remainingAuditSkips = map[string]string{
 	// specific tests cover adjacent defects (store-layer races, lifecycle
 	// sweeps) that Phase 8c is scheduled to address.
 	"AUDIT-015": "Fix #8b (onSubPRMerged mid-tx log)",
-	"AUDIT-026": "Fix #8 (ResetTask resurrect)",
-	"AUDIT-027": "Fix #8 (concurrent cancel-vs-approve)",
 	"AUDIT-040": "Fix #8b (escalate CI-triage double UPDATE)",
 	"AUDIT-042": "Fix #8b (UpdateAskBranchPRChecks discarded)",
 	"AUDIT-043": "Fix #8b (PRCloseUnconditionalMarkClosed)",
@@ -52,7 +50,6 @@ var remainingAuditSkips = map[string]string{
 	"AUDIT-066": "Fix #8b companion (PruneFleet unparameterised interval)",
 	"AUDIT-068": "Fix #8b (ClaimBounty conflates ErrNoRows)",
 	"AUDIT-069": "Fix #8b (ResolveFeatureBlockers no transaction)",
-	"AUDIT-072": "Fix #8b pattern-covered (P7)",
 	"AUDIT-125": "Fix #8b (lifecycle batch)",
 	"AUDIT-126": "Fix #8b (lifecycle batch)",
 	"AUDIT-127": "Fix #8b (lifecycle batch)",
@@ -65,7 +62,6 @@ var remainingAuditSkips = map[string]string{
 	"AUDIT-155": "Fix #8b spotcheck-d (union merge no repo lock)",
 	"AUDIT-156": "Fix #8b pattern-covered",
 	"AUDIT-158": "Fix #8b lifecycle batch",
-	"AUDIT-159": "Fix #8b pattern-covered",
 	"AUDIT-164": "Fix #8b lifecycle batch (low, pattern-covered)",
 	"AUDIT-165": "Fix #8b lifecycle batch (low, pattern-covered)",
 

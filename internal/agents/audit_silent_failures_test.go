@@ -396,8 +396,6 @@ func TestAUDIT_095_DiplomatSilentFallback(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_156_GitRunErrorsSwallowed(t *testing.T) {
-	t.Skip("AUDIT-156: remove when internal/git wraps .Run() errors (Fix #8)")
-	// Without skip, fails with: AUDIT-156: defective pattern still present — 23 bare `.Run()` git invocations in internal/git/git.go; reset/clean/branch -D/merge --abort/rebase --abort all silent
 	src := silentReadFile(t, "internal/git/git.go")
 
 	re := regexp.MustCompile(`exec\.Command\("git",[^)]*\)\.Run\(\)`)
@@ -429,8 +427,6 @@ func TestAUDIT_156_GitRunErrorsSwallowed(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAUDIT_159_ManualRowsCloseNotDefer(t *testing.T) {
-	t.Skip("AUDIT-159: remove when dogGitHygiene uses defer rows.Close (Fix #8)")
-	// Without skip, fails with: AUDIT-159: defective pattern still present — dogGitHygiene uses manual rows.Close() (1) and agentRows.Close() (1) with no defer; scan-error path leaks FDs
 	src := silentReadFile(t, "internal/agents/dogs.go")
 
 	fnIdx := strings.Index(src, "func dogGitHygiene(")

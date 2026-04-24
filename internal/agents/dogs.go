@@ -190,18 +190,26 @@ func runDog(db *sql.DB, name string, logger interface{ Printf(string, ...any) })
 
 func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 	// Collect repos first, then close rows before doing any further DB work.
+	// AUDIT-159: defer the close so a scan-error exit doesn't leak the FD
+	// (manual `rows.Close()` on the tail only ran on the happy path).
 	rows, err := db.Query(`SELECT name, local_path FROM Repositories`)
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	type repo struct{ name, path string }
 	var repos []repo
 	for rows.Next() {
 		var r repo
-		rows.Scan(&r.name, &r.path)
+		if sErr := rows.Scan(&r.name, &r.path); sErr != nil {
+			logger.Printf("Dog git-hygiene: repos scan failed: %v", sErr)
+			continue
+		}
 		repos = append(repos, r)
 	}
-	rows.Close()
+	if rErr := rows.Err(); rErr != nil {
+		logger.Printf("Dog git-hygiene: repos query iter error: %v", rErr)
+	}
 
 	for _, r := range repos {
 		if _, statErr := os.Stat(r.path); statErr != nil {
@@ -225,14 +233,20 @@ func dogGitHygiene(db *sql.DB, logger interface{ Printf(string, ...any) }) error
 	if agentErr != nil {
 		return nil // non-fatal — skip orphan cleanup this cycle
 	}
+	defer agentRows.Close()
 	type agentEntry struct{ name, repo, path string }
 	var agents []agentEntry
 	for agentRows.Next() {
 		var a agentEntry
-		agentRows.Scan(&a.name, &a.repo, &a.path)
+		if sErr := agentRows.Scan(&a.name, &a.repo, &a.path); sErr != nil {
+			logger.Printf("Dog git-hygiene: agents scan failed: %v", sErr)
+			continue
+		}
 		agents = append(agents, a)
 	}
-	agentRows.Close()
+	if rErr := agentRows.Err(); rErr != nil {
+		logger.Printf("Dog git-hygiene: agents query iter error: %v", rErr)
+	}
 
 	var detached int
 	for _, a := range agents {

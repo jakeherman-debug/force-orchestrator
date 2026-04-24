@@ -342,7 +342,15 @@ func applyMedicRequeue(db *sql.DB, agentName string, bounty, parent *store.Bount
 		return
 	}
 
-	store.ResetTaskFull(db, parent.ID)
+	// Pattern P7 (Fix #8d): ResetTaskFull now refuses Completed/Cancelled
+	// sources. If the parent terminated between Medic's failure-triage
+	// dispatch and this write (race), the requeue side-effects — counter
+	// bump + "[MEDIC GUIDANCE]" mail to astromech — would lie about work
+	// that's already done. Skip them.
+	if !store.ResetTaskFull(db, parent.ID) {
+		logger.Printf("Medic: task #%d requeue refused — parent no longer in a reset-eligible state (Completed/Cancelled); aborting requeue", parent.ID)
+		return
+	}
 	newCount := store.IncrementMedicRequeue(db, parent.ID)
 	store.SendMail(db, agentName, "astromech",
 		fmt.Sprintf("[MEDIC GUIDANCE] Task #%d — requeued with updated guidance (cycle %d/%d)", parent.ID, newCount, maxMedicRequeues),

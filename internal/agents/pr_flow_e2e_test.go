@@ -87,7 +87,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	gitRun("commit", "-m", "implement feature X")
 	gitRun("checkout", "main")
 	store.SetBranchName(db, taskID, agentBranch)
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview' WHERE id = ?`, taskID)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview' WHERE id = ?`, taskID)
 
 	// Register a worktree for the council so runCouncilTask can get a diff.
 	if _, err := igitGetOrCreate(db, "Council-Yoda", repoDir); err != nil {
@@ -313,7 +313,7 @@ func TestPRFlow_LegacyPath_StillWorksWhenPRFlowDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.SetBranchName(db, tid, branch)
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview' WHERE id = ?`, tid)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview' WHERE id = ?`, tid)
 
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	b, _ := store.GetBounty(db, tid)

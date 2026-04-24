@@ -203,6 +203,48 @@ func UpdateBountyStatus(db *sql.DB, id int, newStatus string) error {
 	return nil
 }
 
+// UpdateBountyStatusFrom is the source-status-guarded sibling of
+// UpdateBountyStatus. The UPDATE succeeds only if the task's current status
+// equals `from`; a racing writer that already transitioned the task to a
+// different status leaves us with rowsAffected=0 and the caller is expected
+// to detect the lost race and skip any side effects.
+//
+// Pattern P7 (Fix #8d, closes AUDIT-026, AUDIT-027, AUDIT-072): state
+// transitions that depend on the prior status MUST go through this helper
+// rather than the blind UpdateBountyStatus. Without the guard, a CancelTask
+// that lands first can be clobbered by a stale Jedi Council approval — in
+// the P7 pre-fix regression test this happened 20/20 trials.
+//
+// The webhook fires only when the UPDATE actually landed (rowsAffected=1)
+// AND the new status is a webhook-observed terminal; a lost-race no-op
+// stays silent.
+func UpdateBountyStatusFrom(db *sql.DB, id int, from, to string) (int64, error) {
+	res, err := db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = ''
+		WHERE id = ? AND status = ?`, to, id, from)
+	if err != nil {
+		return 0, fmt.Errorf("UpdateBountyStatusFrom(id=%d, from=%s, to=%s): %w", id, from, to, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 1 && (to == "Completed" || to == "Failed" || to == "Escalated") {
+		FireWebhook(db, id, to)
+	}
+	return n, nil
+}
+
+// UpdateBountyStatusFromTx is the transactional sibling of
+// UpdateBountyStatusFrom. The caller fires the webhook (if appropriate)
+// AFTER commit — tx variants deliberately skip side effects so a rolled-back
+// transaction doesn't emit spurious notifications.
+func UpdateBountyStatusFromTx(tx *sql.Tx, id int, from, to string) (int64, error) {
+	res, err := tx.Exec(`UPDATE BountyBoard SET status = ?, owner = '', locked_at = ''
+		WHERE id = ? AND status = ?`, to, id, from)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // UpdateBountyStatusTx updates task status inside an existing transaction.
 // The caller is responsible for firing the webhook AFTER commit — tx variants
 // deliberately skip side effects so a rolled-back transaction doesn't emit
@@ -311,12 +353,29 @@ func MarkConflictPendingTx(tx *sql.Tx, id int, msg string) error {
 	return err
 }
 
-// CancelTask marks a task as Cancelled with a reason. Cancelled is distinct from Failed —
-// it reflects deliberate operator action, not an agent error.
-// No-op if the task is already Completed. Returns true if the task was cancelled.
+// CancelTask marks a task as Cancelled with a reason. Cancelled is distinct
+// from Failed — it reflects deliberate operator action, not an agent error.
+// No-op if the task is already Completed or Cancelled (terminal states);
+// returns true if the task transitioned to Cancelled.
+//
+// Pattern P7 (Fix #8d, closes AUDIT-027, AUDIT-072): the UPDATE is a
+// source-status CAS via read-then-UpdateBountyStatusFromTx. An operator
+// cancel racing with a Jedi Council approve that has also been migrated to
+// UpdateBountyStatusFrom — whichever transition lands first wins, and the
+// loser sees rowsAffected=0 and returns without clobbering.
 func CancelTask(db *sql.DB, id int, reason string) bool {
-	res, _ := db.Exec(`UPDATE BountyBoard SET status = 'Cancelled', owner = '', locked_at = '', error_log = ?
-		WHERE id = ? AND status != 'Completed'`, reason, id)
+	var currentStatus string
+	if err := db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&currentStatus); err != nil {
+		return false
+	}
+	if currentStatus == "Completed" || currentStatus == "Cancelled" {
+		return false
+	}
+	res, err := db.Exec(`UPDATE BountyBoard SET status = 'Cancelled', owner = '', locked_at = '', error_log = ?
+		WHERE id = ? AND status = ?`, reason, id, currentStatus)
+	if err != nil {
+		return false
+	}
 	n, _ := res.RowsAffected()
 	return n > 0
 }
@@ -328,24 +387,44 @@ func CancelTask(db *sql.DB, id int, reason string) bool {
 // an astromech redoing it from scratch.
 // If no branch_name is set (no coding work yet), it resets to Pending.
 // In both cases error/lock state is cleared and the convoy is auto-recovered.
-func ResetTask(db *sql.DB, id int) {
+//
+// Pattern P7 (Fix #8d, closes AUDIT-026): a Completed or Cancelled task is
+// refused — these are terminal states and a retry endpoint racing with a
+// stale dashboard view must not resurrect finished work. The UPDATE's
+// AND status NOT IN ('Completed','Cancelled') clause makes the refusal
+// atomic with the read so an in-flight completion cannot slip between the
+// status check and the write. Returns true iff the reset landed.
+func ResetTask(db *sql.DB, id int) bool {
 	var convoyID int
 	var branchName string
-	db.QueryRow(`SELECT convoy_id, IFNULL(branch_name,'') FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID, &branchName)
+	if err := db.QueryRow(`SELECT convoy_id, IFNULL(branch_name,'') FROM BountyBoard WHERE id = ?`, id).
+		Scan(&convoyID, &branchName); err != nil {
+		return false
+	}
+	var res sql.Result
+	var err error
 	if branchName != "" {
 		targetStatus := "AwaitingCouncilReview"
 		if IsConvoyCoordinated(db, convoyID) {
 			targetStatus = "AwaitingCaptainReview"
 		}
-		db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', error_log = '',
+		res, err = db.Exec(`UPDATE BountyBoard SET status = ?, owner = '', error_log = '',
 			retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = ''
-			WHERE id = ?`, targetStatus, id)
+			WHERE id = ? AND status NOT IN ('Completed','Cancelled')`, targetStatus, id)
 	} else {
-		db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
+		res, err = db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
 			retry_count = 0, infra_failures = 0, locked_at = '', checkpoint = '', branch_name = ''
-			WHERE id = ?`, id)
+			WHERE id = ? AND status NOT IN ('Completed','Cancelled')`, id)
+	}
+	if err != nil {
+		return false
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false
 	}
 	AutoRecoverConvoy(db, convoyID, nil)
+	return true
 }
 
 // ResetTaskFull always resets a task to Pending and clears branch_name regardless
@@ -359,13 +438,29 @@ func ResetTask(db *sql.DB, id int) {
 // (auto-shard on timeout, permanent-fail on retries) remain bounded even
 // across multiple Medic-driven retries, and the `medic_requeue_count` cap
 // (see applyMedicRequeue) is the final bounded-lives budget.
-func ResetTaskFull(db *sql.DB, id int) {
+//
+// Pattern P7 (Fix #8d): Completed/Cancelled tasks are refused — Medic has no
+// business resurrecting a task that the fleet already finished. The atomic
+// AND status NOT IN (...) clause protects against a Medic decision landing
+// on a task that completed between the failure-triage dispatch and the
+// requeue write. Returns true iff the reset landed.
+func ResetTaskFull(db *sql.DB, id int) bool {
 	var convoyID int
-	db.QueryRow(`SELECT convoy_id FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID)
-	db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
+	if err := db.QueryRow(`SELECT convoy_id FROM BountyBoard WHERE id = ?`, id).Scan(&convoyID); err != nil {
+		return false
+	}
+	res, err := db.Exec(`UPDATE BountyBoard SET status = 'Pending', owner = '', error_log = '',
 		locked_at = '', checkpoint = '', branch_name = ''
-		WHERE id = ?`, id)
+		WHERE id = ? AND status NOT IN ('Completed','Cancelled')`, id)
+	if err != nil {
+		return false
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false
+	}
 	AutoRecoverConvoy(db, convoyID, nil)
+	return true
 }
 
 // ResetAllFailed resets all Failed tasks to Pending. Returns the number of tasks reset.

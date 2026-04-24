@@ -53,7 +53,7 @@ func TestRunCouncilTask_UnknownRepo(t *testing.T) {
 	defer db.Close()
 
 	id := store.AddBounty(db, 0, "CodeEdit", "fix bug")
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', target_repo = 'ghost' WHERE id = ?`, id)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', target_repo = 'ghost' WHERE id = ?`, id)
 	b, _ := store.GetBounty(db, id)
 
 	withStubCLIRunner(t, "", nil)
@@ -78,7 +78,7 @@ func TestRunCouncilTask_CLIError(t *testing.T) {
 	store.AddRepo(db, "myrepo", repoDir, "test")
 
 	id := store.AddBounty(db, 0, "CodeEdit", "fix bug")
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
 	b, _ := store.GetBounty(db, id)
 
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI failed: network error"))
@@ -103,7 +103,7 @@ func TestRunCouncilTask_JSONError(t *testing.T) {
 	store.AddRepo(db, "myrepo", repoDir, "test")
 
 	id := store.AddBounty(db, 0, "CodeEdit", "fix bug")
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
 	b, _ := store.GetBounty(db, id)
 
 	withStubCLIRunner(t, "This is not JSON at all", nil)
@@ -128,7 +128,7 @@ func TestRunCouncilTask_Rejected_RetryRemaining(t *testing.T) {
 	store.AddRepo(db, "myrepo", repoDir, "test")
 
 	id := store.AddBounty(db, 0, "CodeEdit", "fix bug")
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
 	b, _ := store.GetBounty(db, id)
 
 	ruling := `{"approved":false,"feedback":"missing test coverage"}`
@@ -157,7 +157,7 @@ func TestRunCouncilTask_Approved(t *testing.T) {
 	store.AddRepo(db, "myrepo", repoDir, "test")
 
 	id := store.AddBounty(db, 0, "CodeEdit", "fix bug")
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
 	b, _ := store.GetBounty(db, id)
 
 	ruling := `{"approved":true,"feedback":""}`
@@ -208,7 +208,7 @@ func TestRunCouncilTask_Rejected_MaxRetries(t *testing.T) {
 	for i := 0; i < MaxRetries-1; i++ {
 		store.IncrementRetryCount(db, id)
 	}
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
 	b, _ := store.GetBounty(db, id)
 
 	ruling := `{"approved":false,"feedback":"still broken"}`

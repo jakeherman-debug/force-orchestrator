@@ -118,8 +118,10 @@ func setupSubPRScenario(t *testing.T, db *sql.DB) (convoyID, taskID int, repoDir
 		t.Fatal(err)
 	}
 
-	// Put the task into AwaitingCouncilReview with the branch name recorded.
-	db.Exec(`UPDATE BountyBoard SET status = 'AwaitingCouncilReview', branch_name = ? WHERE id = ?`, branchName, taskID)
+	// Put the task into UnderReview with the branch name recorded.
+	// Pattern P7 (Fix #8d): Council approve uses UpdateBountyStatusFrom(UnderReview,
+	// Completed) so the seed must reflect the post-ClaimForReview reality.
+	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', branch_name = ? WHERE id = ?`, branchName, taskID)
 	return
 }
 

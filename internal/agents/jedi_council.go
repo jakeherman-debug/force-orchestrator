@@ -170,8 +170,16 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 		if reviewCommitsAhead(db, repoPath, b) == "" {
 			// All commits already in main — auto-complete rather than fail.
 			logger.Printf("Task %d: diff empty and no unique commits — work already merged, auto-completing", b.ID)
-			if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
+			// Pattern P7 (Fix #8d): source-status CAS so a concurrent operator
+			// cancel on the dashboard cannot be clobbered. Council only
+			// auto-completes a task still in UnderReview.
+			rows, err := store.UpdateBountyStatusFrom(db, b.ID, "UnderReview", "Completed")
+			if err != nil {
 				logger.Printf("Task %d: auto-complete status update failed (%v); stale-lock detector will recover", b.ID, err)
+				return
+			}
+			if rows == 0 {
+				logger.Printf("Task %d: auto-complete refused — task no longer in UnderReview (operator cancel / retry race)", b.ID)
 				return
 			}
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "auto-completed: work already merged into main", "Completed")
@@ -440,7 +448,13 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 			}
 			return
 		}
-		if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
+		// Pattern P7 (Fix #8d): source-status CAS — a concurrent operator
+		// cancel between ClaimForReview and the approve write must not be
+		// clobbered by this "Completed" write. The merge already landed on
+		// main; if the task was cancelled in-flight we log the merged work
+		// against the cancelled task via mail rather than rewriting state.
+		rows, err := store.UpdateBountyStatusFrom(db, b.ID, "UnderReview", "Completed")
+		if err != nil {
 			// Branch is merged — the DB row says otherwise, which is a genuine
 			// inconsistency. Log + escalate via operator mail; the stale-lock
 			// detector will also pick this up on the next tick.
@@ -448,6 +462,14 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("[DB INCONSISTENCY] Task #%d — merge succeeded but status update failed", b.ID),
 				fmt.Sprintf("Branch %s was merged but the task's status could not be updated: %v", branchName, err),
+				b.ID, store.MailTypeAlert)
+			return
+		}
+		if rows == 0 {
+			logger.Printf("Task %d: Completed write refused — task left UnderReview during council pass (operator cancel / retry race); mailing operator to reconcile", b.ID)
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[RACE] Task #%d — merged but status write refused", b.ID),
+				fmt.Sprintf("Branch %s was merged into main, but the Council's Completed write was refused because the task left UnderReview in the meantime (likely an operator cancel or a retry). Reconcile by verifying the main branch and deciding whether to mark Completed manually.", branchName),
 				b.ID, store.MailTypeAlert)
 			return
 		}
@@ -501,8 +523,18 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 					chain = append(chain, grandParentID)
 				}
 				for _, ancestorID := range chain {
-					if err := store.UpdateBountyStatus(db, ancestorID, "Completed"); err != nil {
+					// Pattern P7 (Fix #8d): source-status CAS so an operator
+					// cancel of an ancestor mid-chain is not clobbered by the
+					// Completed write we do here. If the ancestor is no
+					// longer ConflictPending the chain-resolution already
+					// handled it by another path (or the operator cancelled).
+					rows, err := store.UpdateBountyStatusFrom(db, ancestorID, "ConflictPending", "Completed")
+					if err != nil {
 						logger.Printf("Task %d: ancestor #%d status update failed (%v); conflict-chain completion partial", b.ID, ancestorID, err)
+						continue
+					}
+					if rows == 0 {
+						logger.Printf("Task %d: ancestor #%d no longer ConflictPending — skipping chain write", b.ID, ancestorID)
 						continue
 					}
 					if n := store.UnblockDependentsOf(db, ancestorID); n > 0 {
