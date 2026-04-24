@@ -115,7 +115,13 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 		// action).
 		msg := fmt.Sprintf("Chancellor Claude call failed: %v — routing to operator review (fail-closed)", err)
 		logger.Printf("Feature #%d: %s", feature.ID, msg)
-		_ = store.FailBounty(db, feature.ID, msg) // TODO(Fix #8b): propagate error
+		if failErr := store.FailBounty(db, feature.ID, msg); failErr != nil {
+			// Feature row did not transition to Failed. Log and continue —
+			// the stale-lock detector will re-evaluate this feature on the
+			// next sweep, and operator mail (below) still fires so the
+			// human is notified regardless of the DB write outcome.
+			logger.Printf("Feature #%d: FailBounty write failed (%v) — stale-lock detector will recover", feature.ID, failErr)
+		}
 		store.SendMail(db, chancellorName, "operator",
 			fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — LLM unavailable, operator review required", feature.ID),
 			fmt.Sprintf("The Supreme Chancellor's LLM call failed. The Feature has been failed rather than auto-approved (Fix #8.5 fail-closed). Reset the Feature to Pending once the LLM outage is resolved.\n\nError: %v\n\nOriginal request:\n%s",
@@ -132,7 +138,12 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on parse failure.
 		msg := fmt.Sprintf("Chancellor ruling parse failed: %v — routing to operator review (fail-closed)", err)
 		logger.Printf("Feature #%d: %s", feature.ID, msg)
-		_ = store.FailBounty(db, feature.ID, msg) // TODO(Fix #8b): propagate error
+		if failErr := store.FailBounty(db, feature.ID, msg); failErr != nil {
+			// Feature row did not transition to Failed. Log and continue —
+			// the stale-lock detector will re-evaluate this feature on the
+			// next sweep; operator mail still fires.
+			logger.Printf("Feature #%d: FailBounty write failed (%v) — stale-lock detector will recover", feature.ID, failErr)
+		}
 		store.SendMail(db, chancellorName, "operator",
 			fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — LLM returned unparseable ruling, operator review required", feature.ID),
 			fmt.Sprintf("The Supreme Chancellor's LLM produced a response that could not be parsed. The Feature has been failed rather than auto-approved (Fix #8.5 fail-closed).\n\nParse error: %v\n\nRaw response (first 500 bytes): %.500s\n\nOriginal request:\n%s",
@@ -141,34 +152,39 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 		return
 	}
 
+	var actionErr error
 	switch ruling.Action {
 	case "APPROVE":
 		logger.Printf("Feature #%d: APPROVED — %s", feature.ID, ruling.Reason)
-		approveProposal(db, feature, tasks, ruling, logger)
+		actionErr = approveProposal(db, feature, tasks, ruling, logger)
 
 	case "SEQUENCE":
 		if len(ruling.SequenceAfterConvoyIDs) == 0 {
 			logger.Printf("Feature #%d: SEQUENCE with no convoy IDs — auto-approving", feature.ID)
-			approveProposal(db, feature, tasks, ruling, logger)
+			if err := approveProposal(db, feature, tasks, ruling, logger); err != nil {
+				logger.Printf("Feature #%d: approveProposal reported error (%v) — stale-lock detector will recover", feature.ID, err)
+			}
 			return
 		}
 		logger.Printf("Feature #%d: SEQUENCE after convoy(s) %v — %s", feature.ID, ruling.SequenceAfterConvoyIDs, ruling.Reason)
-		sequenceProposal(db, feature, tasks, ruling, logger)
+		actionErr = sequenceProposal(db, feature, tasks, ruling, logger)
 
 	case "REJECT":
 		logger.Printf("Feature #%d: REJECTED — %s", feature.ID, ruling.Reason)
 		// Still enforce holds even on reject — hold_convoy_ids may be set.
 		enforceHolds(db, 0, ruling, feature, logger)
-		rejectProposal(db, feature, ruling.Reason, logger)
+		actionErr = rejectProposal(db, feature, ruling.Reason, logger)
 
 	case "MERGE":
 		if ruling.MergeWithFeatureID <= 0 {
 			logger.Printf("Feature #%d: MERGE with no target feature_id — auto-approving", feature.ID)
-			approveProposal(db, feature, tasks, ruling, logger)
+			if err := approveProposal(db, feature, tasks, ruling, logger); err != nil {
+				logger.Printf("Feature #%d: approveProposal reported error (%v) — stale-lock detector will recover", feature.ID, err)
+			}
 			return
 		}
 		logger.Printf("Feature #%d: MERGE with Feature #%d — %s", feature.ID, ruling.MergeWithFeatureID, ruling.Reason)
-		mergeProposals(db, feature, tasks, ruling, logger)
+		actionErr = mergeProposals(db, feature, tasks, ruling, logger)
 
 	default:
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on unknown action.
@@ -177,17 +193,35 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 		// emitting an empty action field.
 		msg := fmt.Sprintf("Chancellor returned unknown action %q — routing to operator review (fail-closed)", ruling.Action)
 		logger.Printf("Feature #%d: %s", feature.ID, msg)
-		_ = store.FailBounty(db, feature.ID, msg) // TODO(Fix #8b): propagate error
+		if failErr := store.FailBounty(db, feature.ID, msg); failErr != nil {
+			// Feature row did not transition to Failed. Log and continue —
+			// the stale-lock detector will re-evaluate this feature on the
+			// next sweep; operator mail still fires.
+			logger.Printf("Feature #%d: FailBounty write failed (%v) — stale-lock detector will recover", feature.ID, failErr)
+		}
 		store.SendMail(db, chancellorName, "operator",
 			fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — unknown action %q, operator review required", feature.ID, ruling.Action),
 			fmt.Sprintf("The Supreme Chancellor returned an action value not in the schema. The Feature has been failed rather than auto-approved (Fix #8.5 fail-closed).\n\nAction: %q\nReason: %s\n\nOriginal request:\n%s",
 				ruling.Action, ruling.Reason, util.TruncateStr(feature.Payload, 500)),
 			feature.ID, store.MailTypeAlert)
 	}
+
+	if actionErr != nil {
+		// A helper (approve/sequence/reject/merge) hit a DB error. Operator
+		// mail has already been sent by the helper where applicable; log
+		// here so the claim-loop owner sees the failure in the daily
+		// review, and the stale-lock detector will re-evaluate this
+		// feature on the next sweep.
+		logger.Printf("Feature #%d: %s path reported error (%v) — stale-lock detector will recover", feature.ID, ruling.Action, actionErr)
+	}
 }
 
 // approveProposal creates the convoy and subtasks from an approved plan.
-func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) {
+// Fix #8b: returns error so runChancellorReview can observe DB-write failures
+// that leave the Feature in an inconsistent state. A non-nil return means at
+// least one terminator (FailBounty / UpdateBountyStatus) did not land; the
+// caller logs and the stale-lock detector re-evaluates on the next sweep.
+func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
 	convoyPreview := strings.ReplaceAll(feature.Payload, "\n", " ")
 	if len(convoyPreview) > 50 {
 		convoyPreview = convoyPreview[:50]
@@ -202,20 +236,28 @@ func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, 
 			}
 		}
 		if convoyErr != nil {
-			_ = store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr)) // TODO(Fix #8b): propagate error
-			return
+			if failErr := store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr)); failErr != nil {
+				return fmt.Errorf("approveProposal feature #%d: convoy creation failed (%v) and FailBounty failed: %w", feature.ID, convoyErr, failErr)
+			}
+			return fmt.Errorf("approveProposal feature #%d: could not create convoy: %w", feature.ID, convoyErr)
 		}
 	}
 	store.SetConvoyCoordinated(db, convoyID)
 
 	idMapping, err := insertConvoyAndTasks(db, tasks, feature, convoyID)
 	if err != nil {
-		_ = store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error()) // TODO(Fix #8b): propagate error
-		return
+		if failErr := store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error()); failErr != nil {
+			return fmt.Errorf("approveProposal feature #%d: insertConvoyAndTasks failed (%v) and FailBounty failed: %w", feature.ID, err, failErr)
+		}
+		return fmt.Errorf("approveProposal feature #%d: insertConvoyAndTasks: %w", feature.ID, err)
 	}
 
 	store.SetProposedConvoyStatus(db, feature.ID, "approved")
-	_ = store.UpdateBountyStatus(db, feature.ID, "Completed") // TODO(Fix #8b): propagate error
+	if err := store.UpdateBountyStatus(db, feature.ID, "Completed"); err != nil {
+		// Convoy is on disk but the Feature row did not transition. Surface
+		// so the caller can log — the stale-lock detector will reconcile.
+		return fmt.Errorf("approveProposal feature #%d: convoy #%d created but UpdateBountyStatus Completed failed: %w", feature.ID, convoyID, err)
+	}
 	logger.Printf("Feature #%d: convoy #%d created with %d task(s)", feature.ID, convoyID, len(tasks))
 
 	// Resolve any FeatureBlockers that were waiting on this Feature to get a convoy.
@@ -236,12 +278,23 @@ func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, 
 		fmt.Sprintf("Supreme Chancellor approved Feature #%d.\nConvoy #%d created with %d task(s):\n\n%s\n\nOriginal request:\n%s",
 			feature.ID, convoyID, len(tasks), strings.Join(taskLines, "\n"), util.TruncateStr(feature.Payload, 500)),
 		feature.ID, store.MailTypeInfo)
+	return nil
 }
 
 // rejectProposal resets the Feature to Pending and mails the rejection to Commander.
-func rejectProposal(db *sql.DB, feature *store.Bounty, reason string, logger interface{ Printf(string, ...any) }) {
+// Fix #8b: returns error so the caller can observe an UpdateBountyStatus
+// failure — the mail still fires either way, but a stuck Feature row needs
+// to be visible to the claim-loop owner.
+func rejectProposal(db *sql.DB, feature *store.Bounty, reason string, logger interface{ Printf(string, ...any) }) error {
 	store.SetProposedConvoyStatus(db, feature.ID, "rejected")
-	_ = store.UpdateBountyStatus(db, feature.ID, "Pending") // TODO(Fix #8b): propagate error
+	var retErr error
+	if err := store.UpdateBountyStatus(db, feature.ID, "Pending"); err != nil {
+		// Feature row did not revert to Pending. The rejection mail below
+		// still fires so Commander sees the feedback; surface the write
+		// failure so the caller logs it — the stale-lock detector will
+		// reclaim the row on the next sweep.
+		retErr = fmt.Errorf("rejectProposal feature #%d: UpdateBountyStatus Pending failed: %w", feature.ID, err)
+	}
 
 	store.SendMail(db, chancellorName, "commander",
 		fmt.Sprintf("[CHANCELLOR REJECTED] Feature #%d plan", feature.ID),
@@ -254,6 +307,7 @@ func rejectProposal(db *sql.DB, feature *store.Bounty, reason string, logger int
 		fmt.Sprintf("Supreme Chancellor rejected the plan for Feature #%d.\n\nReason:\n%s\n\nTask reset to Pending — Commander will replan.",
 			feature.ID, reason),
 		feature.ID, store.MailTypeAlert)
+	return retErr
 }
 
 // enforceHolds applies FeatureBlockers and ConvoyHolds from a Chancellor ruling.
@@ -316,7 +370,8 @@ func enforceHolds(db *sql.DB, newConvoyID int, ruling chancellorRuling, feature 
 
 // sequenceProposal creates the convoy immediately but wires cross-convoy blocking dependencies
 // so the new convoy's root tasks cannot start until the tail tasks of each specified convoy complete.
-func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) {
+// Fix #8b: returns error so runChancellorReview can log DB-write failures.
+func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
 	blockingConvoyIDs := ruling.SequenceAfterConvoyIDs
 	reason := ruling.Reason
 	convoyPreview := strings.ReplaceAll(feature.Payload, "\n", " ")
@@ -333,16 +388,20 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 			}
 		}
 		if convoyErr != nil {
-			_ = store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr)) // TODO(Fix #8b): propagate error
-			return
+			if failErr := store.FailBounty(db, feature.ID, fmt.Sprintf("Chancellor Err: could not create convoy: %v", convoyErr)); failErr != nil {
+				return fmt.Errorf("sequenceProposal feature #%d: convoy creation failed (%v) and FailBounty failed: %w", feature.ID, convoyErr, failErr)
+			}
+			return fmt.Errorf("sequenceProposal feature #%d: could not create convoy: %w", feature.ID, convoyErr)
 		}
 	}
 	store.SetConvoyCoordinated(db, convoyID)
 
 	idMapping, err := insertConvoyAndTasks(db, tasks, feature, convoyID)
 	if err != nil {
-		_ = store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error()) // TODO(Fix #8b): propagate error
-		return
+		if failErr := store.FailBounty(db, feature.ID, "Chancellor Err: "+err.Error()); failErr != nil {
+			return fmt.Errorf("sequenceProposal feature #%d: insertConvoyAndTasks failed (%v) and FailBounty failed: %w", feature.ID, err, failErr)
+		}
+		return fmt.Errorf("sequenceProposal feature #%d: insertConvoyAndTasks: %w", feature.ID, err)
 	}
 
 	// Find root tasks in the new plan (those with no blocked_by in the plan).
@@ -368,7 +427,13 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 	}
 
 	store.SetProposedConvoyStatus(db, feature.ID, "approved")
-	_ = store.UpdateBountyStatus(db, feature.ID, "Completed") // TODO(Fix #8b): propagate error
+	var retErr error
+	if err := store.UpdateBountyStatus(db, feature.ID, "Completed"); err != nil {
+		// Convoy is on disk with correct cross-convoy deps but the Feature
+		// row did not transition. Surface so caller logs; stale-lock
+		// detector will reconcile on the next sweep.
+		retErr = fmt.Errorf("sequenceProposal feature #%d: convoy #%d created but UpdateBountyStatus Completed failed: %w", feature.ID, convoyID, err)
+	}
 	logger.Printf("Feature #%d: convoy #%d created (sequenced after convoy(s) %v, %d cross-convoy dep(s) injected, %d task(s))",
 		feature.ID, convoyID, blockingConvoyIDs, injected, len(tasks))
 
@@ -387,52 +452,92 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 		fmt.Sprintf("Supreme Chancellor sequenced Feature #%d after convoy(s) %v.\nConvoy #%d created with %d task(s) — root tasks blocked until upstream work completes.\n\nReason: %s\n\nTasks:\n%s\n\nOriginal request:\n%s",
 			feature.ID, blockingConvoyIDs, convoyID, len(tasks), reason, strings.Join(taskLines, "\n"), util.TruncateStr(feature.Payload, 500)),
 		feature.ID, store.MailTypeInfo)
+	return retErr
 }
 
 // mergeProposals synthesizes two proposed plans into a single convoy.
-func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) {
+// Fix #8b: returns error so runChancellorReview can log DB-write failures.
+// When the merge path falls back to independent approval, the fallback
+// errors are joined and returned together so neither is lost.
+func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
 	featureBID := ruling.MergeWithFeatureID
 	reason := ruling.Reason
 	featureB, tasksB, ok := store.ClaimMergeTarget(db, featureBID, chancellorName)
 	if !ok {
 		// Target already gone or claimed — approve A independently.
 		logger.Printf("Feature #%d: merge target #%d unavailable — approving independently", featureA.ID, featureBID)
-		approveProposal(db, featureA, tasksA, ruling, logger)
-		return
+		return approveProposal(db, featureA, tasksA, ruling, logger)
 	}
 
 	logger.Printf("Merging Feature #%d + Feature #%d", featureA.ID, featureB.ID)
 
 	mergedTasks := synthesizeMergedPlan(db, featureA, tasksA, featureB, tasksB, logger)
 	if mergedTasks == nil {
-		// Synthesis failed — approve both independently.
+		// Synthesis failed — approve both independently. Join errors so a
+		// single-leg failure doesn't silently succeed under a two-leg return.
 		logger.Printf("Merge synthesis failed — approving Feature #%d and #%d independently", featureA.ID, featureB.ID)
-		approveProposal(db, featureA, tasksA, ruling, logger)
-		approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
-		return
+		errA := approveProposal(db, featureA, tasksA, ruling, logger)
+		errB := approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
+		switch {
+		case errA != nil && errB != nil:
+			return fmt.Errorf("mergeProposals fallback: featureA=%v; featureB=%v", errA, errB)
+		case errA != nil:
+			return errA
+		case errB != nil:
+			return errB
+		}
+		return nil
 	}
 
 	convoyName := fmt.Sprintf("[%d+%d] merged", featureA.ID, featureB.ID)
 	convoyID, convoyErr := store.CreateConvoy(db, convoyName)
 	if convoyErr != nil {
 		logger.Printf("Merge convoy creation failed — approving independently")
-		approveProposal(db, featureA, tasksA, ruling, logger)
-		approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
-		return
+		errA := approveProposal(db, featureA, tasksA, ruling, logger)
+		errB := approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
+		switch {
+		case errA != nil && errB != nil:
+			return fmt.Errorf("mergeProposals fallback after CreateConvoy %v: featureA=%v; featureB=%v", convoyErr, errA, errB)
+		case errA != nil:
+			return errA
+		case errB != nil:
+			return errB
+		}
+		return nil
 	}
 	store.SetConvoyCoordinated(db, convoyID)
 
 	idMapping, err := insertConvoyAndTasks(db, mergedTasks, featureA, convoyID)
 	if err != nil {
-		_ = store.FailBounty(db, featureA.ID, "Chancellor Err (merge): "+err.Error()) // TODO(Fix #8b): propagate error
-		_ = store.FailBounty(db, featureB.ID, "Chancellor Err (merge): "+err.Error()) // TODO(Fix #8b): propagate error
-		return
+		failA := store.FailBounty(db, featureA.ID, "Chancellor Err (merge): "+err.Error())
+		failB := store.FailBounty(db, featureB.ID, "Chancellor Err (merge): "+err.Error())
+		// Both Feature rows should end in Failed; surface any DB-write
+		// errors so the stale-lock detector (which also retries) has a
+		// corresponding log line.
+		switch {
+		case failA != nil && failB != nil:
+			return fmt.Errorf("mergeProposals feature #%d/#%d: insertConvoyAndTasks failed (%v); FailBounty A=%v; FailBounty B=%v", featureA.ID, featureB.ID, err, failA, failB)
+		case failA != nil:
+			return fmt.Errorf("mergeProposals feature #%d: insertConvoyAndTasks failed (%v); FailBounty A failed: %w", featureA.ID, err, failA)
+		case failB != nil:
+			return fmt.Errorf("mergeProposals feature #%d: insertConvoyAndTasks failed (%v); FailBounty B failed: %w", featureB.ID, err, failB)
+		}
+		return fmt.Errorf("mergeProposals feature #%d/#%d: insertConvoyAndTasks: %w", featureA.ID, featureB.ID, err)
 	}
 
 	store.SetProposedConvoyStatus(db, featureA.ID, "merged")
 	store.SetProposedConvoyStatus(db, featureB.ID, "merged")
-	_ = store.UpdateBountyStatus(db, featureA.ID, "Completed") // TODO(Fix #8b): propagate error
-	_ = store.UpdateBountyStatus(db, featureB.ID, "Completed") // TODO(Fix #8b): propagate error
+	updA := store.UpdateBountyStatus(db, featureA.ID, "Completed")
+	updB := store.UpdateBountyStatus(db, featureB.ID, "Completed")
+	var retErr error
+	switch {
+	case updA != nil && updB != nil:
+		retErr = fmt.Errorf("mergeProposals: convoy #%d created but UpdateBountyStatus failed for both features (A=%v; B=%v) — stale-lock detector will recover", convoyID, updA, updB)
+	case updA != nil:
+		retErr = fmt.Errorf("mergeProposals feature #%d: convoy #%d created but UpdateBountyStatus Completed failed: %w", featureA.ID, convoyID, updA)
+	case updB != nil:
+		retErr = fmt.Errorf("mergeProposals feature #%d: convoy #%d created but UpdateBountyStatus Completed failed: %w", featureB.ID, convoyID, updB)
+	}
 
 	store.ResolveFeatureBlockers(db, featureA.ID, convoyID)
 	store.ResolveFeatureBlockers(db, featureB.ID, convoyID)
@@ -450,6 +555,7 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 		fmt.Sprintf("Supreme Chancellor merged Feature #%d and #%d into a single convoy #%d.\n\nReason: %s\n\nTasks:\n%s",
 			featureA.ID, featureB.ID, convoyID, reason, strings.Join(taskLines, "\n")),
 		featureA.ID, store.MailTypeInfo)
+	return retErr
 }
 
 // synthesizeMergedPlan calls Claude to produce a unified task list from two plans.

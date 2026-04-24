@@ -315,7 +315,12 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	repoPath := store.GetRepoPath(db, b.TargetRepo)
 	if repoPath == "" {
 		msg := fmt.Sprintf("DB Err: unknown target repository '%s'", b.TargetRepo)
-		_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
+		if err := store.FailBounty(db, b.ID, msg); err != nil {
+			// Task row did not transition to Failed. Log and continue —
+			// the stale-lock detector will re-evaluate this task on the
+			// next sweep; the telemetry event still fires below.
+			logger.Printf("Task %d: FailBounty write failed (%v) — stale-lock detector will recover", b.ID, err)
+		}
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		return
 	}
@@ -333,7 +338,14 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		if reviewCommitsAhead(db, repoPath, b) == "" {
 			// No diff and no unique commits — work was already merged into main.
 			// Auto-complete rather than failing; unblock dependents and recover convoy.
-			_ = store.UpdateBountyStatus(db, b.ID, "Completed") // TODO(Fix #8b): propagate error
+			if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
+				// Task did not transition to Completed. Log and continue
+				// with the downstream side effects — RecordTaskHistory /
+				// UnblockDependentsOf / AutoRecoverConvoy are idempotent,
+				// and the stale-lock detector will re-evaluate if the row
+				// is still stuck on the next sweep.
+				logger.Printf("Task %d: captain auto-complete UpdateBountyStatus write failed (%v) — stale-lock detector will recover", b.ID, err)
+			}
 			store.RecordTaskHistory(db, b.ID, agentName, sessionID, "auto-completed: work already merged into main", "Completed")
 			store.LogAudit(db, agentName, "captain-auto-complete", b.ID, "diff empty, commits already in main")
 			store.UnblockDependentsOf(db, b.ID)
@@ -342,7 +354,12 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 			return
 		}
 		msg := "Git Err: diff is empty — branch has commits but no net changes vs main"
-		_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
+		if err := store.FailBounty(db, b.ID, msg); err != nil {
+			// Task did not transition to Failed. Log and continue — the
+			// stale-lock detector will re-evaluate on the next sweep; the
+			// telemetry event still fires below.
+			logger.Printf("Task %d: FailBounty write failed (%v) — stale-lock detector will recover", b.ID, err)
+		}
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		return
 	}
@@ -433,7 +450,22 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 		if !isKnownRepo(db, nt.Repo) {
 			msg := fmt.Sprintf("captain plan references unknown repository '%s' — convoy cannot proceed without human review", nt.Repo)
 			logger.Printf("Task %d: %s", b.ID, msg)
-			_, _ = CreateEscalation(db, b.ID, store.SeverityMedium, msg) // TODO(Fix #8b): propagate error
+			if _, err := CreateEscalation(db, b.ID, store.SeverityMedium, msg); err != nil {
+				// CreateEscalation failed (INSERT or the subsequent
+				// Escalated status update). Fall back to FailBounty +
+				// operator mail so the task can't sit between states
+				// like the AUDIT-041 defect. This mirrors the fall-back
+				// pattern used by Jedi Council / Medic.
+				logger.Printf("Task %d: CreateEscalation failed (%v) — falling back to FailBounty + operator mail", b.ID, err)
+				if failErr := store.FailBounty(db, b.ID, msg); failErr != nil {
+					logger.Printf("Task %d: FailBounty fallback also failed (%v) — stale-lock detector will recover", b.ID, failErr)
+				}
+				store.SendMail(db, agentName, "operator",
+					fmt.Sprintf("[CAPTAIN ESCALATION FAILED] Task #%d — %s", b.ID, b.TargetRepo),
+					fmt.Sprintf("Captain %s tried to escalate task #%d (unknown repo '%s' in new_tasks) but CreateEscalation itself failed: %v.\n\nTask has been FailBounty-ed as a fallback; operator review required.\n\nOriginal reason:\n%s",
+						agentName, b.ID, nt.Repo, err, msg),
+					b.ID, store.MailTypeAlert)
+			}
 			return
 		}
 		newID, insertErr := store.AddConvoyTask(db, b.ParentID, nt.Repo, nt.Task, b.ConvoyID, b.Priority, "Pending")
@@ -484,7 +516,13 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 	switch ruling.Decision {
 	case "approve":
 		logger.Printf("Task %d: captain APPROVED — forwarding to council", b.ID)
-		_ = store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview") // TODO(Fix #8b): propagate error
+		if err := store.UpdateBountyStatus(db, b.ID, "AwaitingCouncilReview"); err != nil {
+			// Task did not advance to AwaitingCouncilReview. The telemetry
+			// below still fires; log so the claim-loop owner sees the DB
+			// write failure. The stale-lock detector will re-evaluate on
+			// the next sweep and Council will eventually pick it up.
+			logger.Printf("Task %d: captain approve UpdateBountyStatus write failed (%v) — stale-lock detector will recover", b.ID, err)
+		}
 		telemetry.EmitEvent(telemetry.TelemetryEvent{
 			SessionID: sessionID, Agent: agentName, TaskID: b.ID,
 			EventType: "captain_approved",
@@ -502,7 +540,13 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 
 		if retryCount >= MaxRetries {
 			msg := fmt.Sprintf("Captain: max retries (%d) exceeded. Final rejection: %s", MaxRetries, ruling.Feedback)
-			_ = store.FailBounty(db, b.ID, msg) // TODO(Fix #8b): propagate error
+			if err := store.FailBounty(db, b.ID, msg); err != nil {
+				// Task did not transition to Failed. Log and continue —
+				// the MedicReview queued below is the authoritative next
+				// step; the stale-lock detector will re-evaluate if the
+				// row sits stuck.
+				logger.Printf("Task %d: captain max-retries FailBounty write failed (%v) — stale-lock detector will recover", b.ID, err)
+			}
 
 			// Send rejection history to librarian for memory synthesis.
 			store.SendMail(db, agentName, "librarian",
@@ -532,7 +576,23 @@ func runCaptainTask(db *sql.DB, agentName string, b *store.Bounty, logger *log.L
 
 	case "escalate":
 		logger.Printf("Task %d: captain ESCALATED: %s", b.ID, ruling.Feedback)
-		_, _ = CreateEscalation(db, b.ID, store.SeverityMedium, ruling.Feedback) // TODO(Fix #8b): propagate error
+		if _, err := CreateEscalation(db, b.ID, store.SeverityMedium, ruling.Feedback); err != nil {
+			// Escalation row was not written (or the downstream status
+			// update failed). Fall back to FailBounty + operator mail so
+			// the task can't sit half-Escalated without an Escalations row
+			// — this is the AUDIT-041 defense pattern from Fix #8a.
+			logger.Printf("Task %d: CreateEscalation failed (%v) — falling back to FailBounty + operator mail", b.ID, err)
+			if failErr := store.FailBounty(db, b.ID, ruling.Feedback); failErr != nil {
+				logger.Printf("Task %d: FailBounty fallback also failed (%v) — stale-lock detector will recover", b.ID, failErr)
+			}
+			store.SendMail(db, agentName, "operator",
+				fmt.Sprintf("[CAPTAIN ESCALATION FAILED] Task #%d — %s", b.ID, b.TargetRepo),
+				fmt.Sprintf("Captain %s tried to escalate task #%d but CreateEscalation itself failed: %v.\n\nTask has been FailBounty-ed as a fallback; operator review required.\n\nConvoy: #%d\nOriginal feedback:\n%s",
+					agentName, b.ID, err, b.ConvoyID, ruling.Feedback),
+				b.ID, store.MailTypeAlert)
+			telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, "captain escalate fallback after CreateEscalation failure"))
+			return
+		}
 		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, agentName, b.ID, store.SeverityMedium, ruling.Feedback))
 		store.SendMail(db, agentName, "operator",
 			fmt.Sprintf("[CAPTAIN ESCALATED] Task #%d — %s", b.ID, b.TargetRepo),
