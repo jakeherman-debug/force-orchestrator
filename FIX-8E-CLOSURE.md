@@ -162,10 +162,15 @@ audit-script grep missed). Files with newly-added `iter.Err()` blocks
 | internal/store/proposed_convoy.go | 5 | rows / taskRows |
 | internal/store/tasks.go | 6 | rows / ftsRows |
 
-**Total: 88 loops patched. 100% coverage post-fix.** (The 16-loop delta
+**Total: 95 loops patched. 100% coverage post-fix.** (The 9-loop delta
 between the per-file totals here and the 104 grep count is loops that
 already had rows.Err() pre-fix — most notably the well-instrumented
-dogs.go:222 and dashboard handlers that already had it from prior fixes.)
+dogs.go:222 and dashboard handlers that already had it from prior fixes,
+plus the 4 RESIDUAL-3 sites the Fix #8d verifier identified as already
+log-with-named-recovery: holocron.go:115 ListRepos, escalation.go:102
+ListEscalations, convoy.go:94 RecoverStaleConvoys, print.go:60 printList.
+**Fix #8f Track C corrected this from "88 / 16-loop delta" to
+"95 / 9-loop delta" to match the per-file table sums.**)
 
 ## Verification output
 

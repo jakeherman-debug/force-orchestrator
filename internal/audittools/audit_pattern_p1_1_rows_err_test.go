@@ -21,7 +21,7 @@ import (
 //
 // The check walks every production *.go file, finds each `for <name>.Next() {`
 // loop, traces forward until the matching close brace at the same indent,
-// and asserts `<name>.Err()` is referenced within 60 lines of that close.
+// and asserts `<name>.Err()` is referenced within 10 lines of that close.
 // Test files are exempt — the invariant is about production paths, not
 // test fixtures.
 //
@@ -99,8 +99,10 @@ func TestPattern_P1_1_RowsErrCheckedAfterIteration(t *testing.T) {
 				})
 				continue
 			}
-			// Window: 60 lines past the close brace. Must reference iter.Err().
-			windowEnd := closeIdx + 60
+			// Window: 10 lines past the close brace. Must reference iter.Err().
+			// Tightened from 60 → 10 by Fix #8f Track C; the spec said "10
+			// lines" and the broader window was masking placement drift.
+			windowEnd := closeIdx + 10
 			if windowEnd > len(lines) {
 				windowEnd = len(lines)
 			}
@@ -109,7 +111,7 @@ func TestPattern_P1_1_RowsErrCheckedAfterIteration(t *testing.T) {
 			if !strings.Contains(window, errCall) {
 				offenders = append(offenders, offender{
 					path: rel(root, path), line: i + 1, id: iter,
-					why: "no " + errCall + " reference in the 60 lines after the loop close",
+					why: "no " + errCall + " reference in the 10 lines after the loop close",
 				})
 				continue
 			}
