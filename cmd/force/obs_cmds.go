@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -418,7 +419,11 @@ func cmdDogs(ctx context.Context, db *sql.DB, args []string) {
 		}
 		fmt.Printf("Running %s...\n", name)
 		logger := log.New(os.Stdout, "["+name+"] ", log.LstdFlags)
-		if err := agents.RunDogByName(ctx, db, name, logger); err != nil {
+		// D0-B: construct the in-process Librarian at the CLI entry point
+		// so RunDogByName has the same client the daemon would have given
+		// it; the dashboard does the same in its handler.
+		libClient := librarian.NewInProcess(db)
+		if err := agents.RunDogByName(ctx, db, name, libClient, logger); err != nil {
 			fmt.Printf("Dog %s failed: %v\n", name, err)
 			os.Exit(1)
 		}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -162,6 +163,6 @@ func TestRunDogs_WithReposAndAgents_NoDeadlock(t *testing.T) {
 	// Leave all dogs due (no last_run_at) so all dogs execute.
 	logger := log.New(io.Discard, "", 0)
 	runWithDeadline(t, 10*time.Second, func() {
-		RunDogs(context.Background(), db, logger)
+		RunDogs(context.Background(), db, librarian.NewInProcess(db), logger)
 	})
 }

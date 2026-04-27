@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"force-orchestrator/internal/gh"
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -102,7 +103,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":"lgtm"}`, nil)
 
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, log.New(io.Discard, "", 0))
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), log.New(io.Discard, "", 0))
 
 	taskAfter, _ := store.GetBounty(db, taskID)
 	if taskAfter.Status != subPRCITaskStatus {
@@ -119,7 +120,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 		"pr checks 123": {stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`},
 		"pr merge 123":  {stdout: ""},
 	})
-	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +128,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	installGHStub(t, map[string]ghStubResp{
 		"pr view 123": {stdout: `{"number":123,"url":"u","state":"MERGED","isDraft":false,"merged":true,"mergedAt":"2024-01-01"}`},
 	})
-	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	taskAfter, _ = store.GetBounty(db, taskID)
@@ -176,7 +177,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 		Err    error
 	}{200: {State: "MERGED", Merged: true}})
 
-	if err := dogDraftPRWatch(db, testLogger{}); err != nil {
+	if err := dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	conv = store.GetConvoy(db, convoyID)
@@ -229,7 +230,7 @@ func TestPRFlow_CIFailure_SelfHealsViaMedic(t *testing.T) {
 		"pr view 1":   {stdout: `{"number":1,"state":"OPEN","merged":false}`},
 		"pr checks 1": {stdout: `[{"name":"test","state":"FAILURE","bucket":"fail"}]`, err: fmt.Errorf("exit 1")},
 	})
-	if err := dogSubPRCIWatch(context.Background(), db, testLogger{}); err != nil {
+	if err := dogSubPRCIWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -318,7 +319,7 @@ func TestPRFlow_LegacyPath_StillWorksWhenPRFlowDisabled(t *testing.T) {
 
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	b, _ := store.GetBounty(db, tid)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, log.New(io.Discard, "", 0))
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), log.New(io.Discard, "", 0))
 
 	after, _ := store.GetBounty(db, tid)
 	if after.Status != "Completed" {

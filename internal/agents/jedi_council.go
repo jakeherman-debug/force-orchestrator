@@ -3,19 +3,28 @@ package agents
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"strings"
 	"time"
 
-	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/clients/librarian"
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/util"
 )
+
+// JediCouncilConfig is the constructor-injection bundle for SpawnJediCouncil.
+// Per CLAUDE.md "Cross-agent service interfaces": the Spawn function gains
+// service dependencies through this struct, not via package globals or
+// direct concrete-type construction.
+type JediCouncilConfig struct {
+	Name      string
+	Librarian librarian.Client
+}
 
 const MaxDiffBytes = 80_000
 
@@ -51,14 +60,14 @@ func BranchAgentName(branchName string) string {
 	return ""
 }
 
-func SpawnJediCouncil(ctx context.Context, db *sql.DB, name string) {
-	agentName := name
-	logger := NewLogger(name)
-	logger.Printf("%s starting up", name)
+func SpawnJediCouncil(ctx context.Context, db *sql.DB, cfg JediCouncilConfig) {
+	agentName := cfg.Name
+	logger := NewLogger(agentName)
+	logger.Printf("%s starting up", agentName)
 
 	for {
 		if ctx.Err() != nil {
-			logger.Printf("%s exiting: %v", name, ctx.Err())
+			logger.Printf("%s exiting: %v", agentName, ctx.Err())
 			return
 		}
 		// Hard stop — operator activated e-stop
@@ -77,7 +86,7 @@ func SpawnJediCouncil(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runCouncilTask(ctx, db, agentName, b, logger)
+		runCouncilTask(ctx, db, agentName, b, cfg.Librarian, logger)
 	}
 }
 
@@ -85,7 +94,10 @@ func SpawnJediCouncil(ctx context.Context, db *sql.DB, name string) {
 // or rejects it (retry or permanent failure).
 // Fix #8e: ctx threads from SpawnJediCouncil's claim ctx so the merge subprocess
 // + sub-PR push cancel on daemon shutdown.
-func runCouncilTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, logger *log.Logger) {
+// D0-B: lib is the librarian.Client used to enqueue the post-merge
+// WriteMemory bounty; lib is non-nil for daemon-routed calls and may be
+// the librarian.NewMock() variant in tests.
+func runCouncilTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, lib librarian.Client, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 
 	// Hard-reject if the Chancellor has placed a hold on this convoy.
@@ -496,14 +508,21 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 				memPayload = strings.TrimLeft(memPayload[nl:], "\n")
 			}
 		}
-		writeMemJSON, _ := json.Marshal(map[string]string{
-			"task":     util.TruncateStr(directiveText(memPayload), 800),
-			"files":    filesStr,
-			"feedback": ruling.Feedback,
-			"diff":     util.TruncateStr(diff, 4000),
-			"repo":     b.TargetRepo,
-		})
-		store.AddBounty(db, b.ID, "WriteMemory", string(writeMemJSON))
+		if _, wmErr := lib.WriteMemory(ctx, librarian.Memory{
+			ParentTaskID: b.ID,
+			Repo:         b.TargetRepo,
+			Task:         util.TruncateStr(directiveText(memPayload), 800),
+			Files:        filesStr,
+			Feedback:     ruling.Feedback,
+			Diff:         util.TruncateStr(diff, 4000),
+		}); wmErr != nil {
+			// WriteMemory queueing is non-fatal: the merge already
+			// landed and dependents have been unblocked. Log the
+			// failure so a stale memory index is at least visible
+			// in fleet.log; the operator can backfill manually if
+			// needed.
+			logger.Printf("Task %d: WriteMemory enqueue failed: %v — memory entry skipped", b.ID, wmErr)
+		}
 		logger.Printf("Task %d: COMPLETED and merged", b.ID)
 
 		if b.ParentID > 0 {
