@@ -25,6 +25,47 @@ This file captures invariants that are easy to violate without noticing. Read it
 - **Escalation auto-close is a one-shot budget (Campaign 2 / AUDIT-149).** `Escalations.auto_resolve_count` caps the `escalation-sweeper` at exactly one automatic close per row. The sweeper's UPDATE is `SET status='Closed', auto_resolve_count = auto_resolve_count + 1 WHERE ... AND auto_resolve_count < 1`. An operator who re-opens an auto-closed escalation (`UPDATE Escalations SET status='Open' WHERE id=X`) keeps the counter at 1, so the next sweeper tick matches zero rows and the re-opened row stays Open. `CloseEscalation`/`AckEscalation` (the legitimate operator-transition paths) do NOT increment the counter — they move the row off `Open` cleanly. The terminal vocabulary is Open → Acknowledged → Closed; `Resolved` is a retired legacy value (AUDIT-025). A startup migration normalises any lingering `Resolved` rows → `Closed`. Do not re-introduce `Resolved` at any sink.
 - **Shell-boundary validators (Fix #9).** Every ingress that feeds a branch/path/URL/gh-repo-spec into a `git`/`gh` shell call MUST route through `igit.ValidateRef` / `igit.ValidateRepoPath` / `igit.ValidateRemoteURL` / `igit.ValidateGHRepoSpec` first. Store-layer writes that hit `BountyBoard.branch_name`, `Convoys.ask_branch`, `ConvoyAskBranches.ask_branch`, and `Repositories.remote_url` additionally call `store.validateRefName` / `store.validateRemoteURL` at DB-write time — the store cannot import `internal/git`, so the regex rules are duplicated; keep the two lists in lockstep. Every positional ref/path in an `exec.Command("git", …)` or `exec.Command("gh", …)` call MUST be separated from the flag slots by a `--` token (trailing `--` works for `reset --hard`, `diff`, `log`; leading `-- <ref>` works for `fetch`, `push`, `rebase`, `ls-remote`; neither form works for every subcommand, so check per-command). The P10 pattern test in `internal/git/audit_pattern_p10_test.go` enforces the `--` invariant by grep; do not suppress it with a comment or a string-manipulation trick. Payload-sourced ref extractors (`conflictBranchFromPayload`, `deriveGHRepoFromRemoteURL`) run the validator AFTER parsing and return "" on failure so the downstream path falls back to the "not a ref-task" branch. If you need to clear `branch_name` to `''` (the "no branch yet" sentinel), use `store.ClearBranchNameTx` — `SetBranchNameTx` rejects empty strings as an ingress sanity check.
 
+## Cross-agent service interfaces
+
+Cross-agent service dependencies route through Go interfaces in
+`internal/clients/<service>/`. Direct function-call dependencies between
+agents (e.g., `librarian.GetMemoriesForTask(...)` from Captain) are
+forbidden going forward.
+
+Pattern:
+- `internal/clients/<service>/client.go` defines the `Client` interface.
+  The exported `Client` MUST be an interface, never a struct.
+- `internal/clients/<service>/inprocess.go` implements the in-process
+  default backed by `holocron.db` or in-memory state. Concrete
+  implementations are unexported struct types (e.g. `inProcessClient`)
+  and MUST be constructed via the `NewInProcess(...)` factory function —
+  never via a `&<service>.<Type>{...}` literal at the call site.
+- Additional implementations (gRPC, shared, mock) live in sibling files
+  when their triggers fire. Constructed via `NewGRPC(...)`, `NewShared(...)`,
+  `NewMock(...)`. Same factory-function rule applies.
+- Agents receive `Client` instances by constructor injection
+  (`Spawn<Agent>(ctx, cfg <Agent>Config { ..., Librarian librarian.Client, ... })`),
+  never by importing a concrete struct type.
+
+Why: each interface is the explicit contract between agents and a service.
+When a service form-factor changes (in-process → gRPC → shared multi-tenant
+→ polyglot bridge), agents are unaffected — only one implementation file
+changes. Unit tests use mock implementations against the same interface.
+
+Pattern P16 (`internal/audittools/audit_pattern_p16_clients_interfaces_test.go`)
+walks production code under `internal/agents/` and fails if any agent
+imports a concrete `*inProcessClient` / `*grpcClient` struct type or
+constructs an implementation by calling `&<service>.<Type>{...}` directly.
+Construction MUST go through `NewInProcess` / `NewGRPC` / `NewShared` /
+`NewMock` factory functions; agents only see the interface type and the
+factory entry points (plus the data types — `librarian.Memory`,
+`librarian.Scope`, etc.).
+
+This pattern WILL graduate to a BoS rule (BOS-CLIENTS-001 or similar)
+when D4 ships, providing commit-time enforcement in addition to the
+CI-time Pattern P16 test. Until D4, P16 is the only enforcement; from
+D4 forward, BoS catches violations one step earlier in the pipeline.
+
 ## Dashboard invariants (Fix #2)
 
 The command-center dashboard has no auth. It is a single-user local tool, and every directive below keeps it that way.

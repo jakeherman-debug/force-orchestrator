@@ -28,3 +28,9 @@ fleet-task-**
 cover.out
 coverage.out
 .fix-worktrees/
+
+# Per-deliverable build worktrees (roadmap.md "Worktree discipline").
+# Each track of a deliverable runs in `.build-worktrees/D<n>-<track>/` on
+# its own `deliverable/<n>/<track>` branch; the directory is disposable
+# and never lands on main as tracked content.
+.build-worktrees/
