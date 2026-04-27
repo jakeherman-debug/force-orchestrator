@@ -11,10 +11,18 @@ import (
 	"time"
 
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
+
+// InquisitorConfig is the constructor-injection bundle for SpawnInquisitor.
+// The Inquisitor delegates to RunDogs each tick, which needs the Librarian
+// client to drive the post-merge / post-shipped WriteMemory enqueues.
+type InquisitorConfig struct {
+	Librarian librarian.Client
+}
 
 const staleLockTimeout = 45 * time.Minute // locked this long (regardless of commits) → hard reset
 const stallEscTimeout  = 30 * time.Minute // locked this long with no commits → Boot triage + escalate
@@ -35,7 +43,7 @@ var bootLastCalled = map[int]time.Time{}
 // indefinitely. Dog-level timeouts (see RunDogs) provide a finer-grained
 // 5-min budget per dog, and DogMarkHeartbeat writes heartbeat_at on each
 // dog-start so /healthz can surface a wedged dog to the operator.
-func SpawnInquisitor(ctx context.Context, db *sql.DB) {
+func SpawnInquisitor(ctx context.Context, db *sql.DB, cfg InquisitorConfig) {
 	logger := NewLogger("Inquisitor")
 	logger.Printf("Inquisitor deployed — hunting every %v, stale threshold %v", inquisitorInterval, staleLockTimeout)
 	validateWorktrees(db, logger)
@@ -51,7 +59,7 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB) {
 		// When the tick runs long, the context fires and downstream calls
 		// that honour it (gh, future claude calls) abort rather than hang.
 		tickCtx, tickCancel := context.WithTimeout(ctx, 15*time.Minute)
-		runInquisitorTick(tickCtx, db, logger)
+		runInquisitorTick(tickCtx, db, cfg.Librarian, logger)
 		tickCancel()
 		continue
 	}
@@ -61,7 +69,7 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB) {
 // SpawnInquisitor so each tick runs under its own timeout-bounded
 // context (AUDIT-047) without the enclosing for-loop needing deferred
 // cancellation book-keeping.
-func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
+func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, logger *log.Logger) {
 	// Fix #8e: ctx now threads into cleanOrphanedBranches (igit.RunCmd) and
 	// RunDogs (per-dog ctx); the prior _=ctx discard reflected the pre-Fix-#8e
 	// state where the only consumers were gh/claude calls that took ctx
@@ -142,7 +150,7 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, logger *log.Logger) {
 		// lives in astromech.go next to the map declaration.
 		pruneRateLimitRetries(db)
 
-		RunDogs(ctx, db, logger)
+		RunDogs(ctx, db, lib, logger)
 
 		db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 }

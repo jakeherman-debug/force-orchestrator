@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -399,7 +400,7 @@ func TestJediCouncilApproval_RequeuesWhenBreakerOpen(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), logger)
 
 	// Task should NOT be AwaitingSubPRCI; it must be back at AwaitingCouncilReview
 	// for a later retry after the breaker closes.

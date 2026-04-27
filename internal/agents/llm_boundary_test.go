@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -237,7 +238,7 @@ func TestCouncilBoundaryIntegrity_InvokedEndToEnd(t *testing.T) {
 	// the stub receives, not the response.
 	stub := withStubCLIRunner(t, `{"approved":false,"feedback":"wanted to test boundary"}`, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), logger)
 
 	if stub.CallCount() == 0 {
 		t.Fatal("stub LLM was never called — Council short-circuited before reaching the prompt build")

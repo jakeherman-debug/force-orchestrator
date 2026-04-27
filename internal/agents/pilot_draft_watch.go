@@ -1,12 +1,14 @@
 package agents
 
 import (
-	"log"
+	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -39,7 +41,10 @@ func defaultDraftPRView(cwd, repo string, number int) (string, bool, error) {
 	return v.State, v.Merged, nil
 }
 
-func dogDraftPRWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+// D0-B: lib threads from RunDogs → runDog so terminalConvoyTransitionTx
+// can enqueue the post-shipped/abandoned WriteMemory bounty inside the
+// same atomic transaction that flips the convoy status.
+func dogDraftPRWatch(ctx context.Context, db *sql.DB, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
 	rows, err := db.Query(`SELECT id, name FROM Convoys WHERE status = 'DraftPROpen'`)
 	if err != nil {
 		return err
@@ -66,14 +71,14 @@ func dogDraftPRWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) err
 	}
 
 	for _, c := range convoys {
-		pollConvoyDraftPRs(db, c.id, c.name, logger)
+		pollConvoyDraftPRs(ctx, db, c.id, c.name, lib, logger)
 	}
 	return nil
 }
 
 // pollConvoyDraftPRs handles one convoy's per-repo draft PRs. Split out for
 // unit testing without needing to set up many convoys.
-func pollConvoyDraftPRs(db *sql.DB, convoyID int, convoyName string, logger interface{ Printf(string, ...any) }) {
+func pollConvoyDraftPRs(ctx context.Context, db *sql.DB, convoyID int, convoyName string, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
 	branches := store.ListConvoyAskBranches(db, convoyID)
 	if len(branches) == 0 {
 		return
@@ -127,17 +132,17 @@ func pollConvoyDraftPRs(db *sql.DB, convoyID int, convoyName string, logger inte
 	}
 	switch {
 	case merged == total:
-		transitionConvoyToShipped(db, convoyID, convoyName, logger)
+		transitionConvoyToShipped(ctx, db, convoyID, convoyName, lib, logger)
 	case closed > 0 && open == 0:
-		transitionConvoyToAbandoned(db, convoyID, convoyName, logger)
+		transitionConvoyToAbandoned(ctx, db, convoyID, convoyName, lib, logger)
 	}
 }
 
 // ── terminal transitions ────────────────────────────────────────────────────
 
-func transitionConvoyToShipped(db *sql.DB, convoyID int, convoyName string, logger interface{ Printf(string, ...any) }) {
-	if err := terminalConvoyTransitionTx(db, convoyID, convoyName, "Shipped", "shipped",
-		"Convoy shipped via draft PR(s)."); err != nil {
+func transitionConvoyToShipped(ctx context.Context, db *sql.DB, convoyID int, convoyName string, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
+	if err := terminalConvoyTransitionTx(ctx, db, convoyID, convoyName, "Shipped", "shipped",
+		"Convoy shipped via draft PR(s).", lib); err != nil {
 		logger.Printf("draft-pr-watch: transition convoy %d → Shipped failed: %v", convoyID, err)
 		return
 	}
@@ -148,9 +153,9 @@ func transitionConvoyToShipped(db *sql.DB, convoyID int, convoyName string, logg
 	logger.Printf("draft-pr-watch: convoy %d → Shipped, cleanup queued", convoyID)
 }
 
-func transitionConvoyToAbandoned(db *sql.DB, convoyID int, convoyName string, logger interface{ Printf(string, ...any) }) {
-	if err := terminalConvoyTransitionTx(db, convoyID, convoyName, "Abandoned", "abandoned",
-		"Convoy's draft PR was closed without merging — review for scoping/design issues."); err != nil {
+func transitionConvoyToAbandoned(ctx context.Context, db *sql.DB, convoyID int, convoyName string, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
+	if err := terminalConvoyTransitionTx(ctx, db, convoyID, convoyName, "Abandoned", "abandoned",
+		"Convoy's draft PR was closed without merging — review for scoping/design issues.", lib); err != nil {
 		logger.Printf("draft-pr-watch: transition convoy %d → Abandoned failed: %v", convoyID, err)
 		return
 	}
@@ -163,23 +168,24 @@ func transitionConvoyToAbandoned(db *sql.DB, convoyID int, convoyName string, lo
 }
 
 // terminalConvoyTransitionTx atomically sets the convoy status, queues a
-// CleanupAskBranch task, and queues the Librarian memory entry. If any of
-// these fail, the transaction rolls back — the convoy stays in its prior
-// status and the dog will retry on the next tick.
+// CleanupAskBranch task, and queues the Librarian memory entry via the
+// supplied librarian.Client. If any of these fail, the transaction rolls
+// back — the convoy stays in its prior status and the dog will retry on
+// the next tick.
 //
 // This is the guarantee the caller relies on: we never finalize a convoy's
 // lifecycle status without also queuing the cleanup that depends on it.
-func terminalConvoyTransitionTx(db *sql.DB, convoyID int, convoyName, newStatus, outcomeTag, summary string) error {
+//
+// D0-B: the WriteMemory enqueue is now routed via lib.WriteMemoryTx so
+// agent code no longer reaches into store.AddBountyTx for queue work
+// owned by the Librarian service.
+func terminalConvoyTransitionTx(ctx context.Context, db *sql.DB, convoyID int, convoyName, newStatus, outcomeTag, summary string, lib librarian.Client) error {
 	// Read the repo for the memory entry OUTSIDE the tx (read-only).
 	branches := store.ListConvoyAskBranches(db, convoyID)
 	repo := ""
 	if len(branches) > 0 {
 		repo = branches[0].Repo
 	}
-	memoryPayload := fmt.Sprintf(`{"task":%q,"files":"","feedback":%q,"diff":"","repo":%q}`,
-		fmt.Sprintf("[convoy-%s] %s", outcomeTag, convoyName),
-		summary,
-		repo)
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -193,7 +199,12 @@ func terminalConvoyTransitionTx(db *sql.DB, convoyID int, convoyName, newStatus,
 	if _, err := QueueCleanupAskBranchTx(tx, convoyID); err != nil {
 		return fmt.Errorf("queue CleanupAskBranch: %w", err)
 	}
-	if _, err := store.AddBountyTx(tx, 0, "WriteMemory", memoryPayload); err != nil {
+	if _, err := lib.WriteMemoryTx(ctx, tx, librarian.Memory{
+		ParentTaskID: 0,
+		Repo:         repo,
+		Task:         fmt.Sprintf("[convoy-%s] %s", outcomeTag, convoyName),
+		Feedback:     summary,
+	}); err != nil {
 		return fmt.Errorf("queue WriteMemory: %w", err)
 	}
 

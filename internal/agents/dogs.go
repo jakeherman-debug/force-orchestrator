@@ -1,16 +1,17 @@
 package agents
 
 import (
-	"log"
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
@@ -98,7 +99,11 @@ var dogOrder = []string{
 // the daemon ctx) so per-dog timeouts derive from a cancellable parent;
 // pre-fix the per-dog 5-min context used a fabricated context.Background
 // root, leaving in-flight dogs deaf to daemon shutdown.
-func RunDogs(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) {
+// D0-B: lib threads through to the dogs whose handlers enqueue
+// WriteMemory bounties (sub-pr-ci-watch, draft-pr-watch). The Librarian
+// is constructed once at daemon startup and passed via SpawnInquisitor's
+// config struct; tests pass a librarian.NewMock() instance.
+func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
 	if IsEstopped(db) {
 		logger.Printf("RunDogs: e-stop active — skipping all dogs this cycle")
 		return
@@ -136,7 +141,7 @@ func RunDogs(ctx context.Context, db *sql.DB, logger interface{ Printf(string, .
 		// subprocess invocation.
 		dogCtx, dogCancel := context.WithTimeout(ctx, 5*time.Minute)
 		errCh := make(chan error, 1)
-		go func(name string) { errCh <- runDog(dogCtx, db, name, logger) }(dogName)
+		go func(name string) { errCh <- runDog(dogCtx, db, name, lib, logger) }(dogName)
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -160,10 +165,13 @@ func RunDogs(ctx context.Context, db *sql.DB, logger interface{ Printf(string, .
 // Returns an error with the list of valid dog names if the name is unknown.
 // Fix #8e: ctx threads from the caller (CLI command ctx) so SIGINT cancels
 // the manually-triggered dog.
-func RunDogByName(ctx context.Context, db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
+// D0-B: lib is the librarian.Client used by sub-pr-ci-watch / draft-pr-watch
+// for their WriteMemory enqueues; CLI/dashboard callers construct it via
+// librarian.NewInProcess(db) at the entry point.
+func RunDogByName(ctx context.Context, db *sql.DB, name string, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
 	// Mark the run before executing so a crashed dog still shows up as attempted.
 	store.DogMarkRun(db, name)
-	return runDog(ctx, db, name, logger)
+	return runDog(ctx, db, name, lib, logger)
 }
 
 // DogNames returns the canonical order of registered dogs. Used for CLI
@@ -174,7 +182,7 @@ func DogNames() []string {
 	return out
 }
 
-func runDog(ctx context.Context, db *sql.DB, name string, logger interface{ Printf(string, ...any) }) error {
+func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
 	switch name {
 	case "git-hygiene":
 		return dogGitHygiene(ctx, db, logger)
@@ -195,11 +203,11 @@ func runDog(ctx context.Context, db *sql.DB, name string, logger interface{ Prin
 	case "stale-convoys-report":
 		return runStaleConvoysReport(db, logger)
 	case "sub-pr-ci-watch":
-		return dogSubPRCIWatch(ctx, db, logger)
+		return dogSubPRCIWatch(ctx, db, lib, logger)
 	case "main-drift-watch":
 		return dogMainDriftWatch(ctx, db, logger)
 	case "draft-pr-watch":
-		return dogDraftPRWatch(db, logger)
+		return dogDraftPRWatch(ctx, db, lib, logger)
 	case "ship-it-nag":
 		return dogShipItNag(db, logger)
 	case "repo-config-check":

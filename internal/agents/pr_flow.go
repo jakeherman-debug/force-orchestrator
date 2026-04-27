@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
@@ -333,14 +334,16 @@ func subPRAutoMergeStrategy(db *sql.DB) string {
 //     escalate with guidance about missing CI config.
 // Fix #8e: ctx threads from RunDogs → runDog (per-dog 5m ctx, derived from
 // inquisitor tick ctx) so onSubPRStalled's network rerun cancels on shutdown.
-func dogSubPRCIWatch(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+// D0-B: lib threads from RunDogs → runDog so onSubPRMerged can enqueue the
+// post-merge WriteMemory bounty inside its existing atomic tx.
+func dogSubPRCIWatch(ctx context.Context, db *sql.DB, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
 	prs := store.ListOpenAskBranchPRs(db)
 	if len(prs) == 0 {
 		return nil
 	}
 	ghc := newGHClient()
 	for _, pr := range prs {
-		handleSubPRPoll(ctx, db, ghc, pr, logger)
+		handleSubPRPoll(ctx, db, ghc, pr, lib, logger)
 	}
 	return nil
 }
@@ -363,7 +366,8 @@ func SetGHClientFactory(f func() *gh.Client) (restore func()) {
 // onSubPRStalled stall-rerun network ops cancel on shutdown.
 // handleSubPRPoll processes a single sub-PR's state change. Split out so it's
 // unit-testable with a fake gh client.
-func handleSubPRPoll(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+// D0-B: lib threads through to onSubPRMerged for the WriteMemory enqueue.
+func handleSubPRPoll(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
 	repo := store.GetRepo(db, pr.Repo)
 	var cwd, ghRepo string
 	if repo != nil {
@@ -406,7 +410,7 @@ func handleSubPRPoll(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.A
 
 	// Externally merged (rare — human merged the sub-PR directly).
 	if view.Merged {
-		if err := onSubPRMerged(db, pr, logger); err != nil {
+		if err := onSubPRMerged(ctx, db, pr, lib, logger); err != nil {
 			escalateOnSubPRMergedFailure(db, pr, err, logger)
 		}
 		return
@@ -425,7 +429,7 @@ func handleSubPRPoll(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.A
 	// the blocker — escalate immediately rather than spinning for 2 hours.
 	switch strings.ToUpper(view.MergeStateStatus) {
 	case "CLEAN":
-		mergeSubPRDirect(db, ghc, pr, logger)
+		mergeSubPRDirect(ctx, db, ghc, pr, lib, logger)
 		return
 	case "BLOCKED":
 		// BLOCKED covers multiple root causes; checks disambiguate.
@@ -523,7 +527,7 @@ func handleSubPRPoll(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.A
 			return
 		}
 		if age > missingCITimeout && len(checks) == 0 {
-			onSubPRMissingCI(db, ghc, pr, logger)
+			onSubPRMissingCI(ctx, db, ghc, pr, lib, logger)
 		}
 	}
 }
@@ -541,10 +545,7 @@ func handleSubPRPoll(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.A
 // the caller routes any error through CreateEscalation (idempotent per-task
 // via Fix #3 partial UNIQUE) so the operator sees one Open escalation
 // regardless of how many dog ticks it took to repro.
-func onSubPRMerged(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) error {
-	memoryPayload := fmt.Sprintf(`{"task":%q,"files":"","feedback":"merged via PR #%d","diff":"","repo":%q}`,
-		"sub-PR merged", pr.PRNumber, pr.Repo)
-
+func onSubPRMerged(ctx context.Context, db *sql.DB, pr store.AskBranchPR, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx for sub-PR #%d merge: %w", pr.PRNumber, err)
@@ -561,7 +562,16 @@ func onSubPRMerged(db *sql.DB, pr store.AskBranchPR, logger interface{ Printf(st
 	if err != nil {
 		return fmt.Errorf("unblock dependents of task %d: %w", pr.TaskID, err)
 	}
-	if _, err := store.AddBountyTx(tx, pr.TaskID, "WriteMemory", memoryPayload); err != nil {
+	// D0-B: WriteMemory now routes through the librarian.Client. The
+	// in-process backing turns this into the same store.AddBountyTx
+	// insert the pre-D0-B code did, so the four writes still land
+	// atomically.
+	if _, err := lib.WriteMemoryTx(ctx, tx, librarian.Memory{
+		ParentTaskID: pr.TaskID,
+		Repo:         pr.Repo,
+		Task:         "sub-PR merged",
+		Feedback:     fmt.Sprintf("merged via PR #%d", pr.PRNumber),
+	}); err != nil {
 		return fmt.Errorf("queue WriteMemory for task %d: %w", pr.TaskID, err)
 	}
 
@@ -919,7 +929,7 @@ func onSubPRMergeBlocked(db *sql.DB, pr store.AskBranchPR, logger interface{ Pri
 // when mergeStateStatus=CLEAN (covers both "no CI" and "CI already green") or
 // as a fallback after missingCITimeout with zero checks. The Jedi Council
 // review is the quality gate; CI is additive.
-func mergeSubPRDirect(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
+func mergeSubPRDirect(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
 	repo := store.GetRepo(db, pr.Repo)
 	if repo == nil {
 		logger.Printf("sub-pr-ci-watch: task %d direct merge: repo %q not found", pr.TaskID, pr.Repo)
@@ -931,12 +941,12 @@ func mergeSubPRDirect(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger i
 		logger.Printf("sub-pr-ci-watch: task %d direct merge #%d failed: %v", pr.TaskID, pr.PRNumber, mErr)
 		return
 	}
-	if err := onSubPRMerged(db, pr, logger); err != nil {
+	if err := onSubPRMerged(ctx, db, pr, lib, logger); err != nil {
 		escalateOnSubPRMergedFailure(db, pr, err, logger)
 	}
 }
 
 // onSubPRMissingCI is the legacy name used by cycle1 tests; delegates to mergeSubPRDirect.
-func onSubPRMissingCI(db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, logger interface{ Printf(string, ...any) }) {
-	mergeSubPRDirect(db, ghc, pr, logger)
+func onSubPRMissingCI(ctx context.Context, db *sql.DB, ghc *gh.Client, pr store.AskBranchPR, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
+	mergeSubPRDirect(ctx, db, ghc, pr, lib, logger)
 }

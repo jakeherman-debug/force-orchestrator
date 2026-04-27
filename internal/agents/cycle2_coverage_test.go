@@ -12,6 +12,7 @@ import (
 
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -168,7 +169,7 @@ func TestHandleSubPRPoll_PRViewErrorLeavesStateUntouched(t *testing.T) {
 
 	ghc := newGHClient()
 	pr := store.GetAskBranchPR(db, prRowID)
-	handleSubPRPoll(context.Background(), db, ghc, *pr, testLogger{})
+	handleSubPRPoll(context.Background(), db, ghc, *pr, librarian.NewInProcess(db), testLogger{})
 
 	// State must NOT advance on transient view errors.
 	after, _ := store.GetBounty(db, taskID)
@@ -258,7 +259,7 @@ func TestSubPRStateStringTransition_PersistsOnChange(t *testing.T) {
 
 	ghc := newGHClient()
 	pr := store.GetAskBranchPR(db, prRowID)
-	handleSubPRPoll(context.Background(), db, ghc, *pr, testLogger{})
+	handleSubPRPoll(context.Background(), db, ghc, *pr, librarian.NewInProcess(db), testLogger{})
 
 	updated := store.GetAskBranchPR(db, prRowID)
 	if updated.ChecksState != "Success" {

@@ -1,11 +1,13 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -32,7 +34,7 @@ func TestDogDraftPRWatch_NoOpWhenNoDraftPROpenConvoys(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 	// No DraftPROpen convoys.
-	if err := dogDraftPRWatch(db, testLogger{}); err != nil {
+	if err := dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -52,7 +54,7 @@ func TestDogDraftPRWatch_MergedPR_TransitionsToShipped(t *testing.T) {
 		Err    error
 	}{42: {State: "MERGED", Merged: true}})
 
-	if err := dogDraftPRWatch(db, testLogger{}); err != nil {
+	if err := dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	conv := store.GetConvoy(db, cid)
@@ -96,7 +98,7 @@ func TestDogDraftPRWatch_ClosedUnmerged_TransitionsToAbandoned(t *testing.T) {
 		Err    error
 	}{42: {State: "CLOSED", Merged: false}})
 
-	if err := dogDraftPRWatch(db, testLogger{}); err != nil {
+	if err := dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
 		t.Fatal(err)
 	}
 	conv := store.GetConvoy(db, cid)
@@ -131,7 +133,7 @@ func TestDogDraftPRWatch_StillOpenNoTransition(t *testing.T) {
 		Err    error
 	}{42: {State: "OPEN", Merged: false}})
 
-	_ = dogDraftPRWatch(db, testLogger{})
+	_ = dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{})
 	conv := store.GetConvoy(db, cid)
 	if conv.Status != "DraftPROpen" {
 		t.Errorf("convoy should stay DraftPROpen, got %q", conv.Status)
@@ -159,7 +161,7 @@ func TestDogDraftPRWatch_MultiRepoPartialMergeStaysDraft(t *testing.T) {
 		2: {State: "OPEN", Merged: false},
 	})
 
-	_ = dogDraftPRWatch(db, testLogger{})
+	_ = dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{})
 	conv := store.GetConvoy(db, cid)
 	if conv.Status != "DraftPROpen" {
 		t.Errorf("partial merge should stay DraftPROpen, got %q", conv.Status)
@@ -187,7 +189,7 @@ func TestDogDraftPRWatch_ClosedWithOpenStaysOpen(t *testing.T) {
 		2: {State: "OPEN", Merged: false},
 	})
 
-	_ = dogDraftPRWatch(db, testLogger{})
+	_ = dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{})
 	conv := store.GetConvoy(db, cid)
 	if conv.Status == "Abandoned" {
 		t.Errorf("convoy with one closed but one still open should stay DraftPROpen, got Abandoned")
@@ -209,7 +211,7 @@ func TestDogDraftPRWatch_TransientViewErrorDoesNotTransition(t *testing.T) {
 		Err    error
 	}{42: {Err: fmt.Errorf("transient network")}})
 
-	_ = dogDraftPRWatch(db, testLogger{})
+	_ = dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{})
 	conv := store.GetConvoy(db, cid)
 	if conv.Status != "DraftPROpen" {
 		t.Errorf("view errors should not advance state, got %q", conv.Status)
@@ -296,7 +298,7 @@ func TestTransitionConvoyToShipped_QueuesCleanupAndMemory(t *testing.T) {
 	cid, _ := store.CreateConvoy(db, "[1] done")
 	_ = store.UpsertConvoyAskBranch(db, cid, "api", "force/ask-1-done", "sha")
 
-	transitionConvoyToShipped(db, cid, "[1] done", testLogger{})
+	transitionConvoyToShipped(context.Background(), db, cid, "[1] done", librarian.NewInProcess(db), testLogger{})
 
 	conv := store.GetConvoy(db, cid)
 	if conv.Status != "Shipped" {
@@ -325,7 +327,7 @@ func TestTransitionConvoyToAbandoned_QueuesCleanupAndFailureMemory(t *testing.T)
 	cid, _ := store.CreateConvoy(db, "[1] dropped")
 	_ = store.UpsertConvoyAskBranch(db, cid, "api", "force/ask-1-dropped", "sha")
 
-	transitionConvoyToAbandoned(db, cid, "[1] dropped", testLogger{})
+	transitionConvoyToAbandoned(context.Background(), db, cid, "[1] dropped", librarian.NewInProcess(db), testLogger{})
 
 	conv := store.GetConvoy(db, cid)
 	if conv.Status != "Abandoned" {

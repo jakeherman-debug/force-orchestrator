@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/clients/librarian"
 )
 
 // dogInfo is the row returned to the dashboard dogs list.
@@ -63,7 +64,11 @@ func handleDogsRun(db *sql.DB) http.HandlerFunc {
 		// Capture the dog's log output in a buffer so we can return it in the response.
 		var buf strings.Builder
 		logger := log.New(&buf, "["+name+"] ", log.LstdFlags)
-		runErr := agents.RunDogByName(r.Context(), db, name, logger)
+		// D0-B: construct an in-process librarian.Client for this one-shot
+		// dog invocation. The dashboard is single-user / single-tenant, so
+		// short-lived clients are fine — they share the same *sql.DB pool.
+		libClient := librarian.NewInProcess(db)
+		runErr := agents.RunDogByName(r.Context(), db, name, libClient, logger)
 
 		resp := map[string]any{
 			"dog":    name,

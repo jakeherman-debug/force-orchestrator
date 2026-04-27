@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -155,6 +156,13 @@ func cmdDaemon(db *sql.DB) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// D0-B: Construct the in-process Librarian client once at daemon
+	// startup and inject it into every agent that produces WriteMemory
+	// bounties (Jedi Council via JediCouncilConfig; Inquisitor → RunDogs
+	// via InquisitorConfig). Subsequent deliverables (D1, D3, D8) will
+	// add more clients to the same Spawn config structs.
+	libClient := librarian.NewInProcess(db)
+
 	go agents.SpawnChancellor(ctx, db)
 	for i := 0; i < numCommanders; i++ {
 		name := fmt.Sprintf("Commander-%d", i+1)
@@ -182,7 +190,7 @@ func cmdDaemon(db *sql.DB) {
 		if i < len(councilRoster) {
 			name = councilRoster[i]
 		}
-		go agents.SpawnJediCouncil(ctx, db, name)
+		go agents.SpawnJediCouncil(ctx, db, agents.JediCouncilConfig{Name: name, Librarian: libClient})
 	}
 	for i := 0; i < numInvestigators; i++ {
 		name := fmt.Sprintf("Investigator-%d", i+1)
@@ -226,7 +234,7 @@ func cmdDaemon(db *sql.DB) {
 		}
 		go agents.SpawnDiplomat(ctx, db, name)
 	}
-	go agents.SpawnInquisitor(ctx, db)
+	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient})
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
@@ -303,7 +311,7 @@ func cmdDaemon(db *sql.DB) {
 					name = councilRoster[spawnedCouncil]
 				}
 				fmt.Printf("Scaling: spawning %s (council: %d → %d)\n", name, spawnedCouncil, newCouncil)
-				go agents.SpawnJediCouncil(ctx, db, name)
+				go agents.SpawnJediCouncil(ctx, db, agents.JediCouncilConfig{Name: name, Librarian: libClient})
 				spawnedCouncil++
 			}
 			if newCouncil < spawnedCouncil {
