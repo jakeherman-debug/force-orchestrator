@@ -1,0 +1,39 @@
+description: |
+  Tools that NO agent gets, fleet-wide, regardless of per-agent profile.
+  Even if an agent's YAML accidentally lists one of these, the blocklist
+  is the final word — the loader rejects profiles that grant a
+  blocklisted tool. This is the "never reachable" rail; removing an
+  entry requires operator action with an explicit commit + audit trail.
+
+  Namespace tokens (e.g. mcp:slack-write) blocklist the entire
+  namespace; concrete tool names blocklist a single tool. The loader
+  expands namespace tokens against REGISTRY.yaml's mcp_namespaces
+  before the per-profile validation runs.
+
+blocked:
+  # Slack write — agents notify the operator via Fleet_Mail, not Slack.
+  - mcp:slack-write
+
+  # Confluence write — fleet does not authorize agents to mutate wikis.
+  # (Listed individually since the read/write split is per-tool, not
+  # captured by a namespace.)
+  - mcp__plugin_dev-tools_atlassian__createConfluencePage
+  - mcp__plugin_dev-tools_atlassian__updateConfluencePage
+  - mcp__plugin_dev-tools_atlassian__createConfluenceFooterComment
+  - mcp__plugin_dev-tools_atlassian__createConfluenceInlineComment
+
+  # Atlassian destructive Jira ops — comment+create OK as fleet output;
+  # transition+edit are operator-only.
+  - mcp__plugin_dev-tools_atlassian__transitionJiraIssue
+  - mcp__plugin_dev-tools_atlassian__editJiraIssue
+
+  # Sonar destructive ops — read-only authorization fleet-wide.
+  - mcp__plugin_sonarqube_sonarqube__change_security_hotspot_status
+  - mcp__plugin_sonarqube_sonarqube__change_sonar_issue_status
+
+reasoning: |
+  Removing an entry from this list requires operator action with an
+  explicit commit + audit trail. Adding an entry to a per-agent profile
+  requires the entry to be ABSENT from this blocklist; the loader
+  rejects profiles that grant a blocklisted tool with a precise error
+  pointing at the offending agent + tool.

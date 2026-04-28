@@ -1,0 +1,15 @@
+agent: captain
+description: |
+  Captain reviews diffs for scope and coherence. Read-only across the
+  fleet; no shell, no file writes, no destructive ops. Sees domain
+  context via Atlassian/Glean/Sonar reads.
+builtin_tools: []
+mcp_servers:
+  - mcp:atlassian-read
+  - mcp:glean-read
+  - mcp:sonar-read
+notes: |
+  Captain reasons over the diff text supplied in the prompt — no Read
+  needed because file content is already inlined. No Bash (Captain
+  doesn't execute), no Edit/Write (review-only role). Migration
+  baseline: claude.CouncilTools.

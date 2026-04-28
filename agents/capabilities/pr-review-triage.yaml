@@ -1,0 +1,12 @@
+agent: pr-review-triage
+description: |
+  PR review triage classifies bot/human PR review comments into
+  in_scope_fix / out_of_scope / not_actionable / conflicted_loop and
+  drafts the reply body. Pure reasoning over the comment text in the
+  prompt.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string. The classification dispatch
+  (gh reply post, CodeEdit spawn, escalation) happens in Go; Claude
+  produces a JSON decision and nothing else.

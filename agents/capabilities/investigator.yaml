@@ -1,0 +1,19 @@
+agent: investigator
+description: |
+  Investigator answers open-ended research questions about the codebase
+  and runtime systems. Read-only across the fleet; same shape as
+  Auditor but typically narrower scope per task.
+builtin_tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+mcp_servers:
+  - mcp:atlassian-read
+  - mcp:glean-read
+  - mcp:sonar-read
+  - mcp:datadog-read
+notes: |
+  Migration baseline: claude.InvestigateTools (identical to Auditor's
+  current grant). No Edit / Write — research output is a textual
+  report, never a file mutation.

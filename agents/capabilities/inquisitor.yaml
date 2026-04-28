@@ -1,0 +1,12 @@
+agent: inquisitor
+description: |
+  Inquisitor performs stuck-task / stale-lock detection over the
+  holocron DB. Today it runs no LLM calls — this profile is a
+  placeholder so any future LLM use must come through the loader and
+  not via a hardcoded literal slipped into a code path.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  No-op profile by design. If/when Inquisitor gains an LLM call, the
+  reviewer should expand this profile in the same commit and remove
+  this notes block.

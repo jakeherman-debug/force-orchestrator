@@ -1,0 +1,19 @@
+agent: auditor
+description: |
+  Auditor performs read-only sweeps over the codebase plus external
+  context (Jira, Confluence, Glean, Sonar, Datadog) to surface issues
+  for follow-up fixes. No file mutation — every code change must flow
+  back through Commander → Chancellor.
+builtin_tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+mcp_servers:
+  - mcp:atlassian-read
+  - mcp:glean-read
+  - mcp:sonar-read
+  - mcp:datadog-read
+notes: |
+  Bash is granted but Edit/Write deliberately are not — Auditor MUST
+  NOT modify files. Migration baseline: claude.InvestigateTools.

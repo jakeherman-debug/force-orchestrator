@@ -1,0 +1,11 @@
+agent: convoy-review
+description: |
+  ConvoyReview is the convoy-level completeness gate that finds gaps,
+  regressions, and incorrectness in the ask-branch diff vs main. The
+  full diff is inlined in the prompt; output is a JSON finding list.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string. The findings spawn CodeEdit
+  fix tasks executed by astromechs; ConvoyReview itself only reads the
+  prompt and emits JSON.

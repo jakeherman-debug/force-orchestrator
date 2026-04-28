@@ -1,0 +1,12 @@
+agent: diplomat
+description: |
+  Diplomat synthesises sub-PR descriptions and convoy ship-it bodies
+  from completed task summaries. All inputs are inlined in the prompt;
+  output is text destined for a gh CLI shell call (no MCP needed).
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string. The gh CLI invocation that
+  consumes Diplomat's output runs in Go (igit / internal/gh), not from
+  inside the Claude session — Claude does not need Bash or any other
+  catalog tool.

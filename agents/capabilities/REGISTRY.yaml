@@ -1,0 +1,159 @@
+description: |
+  Fleet-wide tool vocabulary. Every tool an agent could theoretically
+  invoke must be listed here. The DisallowedToolsArg complement is
+  computed against this registry — tools NOT in a profile but listed in
+  REGISTRY are added to --disallowedTools and removed from Claude's
+  catalog entirely. Adding a new MCP server or builtin tool requires
+  updating this file AND the per-agent profiles that grant it.
+
+builtin_tools:
+  - Read
+  - Glob
+  - Grep
+  - Edit
+  - Write
+  - Bash
+  - WebFetch
+  - WebSearch
+  - LSP
+  - NotebookEdit
+  - TodoWrite
+
+mcp_tools:
+  # Atlassian — read
+  - mcp__plugin_dev-tools_atlassian__atlassianUserInfo
+  - mcp__plugin_dev-tools_atlassian__getJiraIssue
+  - mcp__plugin_dev-tools_atlassian__searchJiraIssuesUsingJql
+  - mcp__plugin_dev-tools_atlassian__getConfluencePage
+  - mcp__plugin_dev-tools_atlassian__searchConfluenceUsingCql
+  - mcp__plugin_dev-tools_atlassian__searchAtlassian
+  - mcp__plugin_dev-tools_atlassian__getJiraIssueTypeMetaWithFields
+  - mcp__plugin_dev-tools_atlassian__getJiraProjectIssueTypesMetadata
+  - mcp__plugin_dev-tools_atlassian__getTransitionsForJiraIssue
+  - mcp__plugin_dev-tools_atlassian__getVisibleJiraProjects
+  - mcp__plugin_dev-tools_atlassian__lookupJiraAccountId
+  - mcp__plugin_dev-tools_atlassian__getConfluenceSpaces
+  - mcp__plugin_dev-tools_atlassian__getPagesInConfluenceSpace
+  - mcp__plugin_dev-tools_atlassian__getConfluencePageDescendants
+  - mcp__plugin_dev-tools_atlassian__getConfluencePageFooterComments
+  - mcp__plugin_dev-tools_atlassian__getConfluencePageInlineComments
+  - mcp__plugin_dev-tools_atlassian__getConfluenceCommentChildren
+  - mcp__plugin_dev-tools_atlassian__getJiraIssueRemoteIssueLinks
+  - mcp__plugin_dev-tools_atlassian__getIssueLinkTypes
+  - mcp__plugin_dev-tools_atlassian__getAccessibleAtlassianResources
+  # Atlassian — write
+  - mcp__plugin_dev-tools_atlassian__addCommentToJiraIssue
+  - mcp__plugin_dev-tools_atlassian__addWorklogToJiraIssue
+  - mcp__plugin_dev-tools_atlassian__createJiraIssue
+  - mcp__plugin_dev-tools_atlassian__editJiraIssue
+  - mcp__plugin_dev-tools_atlassian__transitionJiraIssue
+  - mcp__plugin_dev-tools_atlassian__createIssueLink
+  - mcp__plugin_dev-tools_atlassian__createConfluencePage
+  - mcp__plugin_dev-tools_atlassian__updateConfluencePage
+  - mcp__plugin_dev-tools_atlassian__createConfluenceFooterComment
+  - mcp__plugin_dev-tools_atlassian__createConfluenceInlineComment
+
+  # Glean — read
+  - mcp__plugin_glean_glean__search
+  - mcp__plugin_glean_glean__read_document
+
+  # Sonar — read
+  - mcp__plugin_sonarqube_sonarqube__analyze_code_snippet
+  - mcp__plugin_sonarqube_sonarqube__search_sonar_issues_in_projects
+  - mcp__plugin_sonarqube_sonarqube__get_project_quality_gate_status
+  - mcp__plugin_sonarqube_sonarqube__get_component_measures
+  - mcp__plugin_sonarqube_sonarqube__search_security_hotspots
+  - mcp__plugin_sonarqube_sonarqube__get_file_coverage_details
+  # Sonar — write
+  - mcp__plugin_sonarqube_sonarqube__change_security_hotspot_status
+  - mcp__plugin_sonarqube_sonarqube__change_sonar_issue_status
+
+  # Datadog — read
+  - mcp__plugin_dev-tools_datadog-mcp__search_datadog_logs
+  - mcp__plugin_dev-tools_datadog-mcp__analyze_datadog_logs
+  - mcp__plugin_dev-tools_datadog-mcp__search_datadog_monitors
+  - mcp__plugin_dev-tools_datadog-mcp__get_datadog_metric
+  - mcp__plugin_dev-tools_datadog-mcp__search_datadog_spans
+  - mcp__plugin_dev-tools_datadog-mcp__get_datadog_trace
+  - mcp__plugin_dev-tools_datadog-mcp__search_datadog_services
+  - mcp__plugin_dev-tools_datadog-mcp__search_datadog_service_dependencies
+
+  # Slack — write (blocked fleet-wide; listed for registry-completeness)
+  - mcp__plugin_slack_slack__slack_send_message
+  - mcp__plugin_slack_slack__slack_send_message_draft
+  - mcp__plugin_slack_slack__slack_schedule_message
+  - mcp__plugin_slack_slack__slack_create_canvas
+  - mcp__plugin_slack_slack__slack_update_canvas
+
+mcp_namespaces:
+  # Convenience namespaces for profile YAMLs to reference. The loader
+  # expands these to concrete tool names against mcp_tools above. A
+  # profile MAY list either a namespace token or a concrete tool name;
+  # both forms validate against the registry.
+
+  mcp:atlassian-read:
+    - mcp__plugin_dev-tools_atlassian__atlassianUserInfo
+    - mcp__plugin_dev-tools_atlassian__getJiraIssue
+    - mcp__plugin_dev-tools_atlassian__searchJiraIssuesUsingJql
+    - mcp__plugin_dev-tools_atlassian__getConfluencePage
+    - mcp__plugin_dev-tools_atlassian__searchConfluenceUsingCql
+    - mcp__plugin_dev-tools_atlassian__searchAtlassian
+    - mcp__plugin_dev-tools_atlassian__getJiraIssueTypeMetaWithFields
+    - mcp__plugin_dev-tools_atlassian__getJiraProjectIssueTypesMetadata
+    - mcp__plugin_dev-tools_atlassian__getTransitionsForJiraIssue
+    - mcp__plugin_dev-tools_atlassian__getVisibleJiraProjects
+    - mcp__plugin_dev-tools_atlassian__lookupJiraAccountId
+    - mcp__plugin_dev-tools_atlassian__getConfluenceSpaces
+    - mcp__plugin_dev-tools_atlassian__getPagesInConfluenceSpace
+    - mcp__plugin_dev-tools_atlassian__getConfluencePageDescendants
+    - mcp__plugin_dev-tools_atlassian__getConfluencePageFooterComments
+    - mcp__plugin_dev-tools_atlassian__getConfluencePageInlineComments
+    - mcp__plugin_dev-tools_atlassian__getConfluenceCommentChildren
+    - mcp__plugin_dev-tools_atlassian__getJiraIssueRemoteIssueLinks
+    - mcp__plugin_dev-tools_atlassian__getIssueLinkTypes
+    - mcp__plugin_dev-tools_atlassian__getAccessibleAtlassianResources
+
+  mcp:atlassian-write:
+    - mcp__plugin_dev-tools_atlassian__addCommentToJiraIssue
+    - mcp__plugin_dev-tools_atlassian__addWorklogToJiraIssue
+    - mcp__plugin_dev-tools_atlassian__createJiraIssue
+    - mcp__plugin_dev-tools_atlassian__editJiraIssue
+    - mcp__plugin_dev-tools_atlassian__transitionJiraIssue
+    - mcp__plugin_dev-tools_atlassian__createIssueLink
+    - mcp__plugin_dev-tools_atlassian__createConfluencePage
+    - mcp__plugin_dev-tools_atlassian__updateConfluencePage
+    - mcp__plugin_dev-tools_atlassian__createConfluenceFooterComment
+    - mcp__plugin_dev-tools_atlassian__createConfluenceInlineComment
+
+  mcp:glean-read:
+    - mcp__plugin_glean_glean__search
+    - mcp__plugin_glean_glean__read_document
+
+  mcp:sonar-read:
+    - mcp__plugin_sonarqube_sonarqube__analyze_code_snippet
+    - mcp__plugin_sonarqube_sonarqube__search_sonar_issues_in_projects
+    - mcp__plugin_sonarqube_sonarqube__get_project_quality_gate_status
+    - mcp__plugin_sonarqube_sonarqube__get_component_measures
+    - mcp__plugin_sonarqube_sonarqube__search_security_hotspots
+    - mcp__plugin_sonarqube_sonarqube__get_file_coverage_details
+
+  mcp:sonar-write:
+    - mcp__plugin_sonarqube_sonarqube__change_security_hotspot_status
+    - mcp__plugin_sonarqube_sonarqube__change_sonar_issue_status
+
+  mcp:datadog-read:
+    - mcp__plugin_dev-tools_datadog-mcp__search_datadog_logs
+    - mcp__plugin_dev-tools_datadog-mcp__analyze_datadog_logs
+    - mcp__plugin_dev-tools_datadog-mcp__search_datadog_monitors
+    - mcp__plugin_dev-tools_datadog-mcp__get_datadog_metric
+    - mcp__plugin_dev-tools_datadog-mcp__search_datadog_spans
+    - mcp__plugin_dev-tools_datadog-mcp__get_datadog_trace
+    - mcp__plugin_dev-tools_datadog-mcp__search_datadog_services
+    - mcp__plugin_dev-tools_datadog-mcp__search_datadog_service_dependencies
+
+  mcp:slack-write:
+    - mcp__plugin_slack_slack__slack_send_message
+    - mcp__plugin_slack_slack__slack_send_message_draft
+    - mcp__plugin_slack_slack__slack_schedule_message
+    - mcp__plugin_slack_slack__slack_create_canvas
+    - mcp__plugin_slack_slack__slack_update_canvas

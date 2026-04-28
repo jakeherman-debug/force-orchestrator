@@ -1,0 +1,13 @@
+agent: commander
+description: |
+  Commander decomposes Feature requests into ordered convoy task
+  shards. Needs ticket context and cross-repo search; produces JSON
+  output, never code.
+builtin_tools: []
+mcp_servers:
+  - mcp:atlassian-read
+  - mcp:glean-read
+notes: |
+  No Sonar or Datadog — Commander is a planner, not a debugger. No
+  Bash, Read, or file tools — its output is a JSON plan that downstream
+  agents execute. Migration baseline: claude.CommanderTools.

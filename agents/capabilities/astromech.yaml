@@ -1,0 +1,24 @@
+agent: astromech
+description: |
+  Astromechs are the worker agents that implement code edits inside a
+  per-agent worktree. They need full file/shell tools to modify the
+  repo, plus read access to ticketing, docs, code-quality, and
+  observability so they can self-debug without escalating.
+builtin_tools:
+  - Edit
+  - Write
+  - Read
+  - Bash
+  - Glob
+  - Grep
+mcp_servers:
+  - mcp:atlassian-read
+  - mcp:glean-read
+  - mcp:sonar-read
+  - mcp:datadog-read
+notes: |
+  Migration baseline: prior to T0-1 the astromech tool list was the
+  literal "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools
+  passed inline at the call site in astromech.go. This profile is
+  exactly that set. No write-side MCP grants — wikis, Slack, and Sonar
+  status mutations are blocked at the fleet level.

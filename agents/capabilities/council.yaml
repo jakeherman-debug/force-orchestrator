@@ -1,0 +1,13 @@
+agent: council
+description: |
+  Jedi Council is the code-review gate before sub-PR opens. Reasons
+  over the diff text inlined in the prompt; consults Atlassian/Glean
+  for context and Sonar for existing-quality findings.
+builtin_tools: []
+mcp_servers:
+  - mcp:atlassian-read
+  - mcp:glean-read
+  - mcp:sonar-read
+notes: |
+  Same shape as Captain — pure-reasoning review agent. Migration
+  baseline: claude.CouncilTools.

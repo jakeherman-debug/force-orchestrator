@@ -1,0 +1,12 @@
+agent: pilot
+description: |
+  Pilot is the infrastructure agent (rebases, branch creation, worktree
+  resets, FindPRTemplate). Most Pilot tasks run no LLM at all. The
+  one LLM-using path — FindPRTemplatePathLLM — reasons over a directory
+  listing inlined in the prompt and emits a single relative path.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string passed to the runCLI lambda
+  in pilot.go. The directory listing is materialised in Go and inlined;
+  Claude does not need filesystem access.

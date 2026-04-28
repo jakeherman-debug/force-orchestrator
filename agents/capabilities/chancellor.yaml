@@ -1,0 +1,11 @@
+agent: chancellor
+description: |
+  Chancellor adjudicates Feature-level merge / sequence / blocker
+  decisions across convoys. Pure reasoning over the proposal payload
+  in the prompt — no tool access needed.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string. Tools are restricted via the
+  --disallowedTools complement against REGISTRY (not via "" omission)
+  so a future LLM cannot reach for any catalog tool surreptitiously.

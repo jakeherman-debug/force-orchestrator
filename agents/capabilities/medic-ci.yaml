@@ -1,0 +1,14 @@
+agent: medic-ci
+description: |
+  Medic CI triages failed CI runs by inspecting the failed job's
+  logs and the linked PR. Needs Bash + WebFetch + WebSearch to fetch
+  and parse external log artifacts.
+builtin_tools:
+  - Bash
+  - WebFetch
+  - WebSearch
+mcp_servers: []
+notes: |
+  Migration baseline: "Bash,WebFetch,WebSearch" — preserved verbatim.
+  No MCP grants today; if future Medic-CI runs need Datadog log
+  context, add mcp:datadog-read here and re-test.

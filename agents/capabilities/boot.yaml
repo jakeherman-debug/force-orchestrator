@@ -1,0 +1,10 @@
+agent: boot
+description: |
+  Boot triages a stuck task to decide between WAIT, KILL, or ESCALATE.
+  Pure reasoning over the task summary + lock-time + error-log inlined
+  in the prompt.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string. Boot outputs a single-token
+  verdict consumed by Go code; no tool access required.

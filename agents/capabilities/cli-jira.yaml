@@ -1,0 +1,15 @@
+agent: cli-jira
+description: |
+  CLI profile used by the operator-invoked `force add-jira <TICKET>`
+  command. Fetches a Jira ticket via Atlassian read tools and returns
+  a feature description that becomes the seed payload for a new
+  Feature task. Operator-invoked, not part of the agent loop.
+builtin_tools: []
+mcp_servers:
+  - mcp:atlassian-read
+notes: |
+  Migration baseline: claude.AtlassianReadTools (the same constant
+  exposed for cmd/force). Kept as a separate profile because this
+  isn't a Spawn* loop — it's a one-shot CLI command — and its grant
+  shape (read-only Atlassian, nothing else) is narrower than any
+  agent profile.

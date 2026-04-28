@@ -1,0 +1,11 @@
+agent: librarian
+description: |
+  Librarian summarises completed-task outputs into memories and reranks
+  candidate memories for retrieval. Pure reasoning over text in the
+  prompt; no tool access required.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string. Covers both Librarian's
+  summarisation calls and the memory-rerank helper that runs as part
+  of the Librarian retrieval pipeline.

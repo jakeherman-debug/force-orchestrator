@@ -1,0 +1,11 @@
+agent: medic
+description: |
+  Medic decides how to recover from a failed Astromech attempt: retry
+  with critic note, decompose, escalate, or auto-cleanup. Pure
+  reasoning over the failure log inlined in the prompt.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: empty tools string. Medic outputs a JSON
+  decision; downstream Go code executes it (worktree resets, requeues,
+  shards). Claude does not need any tool to produce the decision.
