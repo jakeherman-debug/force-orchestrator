@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
@@ -63,6 +64,13 @@ func BranchAgentName(branchName string) string {
 func SpawnJediCouncil(ctx context.Context, db *sql.DB, cfg JediCouncilConfig) {
 	agentName := cfg.Name
 	logger := NewLogger(agentName)
+
+	// D1 T0-1: load Council's capability profile once at spawn-time.
+	profile, err := capabilities.LoadProfile("council")
+	if err != nil {
+		logger.Printf("%s cannot start: %v", agentName, err)
+		return
+	}
 	logger.Printf("%s starting up", agentName)
 
 	for {
@@ -86,7 +94,7 @@ func SpawnJediCouncil(ctx context.Context, db *sql.DB, cfg JediCouncilConfig) {
 			continue
 		}
 
-		runCouncilTask(ctx, db, agentName, b, cfg.Librarian, logger)
+		runCouncilTask(ctx, db, agentName, b, profile, cfg.Librarian, logger)
 	}
 }
 
@@ -97,7 +105,7 @@ func SpawnJediCouncil(ctx context.Context, db *sql.DB, cfg JediCouncilConfig) {
 // D0-B: lib is the librarian.Client used to enqueue the post-merge
 // WriteMemory bounty; lib is non-nil for daemon-routed calls and may be
 // the librarian.NewMock() variant in tests.
-func runCouncilTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, lib librarian.Client, logger *log.Logger) {
+func runCouncilTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, profile *capabilities.Profile, lib librarian.Client, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 
 	// Hard-reject if the Chancellor has placed a hold on this convoy.
@@ -239,7 +247,12 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 		WrapUserContent("diff", diff),
 		diffNote, inboxContext)
 
-	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt, claude.CouncilTools, 5)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Task %d: council MCP config write failed (%v) — proceeding without --mcp-config", b.ID, mcpErr)
+	}
+	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if err != nil {
 		msg := fmt.Sprintf("Claude CLI Err: %v", err)
 		logger.Printf("Task %d: council infra failure — %s", b.ID, msg)

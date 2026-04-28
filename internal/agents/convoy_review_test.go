@@ -100,7 +100,7 @@ func TestRunConvoyReview_CleanPass_Completes(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (999, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 999`).Scan(&status)
@@ -141,7 +141,7 @@ func TestRunConvoyReview_NeedsWork_SpawnsFixTasks(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (998, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 998`).Scan(&status)
@@ -187,7 +187,7 @@ func TestRunConvoyReview_ActiveConvoyTasks_NoSpawn(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (994, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	// Should complete without spawning any fix tasks.
 	var status string
@@ -252,7 +252,7 @@ func TestRunConvoyReview_MaxFindingsCap(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (997, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var fixCount int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = 997 AND type = 'CodeEdit'`).Scan(&fixCount)
@@ -282,7 +282,7 @@ func TestRunConvoyReview_LoopCapEscalates(t *testing.T) {
 		VALUES (996, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
 	// No LLM stub needed — loop cap check fires before LLM call.
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 996`).Scan(&status)
@@ -361,7 +361,7 @@ func TestRunConvoyReview_ActiveAskBranchConflict_NoSpawn(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (993, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 993`).Scan(&status)

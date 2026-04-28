@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
@@ -50,6 +51,13 @@ type writeMemoryPayload struct {
 
 func SpawnLibrarian(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Librarian's capability profile once at spawn-time.
+	profile, err := capabilities.LoadProfile("librarian")
+	if err != nil {
+		logger.Printf("Librarian %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Librarian %s coming online", name)
 
 	for {
@@ -72,11 +80,11 @@ func SpawnLibrarian(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runLibrarianTask(db, name, bounty, logger)
+		runLibrarianTask(db, name, bounty, profile, logger)
 	}
 }
 
-func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
+func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	logger.Printf("Librarian claimed WriteMemory #%d", bounty.ID)
 
 	// Parse the structured payload from jedi_council.
@@ -116,7 +124,9 @@ func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, logger *log
 		userPrompt += "\n\n" + priorContext
 	}
 
-	rawOut, err := claude.AskClaudeCLI(librarianSystemPrompt, userPrompt, "", 1)
+	mcpConfig, _ := profile.MCPConfigArg()
+	rawOut, err := claude.AskClaudeCLI(librarianSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	var summary, tags string
 	if err != nil {
 		logger.Printf("WriteMemory #%d: Claude failed (%v) — using fallback summary", bounty.ID, err)

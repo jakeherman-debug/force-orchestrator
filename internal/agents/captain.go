@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -267,6 +268,14 @@ func isKnownRepo(db *sql.DB, repoName string) bool {
 func SpawnCaptain(ctx context.Context, db *sql.DB, name string) {
 	agentName := name
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Captain's capability profile once at spawn-time so a
+	// profile error surfaces immediately and not in the middle of a task.
+	profile, err := capabilities.LoadProfile("captain")
+	if err != nil {
+		logger.Printf("Captain %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Captain %s standing by", name)
 
 	for {
@@ -289,7 +298,7 @@ func SpawnCaptain(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runCaptainTask(ctx, db, agentName, b, logger)
+		runCaptainTask(ctx, db, agentName, b, profile, logger)
 	}
 }
 
@@ -297,7 +306,7 @@ func SpawnCaptain(ctx context.Context, db *sql.DB, name string) {
 // it to council (approve), back to Pending (reject), or escalates to a human.
 // Fix #8e: ctx threads from SpawnCaptain's claim ctx so reviewDiff's git
 // subprocess cancels on daemon shutdown.
-func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, logger *log.Logger) {
+func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed task %d for captain review [convoy %d]", sessionID, b.ID, b.ConvoyID)
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -398,7 +407,12 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 		WrapUserContent("diff", diff),
 		inboxContext)
 
-	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt, claude.CouncilTools, 5)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Task %d: captain MCP config write failed (%v) — proceeding without --mcp-config", b.ID, mcpErr)
+	}
+	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if err != nil {
 		msg := fmt.Sprintf("Claude CLI Err: %v", err)
 		logger.Printf("Task %d: captain infra failure — %s", b.ID, msg)

@@ -61,7 +61,7 @@ func TestFix8B_RunFindPRTemplate_FailBountyErrorSurfaces(t *testing.T) {
 	}
 
 	buf, lg := newLoggerBuf()
-	runFindPRTemplate(context.Background(), db, bounty, lg)
+	runFindPRTemplate(context.Background(), db, bounty, mustLoadCapProfile(t, "pilot"), lg)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty after invalid payload failed") {

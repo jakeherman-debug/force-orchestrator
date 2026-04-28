@@ -170,72 +170,18 @@ func AstromechTimeoutForAttempt(infraFailures int) time.Duration {
 	return time.Duration(timeout)
 }
 
-// Read-only Atlassian tools — look up Jira tickets and Confluence pages.
-// Write tools (createJiraIssue, editJiraIssue, addCommentToJiraIssue, transitionJiraIssue,
-// createConfluencePage, updateConfluencePage, etc.) are intentionally excluded.
-const atlassianReadTools = "" +
-	"mcp__plugin_dev-tools_atlassian__getJiraIssue," +
-	"mcp__plugin_dev-tools_atlassian__searchJiraIssuesUsingJql," +
-	"mcp__plugin_dev-tools_atlassian__getConfluencePage," +
-	"mcp__plugin_dev-tools_atlassian__searchConfluenceUsingCql," +
-	"mcp__plugin_dev-tools_atlassian__searchAtlassian"
-
-// Read-only Glean tools — search and read documents.
-const gleanReadTools = "" +
-	"mcp__plugin_glean_glean__search," +
-	"mcp__plugin_glean_glean__read_document"
-
-// Read-only SonarQube tools — inspect code quality and security issues.
-// Write tools (change_security_hotspot_status, change_sonar_issue_status) are excluded.
-const sonarReadTools = "" +
-	"mcp__plugin_sonarqube_sonarqube__analyze_code_snippet," +
-	"mcp__plugin_sonarqube_sonarqube__search_sonar_issues_in_projects," +
-	"mcp__plugin_sonarqube_sonarqube__get_project_quality_gate_status," +
-	"mcp__plugin_sonarqube_sonarqube__get_component_measures," +
-	"mcp__plugin_sonarqube_sonarqube__search_security_hotspots," +
-	"mcp__plugin_sonarqube_sonarqube__get_file_coverage_details"
-
-// Read-only Datadog tools — observe logs, metrics, traces, and service topology.
-// All Datadog tools are inherently read-only (observability only).
-const datadogReadTools = "" +
-	"mcp__plugin_dev-tools_datadog-mcp__search_datadog_logs," +
-	"mcp__plugin_dev-tools_datadog-mcp__analyze_datadog_logs," +
-	"mcp__plugin_dev-tools_datadog-mcp__search_datadog_monitors," +
-	"mcp__plugin_dev-tools_datadog-mcp__get_datadog_metric," +
-	"mcp__plugin_dev-tools_datadog-mcp__search_datadog_spans," +
-	"mcp__plugin_dev-tools_datadog-mcp__get_datadog_trace," +
-	"mcp__plugin_dev-tools_datadog-mcp__search_datadog_services," +
-	"mcp__plugin_dev-tools_datadog-mcp__search_datadog_service_dependencies"
-
-// CommanderTools — tools granted to Commander for decomposing feature requests.
-// Needs ticket context and docs; does not write code so no file or Datadog tools.
-const CommanderTools = atlassianReadTools + "," + gleanReadTools
-
-// CouncilTools — tools granted to Jedi Council for reviewing diffs.
-// Needs ticket context, docs, and quality signals to make informed rulings.
-const CouncilTools = atlassianReadTools + "," + gleanReadTools + "," + sonarReadTools
-
-// AstromechExtraTools — additional tools granted to Astromechs on top of the
-// standard file tools (Edit,Write,Read,Bash,Glob,Grep). Provides ticket context,
-// docs, quality signals, and observability for debugging and implementation.
-const AstromechExtraTools = atlassianReadTools + "," + gleanReadTools + "," + sonarReadTools + "," + datadogReadTools
-
-// InvestigateTools — tools for Investigator and Auditor agents.
-// Read-only access to the codebase and all external observability/doc systems.
-// No Edit or Write tools — these agents must never modify files.
-const InvestigateTools = "Read,Grep,Glob,Bash," + atlassianReadTools + "," + gleanReadTools + "," + sonarReadTools + "," + datadogReadTools
-
-// AtlassianReadTools exposes the atlassian tools for use in cmd/force (add-jira command).
-const AtlassianReadTools = atlassianReadTools
-
 // CLIRunner executes the Claude CLI. ctx (Fix #8e) is the caller's
 // daemon-cancellable context — the runner wraps it with a per-call timeout
 // instead of fabricating a context.Background root. prompt is the full
-// content of the -p flag. tools is --allowedTools (empty = omit the flag).
-// dir is the working directory (empty = inherit current directory).
-// maxTurns is --max-turns. timeout is the per-call deadline. Always
-// returns raw combined output even on error (may be partial).
-type CLIRunner func(ctx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)
+// content of the -p flag. allowedTools is --allowedTools (empty = omit
+// the flag). disallowedTools (D1 T0-1) is --disallowedTools (empty =
+// omit) — the actual hard restriction since --allowedTools is an
+// auto-approve hint in --dangerously-skip-permissions mode. mcpConfig
+// is --mcp-config (empty = omit). dir is the working directory (empty
+// = inherit). maxTurns is --max-turns. timeout is the per-call
+// deadline. Always returns raw combined output even on error (may be
+// partial).
+type CLIRunner func(ctx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error)
 
 // cliRunner is the active runner used by all agents. Override in tests to inject a stub.
 var cliRunner CLIRunner = defaultCLIRunner
@@ -244,7 +190,7 @@ var cliRunner CLIRunner = defaultCLIRunner
 // RunCLIStreaming uses this to decide whether to stream or fall back to buffered output.
 var cliRunnerIsDefault = true
 
-func defaultCLIRunner(parentCtx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+func defaultCLIRunner(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 	// Fix #8e: derive the bounded ctx from the caller's parentCtx so daemon
 	// shutdown / e-stop cancels in-flight Claude CLI invocations. Pre-fix
 	// this fabricated context.Background, leaving every AskClaudeCLI call
@@ -252,10 +198,7 @@ func defaultCLIRunner(parentCtx context.Context, prompt, tools, dir string, maxT
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
-	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns), "--output-format", "json"}
-	if tools != "" {
-		args = append(args, "--allowedTools", tools)
-	}
+	args := buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig, maxTurns, "json")
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	if dir != "" {
 		cmd.Dir = dir
@@ -293,9 +236,11 @@ var DefaultCLIRunner CLIRunner = defaultCLIRunner
 // RunCLI invokes the active CLI runner directly (for use by agents that need
 // custom directories and timeouts, e.g. Astromech running in a worktree).
 // Fix #8e: ctx threads from the caller so daemon cancellation propagates to
-// the underlying claude subprocess.
-func RunCLI(ctx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
-	return cliRunner(ctx, prompt, tools, dir, maxTurns, timeout)
+// the underlying claude subprocess. D1 T0-1: allowedTools / disallowedTools
+// / mcpConfig come from the caller's capabilities.Profile, not hardcoded
+// constants.
+func RunCLI(ctx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	return cliRunner(ctx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 }
 
 // RunCLIStreaming is like RunCLI but also writes Claude's live output to w as
@@ -315,10 +260,10 @@ func RunCLI(ctx context.Context, prompt, tools, dir string, maxTurns int, timeou
 // holds a daemon ctx (every astromech path does). The
 // `context.Background()` here is a deliberate exception, isolated to a
 // single non-hot-path call site, and explicitly commented.
-func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
 	// context.Background intentional: legacy non-daemon entry-point with no
 	// caller-supplied ctx. Hot-path callers use RunCLIStreamingContext.
-	return RunCLIStreamingContext(context.Background(), prompt, tools, dir, maxTurns, timeout, w)
+	return RunCLIStreamingContext(context.Background(), prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout, w)
 }
 
 // RunCLIStreamingContext is like RunCLIStreaming but accepts an external
@@ -330,10 +275,10 @@ func RunCLIStreaming(prompt, tools, dir string, maxTurns int, timeout time.Durat
 // AUDIT-105 (Fix #1): this is the entry point that makes e-stop effective
 // against a long-running Claude session. The heartbeat goroutine wraps this
 // context, polls IsEstopped every 2 minutes, and cancels when flipped.
-func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
 	if !cliRunnerIsDefault {
 		// Stub installed — call it and write its output to w for consistency.
-		out, err := cliRunner(parentCtx, prompt, tools, dir, maxTurns, timeout)
+		out, err := cliRunner(parentCtx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 		if w != nil && out != "" {
 			w.Write([]byte(out)) //nolint:errcheck
 		}
@@ -343,10 +288,7 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
-	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--max-turns", fmt.Sprintf("%d", maxTurns), "--output-format", "stream-json", "--verbose"}
-	if tools != "" {
-		args = append(args, "--allowedTools", tools)
-	}
+	args := buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig, maxTurns, "stream-json")
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	// AUDIT-093 (Fix #8d): WaitDelay bounds how long Wait() blocks after
 	// ctx cancellation before os/exec gives up on stdout/stderr pipes and
@@ -451,18 +393,19 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, tools, dir string
 // context.Background to the runner. New code SHOULD use AskClaudeCLIContext
 // to thread the daemon ctx through; the test layer enforces this for new
 // adoption sites via Pattern P11.
-func AskClaudeCLI(systemPrompt, userPrompt, tools string, maxTurns int) (string, error) {
+func AskClaudeCLI(systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int) (string, error) {
 	// context.Background intentional: legacy convenience wrapper with no
 	// caller-supplied ctx. Use AskClaudeCLIContext for ctx-bearing callers.
-	return AskClaudeCLIContext(context.Background(), systemPrompt, userPrompt, tools, maxTurns)
+	return AskClaudeCLIContext(context.Background(), systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig, maxTurns)
 }
 
 // AskClaudeCLIContext is the ctx-aware variant of AskClaudeCLI. Fix #8e:
 // callers that hold a daemon-cancellable ctx should prefer this so e-stop
-// can interrupt LLM calls.
-func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, tools string, maxTurns int) (string, error) {
+// can interrupt LLM calls. D1 T0-1: tool args are sourced from the
+// caller's capabilities.Profile, not hardcoded constants.
+func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int) (string, error) {
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
-	out, err := cliRunner(ctx, fullPrompt, tools, "", maxTurns, claudeCLITimeout)
+	out, err := cliRunner(ctx, fullPrompt, allowedTools, disallowedTools, mcpConfig, "", maxTurns, claudeCLITimeout)
 	if err != nil {
 		return "", err
 	}
@@ -492,8 +435,14 @@ Respond with only the single line. No preamble, no explanation, no markdown.`
 // Returns (taskType, reason, err). taskType is one of: Feature, CodeEdit, Investigate, Audit.
 // reason is a one-sentence explanation. Returns an error if the response cannot be parsed
 // or the type is not one of the four valid values.
-func ClassifyTaskType(prompt string) (string, string, error) {
-	out, err := AskClaudeCLI(classifySystemPrompt, prompt, "", 1)
+//
+// D1 T0-1: tool args (allowedTools / disallowedTools / mcpConfig) come
+// from the caller's capabilities.Profile. The classifier is pure
+// reasoning so callers typically supply Inquisitor's profile (empty
+// tools); the args are still threaded through so Pattern P13 sees
+// profile-sourced strings, not literals.
+func ClassifyTaskType(prompt, allowedTools, disallowedTools, mcpConfig string) (string, string, error) {
+	out, err := AskClaudeCLI(classifySystemPrompt, prompt, allowedTools, disallowedTools, mcpConfig, 1)
 	if err != nil {
 		return "", "", fmt.Errorf("classification failed: %w", err)
 	}
@@ -568,4 +517,38 @@ func LoadRateLimitHits(db *sql.DB, agentName string) int {
 // ClearRateLimitHits removes a persisted rate-limit counter after a successful run.
 func ClearRateLimitHits(db *sql.DB, agentName string) {
 	db.Exec(`DELETE FROM SystemConfig WHERE key = ?`, "rl_hits_"+agentName)
+}
+
+// buildClaudeArgs assembles the argv passed to the `claude` binary for a
+// single CLI invocation. allowedTools / disallowedTools / mcpConfig are
+// each emitted only when non-empty so callers that grant nothing don't
+// litter the argv with empty flags.
+//
+// outputFormat is "json" (one-shot) or "stream-json" (streaming with
+// --verbose). The streaming path adds --verbose; the one-shot path
+// does not.
+//
+// D1 T0-1: --disallowedTools is the actual hard restriction (Fix #8e
+// empirical finding that --allowedTools is auto-approve hint, not
+// enforcement, in --dangerously-skip-permissions mode). The
+// capabilities loader supplies the complement of the profile against
+// the full REGISTRY universe.
+func buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int, outputFormat string) []string {
+	args := []string{"-p", prompt, "--dangerously-skip-permissions",
+		"--max-turns", fmt.Sprintf("%d", maxTurns),
+		"--output-format", outputFormat,
+	}
+	if outputFormat == "stream-json" {
+		args = append(args, "--verbose")
+	}
+	if allowedTools != "" {
+		args = append(args, "--allowedTools", allowedTools)
+	}
+	if disallowedTools != "" {
+		args = append(args, "--disallowedTools", disallowedTools)
+	}
+	if mcpConfig != "" {
+		args = append(args, "--mcp-config", mcpConfig, "--strict-mcp-config")
+	}
+	return args
 }

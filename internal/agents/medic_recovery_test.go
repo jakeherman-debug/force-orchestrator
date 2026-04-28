@@ -82,7 +82,7 @@ func TestAutoCompletedMedicTask_BranchHasNoDiff(t *testing.T) {
 	mb, _ := store.GetBounty(db, medicID)
 
 	logger := log.New(io.Discard, "", 0)
-	runMedicTask(context.Background(), db, "Medic-1", mb, logger)
+	runMedicTask(context.Background(), db, "Medic-1", mb, mustLoadCapProfile(t, "medic"), logger)
 
 	// Parent must be Completed.
 	parent, _ := store.GetBounty(db, taskID)

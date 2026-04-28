@@ -103,7 +103,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":"lgtm"}`, nil)
 
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), log.New(io.Discard, "", 0))
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, mustLoadCapProfile(t, "council"), librarian.NewInProcess(db), log.New(io.Discard, "", 0))
 
 	taskAfter, _ := store.GetBounty(db, taskID)
 	if taskAfter.Status != subPRCITaskStatus {
@@ -159,7 +159,7 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 	withStubCLIRunner(t, "## Summary\n\nAdds feature X.\n\n## Testing\n\nVerified via CI.\n", nil)
 
 	shipB, _ := store.GetBounty(db, shipTaskID)
-	runShipConvoy(context.Background(), db, "Diplomat", shipB, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", shipB, mustLoadCapProfile(t, "diplomat"), testLogger{})
 
 	conv = store.GetConvoy(db, convoyID)
 	if conv.Status != "DraftPROpen" {
@@ -244,7 +244,7 @@ func TestPRFlow_CIFailure_SelfHealsViaMedic(t *testing.T) {
 	// Medic runs, classifies as RealBug.
 	withStubCLIRunner(t, `{"classification":"RealBug","diagnosis":"assertion wrong","fix_guidance":"update expect(3) to expect(4)","operator_note":""}`, nil)
 	triageB, _ := store.GetBounty(db, triageID)
-	runMedicCITriage(context.Background(), db, "Medic-Bacta", triageB, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", triageB, mustLoadCapProfile(t, "medic-ci"), testLogger{})
 
 	// A CodeEdit fix task should have been spawned with the astromech branch.
 	var fixID int
@@ -319,7 +319,7 @@ func TestPRFlow_LegacyPath_StillWorksWhenPRFlowDisabled(t *testing.T) {
 
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	b, _ := store.GetBounty(db, tid)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), log.New(io.Discard, "", 0))
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, mustLoadCapProfile(t, "council"), librarian.NewInProcess(db), log.New(io.Discard, "", 0))
 
 	after, _ := store.GetBounty(db, tid)
 	if after.Status != "Completed" {

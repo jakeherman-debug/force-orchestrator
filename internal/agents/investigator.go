@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -45,6 +46,13 @@ If you truly cannot complete the investigation without human input, emit [ESCALA
 
 func SpawnInvestigator(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Investigator's capability profile once at spawn-time.
+	profile, err := capabilities.LoadProfile("investigator")
+	if err != nil {
+		logger.Printf("Investigator %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Investigator %s starting up", name)
 
 	for {
@@ -67,12 +75,12 @@ func SpawnInvestigator(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runInvestigatorTask(ctx, db, name, bounty, logger)
+		runInvestigatorTask(ctx, db, name, bounty, profile, logger)
 	}
 }
 
 // Fix #8e: ctx threads from SpawnInvestigator's claim ctx.
-func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
+func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed Investigate #%d: %s", sessionID, bounty.ID, util.TruncateStr(bounty.Payload, 80))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -105,7 +113,13 @@ func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *s
 
 	logger.Printf("Task %d: starting investigation (timeout: %v)", bounty.ID, investigatorTimeout)
 
-	rawOut, err := claude.RunCLI(ctx, fullPrompt, claude.InvestigateTools, runDir, 30, investigatorTimeout)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Task %d: investigator MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
+	}
+	rawOut, err := claude.RunCLI(ctx, fullPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
+		runDir, 30, investigatorTimeout)
 	outputStr := strings.TrimSpace(rawOut)
 	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 

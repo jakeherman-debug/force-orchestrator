@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
@@ -94,6 +95,18 @@ type medicShard struct {
 
 func SpawnMedic(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Medic + Medic-CI profiles once at spawn-time.
+	medicProfile, err := capabilities.LoadProfile("medic")
+	if err != nil {
+		logger.Printf("Medic %s cannot start: %v", name, err)
+		return
+	}
+	medicCIProfile, err := capabilities.LoadProfile("medic-ci")
+	if err != nil {
+		logger.Printf("Medic %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Medic %s coming online", name)
 
 	for {
@@ -111,11 +124,11 @@ func SpawnMedic(ctx context.Context, db *sql.DB, name string) {
 		}
 
 		if bounty, claimed := store.ClaimBounty(db, "MedicReview", name); claimed {
-			runMedicTask(ctx, db, name, bounty, logger)
+			runMedicTask(ctx, db, name, bounty, medicProfile, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "CIFailureTriage", name); claimed {
-			runMedicCITriage(ctx, db, name, bounty, logger)
+			runMedicCITriage(ctx, db, name, bounty, medicCIProfile, logger)
 			continue
 		}
 
@@ -125,7 +138,7 @@ func SpawnMedic(ctx context.Context, db *sql.DB, name string) {
 
 // Fix #8e: ctx threads from SpawnMedic's claim ctx so reviewDiff's git
 // subprocess cancels on daemon shutdown.
-func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger *log.Logger) {
+func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	logger.Printf("Medic claimed MedicReview #%d (parent task #%d)", bounty.ID, bounty.ParentID)
 
 	// Parse the failure context queued by permanentInfraFail / council / captain.
@@ -178,7 +191,12 @@ func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *sto
 
 	userPrompt := buildMedicPrompt(parent, mp, history, diff)
 
-	rawOut, claudeErr := claude.AskClaudeCLI(medicSystemPrompt, userPrompt, "", 1)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Medic #%d: MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
+	}
+	rawOut, claudeErr := claude.AskClaudeCLI(medicSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if claudeErr != nil {
 		// Claude CLI flakes are infra-class failures, not task-analysis
 		// failures. Route through handleInfraFailure (same backoff + retry

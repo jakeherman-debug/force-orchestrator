@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/gh"
 	"force-orchestrator/internal/store"
@@ -90,7 +91,7 @@ type prReviewTriagePayload struct {
 // Fix #8e: ctx threads from SpawnDiplomat's claim ctx. Body is LLM + DB +
 // gh-client (which already accepts ctx separately) so ctx is not propagated
 // further today; the parameter aligns the signature with peer claim handlers.
-func runPRReviewTriage(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+func runPRReviewTriage(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	_ = ctx
 	var payload prReviewTriagePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
@@ -134,7 +135,7 @@ func runPRReviewTriage(ctx context.Context, db *sql.DB, agentName string, bounty
 		thread := store.LoadThreadHistory(db, payload.ConvoyID, c.ReviewThreadID)
 		convoyTasks := summarizeConvoyTasks(db, payload.ConvoyID)
 
-		decision, classifyErr := classifyPRReviewComment(c, thread, convoyTasks, depthCap, logger)
+		decision, classifyErr := classifyPRReviewComment(c, thread, convoyTasks, depthCap, profile, logger)
 		if classifyErr != nil {
 			// Fix #7 (AUDIT-032) — bound transient classifier retries.
 			// Previously the row stayed unclassified forever and every
@@ -194,11 +195,16 @@ func classifyPRReviewComment(
 	thread []store.PRReviewComment,
 	convoyTasks string,
 	depthCap int,
+	profile *capabilities.Profile,
 	logger interface{ Printf(string, ...any) },
 ) (prReviewDecision, error) {
 	userPrompt := buildPRReviewUserPrompt(c, thread, convoyTasks, depthCap)
-	// No tools needed — the classifier is purely textual.
-	raw, err := claude.AskClaudeCLI(prReviewSystemPrompt, userPrompt, "", 3)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("PRReviewTriage: MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
+	}
+	raw, err := claude.AskClaudeCLI(prReviewSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 	if err != nil {
 		return prReviewDecision{}, err
 	}

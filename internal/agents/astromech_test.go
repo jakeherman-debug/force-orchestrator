@@ -222,7 +222,7 @@ func TestRunAstromechTask_UnknownRepo(t *testing.T) {
 
 	withStubCLIRunner(t, "", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, mustLoadCapProfile(t, "astromech"), mustLoadCapProfile(t, "librarian"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -246,7 +246,7 @@ func TestRunAstromechTask_DoneSignal(t *testing.T) {
 
 	withStubCLIRunner(t, "[DONE]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, mustLoadCapProfile(t, "astromech"), mustLoadCapProfile(t, "librarian"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "AwaitingCouncilReview" {
@@ -270,7 +270,7 @@ func TestRunAstromechTask_ShardNeeded(t *testing.T) {
 
 	withStubCLIRunner(t, "[SHARD_NEEDED]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, mustLoadCapProfile(t, "astromech"), mustLoadCapProfile(t, "librarian"), logger)
 
 	// Original task should be Completed; a Decompose task should be queued
 	b, _ = store.GetBounty(db, id)
@@ -302,7 +302,7 @@ func TestRunAstromechTask_RateLimit(t *testing.T) {
 	stub := withStubCLIRunner(t, "rate limit exceeded", fmt.Errorf("claude CLI failed: 429"))
 	rateLimitRetries.Delete("R2-D2")
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, mustLoadCapProfile(t, "astromech"), mustLoadCapProfile(t, "librarian"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -333,7 +333,7 @@ func TestRunAstromechTask_Escalated(t *testing.T) {
 
 	withStubCLIRunner(t, "[ESCALATED:HIGH:Cannot determine correct API version]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, mustLoadCapProfile(t, "astromech"), mustLoadCapProfile(t, "librarian"), logger)
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, id).Scan(&count)
@@ -359,7 +359,7 @@ func TestRunAstromechTask_CLIError(t *testing.T) {
 	withStubCLIRunner(t, "some output", fmt.Errorf("claude CLI failed: exit 1"))
 	rateLimitRetries.Delete("R2-D2")
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, mustLoadCapProfile(t, "astromech"), mustLoadCapProfile(t, "librarian"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -384,7 +384,7 @@ func TestRunAstromechTask_Timeout(t *testing.T) {
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI timed out after 15m0s"))
 	rateLimitRetries.Delete("R2-D2")
 	logger := log.New(io.Discard, "", 0)
-	runAstromechTask(context.Background(), db, "R2-D2", b, logger)
+	runAstromechTask(context.Background(), db, "R2-D2", b, mustLoadCapProfile(t, "astromech"), mustLoadCapProfile(t, "librarian"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {

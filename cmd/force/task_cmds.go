@@ -10,6 +10,7 @@ import (
 
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -283,9 +284,15 @@ func cmdAddJira(db *sql.DB, args []string) {
 Return a comprehensive feature description as plain text including: ticket title, description, acceptance criteria, and any relevant context from linked tickets.
 Do not use markdown formatting. Write it as a clear feature request that a software architect can decompose into coding tasks.`
 
+	cliJiraProfile, profErr := capabilities.LoadProfile("cli-jira")
+	if profErr != nil {
+		fmt.Printf("force add-jira: cannot load cli-jira capability profile: %v\n", profErr)
+		os.Exit(1)
+	}
+	mcpConfig, _ := cliJiraProfile.MCPConfigArg()
 	description, err := claude.AskClaudeCLI(jiraSystemPrompt,
 		fmt.Sprintf("Fetch Jira ticket %s and return its full context as a feature description.", ticketID),
-		claude.AtlassianReadTools, 5)
+		cliJiraProfile.AllowedToolsArg(), cliJiraProfile.DisallowedToolsArg(), mcpConfig, 5)
 	if err != nil {
 		fmt.Printf("Failed to fetch Jira ticket: %v\n", err)
 		os.Exit(1)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
@@ -188,8 +189,11 @@ func FindPRTemplatePath(repoPath string) (string, error) {
 // inconclusive — for repos without any template at all, the LLM call is also
 // skipped because the directory heuristic finds nothing worth asking about.
 //
-// The runCLI parameter lets tests inject a deterministic stub; production code
-// passes claude.AskClaudeCLI.
+// The runCLI parameter lets tests inject a deterministic stub; production
+// code passes a closure that calls claude.AskClaudeCLI with the Pilot
+// capability profile's tool args (D1 T0-1). The third string parameter is
+// vestigial — kept so existing test stubs continue to compile — and is
+// ignored by the production wrapper.
 func FindPRTemplatePathLLM(repoPath string, runCLI func(systemPrompt, userPrompt, tools string, maxTurns int) (string, error)) (string, error) {
 	path, err := FindPRTemplatePath(repoPath)
 	if err != nil {
@@ -301,6 +305,15 @@ func QueueFindPRTemplate(db *sql.DB, repoName, localPath string) (int, error) {
 // CleanupAskBranch, RevalidateRepoConfig).
 func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Pilot's capability profile once at spawn-time. Most
+	// Pilot tasks run no LLM at all; FindPRTemplate is the one LLM-using
+	// path and consumes the profile via the runCLI lambda.
+	profile, err := capabilities.LoadProfile("pilot")
+	if err != nil {
+		logger.Printf("Pilot %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Pilot %s coming online", name)
 
 	for {
@@ -318,7 +331,7 @@ func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 		}
 
 		if bounty, claimed := store.ClaimBounty(db, "FindPRTemplate", name); claimed {
-			runFindPRTemplate(ctx, db, bounty, logger)
+			runFindPRTemplate(ctx, db, bounty, profile, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "CreateAskBranch", name); claimed {
@@ -352,7 +365,7 @@ func SpawnPilot(ctx context.Context, db *sql.DB, name string) {
 
 // runFindPRTemplate handles a single FindPRTemplate claim.
 // Fix #8e: ctx threads from SpawnPilot's claim ctx.
-func runFindPRTemplate(ctx context.Context, db *sql.DB, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+func runFindPRTemplate(ctx context.Context, db *sql.DB, bounty *store.Bounty, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	_ = ctx // FindPRTemplate is filesystem-only; no subprocess to thread ctx into
 	var payload findPRTemplatePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
@@ -368,7 +381,19 @@ func runFindPRTemplate(ctx context.Context, db *sql.DB, bounty *store.Bounty, lo
 		return
 	}
 
-	path, err := FindPRTemplatePathLLM(payload.LocalPath, claude.AskClaudeCLI)
+	// Wrap claude.AskClaudeCLI with the Pilot profile's tool args so
+	// FindPRTemplatePathLLM gets profile-restricted tool access. The
+	// vestigial `tools` parameter from the runCLI signature is ignored;
+	// the profile is the source of truth.
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("FindPRTemplate #%d: pilot MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
+	}
+	runCLI := func(systemPrompt, userPrompt, _ string, maxTurns int) (string, error) {
+		return claude.AskClaudeCLI(systemPrompt, userPrompt,
+			profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, maxTurns)
+	}
+	path, err := FindPRTemplatePathLLM(payload.LocalPath, runCLI)
 	if err != nil {
 		// Directory-level failure (not-a-dir etc.) — escalate via normal retry path.
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("discovery failed: %v", err)); fbErr != nil {

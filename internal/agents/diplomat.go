@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
@@ -90,6 +91,26 @@ func QueueShipConvoy(db *sql.DB, convoyID int) (int, error) {
 // SpawnDiplomat runs the Diplomat loop.
 func SpawnDiplomat(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
+
+	// D1 T0-1: load the three profiles Diplomat handlers use (ShipConvoy
+	// uses diplomat; PRReviewTriage / ConvoyReview use their own
+	// profiles). Loading all three upfront fails fast on profile errors
+	// instead of mid-task.
+	diplomatProfile, err := capabilities.LoadProfile("diplomat")
+	if err != nil {
+		logger.Printf("Diplomat %s cannot start: %v", name, err)
+		return
+	}
+	prReviewProfile, err := capabilities.LoadProfile("pr-review-triage")
+	if err != nil {
+		logger.Printf("Diplomat %s cannot start: %v", name, err)
+		return
+	}
+	convoyReviewProfile, err := capabilities.LoadProfile("convoy-review")
+	if err != nil {
+		logger.Printf("Diplomat %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Diplomat %s coming online", name)
 	for {
 		if ctx.Err() != nil {
@@ -105,15 +126,15 @@ func SpawnDiplomat(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "ShipConvoy", name); claimed {
-			runShipConvoy(ctx, db, name, bounty, logger)
+			runShipConvoy(ctx, db, name, bounty, diplomatProfile, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "PRReviewTriage", name); claimed {
-			runPRReviewTriage(ctx, db, name, bounty, logger)
+			runPRReviewTriage(ctx, db, name, bounty, prReviewProfile, logger)
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "ConvoyReview", name); claimed {
-			runConvoyReview(ctx, db, name, bounty, logger)
+			runConvoyReview(ctx, db, name, bounty, convoyReviewProfile, logger)
 			continue
 		}
 		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
@@ -122,7 +143,7 @@ func SpawnDiplomat(ctx context.Context, db *sql.DB, name string) {
 
 // Fix #8e: ctx threads from SpawnDiplomat's claim ctx so the rebase/push +
 // PR-body LLM calls cancel on daemon shutdown.
-func runShipConvoy(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+func runShipConvoy(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	var payload shipConvoyPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); fbErr != nil {
@@ -166,7 +187,7 @@ func runShipConvoy(ctx context.Context, db *sql.DB, agentName string, bounty *st
 			created = append(created, fmt.Sprintf("%s(existing:%s)", ab.Repo, ab.DraftPRURL))
 			continue
 		}
-		if err := openDraftPRForAskBranch(ctx, db, agentName, convoy, ab, logger); err != nil {
+		if err := openDraftPRForAskBranch(ctx, db, agentName, convoy, ab, profile, logger); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", ab.Repo, err))
 			continue
 		}
@@ -239,7 +260,7 @@ func buildShipItMailBody(db *sql.DB, convoy *store.Convoy, branches []store.Conv
 // generates and posts a draft PR. Runs per (convoy, repo).
 // Fix #8e: ctx threads from runShipConvoy so the rebase/push and PR-body
 // generation cancel on daemon shutdown.
-func openDraftPRForAskBranch(ctx context.Context, db *sql.DB, agentName string, convoy *store.Convoy, ab store.ConvoyAskBranch, logger interface{ Printf(string, ...any) }) error {
+func openDraftPRForAskBranch(ctx context.Context, db *sql.DB, agentName string, convoy *store.Convoy, ab store.ConvoyAskBranch, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) error {
 	repo := store.GetRepo(db, ab.Repo)
 	if repo == nil || repo.LocalPath == "" {
 		return fmt.Errorf("repo %s not registered or missing local_path", ab.Repo)
@@ -267,7 +288,7 @@ func openDraftPRForAskBranch(ctx context.Context, db *sql.DB, agentName string, 
 	}
 
 	// Build the PR body.
-	body, bodyErr := generatePRBody(ctx, db, convoy, ab, repo, logger)
+	body, bodyErr := generatePRBody(ctx, db, convoy, ab, repo, profile, logger)
 	if bodyErr != nil {
 		return fmt.Errorf("generatePRBody: %w", bodyErr)
 	}
@@ -276,7 +297,7 @@ func openDraftPRForAskBranch(ctx context.Context, db *sql.DB, agentName string, 
 	if sanityErr := sanityCheckPRBody(body); sanityErr != nil {
 		// Retry once with critic feedback.
 		logger.Printf("ShipConvoy: first body failed sanity (%v) — retrying LLM", sanityErr)
-		body2, retryErr := generatePRBodyWithCritic(ctx, db, convoy, ab, repo, sanityErr.Error(), logger)
+		body2, retryErr := generatePRBodyWithCritic(ctx, db, convoy, ab, repo, sanityErr.Error(), profile, logger)
 		if retryErr != nil {
 			return fmt.Errorf("retry body generation failed: %w", retryErr)
 		}
@@ -313,7 +334,7 @@ func openDraftPRForAskBranch(ctx context.Context, db *sql.DB, agentName string, 
 // If the repo has no template, returns a structured fallback body.
 // Fix #8e: ctx is reserved for future use when AskClaudeCLI gains a Context
 // variant; today it is unused but the signature aligns with caller propagation.
-func generatePRBody(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, logger interface{ Printf(string, ...any) }) (string, error) {
+func generatePRBody(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) (string, error) {
 	_ = ctx
 	context := buildDiplomatConvoyContext(ctx, db, convoy, ab, repo)
 	var template string
@@ -332,7 +353,12 @@ func generatePRBody(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab st
 	userPrompt := fmt.Sprintf("PR TEMPLATE:\n%s\n\nCONVOY CONTEXT:\n%s",
 		util.TruncateStr(template, 8000),
 		util.TruncateStr(context, 8000))
-	raw, err := claude.AskClaudeCLI(diplomatSystemPrompt, userPrompt, "", 2)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("ShipConvoy: diplomat MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
+	}
+	raw, err := claude.AskClaudeCLI(diplomatSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 2)
 	if err != nil {
 		// AUDIT-095 (Fix #8d): classify the error. Transient / rate-limit
 		// errors should NOT silently fall back to the bare PR body — the
@@ -356,7 +382,7 @@ func generatePRBody(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab st
 }
 
 // Fix #8e: ctx threads from runShipConvoy.
-func generatePRBodyWithCritic(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, criticFeedback string, logger interface{ Printf(string, ...any) }) (string, error) {
+func generatePRBodyWithCritic(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab store.ConvoyAskBranch, repo *store.Repository, criticFeedback string, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) (string, error) {
 	_ = ctx
 	context := buildDiplomatConvoyContext(ctx, db, convoy, ab, repo)
 	var template string
@@ -374,7 +400,12 @@ func generatePRBodyWithCritic(ctx context.Context, db *sql.DB, convoy *store.Con
 		critic,
 		util.TruncateStr(template, 8000),
 		util.TruncateStr(context, 8000))
-	raw, err := claude.AskClaudeCLI(diplomatSystemPrompt, userPrompt, "", 2)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("ShipConvoy: diplomat-critic MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
+	}
+	raw, err := claude.AskClaudeCLI(diplomatSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 2)
 	if err != nil {
 		return "", err
 	}
@@ -427,7 +458,12 @@ func buildDiplomatConvoyContext(ctx context.Context, db *sql.DB, convoy *store.C
 	// re-ranker's own log lines aren't useful here (there's no operator
 	// logger in scope at context-build time), so discard them.
 	candidates := store.GetFleetMemories(db, ab.Repo, convoy.Name, 15)
-	memories := RerankFleetMemories(db, convoy.Name, candidates, 3, log.New(io.Discard, "", 0))
+	// Re-rank under the librarian profile (the rerank LLM is part of the
+	// librarian retrieval pipeline). Profile load failure here degrades to
+	// FTS order via RerankFleetMemories' nil-profile branch — graceful
+	// fallback rather than blocking the PR-body assembly.
+	librarianProfile, _ := capabilities.LoadProfile("librarian")
+	memories := RerankFleetMemories(db, convoy.Name, candidates, 3, librarianProfile, log.New(io.Discard, "", 0))
 	if len(memories) > 0 {
 		sb.WriteString("\nRelated memory entries:\n")
 		for _, m := range memories {

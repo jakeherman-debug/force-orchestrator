@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
@@ -74,11 +75,18 @@ type rerankResponse struct {
 // If re-ranking is disabled, the LLM errors, or candidates is shorter than
 // 2, the input is returned trimmed to keepLimit — re-ranking 0 or 1 items
 // isn't worth a Claude call.
+//
+// D1 T0-1: profile is the librarian capability profile (the rerank LLM
+// runs as part of librarian's retrieval pipeline). The function still
+// returns the trimmed FTS order on profile-load or LLM error, so a
+// missing profile degrades gracefully rather than blocking memory
+// retrieval.
 func RerankFleetMemories(
 	db *sql.DB,
 	taskPayload string,
 	candidates []store.FleetMemoryEntry,
 	keepLimit int,
+	profile *capabilities.Profile,
 	logger interface{ Printf(string, ...any) },
 ) []store.FleetMemoryEntry {
 	if len(candidates) == 0 {
@@ -93,12 +101,20 @@ func RerankFleetMemories(
 	if !memoryRerankEnabled(db) {
 		return trimCandidates(candidates, keepLimit)
 	}
+	if profile == nil {
+		// D1 T0-1: a missing profile means the caller couldn't load it —
+		// degrade to FTS order rather than running with an unrestricted
+		// tool catalog.
+		logger.Printf("memory-rerank: no capability profile supplied — falling back to FTS order")
+		return trimCandidates(candidates, keepLimit)
+	}
 
 	userPrompt := buildRerankPrompt(taskPayload, candidates)
 
-	// No tools needed — the re-ranker is purely textual. Low max-turns so we
-	// don't pay for extended reasoning.
-	raw, err := claude.AskClaudeCLI(rerankSystemPrompt, userPrompt, "", 2)
+	// Low max-turns so we don't pay for extended reasoning.
+	mcpConfig, _ := profile.MCPConfigArg()
+	raw, err := claude.AskClaudeCLI(rerankSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 2)
 	if err != nil {
 		logger.Printf("memory-rerank: Claude failed (%v) — falling back to FTS order", err)
 		return trimCandidates(candidates, keepLimit)

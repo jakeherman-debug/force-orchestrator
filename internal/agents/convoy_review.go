@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
@@ -224,7 +225,7 @@ func QueueConvoyReview(db *sql.DB, convoyID int) (int, error) {
 
 // Fix #8e: ctx threads from SpawnDiplomat's claim ctx so the diff lookups
 // cancel on daemon shutdown.
-func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	var payload convoyReviewPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if ferr := store.FailBounty(db, bounty.ID, fmt.Sprintf("invalid payload: %v", err)); ferr != nil {
@@ -328,7 +329,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	logger.Printf("ConvoyReview #%d: running pass %d/%d for convoy %d (%s)",
 		bounty.ID, completedPasses+1, maxPasses, payload.ConvoyID, convoy.Name)
 
-	result, err := runConvoyReviewLLM(userPrompt, logger)
+	result, err := runConvoyReviewLLM(userPrompt, profile, logger)
 	if err != nil {
 		// Fix #7 (AUDIT-007): parse failures are tracked via
 		// BountyBoard.parse_failure_count on THIS ConvoyReview row. We
@@ -361,7 +362,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		logger.Printf("ConvoyReview #%d: retrying with critic note (attempt %d/%d)",
 			bounty.ID, nFail+1, convoyReviewParseFailureCap)
 		retryPrompt := userPrompt + "\n\nIMPORTANT: Your previous response could not be parsed as JSON. Respond ONLY with valid JSON matching the schema above — no markdown, no preamble, no trailing text."
-		result, err = runConvoyReviewLLM(retryPrompt, logger)
+		result, err = runConvoyReviewLLM(retryPrompt, profile, logger)
 		if err != nil {
 			// Retry also failed — bump counter, and on cap, escalate (Fix #7).
 			nFail = incrementParseFailureCount(db, bounty.ID)
@@ -553,8 +554,13 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	}
 }
 
-func runConvoyReviewLLM(userPrompt string, logger interface{ Printf(string, ...any) }) (convoyReviewResult, error) {
-	raw, err := claude.AskClaudeCLI(convoyReviewSystemPrompt, userPrompt, "", 1)
+func runConvoyReviewLLM(userPrompt string, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) (convoyReviewResult, error) {
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("ConvoyReview LLM: MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
+	}
+	raw, err := claude.AskClaudeCLI(convoyReviewSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		return convoyReviewResult{}, fmt.Errorf("claude CLI: %w", err)
 	}

@@ -308,7 +308,7 @@ func TestRunFindPRTemplate_StoresResultAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, mustLoadCapProfile(t, "pilot"), testLogger{})
 
 	r := store.GetRepo(db, "api")
 	if r.PRTemplatePath == "" {
@@ -335,7 +335,7 @@ func TestRunFindPRTemplate_HandlesNoTemplate(t *testing.T) {
 	taskID, _ := QueueFindPRTemplate(db, "api", dir)
 	bounty, _ := store.GetBounty(db, taskID)
 
-	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, mustLoadCapProfile(t, "pilot"), testLogger{})
 
 	r := store.GetRepo(db, "api")
 	if r.PRTemplatePath != "" {
@@ -358,7 +358,7 @@ func TestRunFindPRTemplate_InvalidPayloadFails(t *testing.T) {
 	id, _ := res.LastInsertId()
 	bounty, _ := store.GetBounty(db, int(id))
 
-	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, mustLoadCapProfile(t, "pilot"), testLogger{})
 
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
@@ -379,7 +379,7 @@ func TestRunFindPRTemplate_DiscoveryFailureIsFatal(t *testing.T) {
 	bounty, _ := store.GetBounty(db, int(id))
 	store.AddRepo(db, "api", "/real/path", "")
 
-	runFindPRTemplate(context.Background(), db, bounty, testLogger{})
+	runFindPRTemplate(context.Background(), db, bounty, mustLoadCapProfile(t, "pilot"), testLogger{})
 
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
@@ -63,6 +64,13 @@ type chancellorRuling struct {
 // Single instance — deliberate serialization point for convoy creation.
 func SpawnChancellor(ctx context.Context, db *sql.DB) {
 	logger := NewLogger(chancellorName)
+
+	// D1 T0-1: load Chancellor's capability profile once at spawn-time.
+	profile, err := capabilities.LoadProfile("chancellor")
+	if err != nil {
+		logger.Printf("Chancellor cannot start: %v", err)
+		return
+	}
 	logger.Printf("Supreme Chancellor online — reviewing proposed convoys")
 
 	for {
@@ -85,11 +93,11 @@ func SpawnChancellor(ctx context.Context, db *sql.DB) {
 			continue
 		}
 
-		runChancellorReview(db, feature, tasks, logger)
+		runChancellorReview(db, feature, tasks, profile, logger)
 	}
 }
 
-func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, logger interface{ Printf(string, ...any) }) {
+func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	logger.Printf("Reviewing Feature #%d (%d proposed task(s)): %s",
 		feature.ID, len(tasks), util.TruncateStr(feature.Payload, 80))
 
@@ -106,7 +114,12 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 	userPrompt := WrapUserContent("chancellor_context",
 		buildChancellorPrompt(feature, tasks, activeConvoys, pendingProposals, pendingFeatures))
 
-	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, userPrompt, "", 1)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Feature #%d: chancellor MCP config write failed (%v) — proceeding without --mcp-config", feature.ID, mcpErr)
+	}
+	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on Claude CLI failure.
 		// Pre-fix: "auto-approve to avoid blocking the pipeline" meant a
@@ -209,7 +222,7 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 			return
 		}
 		logger.Printf("Feature #%d: MERGE with Feature #%d — %s", feature.ID, ruling.MergeWithFeatureID, ruling.Reason)
-		actionErr = mergeProposals(db, feature, tasks, ruling, logger)
+		actionErr = mergeProposals(db, feature, tasks, ruling, profile, logger)
 
 	default:
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on unknown action.
@@ -490,7 +503,7 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 // Fix #8b: returns error so runChancellorReview can log DB-write failures.
 // When the merge path falls back to independent approval, the fallback
 // errors are joined and returned together so neither is lost.
-func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
+func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) error {
 	featureBID := ruling.MergeWithFeatureID
 	reason := ruling.Reason
 	featureB, tasksB, ok := store.ClaimMergeTarget(db, featureBID, chancellorName)
@@ -502,7 +515,7 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 
 	logger.Printf("Merging Feature #%d + Feature #%d", featureA.ID, featureB.ID)
 
-	mergedTasks := synthesizeMergedPlan(db, featureA, tasksA, featureB, tasksB, logger)
+	mergedTasks := synthesizeMergedPlan(db, featureA, tasksA, featureB, tasksB, profile, logger)
 	if mergedTasks == nil {
 		// Synthesis failed — approve both independently. Join errors so a
 		// single-leg failure doesn't silently succeed under a two-leg return.
@@ -590,7 +603,7 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 }
 
 // synthesizeMergedPlan calls Claude to produce a unified task list from two plans.
-func synthesizeMergedPlan(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, featureB *store.Bounty, tasksB []store.TaskPlan, logger interface{ Printf(string, ...any) }) []store.TaskPlan {
+func synthesizeMergedPlan(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, featureB *store.Bounty, tasksB []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) []store.TaskPlan {
 	planAJSON, _ := json.MarshalIndent(tasksA, "", "  ")
 	planBJSON, _ := json.MarshalIndent(tasksB, "", "  ")
 
@@ -617,7 +630,12 @@ Respond with ONLY the raw JSON array — no explanation, no markdown, no code fe
 		featureA.ID, WrapUserContent("feature_a", util.TruncateStr(featureA.Payload, 200)), WrapUserContent("plan_a", string(planAJSON)),
 		featureB.ID, WrapUserContent("feature_b", util.TruncateStr(featureB.Payload, 200)), WrapUserContent("plan_b", string(planBJSON)))
 
-	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, mergePrompt, "", 1)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Merge synthesis MCP config write failed: %v — proceeding without --mcp-config", mcpErr)
+	}
+	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, mergePrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		logger.Printf("Merge synthesis Claude call failed: %v", err)
 		return nil

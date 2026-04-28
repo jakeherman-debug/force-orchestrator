@@ -129,7 +129,7 @@ func TestRunMedicCITriage_InvalidPayloadFails(t *testing.T) {
 		VALUES (0, 'api', 'CIFailureTriage', 'Pending', 'not-json', datetime('now'))`)
 	id, _ := res.LastInsertId()
 	b, _ := store.GetBounty(db, int(id))
-	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, mustLoadCapProfile(t, "medic-ci"), testLogger{})
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
 		t.Errorf("invalid payload must fail task, got %q", updated.Status)
@@ -146,7 +146,7 @@ func TestRunMedicCITriage_SubPRRowMissingFails(t *testing.T) {
 		Branch: "agent/x/task-1", TaskID: 1,
 	})
 	b, _ := store.GetBounty(db, taskID)
-	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, testLogger{})
+	runMedicCITriage(context.Background(), db, "Medic-Bacta", b, mustLoadCapProfile(t, "medic-ci"), testLogger{})
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Failed" {
 		t.Errorf("missing sub-PR row must fail task, got %q", updated.Status)
@@ -189,7 +189,7 @@ func TestRunShipConvoy_ConvoyNotFoundFails(t *testing.T) {
 	// Queue a ShipConvoy for a convoy that doesn't exist.
 	taskID, _ := QueueShipConvoy(db, 9999)
 	b, _ := store.GetBounty(db, taskID)
-	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, mustLoadCapProfile(t, "diplomat"), testLogger{})
 	updated, _ := store.GetBounty(db, taskID)
 	if updated.Status != "Failed" {
 		t.Errorf("missing convoy must fail task, got %q", updated.Status)
@@ -205,7 +205,7 @@ func TestRunShipConvoy_InvalidPayloadFails(t *testing.T) {
 		VALUES (0, '', 'ShipConvoy', 'Pending', 'not-json', datetime('now'))`)
 	id, _ := res.LastInsertId()
 	b, _ := store.GetBounty(db, int(id))
-	runShipConvoy(context.Background(), db, "Diplomat", b, testLogger{})
+	runShipConvoy(context.Background(), db, "Diplomat", b, mustLoadCapProfile(t, "diplomat"), testLogger{})
 	updated, _ := store.GetBounty(db, int(id))
 	if updated.Status != "Failed" {
 		t.Errorf("invalid payload must fail, got %q", updated.Status)

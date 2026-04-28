@@ -90,7 +90,7 @@ func TestJediCouncil_CIBreakerDefersReviewWithoutLLM(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, mustLoadCapProfile(t, "council"), librarian.NewInProcess(db), logger)
 
 	// Task should be back at AwaitingCouncilReview (deferred), not Failed or
 	// Completed (which would indicate the LLM ran).
@@ -119,7 +119,7 @@ func TestJediCouncil_CIBreakerIgnoredForPRFlowDisabledRepo(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, mustLoadCapProfile(t, "council"), librarian.NewInProcess(db), logger)
 
 	// Task should be Completed via legacy merge — the breaker gate doesn't
 	// apply when pr_flow_enabled=false.

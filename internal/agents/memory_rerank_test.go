@@ -28,7 +28,7 @@ func TestRerankFleetMemories_UsesLLMOrdering(t *testing.T) {
 	// Claude says: candidates 3 and 1 are relevant (in that order); 2 is not.
 	withStubCLIRunner(t, `{"relevant_ids":[3,1],"reasoning":"OAuth and auth middleware both touch the auth package for the current task"}`, nil)
 
-	got := RerankFleetMemories(db, "improve auth flow", candidates, 5, testLogger{})
+	got := RerankFleetMemories(db, "improve auth flow", candidates, 5, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 2 {
 		t.Fatalf("expected 2 re-ranked results, got %d", len(got))
 	}
@@ -54,7 +54,7 @@ func TestRerankFleetMemories_EmptySelectionIsValid(t *testing.T) {
 	candidates := memoryCandidatesFixture()
 	withStubCLIRunner(t, `{"relevant_ids":[],"reasoning":"none of the candidates are relevant to the current task"}`, nil)
 
-	got := RerankFleetMemories(db, "upgrade Go version in CI", candidates, 5, testLogger{})
+	got := RerankFleetMemories(db, "upgrade Go version in CI", candidates, 5, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 0 {
 		t.Errorf("expected zero results when LLM rejects all candidates, got %d", len(got))
 	}
@@ -69,7 +69,7 @@ func TestRerankFleetMemories_KeepLimitCapsResults(t *testing.T) {
 	candidates := memoryCandidatesFixture()
 	withStubCLIRunner(t, `{"relevant_ids":[1,2,3],"reasoning":"all are tangentially relevant"}`, nil)
 
-	got := RerankFleetMemories(db, "anything", candidates, 2, testLogger{})
+	got := RerankFleetMemories(db, "anything", candidates, 2, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 2 {
 		t.Errorf("keepLimit=2 should cap output, got %d", len(got))
 	}
@@ -87,7 +87,7 @@ func TestRerankFleetMemories_IgnoresOutOfRangeIDs(t *testing.T) {
 	candidates := memoryCandidatesFixture()
 	withStubCLIRunner(t, `{"relevant_ids":[99,1,0,-5,2],"reasoning":"with some garbage IDs"}`, nil)
 
-	got := RerankFleetMemories(db, "test", candidates, 5, testLogger{})
+	got := RerankFleetMemories(db, "test", candidates, 5, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 2 {
 		t.Errorf("expected 2 valid selections (1 and 2), got %d", len(got))
 	}
@@ -105,7 +105,7 @@ func TestRerankFleetMemories_DedupesRepeatedIDs(t *testing.T) {
 	candidates := memoryCandidatesFixture()
 	withStubCLIRunner(t, `{"relevant_ids":[1,1,1,2],"reasoning":""}`, nil)
 
-	got := RerankFleetMemories(db, "test", candidates, 5, testLogger{})
+	got := RerankFleetMemories(db, "test", candidates, 5, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 2 {
 		t.Errorf("expected 2 unique results, got %d", len(got))
 	}
@@ -120,7 +120,7 @@ func TestRerankFleetMemories_FallsBackOnClaudeError(t *testing.T) {
 	candidates := memoryCandidatesFixture()
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI failed: network"))
 
-	got := RerankFleetMemories(db, "test", candidates, 2, testLogger{})
+	got := RerankFleetMemories(db, "test", candidates, 2, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 2 {
 		t.Errorf("fallback: expected candidates[:2], got %d", len(got))
 	}
@@ -138,7 +138,7 @@ func TestRerankFleetMemories_FallsBackOnMalformedJSON(t *testing.T) {
 	candidates := memoryCandidatesFixture()
 	withStubCLIRunner(t, "not json at all { broken", nil)
 
-	got := RerankFleetMemories(db, "test", candidates, 3, testLogger{})
+	got := RerankFleetMemories(db, "test", candidates, 3, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 3 {
 		t.Errorf("malformed JSON fallback: expected 3, got %d", len(got))
 	}
@@ -157,7 +157,7 @@ func TestRerankFleetMemories_SkipsWhenDisabled(t *testing.T) {
 	withStubCLIRunner(t, `{"relevant_ids":[3,2]}`, nil)
 
 	candidates := memoryCandidatesFixture()
-	got := RerankFleetMemories(db, "test", candidates, 2, testLogger{})
+	got := RerankFleetMemories(db, "test", candidates, 2, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if got[0].ID != 1 || got[1].ID != 2 {
 		t.Errorf("disabled re-ranker must preserve FTS order, got [%d,%d]", got[0].ID, got[1].ID)
 	}
@@ -168,7 +168,7 @@ func TestRerankFleetMemories_EmptyCandidates(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	got := RerankFleetMemories(db, "test", nil, 5, testLogger{})
+	got := RerankFleetMemories(db, "test", nil, 5, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if got != nil {
 		t.Errorf("empty candidates should return nil, got %+v", got)
 	}
@@ -185,7 +185,7 @@ func TestRerankFleetMemories_SingleCandidateSkipsLLM(t *testing.T) {
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI should not be called"))
 
 	candidates := memoryCandidatesFixture()[:1]
-	got := RerankFleetMemories(db, "test", candidates, 5, testLogger{})
+	got := RerankFleetMemories(db, "test", candidates, 5, mustLoadCapProfile(t, "librarian"), testLogger{})
 	if len(got) != 1 || got[0].ID != 1 {
 		t.Errorf("single-candidate path should pass through: got %+v", got)
 	}

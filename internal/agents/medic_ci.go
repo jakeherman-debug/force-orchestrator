@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
@@ -130,7 +131,7 @@ func QueueCIFailureTriageTx(tx *sql.Tx, payload ciTriagePayload) (int, error) {
 // Fix #8e: ctx threads from SpawnMedic's claim ctx. Body uses LLM + DB +
 // gh-client (ctx already passed there); no new subprocess sites need ctx
 // today, so the parameter aligns the signature with peer handlers.
-func runMedicCITriage(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+func runMedicCITriage(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	_ = ctx
 	var payload ciTriagePayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
@@ -184,10 +185,15 @@ func runMedicCITriage(ctx context.Context, db *sql.DB, agentName string, bounty 
 	userPrompt := fmt.Sprintf("Sub-PR URL: %s\nPR number: %d\nRepo: %s\nBranch: %s\nBuild URL: %s\nFailure count: %d\n",
 		pr.PRURL, pr.PRNumber, payload.Repo, payload.Branch, payload.BuildURL, pr.FailureCount)
 
-	// Allow the Bash and WebFetch tools so Claude can invoke the jenkins-ci
-	// plugin (which typically provides shell commands for fetching console logs)
+	// Tools come from the medic-ci capability profile — Bash + WebFetch +
+	// WebSearch so Claude can invoke the jenkins-ci plugin's shell commands
 	// and follow Jenkins links when necessary.
-	rawOut, claudeErr := claude.AskClaudeCLI(medicCISystemPrompt, userPrompt, "Bash,WebFetch,WebSearch", 5)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("CIFailureTriage #%d: MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
+	}
+	rawOut, claudeErr := claude.AskClaudeCLI(medicCISystemPrompt, userPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if claudeErr != nil {
 		logger.Printf("CIFailureTriage #%d: Claude failed (%v) — escalating parent task", bounty.ID, claudeErr)
 		escalateCITriage(db, agentName, pr, payload.TaskID, "Medic could not analyze the Jenkins log: "+claudeErr.Error(), logger)

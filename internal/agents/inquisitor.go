@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
@@ -45,6 +46,20 @@ var bootLastCalled = map[int]time.Time{}
 // dog-start so /healthz can surface a wedged dog to the operator.
 func SpawnInquisitor(ctx context.Context, db *sql.DB, cfg InquisitorConfig) {
 	logger := NewLogger("Inquisitor")
+
+	// D1 T0-1: load the two profiles Inquisitor handlers use. Boot triage
+	// runs under the boot profile; the task classifier runs under the
+	// inquisitor profile (both currently empty — pure-reasoning calls).
+	bootProfile, err := capabilities.LoadProfile("boot")
+	if err != nil {
+		logger.Printf("Inquisitor cannot start: %v", err)
+		return
+	}
+	inquisitorProfile, err := capabilities.LoadProfile("inquisitor")
+	if err != nil {
+		logger.Printf("Inquisitor cannot start: %v", err)
+		return
+	}
 	logger.Printf("Inquisitor deployed — hunting every %v, stale threshold %v", inquisitorInterval, staleLockTimeout)
 	validateWorktrees(db, logger)
 
@@ -59,7 +74,7 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB, cfg InquisitorConfig) {
 		// When the tick runs long, the context fires and downstream calls
 		// that honour it (gh, future claude calls) abort rather than hang.
 		tickCtx, tickCancel := context.WithTimeout(ctx, 15*time.Minute)
-		runInquisitorTick(tickCtx, db, cfg.Librarian, logger)
+		runInquisitorTick(tickCtx, db, cfg.Librarian, bootProfile, inquisitorProfile, logger)
 		tickCancel()
 		continue
 	}
@@ -69,7 +84,7 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB, cfg InquisitorConfig) {
 // SpawnInquisitor so each tick runs under its own timeout-bounded
 // context (AUDIT-047) without the enclosing for-loop needing deferred
 // cancellation book-keeping.
-func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, logger *log.Logger) {
+func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, bootProfile, inquisitorProfile *capabilities.Profile, logger *log.Logger) {
 	// Fix #8e: ctx now threads into cleanOrphanedBranches (igit.RunCmd) and
 	// RunDogs (per-dog ctx); the prior _=ctx discard reflected the pre-Fix-#8e
 	// state where the only consumers were gh/claude calls that took ctx
@@ -124,12 +139,12 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, lo
 			}
 		}
 
-		classifyPendingTasks(db, logger)
+		classifyPendingTasks(db, inquisitorProfile, logger)
 		CheckStaleEscalations(db)
 		CheckConvoyCompletions(db, logger)
 		store.RecoverStaleConvoys(db)
 		cleanOrphanedBranches(ctx, db, logger)
-		detectStalledTasks(db, logger)
+		detectStalledTasks(db, bootProfile, logger)
 		backfillMissingAskBranches(db, logger)
 
 		// Prune bootLastCalled entries for tasks that are no longer in a locked state
@@ -164,7 +179,7 @@ const staleClassifyingTimeout = 30 * time.Minute
 // classifyPendingTasks finds tasks with status='Classifying', calls ClassifyTaskType
 // for each, updates the task type to the result, and transitions the task to Pending.
 // It also fails tasks that have been stuck in Classifying beyond staleClassifyingTimeout.
-func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) {
+func classifyPendingTasks(db *sql.DB, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	// Fail tasks that have been stuck in Classifying too long — repeated Claude errors.
 	staleRes, staleErr := db.Exec(`
 		UPDATE BountyBoard
@@ -205,7 +220,9 @@ func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }
 	rows.Close()
 
 	for _, t := range tasks {
-		taskType, reason, err := claude.ClassifyTaskType(t.payload)
+		mcpConfig, _ := profile.MCPConfigArg()
+		taskType, reason, err := claude.ClassifyTaskType(t.payload,
+			profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig)
 		if err != nil {
 			logger.Printf("Task #%d: classification error — %v", t.id, err)
 			db.Exec(`UPDATE BountyBoard SET error_log = ? WHERE id = ?`,
@@ -222,7 +239,7 @@ func classifyPendingTasks(db *sql.DB, logger interface{ Printf(string, ...any) }
 
 // detectStalledTasks finds tasks that are Locked/UnderReview for too long with
 // no new commits in their worktree.
-func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) {
+func detectStalledTasks(db *sql.DB, bootProfile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	rows, err := db.Query(`
 		SELECT id, owner, target_repo, branch_name, locked_at,
 		       (julianday('now') - julianday(locked_at)) * 1440 AS locked_minutes
@@ -293,7 +310,7 @@ func detectStalledTasks(db *sql.DB, logger interface{ Printf(string, ...any) }) 
 			bootLastCalled[t.id] = time.Now()
 			var errorLog string
 			db.QueryRow(`SELECT IFNULL(error_log,'') FROM BountyBoard WHERE id = ?`, t.id).Scan(&errorLog)
-			verdict := BootTriage(db, t.id, t.owner, t.repo, t.lockedMinutes, errorLog)
+			verdict := BootTriage(db, t.id, t.owner, t.repo, t.lockedMinutes, errorLog, bootProfile)
 			logger.Printf("Task %d: Boot triage → %s (%s)", t.id, verdict.Decision, verdict.Reason)
 
 			switch verdict.Decision {

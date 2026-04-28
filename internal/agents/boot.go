@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/util"
 )
@@ -39,13 +40,22 @@ Decision guide:
 
 // BootTriage asks the Boot Agent to decide what to do with a stalled task.
 // Returns WARN on any Claude call failure so Inquisitor falls back to normal behavior.
-func BootTriage(db *sql.DB, taskID int, owner, repo string, lockedMinutes float64, errorLog string) BootVerdict {
+//
+// D1 T0-1: profile is the boot capability profile loaded by the caller
+// (Inquisitor in production). A nil profile is rejected via WARN so a
+// missing profile cannot silently grant the default Claude tool catalog.
+func BootTriage(db *sql.DB, taskID int, owner, repo string, lockedMinutes float64, errorLog string, profile *capabilities.Profile) BootVerdict {
+	if profile == nil {
+		return BootVerdict{Decision: BootWarn, Reason: "boot triage skipped: no capability profile supplied"}
+	}
 	summary := fmt.Sprintf(
 		"Task ID: %d\nAgent: %s\nRepo: %s\nLocked for: %.0f minutes\nError log: %s",
 		taskID, owner, repo, lockedMinutes, util.TruncateStr(errorLog, 500),
 	)
 
-	resp, err := claude.AskClaudeCLI(bootSystemPrompt, summary, "", 3)
+	mcpConfig, _ := profile.MCPConfigArg()
+	resp, err := claude.AskClaudeCLI(bootSystemPrompt, summary,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 	if err != nil {
 		return BootVerdict{Decision: BootWarn, Reason: fmt.Sprintf("boot triage unavailable: %v", err)}
 	}

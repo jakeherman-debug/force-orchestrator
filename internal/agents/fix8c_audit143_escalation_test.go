@@ -50,7 +50,7 @@ func TestFix8c_AUDIT143_ClassifierCapCreatesEscalation(t *testing.T) {
 	taskID := queuePRReviewTriageTask(t, db, convoyID)
 	bounty, _ := store.GetBounty(db, taskID)
 	bounty.Status = "Locked"
-	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, testLogger{})
+	runPRReviewTriage(context.Background(), db, "Diplomat", bounty, mustLoadCapProfile(t, "pr-review-triage"), testLogger{})
 
 	// ── Assertions ───────────────────────────────────────────────────
 	// 1. classify_attempts reached at least the cap.

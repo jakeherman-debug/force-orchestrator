@@ -25,7 +25,7 @@ func TestClassifyPendingTasks_StaleClassifyingTimesOut(t *testing.T) {
 	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now', '-31 minutes') WHERE id = 1`)
 
 	logger := log.New(io.Discard, "", 0)
-	classifyPendingTasks(db, logger)
+	classifyPendingTasks(db, mustLoadCapProfile(t, "inquisitor"), logger)
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 1`).Scan(&status)
@@ -45,7 +45,7 @@ func TestClassifyPendingTasks_RecentClassifyingNotTimedOut(t *testing.T) {
 	store.AddBountyClassifying(db, "", "recent classifying task", 0, "key-2")
 
 	logger := log.New(io.Discard, "", 0)
-	classifyPendingTasks(db, logger)
+	classifyPendingTasks(db, mustLoadCapProfile(t, "inquisitor"), logger)
 
 	// Task should still be Classifying — stale-timeout did not fire (task is fresh),
 	// and the classification error only sets error_log, not status.
@@ -67,7 +67,7 @@ func TestDetectStalledTasks_NoStalledTasks(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 
 	// Should not panic or deadlock
-	detectStalledTasks(db, logger)
+	detectStalledTasks(db, mustLoadCapProfile(t, "boot"), logger)
 }
 
 func TestDetectStalledTasks_StalledTaskGitError(t *testing.T) {
@@ -87,7 +87,7 @@ func TestDetectStalledTasks_StalledTaskGitError(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	// Should not panic; git error in worktree → "progress assumed" → task not escalated
-	detectStalledTasks(db, logger)
+	detectStalledTasks(db, mustLoadCapProfile(t, "boot"), logger)
 
 	// Task should still be Locked (git error means "assumed making progress")
 	b, _ := store.GetBounty(db, id)
@@ -106,7 +106,7 @@ func TestDetectStalledTasks_MissingRepo(t *testing.T) {
 		branch_name = 'agent/R2-D2/task-1', locked_at = datetime('now', '-25 minutes') WHERE id = ?`, id)
 
 	logger := log.New(io.Discard, "", 0)
-	detectStalledTasks(db, logger) // should not panic
+	detectStalledTasks(db, mustLoadCapProfile(t, "boot"), logger) // should not panic
 }
 
 func TestDetectStalledTasks_StallWarnPath(t *testing.T) {
@@ -148,7 +148,7 @@ func TestDetectStalledTasks_StallWarnPath(t *testing.T) {
 		branch_name = 'agent/R2-D2/task-1', locked_at = datetime('now', '-25 minutes') WHERE id = ?`, taskID)
 
 	logger := log.New(io.Discard, "", 0)
-	detectStalledTasks(db, logger)
+	detectStalledTasks(db, mustLoadCapProfile(t, "boot"), logger)
 
 	// Task should remain Locked (stall < stallEscTimeout; no Boot triage)
 	b, _ := store.GetBounty(db, taskID)
@@ -199,7 +199,7 @@ func TestDetectStalledTasks_BootThrottle(t *testing.T) {
 	defer delete(bootLastCalled, taskID)
 
 	logger := log.New(io.Discard, "", 0)
-	detectStalledTasks(db, logger) // should throttle Boot triage
+	detectStalledTasks(db, mustLoadCapProfile(t, "boot"), logger) // should throttle Boot triage
 
 	// Task should still be Locked (throttled — no Boot action taken)
 	b, _ := store.GetBounty(db, taskID)

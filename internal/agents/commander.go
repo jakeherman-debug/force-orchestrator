@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -219,6 +220,13 @@ func insertConvoyAndTasks(db *sql.DB, tasks []store.TaskPlan, bounty *store.Boun
 func SpawnCommander(ctx context.Context, db *sql.DB, name string) {
 	agentName := name
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Commander's capability profile once at spawn-time.
+	profile, err := capabilities.LoadProfile("commander")
+	if err != nil {
+		logger.Printf("Commander %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Commander starting up")
 
 	for {
@@ -246,7 +254,7 @@ func SpawnCommander(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runCommanderTask(db, agentName, bounty, logger)
+		runCommanderTask(db, agentName, bounty, profile, logger)
 	}
 }
 
@@ -324,7 +332,7 @@ func autoInsertReshardTasks(db *sql.DB, bounty, parent *store.Bounty, tasks []st
 }
 
 // runCommanderTask decomposes a single Feature or Decompose bounty into CodeEdit subtasks.
-func runCommanderTask(db *sql.DB, agentName string, bounty *store.Bounty, logger *log.Logger) {
+func runCommanderTask(db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed task %d (%s): %s", sessionID, bounty.ID, bounty.Type, util.TruncateStr(bounty.Payload, 80))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -407,7 +415,13 @@ EXAMPLE:
 		taskWriter = taskLogFile
 	}
 
-	rawOut, err := claude.RunCLIStreaming(fullPrompt, claude.CommanderTools, "", 10, cmdTimeout, taskWriter)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Task %d: commander MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
+	}
+	rawOut, err := claude.RunCLIStreaming(fullPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
+		"", 10, cmdTimeout, taskWriter)
 
 	if taskLogFile != nil {
 		taskLogFile.Close()

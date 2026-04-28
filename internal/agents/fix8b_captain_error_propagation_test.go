@@ -56,7 +56,7 @@ func TestFix8b_Captain_UnknownRepo_FailBountyFailure_LogsRecoveryHint(t *testing
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 	withStubCLIRunner(t, "", nil)
-	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, mustLoadCapProfile(t, "captain"), logger)
 
 	logged := buf.String()
 	if !strings.Contains(logged, "stale-lock detector will recover") {
@@ -100,7 +100,7 @@ func TestFix8b_Captain_EscalateFallback_LogsRecoveryHint(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	runCaptainTask(context.Background(), db, "Captain-Rex", b, logger)
+	runCaptainTask(context.Background(), db, "Captain-Rex", b, mustLoadCapProfile(t, "captain"), logger)
 
 	logged := buf.String()
 	// Post-Fix #8b: CreateEscalation failure must not be silent.

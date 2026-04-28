@@ -233,7 +233,7 @@ func TestIntegration_ClassifyPendingTasks_UpdatesType(t *testing.T) {
 	id, _ := store.AddBountyClassifying(db, "", "fix the login bug in auth.go", 0, "key-1")
 
 	logger := log.New(io.Discard, "", 0)
-	classifyPendingTasks(db, logger)
+	classifyPendingTasks(db, mustLoadCapProfile(t, "inquisitor"), logger)
 
 	var status, taskType string
 	db.QueryRow(`SELECT status, type FROM BountyBoard WHERE id = ?`, id).Scan(&status, &taskType)
@@ -255,7 +255,7 @@ func TestIntegration_ClassifyPendingTasks_StaleTimeout(t *testing.T) {
 	db.Exec(`UPDATE BountyBoard SET created_at = datetime('now', '-31 minutes') WHERE id = ?`, id)
 
 	logger := log.New(io.Discard, "", 0)
-	classifyPendingTasks(db, logger)
+	classifyPendingTasks(db, mustLoadCapProfile(t, "inquisitor"), logger)
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = ?`, id).Scan(&status)

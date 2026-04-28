@@ -15,6 +15,7 @@ import (
 	"time"
 
 	igit "force-orchestrator/internal/git"
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -253,6 +254,7 @@ func buildAstromechContext(
 	db *sql.DB,
 	bounty *store.Bounty,
 	agentName string,
+	librarianProfile *capabilities.Profile,
 	logger interface{ Printf(string, ...any) },
 ) (goalCtx, fleetMemCtx, checkpointCtx, seanceCtx, inboxCtx string, injectedMemoryIDs []int) {
 
@@ -289,7 +291,7 @@ func buildAstromechContext(
 	// us recall; the re-ranker gives us precision. If the re-ranker is
 	// disabled or errors, we fall through to the FTS order trimmed to 5.
 	candidates := store.GetFleetMemories(db, bounty.TargetRepo, bounty.Payload, 20)
-	if memories := RerankFleetMemories(db, bounty.Payload, candidates, 5, logger); len(memories) > 0 {
+	if memories := RerankFleetMemories(db, bounty.Payload, candidates, 5, librarianProfile, logger); len(memories) > 0 {
 		var successes, failures []string
 		for _, m := range memories {
 			injectedMemoryIDs = append(injectedMemoryIDs, m.ID)
@@ -325,6 +327,20 @@ func buildAstromechContext(
 
 func SpawnAstromech(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Astromech's profile (the worker tool grant) and
+	// Librarian's profile (used by the rerank LLM call inside
+	// buildAstromechContext) once at spawn-time.
+	profile, err := capabilities.LoadProfile("astromech")
+	if err != nil {
+		logger.Printf("Astromech %s cannot start: %v", name, err)
+		return
+	}
+	librarianProfile, err := capabilities.LoadProfile("librarian")
+	if err != nil {
+		logger.Printf("Astromech %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Astromech %s starting up", name)
 
 	for {
@@ -391,7 +407,7 @@ func SpawnAstromech(ctx context.Context, db *sql.DB, name string) {
 			time.Sleep(delay)
 		}
 
-		runAstromechTask(ctx, db, name, bounty, logger)
+		runAstromechTask(ctx, db, name, bounty, profile, librarianProfile, logger)
 	}
 }
 
@@ -399,7 +415,7 @@ func SpawnAstromech(ctx context.Context, db *sql.DB, name string) {
 // runs Claude CLI, and processes the output (signals, commits, status updates).
 // Fix #8e: ctx threads from SpawnAstromech (the daemon ctx) so subprocess
 // invocations cancel on shutdown / e-stop.
-func runAstromechTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
+func runAstromechTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, profile, librarianProfile *capabilities.Profile, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed task %d: [%s] %s", sessionID, bounty.ID, bounty.TargetRepo, bounty.Payload)
 	telemetry.EmitEvent(telemetry.EventTaskClaimed(sessionID, name, bounty.ID, bounty.TargetRepo, bounty.Payload))
@@ -467,7 +483,7 @@ func runAstromechTask(ctx context.Context, db *sql.DB, name string, bounty *stor
 	// ── Build prompt ─────────────────────────────────────────────────────
 
 	goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext, injectedMemoryIDs :=
-		buildAstromechContext(db, bounty, name, logger)
+		buildAstromechContext(db, bounty, name, librarianProfile, logger)
 
 	directive := LoadDirective("astromech", bounty.TargetRepo)
 	directiveSection := ""
@@ -585,7 +601,13 @@ Do not re-do work that is already correctly committed.`
 		defer os.Remove(taskLogPath)
 	}
 
-	rawOut, err := claude.RunCLIStreamingContext(claudeCtx, fullPrompt, "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools, worktreeDir, maxTurnsInt, sessionTimeout, taskWriter)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Task %d: astromech MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
+	}
+	rawOut, err := claude.RunCLIStreamingContext(claudeCtx, fullPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
+		worktreeDir, maxTurnsInt, sessionTimeout, taskWriter)
 
 	// Heartbeat goroutine is stopped via deferred stopHeartbeat above; no
 	// explicit close here any more.
@@ -993,6 +1015,18 @@ func processAstromechOutput(
 // Fix #8e: ctx threads from cmd/force/main.go (the CLI command ctx) so a
 // stuck `git worktree add` or claude session can be cancelled by SIGINT.
 func RunTaskForeground(ctx context.Context, db *sql.DB, taskID int) {
+	// D1 T0-1: load Astromech + Librarian profiles for the foreground run.
+	profile, profErr := capabilities.LoadProfile("astromech")
+	if profErr != nil {
+		fmt.Printf("force run: cannot load astromech capability profile: %v\n", profErr)
+		os.Exit(1)
+	}
+	librarianProfile, libErr := capabilities.LoadProfile("librarian")
+	if libErr != nil {
+		fmt.Printf("force run: cannot load librarian capability profile: %v\n", libErr)
+		os.Exit(1)
+	}
+
 	b, err := store.GetBounty(db, taskID)
 	if err != nil {
 		fmt.Printf("Task %d not found.\n", taskID)
@@ -1050,7 +1084,7 @@ func RunTaskForeground(ctx context.Context, db *sql.DB, taskID int) {
 	fgLogger := log.New(os.Stderr, "[force-run] ", log.LstdFlags)
 
 	// Build the same rich context as the daemon loop; checkpoint is intentionally skipped (_).
-	goalCtx, fleetMemCtx, _, seanceCtx, inboxCtx, injectedMemoryIDs := buildAstromechContext(db, b, fgAgent, fgLogger)
+	goalCtx, fleetMemCtx, _, seanceCtx, inboxCtx, injectedMemoryIDs := buildAstromechContext(db, b, fgAgent, librarianProfile, fgLogger)
 
 	directive := LoadDirective("astromech", b.TargetRepo)
 	directiveSection := ""
@@ -1086,11 +1120,22 @@ func RunTaskForeground(ctx context.Context, db *sql.DB, taskID int) {
 	sessionCtx, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
 
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		fgLogger.Printf("force run: astromech MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
+	}
+	cmdArgs := []string{"-p", fullPrompt, "--dangerously-skip-permissions", "--max-turns", maxTurns}
+	if at := profile.AllowedToolsArg(); at != "" {
+		cmdArgs = append(cmdArgs, "--allowedTools", at)
+	}
+	if dt := profile.DisallowedToolsArg(); dt != "" {
+		cmdArgs = append(cmdArgs, "--disallowedTools", dt)
+	}
+	if mcpConfig != "" {
+		cmdArgs = append(cmdArgs, "--mcp-config", mcpConfig, "--strict-mcp-config")
+	}
 	var outputBuf strings.Builder
-	cmd := exec.CommandContext(sessionCtx, "claude", "-p", fullPrompt,
-		"--dangerously-skip-permissions",
-		"--allowedTools", "Edit,Write,Read,Bash,Glob,Grep,"+claude.AstromechExtraTools,
-		"--max-turns", maxTurns)
+	cmd := exec.CommandContext(sessionCtx, "claude", cmdArgs...)
 	cmd.Dir = worktreeDir
 	cmd.Stdout = io.MultiWriter(os.Stdout, &outputBuf)
 	cmd.Stderr = os.Stderr

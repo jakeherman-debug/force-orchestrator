@@ -27,7 +27,7 @@ func TestRunAuditorTask_CLIError(t *testing.T) {
 
 	withStubCLIRunner(t, "some output", fmt.Errorf("claude CLI failed: exit 1"))
 	logger := log.New(io.Discard, "", 0)
-	runAuditorTask(context.Background(), db, "auditor-1", b, logger)
+	runAuditorTask(context.Background(), db, "auditor-1", b, mustLoadCapProfile(t, "auditor"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -47,7 +47,7 @@ func TestRunAuditorTask_JSONParseError(t *testing.T) {
 
 	withStubCLIRunner(t, "this is not valid json at all", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAuditorTask(context.Background(), db, "auditor-1", b, logger)
+	runAuditorTask(context.Background(), db, "auditor-1", b, mustLoadCapProfile(t, "auditor"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -65,7 +65,7 @@ func TestRunAuditorTask_EmptyFindings(t *testing.T) {
 	out, _ := json.Marshal(auditReport{Summary: "no issues", Findings: []AuditFinding{}})
 	withStubCLIRunner(t, string(out), nil)
 	logger := log.New(io.Discard, "", 0)
-	runAuditorTask(context.Background(), db, "auditor-1", b, logger)
+	runAuditorTask(context.Background(), db, "auditor-1", b, mustLoadCapProfile(t, "auditor"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Completed" {
@@ -103,7 +103,7 @@ func TestRunAuditorTask_FindingsWithDependencies(t *testing.T) {
 	out, _ := json.Marshal(report)
 	withStubCLIRunner(t, string(out), nil)
 	logger := log.New(io.Discard, "", 0)
-	runAuditorTask(context.Background(), db, "auditor-1", b, logger)
+	runAuditorTask(context.Background(), db, "auditor-1", b, mustLoadCapProfile(t, "auditor"), logger)
 
 	// Audit task should be Completed.
 	b, _ = store.GetBounty(db, id)
@@ -160,7 +160,7 @@ func TestRunAuditorTask_Escalated(t *testing.T) {
 
 	withStubCLIRunner(t, "[ESCALATED:HIGH:Cannot determine correct API version]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runAuditorTask(context.Background(), db, "auditor-1", b, logger)
+	runAuditorTask(context.Background(), db, "auditor-1", b, mustLoadCapProfile(t, "auditor"), logger)
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, id).Scan(&count)

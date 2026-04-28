@@ -119,7 +119,7 @@ func initTestRepo(t *testing.T) string {
 // withStubCLIRunner replaces claude's cliRunner for the duration of the test.
 func withStubCLIRunner(t *testing.T, output string, err error) {
 	t.Helper()
-	claude.SetCLIRunner(func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	claude.SetCLIRunner(func(_ context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		return output, err
 	})
 	t.Cleanup(func() { claude.SetCLIRunner(claude.DefaultCLIRunner) })

@@ -165,7 +165,7 @@ func TestJediCouncilApproval_UsesSubPRPath(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":"lgtm"}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, mustLoadCapProfile(t, "council"), librarian.NewInProcess(db), logger)
 
 	// Task status should be AwaitingSubPRCI.
 	after, _ := store.GetBounty(db, taskID)
@@ -242,7 +242,7 @@ func TestJediCouncilApproval_FallsBackToLegacyMergeWhenPRFlowDisabled(t *testing
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, mustLoadCapProfile(t, "council"), librarian.NewInProcess(db), logger)
 
 	// Task should be Completed (legacy merge path).
 	after, _ := store.GetBounty(db, taskID)
@@ -285,7 +285,7 @@ func TestJediCouncilApproval_PRCreateFailureEscalates(t *testing.T) {
 	withStubCLIRunner(t, `{"approved":true,"feedback":""}`, nil)
 	logger := log.New(io.Discard, "", 0)
 	b, _ := store.GetBounty(db, taskID)
-	runCouncilTask(context.Background(), db, "Council-Yoda", b, librarian.NewInProcess(db), logger)
+	runCouncilTask(context.Background(), db, "Council-Yoda", b, mustLoadCapProfile(t, "council"), librarian.NewInProcess(db), logger)
 
 	after, _ := store.GetBounty(db, taskID)
 	if after.Status != "Escalated" {

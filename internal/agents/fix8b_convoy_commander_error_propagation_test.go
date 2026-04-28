@@ -54,7 +54,7 @@ func TestFix8B_ConvoyReview_FailBountyErrorSurfacesToLogger(t *testing.T) {
 
 	// payload.ConvoyID == 0 → hits the "payload missing convoy_id" FailBounty
 	// branch (line ~230 in convoy_review.go post-fix).
-	runConvoyReview(context.Background(), db, "Diplomat-test", bounty, logger)
+	runConvoyReview(context.Background(), db, "Diplomat-test", bounty, mustLoadCapProfile(t, "convoy-review"), logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty(missing convoy_id) failed") {
@@ -93,7 +93,7 @@ func TestFix8B_ConvoyReview_UpdateBountyStatusErrorSurfacesToLogger(t *testing.T
 
 	buf, logger := bufferLogger()
 
-	runConvoyReview(context.Background(), db, "Diplomat-test", bounty, logger)
+	runConvoyReview(context.Background(), db, "Diplomat-test", bounty, mustLoadCapProfile(t, "convoy-review"), logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "UpdateBountyStatus(Completed, no ask-branches) failed") {
@@ -129,7 +129,7 @@ func TestFix8B_Commander_FailBountyErrorSurfacesToLogger(t *testing.T) {
 
 	buf, logger := bufferLogger()
 
-	runCommanderTask(db, "Commander-test", b, logger)
+	runCommanderTask(db, "Commander-test", b, mustLoadCapProfile(t, "commander"), logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty(repo-context load) failed") {

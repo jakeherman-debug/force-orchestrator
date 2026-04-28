@@ -42,7 +42,7 @@ func TestChancellor_SEQUENCE_EmptySubfield_FailsClosed(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	runChancellorReview(db, feature, tasks, logger)
+	runChancellorReview(db, feature, tasks, mustLoadCapProfile(t, "chancellor"), logger)
 
 	// Feature should be Failed.
 	after, _ := store.GetBounty(db, featureID)
@@ -89,7 +89,7 @@ func TestChancellor_MERGE_EmptySubfield_FailsClosed(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	runChancellorReview(db, feature, tasks, logger)
+	runChancellorReview(db, feature, tasks, mustLoadCapProfile(t, "chancellor"), logger)
 
 	after, _ := store.GetBounty(db, featureID)
 	if after.Status != "Failed" {

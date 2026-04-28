@@ -12,8 +12,23 @@ import (
 	"testing"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 )
+
+// mustLoadCapProfile loads a capability profile or fails the test.
+// Used by per-agent tests that need to invoke a runner function which
+// (post D1 T0-1) takes a *capabilities.Profile parameter sourced from
+// SpawnX in production. Tests use the real YAML profile so they
+// exercise the same restriction surface production does.
+func mustLoadCapProfile(t *testing.T, name string) *capabilities.Profile {
+	t.Helper()
+	p, err := capabilities.LoadProfile(name)
+	if err != nil {
+		t.Fatalf("LoadProfile(%q): %v", name, err)
+	}
+	return p
+}
 
 // stubCLIRunner is the state shared by a single test's Claude stub. It
 // records every call the stub receives so a test can make bounded-cost
@@ -24,17 +39,19 @@ import (
 // tests that care about prompt structure read Prompts(). A canned output
 // pair drives the (stdout, err) the stub returns on every call.
 type stubCLIRunner struct {
-	callCount atomic.Int64
-	mu        sync.Mutex
-	prompts   []string
-	tools     []string
-	dirs      []string
-	output    string
-	err       error
+	callCount       atomic.Int64
+	mu              sync.Mutex
+	prompts         []string
+	tools           []string
+	disallowedTools []string
+	mcpConfigs      []string
+	dirs            []string
+	output          string
+	err             error
 	// fn, if set, overrides the static (output, err). Tests use this to
 	// return different canned responses per call (e.g. adversarial parse
 	// failures alternating with valid JSON).
-	fn func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)
+	fn func(_ context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error)
 }
 
 // CallCount returns the current number of Claude invocations observed.
@@ -123,16 +140,18 @@ func initTestRepo(t *testing.T) string {
 func withStubCLIRunner(t *testing.T, output string, err error) *stubCLIRunner {
 	t.Helper()
 	s := &stubCLIRunner{output: output, err: err}
-	claude.SetCLIRunner(func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	claude.SetCLIRunner(func(_ context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		s.callCount.Add(1)
 		s.mu.Lock()
 		s.prompts = append(s.prompts, prompt)
-		s.tools = append(s.tools, tools)
+		s.tools = append(s.tools, allowedTools)
+		s.disallowedTools = append(s.disallowedTools, disallowedTools)
+		s.mcpConfigs = append(s.mcpConfigs, mcpConfig)
 		s.dirs = append(s.dirs, dir)
 		fn := s.fn
 		s.mu.Unlock()
 		if fn != nil {
-			return fn(context.Background(), prompt, tools, dir, maxTurns, timeout)
+			return fn(context.Background(), prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 		}
 		return s.output, s.err
 	})
@@ -144,17 +163,19 @@ func withStubCLIRunner(t *testing.T, output string, err error) *stubCLIRunner {
 // a per-call dispatcher. Used for adversarial LLM stubs that return
 // different responses on different calls (e.g. pass 1 = malformed JSON,
 // pass 2 = needs_work, pass 3 = clean).
-func withStubCLIRunnerFn(t *testing.T, fn func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error)) *stubCLIRunner {
+func withStubCLIRunnerFn(t *testing.T, fn func(_ context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error)) *stubCLIRunner {
 	t.Helper()
 	s := &stubCLIRunner{fn: fn}
-	claude.SetCLIRunner(func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	claude.SetCLIRunner(func(_ context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		s.callCount.Add(1)
 		s.mu.Lock()
 		s.prompts = append(s.prompts, prompt)
-		s.tools = append(s.tools, tools)
+		s.tools = append(s.tools, allowedTools)
+		s.disallowedTools = append(s.disallowedTools, disallowedTools)
+		s.mcpConfigs = append(s.mcpConfigs, mcpConfig)
 		s.dirs = append(s.dirs, dir)
 		s.mu.Unlock()
-		return fn(context.Background(), prompt, tools, dir, maxTurns, timeout)
+		return fn(context.Background(), prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 	})
 	t.Cleanup(claude.ResetCLIRunner)
 	return s

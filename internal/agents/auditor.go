@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -83,6 +84,13 @@ If you cannot complete the audit without human input, emit [ESCALATED:LOW|MEDIUM
 
 func SpawnAuditor(ctx context.Context, db *sql.DB, name string) {
 	logger := NewLogger(name)
+
+	// D1 T0-1: load Auditor's capability profile once at spawn-time.
+	profile, err := capabilities.LoadProfile("auditor")
+	if err != nil {
+		logger.Printf("Auditor %s cannot start: %v", name, err)
+		return
+	}
 	logger.Printf("Auditor %s starting up", name)
 
 	for {
@@ -105,12 +113,12 @@ func SpawnAuditor(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runAuditorTask(ctx, db, name, bounty, logger)
+		runAuditorTask(ctx, db, name, bounty, profile, logger)
 	}
 }
 
 // Fix #8e: ctx threads from SpawnAuditor's claim ctx.
-func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, logger *log.Logger) {
+func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed Audit #%d: %s", sessionID, bounty.ID, util.TruncateStr(bounty.Payload, 80))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -141,7 +149,13 @@ func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.
 
 	logger.Printf("Task %d: starting audit (timeout: %v)", bounty.ID, auditorTimeout)
 
-	rawOut, err := claude.RunCLI(ctx, fullPrompt, claude.InvestigateTools, runDir, 40, auditorTimeout)
+	mcpConfig, mcpErr := profile.MCPConfigArg()
+	if mcpErr != nil {
+		logger.Printf("Task %d: auditor MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
+	}
+	rawOut, err := claude.RunCLI(ctx, fullPrompt,
+		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
+		runDir, 40, auditorTimeout)
 	outputStr := strings.TrimSpace(rawOut)
 	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
 

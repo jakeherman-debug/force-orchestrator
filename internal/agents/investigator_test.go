@@ -27,7 +27,7 @@ func TestRunInvestigatorTask_CLIError(t *testing.T) {
 
 	withStubCLIRunner(t, "some output", fmt.Errorf("claude CLI failed: exit 1"))
 	logger := log.New(io.Discard, "", 0)
-	runInvestigatorTask(context.Background(), db, "investigator-1", b, logger)
+	runInvestigatorTask(context.Background(), db, "investigator-1", b, mustLoadCapProfile(t, "investigator"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -44,7 +44,7 @@ func TestRunInvestigatorTask_DoneSignal(t *testing.T) {
 
 	withStubCLIRunner(t, "Investigation findings here.\n\n[DONE]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runInvestigatorTask(context.Background(), db, "investigator-1", b, logger)
+	runInvestigatorTask(context.Background(), db, "investigator-1", b, mustLoadCapProfile(t, "investigator"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Completed" {
@@ -70,7 +70,7 @@ func TestRunInvestigatorTask_Escalated(t *testing.T) {
 
 	withStubCLIRunner(t, "[ESCALATED:MEDIUM:Need access to production logs]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runInvestigatorTask(context.Background(), db, "investigator-1", b, logger)
+	runInvestigatorTask(context.Background(), db, "investigator-1", b, mustLoadCapProfile(t, "investigator"), logger)
 
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, id).Scan(&count)

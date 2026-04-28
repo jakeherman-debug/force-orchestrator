@@ -70,7 +70,7 @@ func TestRunConvoyReview_MaxFindingsDefaultIsTwo(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (1001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var fixCount int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = 1001 AND type = 'CodeEdit'`).Scan(&fixCount)
@@ -112,7 +112,7 @@ func TestRunConvoyReview_OperatorOverrideStillHonoured(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (1002, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var fixCount int
 	db.QueryRow(`SELECT COUNT(*) FROM BountyBoard WHERE parent_id = 1002 AND type = 'CodeEdit'`).Scan(&fixCount)
@@ -142,7 +142,7 @@ func TestRunConvoyReview_ParseFailure_EscalatesAfterCap(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (1003, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	// Must have called Claude exactly 2 times: first try + one critic-note retry.
 	if got := stub.CallCount(); got != 2 {
@@ -198,7 +198,7 @@ func TestRunConvoyReview_FingerprintDedup_SpawnIsSuppressed(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (2001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty1, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty1, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	// Pass 1 should have spawned 2 fix tasks (both findings, under the default cap of 2).
 	var pass1Fix int
@@ -225,7 +225,7 @@ func TestRunConvoyReview_FingerprintDedup_SpawnIsSuppressed(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (2002, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty2, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty2, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	// Pass 2 must NOT have spawned any fix tasks.
 	var pass2Fix int
@@ -278,7 +278,7 @@ func TestRunConvoyReview_DifferentFindings_NoDedup(t *testing.T) {
 	bounty1 := &store.Bounty{ID: 2101, Type: "ConvoyReview", Payload: string(payload)}
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (2101, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty1, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty1, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 	db.Exec(`UPDATE BountyBoard SET status = 'Completed' WHERE parent_id = 2101`)
 
 	// ── Pass 2 — DIFFERENT finding (different description + line + file) ──
@@ -291,7 +291,7 @@ func TestRunConvoyReview_DifferentFindings_NoDedup(t *testing.T) {
 	bounty2 := &store.Bounty{ID: 2102, Type: "ConvoyReview", Payload: string(payload)}
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (2102, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty2, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty2, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	// Pass 2 must have spawned the new finding's fix task (no false-positive dedup).
 	var pass2Fix int
@@ -338,7 +338,7 @@ func TestConvoyReview_TotalClaudeCallsBounded(t *testing.T) {
 		{`{"status":"clean","findings":[]}`, nil},
 	}
 	idx := 0
-	stub := withStubCLIRunnerFn(t, func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	stub := withStubCLIRunnerFn(t, func(_ context.Context, prompt, tools, _disallowedTools, _mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		r := responses[idx%len(responses)]
 		idx++
 		return r.out, r.err
@@ -365,7 +365,7 @@ func TestConvoyReview_TotalClaudeCallsBounded(t *testing.T) {
 		// Lock + run.
 		db.Exec(`UPDATE BountyBoard SET status = 'Locked', owner = 'Diplomat-1' WHERE id = ?`, taskID)
 		b, _ := store.GetBounty(db, taskID)
-		runConvoyReview(context.Background(), db, "Diplomat-1", b, testLogger{})
+		runConvoyReview(context.Background(), db, "Diplomat-1", b, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 		// If the convoy hit the loop cap OR an escalation landed, we're done.
 		var pendingReview int
@@ -408,7 +408,7 @@ func TestFullConvoyLifecycle_AdversarialLLM(t *testing.T) {
 	convoyID := seedDraftPROpenConvoy(t, db)
 
 	// All malformed — forces the parse-failure escalate path to fire.
-	stub := withStubCLIRunnerFn(t, func(_ context.Context, prompt, tools, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	stub := withStubCLIRunnerFn(t, func(_ context.Context, prompt, tools, _disallowedTools, _mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		return "still not json", nil
 	})
 
@@ -425,7 +425,7 @@ func TestFullConvoyLifecycle_AdversarialLLM(t *testing.T) {
 		}
 		db.Exec(`UPDATE BountyBoard SET status = 'Locked', owner = 'Diplomat-1' WHERE id = ?`, taskID)
 		b, _ := store.GetBounty(db, taskID)
-		runConvoyReview(context.Background(), db, "Diplomat-1", b, testLogger{})
+		runConvoyReview(context.Background(), db, "Diplomat-1", b, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 		var escCount int
 		// Fix A (AUDIT-011 read-side): migrated from payload-LIKE to convoy_id equality.
@@ -523,7 +523,7 @@ func TestRunConvoyReview_AfterCleanPass_NewFindingsEscalate(t *testing.T) {
 	bounty1 := &store.Bounty{ID: 3001, Type: "ConvoyReview", Payload: string(payload)}
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (3001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty1, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty1, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	var status string
 	db.QueryRow(`SELECT status FROM BountyBoard WHERE id = 3001`).Scan(&status)
@@ -542,7 +542,7 @@ func TestRunConvoyReview_AfterCleanPass_NewFindingsEscalate(t *testing.T) {
 	bounty2 := &store.Bounty{ID: 3002, Type: "ConvoyReview", Payload: string(payload)}
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (3002, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty2, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty2, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	// Pass 2 after clean must escalate, NOT spawn new fix tasks.
 	var spawned int
@@ -582,7 +582,7 @@ func TestStubConvoyReviewLLM_CapturesPrompt(t *testing.T) {
 	db.Exec(`INSERT INTO BountyBoard (id, parent_id, target_repo, type, status, payload, convoy_id, priority, created_at)
 		VALUES (4001, 0, '', 'ConvoyReview', 'Locked', ?, ?, 5, datetime('now'))`, string(payload), convoyID)
 
-	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, testLogger{})
+	runConvoyReview(context.Background(), db, "Diplomat-1", bounty, mustLoadCapProfile(t, "convoy-review"), testLogger{})
 
 	prompt := stub.LastPrompt()
 	if prompt == "" {
