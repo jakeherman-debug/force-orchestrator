@@ -3,7 +3,7 @@
 **Date:** 2026-04-28
 **Operator:** jake.herman@upstart.com
 
-**Net verdict:** 🟡 **PARTIAL — T0-3 CLOSED; T0-1 + T0-2 OPEN.**
+**Net verdict:** 🟡 **PARTIAL — T0-1 + T0-3 CLOSED; T0-2 OPEN.**
 
 T0-3 (the Fix #8d campaign) closed on `main` via the Fix #8d / #8e / #8f
 sequence that landed before the deliverable framework was articulated.
@@ -21,15 +21,15 @@ until T0-1 and T0-2 are also closed and amended below.
 
 | Track | Status | Closure artifact | Closing branch / commits |
 |---|---|---|---|
-| T0-1 — Per-agent capability profiles | 🔴 **OPEN — not started** | — (to be filed when track closes) | — |
+| T0-1 — Per-agent capability profiles | 🟢 **CLOSED** | This document's Addendum log entry dated 2026-04-28 (T0-1) | 5 commits, all on `main` (see Addendum log) |
 | T0-2 — Inbound secret scrub + `.forceignore` | 🔴 **OPEN — not started** | — (to be filed when track closes) | — |
 | T0-3 — Fix #8d campaign | 🟢 **CLOSED** | `FIX-8D-CLOSURE.md` (authoritative) + `FIX-8E-CLOSURE.md` + `FIX-8F-CLOSURE.md` (verifier-residual closure) | See per-track summary below |
 
-T0-1 and T0-2 are next on the roadmap; nothing about T0-3's closure
-unblocks them automatically. The D1 verification procedure (roadmap
-§D1) cannot run cleanly until both remaining tracks land — that
-re-run is the responsibility of the eventual full-D1 closure
-amendment.
+T0-2 is the only remaining track on D1; T0-3 closed first (the
+Fix #8d campaign), then T0-1 closed via the addendum below. The
+full D1 verification procedure (roadmap §D1) cannot run cleanly
+until T0-2 also lands — that re-run is the responsibility of the
+eventual full-D1 closure amendment.
 
 ---
 
@@ -261,13 +261,104 @@ commits / closure artifacts it points to.
 | Date | Amendment | Scope | Commits / artifacts |
 |---|---|---|---|
 | 2026-04-28 | Initial filing — T0-3 partial closure | T0-3 (Fix #8d / #8e / #8f) closed; T0-1 + T0-2 OPEN | See "Merged commits constituting T0-3" + the three Fix closure reports at repo root |
-| _TBD_ | _T0-1 closure_ | _Capability profiles + Pattern P13_ | _to be filled in_ |
+| 2026-04-28 | T0-1 closure — capability profiles + Pattern P13 | Per-agent YAML capability profiles, REGISTRY + blocklist, loader, Spawn-time profile load, P13 enforcement, CLAUDE.md invariant section | See "T0-1 closure detail" below |
 | _TBD_ | _T0-2 closure_ | _Inbound secret scrub + `.forceignore` + Fuzz target_ | _to be filled in_ |
 | _TBD_ | _Full D1 GO_ | _Net verdict moves to 🟢 GO; full D1 verification procedure (roadmap §D1) re-run with all three tracks present_ | _to be filled in_ |
 
 When the third TBD row is filled, the Net verdict at the top of this
 document moves from 🟡 PARTIAL to 🟢 GO and D1 is shipped. Until then
 the verdict stays partial.
+
+---
+
+## T0-1 closure detail (2026-04-28)
+
+T0-1 (per-agent capability profiles) closed in 5 commits, all
+direct to `main` per the operator workflow, no remote push:
+
+| Commit | Scope |
+|---|---|
+| `772ac9e` | feat(D1-T0-1): YAML profiles + REGISTRY + blocklist — adds `agents/capabilities/` (17 profiles + REGISTRY + blocklist + embed shim) |
+| `e6b1149` | feat(D1-T0-1): capability profile loader + unit tests — adds `internal/agents/capabilities/loader.go` + tests (Profile / LoadProfile / AllowedToolsArg / DisallowedToolsArg / MCPConfigArg). Adds `gopkg.in/yaml.v3` v3.0.1 |
+| `4fa12ff` | feat(D1-T0-1): wire profiles through AskClaudeCLI/RunCLIStreamingContext — modifies `claude.go` signatures (gain `disallowedTools` + `mcpConfig` args), threads `*capabilities.Profile` through every Spawn function and per-agent runner. Removes hardcoded fleet tool constants |
+| `59aa5d0` | test(D1-T0-1): Pattern P13 — capability profile invariants — adds `internal/audittools/audit_pattern_p13_capability_profiles_test.go` (AST-based, single-entry allowlist for the claude package's own internals) |
+| `<this commit>` | docs(D1-T0-1): CLAUDE.md invariant + D1 closure addendum |
+
+**Profiles created (17):** astromech, auditor, boot, captain,
+chancellor, cli-jira, commander, convoy-review, council, diplomat,
+inquisitor, investigator, librarian, medic, medic-ci, pilot,
+pr-review-triage. The roadmap-named 16 plus `cli-jira` for the
+operator add-jira CLI.
+
+**REGISTRY entries:** 11 builtin tools (Read, Glob, Grep, Edit,
+Write, Bash, WebFetch, WebSearch, LSP, NotebookEdit, TodoWrite),
+~50 concrete MCP tools, 8 namespaces (`mcp:atlassian-read`,
+`mcp:atlassian-write`, `mcp:glean-read`, `mcp:sonar-read`,
+`mcp:sonar-write`, `mcp:datadog-read`, `mcp:slack-write`).
+
+**Blocklist entries:** Slack-write namespace + Confluence-write
+tools + Atlassian destructive Jira ops (transition, edit) + Sonar
+destructive ops (change_security_hotspot_status,
+change_sonar_issue_status). Blocked fleet-wide regardless of
+per-agent profile.
+
+**Migration scope:**
+- AskClaudeCLI / AskClaudeCLIContext / RunCLI / RunCLIStreaming /
+  RunCLIStreamingContext signatures gain `allowedTools`,
+  `disallowedTools`, `mcpConfig` parameters (per the prompt's
+  empirical-finding-driven design — `--disallowedTools` is the
+  hard restriction, `--allowedTools` is auto-approve hint).
+- `CLIRunner` type also gains those params.
+- 19 Claude call sites in production code migrated to source from
+  profiles (Captain, Council, Chancellor, Commander, Diplomat × 2,
+  Astromech daemon + foreground, Auditor, Investigator, Boot,
+  Librarian, MemoryRerank, ConvoyReview, PRReviewTriage, MedicTask,
+  MedicCI, Pilot's FindPRTemplate, the cmd/force add-jira CLI,
+  inquisitor's classifier path).
+- Hardcoded constants removed from `internal/claude/claude.go`:
+  `CommanderTools`, `CouncilTools`, `AstromechExtraTools`,
+  `InvestigateTools`, `AtlassianReadTools`, plus the per-namespace
+  internal `atlassianReadTools` / `gleanReadTools` /
+  `sonarReadTools` / `datadogReadTools`.
+
+**Validation results:**
+- `go build -tags sqlite_fts5 -o force ./cmd/force/`: PASS
+- `make test` (full suite, sqlite_fts5 tag): PASS — all 16 packages
+  green.
+- `go test -race -count=5 ./internal/agents/capabilities/...
+  ./internal/claude/... ./internal/agents/...`: PASS (~22 minute
+  wall clock on agents/, ~1 minute on the others).
+- `TestPattern_P13_CapabilityProfiles` at `-race -count=5`: PASS.
+- `TestPattern_P13_AllowlistReasonsTruthful`: PASS.
+- `TestSchemaParity`: PASS (no schema changes; re-run for
+  paranoia).
+- Captain Bash-restriction smoke check (asserted in
+  `internal/agents/capabilities/loader_test.go` —
+  `TestDisallowedToolsArg_Captain_BlocksBash`): PASS. Captain's
+  AllowedToolsArg does NOT contain Bash; DisallowedToolsArg DOES.
+
+**CLAUDE.md invariants stamped by T0-1:**
+- New "Per-agent capability profiles (D1 T0-1)" section near the
+  existing "Cross-agent service interfaces" block.
+- Names every Claude entry-point that must source from a profile.
+- Calls out `--disallowedTools` as the hard restriction (per the
+  Fix #8e empirical finding).
+- Calls out fail-closed `LoadProfile` (no silent fallback).
+- Calls out the blocklist as the final word (operator action +
+  audit trail to remove).
+- Names Pattern P13 as the regression mechanism.
+
+**Anti-cheat self-check (T0-1):**
+- No silent fallback to "all tools" anywhere — `LoadProfile` errors
+  surface at Spawn time and the agent does not start.
+- No granting of blocklisted tools — the loader rejects offending
+  profiles with a precise error.
+- No hardcoded tool strings in production Claude call sites
+  outside the single-entry allowlist (claude package internals);
+  Pattern P13 enforces.
+- Allowlist entry carries a truthful rationale per the CLAUDE.md
+  allowlist-truthfulness invariant; `TestPattern_P13_
+  AllowlistReasonsTruthful` enforces.
 
 ---
 
