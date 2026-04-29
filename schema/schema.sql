@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     parse_failure_count       INTEGER DEFAULT 0,   -- Fix #7: LLM JSON-parse failures on this row; ConvoyReview escalates at 2
     last_findings_fingerprint TEXT    DEFAULT '',  -- Fix #7: SHA256 of last pass's finding set; pass-to-pass dedup gate
     spend_suspended           INTEGER DEFAULT 0,   -- D2 T1-1: dogTaskSpendWatch sets to 1 when trailing-10m cost > escalate threshold; claim queries skip
+    recent_commit_hashes_json TEXT    DEFAULT '[]', -- D2 T1-3.5: JSON array of the last 5 commit tree-hashes produced by this task's worktree; divergence detector escalates on circle
     created_at                TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty

@@ -65,6 +65,7 @@ func createSchema(db *sql.DB) {
 		parse_failure_count       INTEGER DEFAULT 0,
 		last_findings_fingerprint TEXT    DEFAULT '',
 		spend_suspended           INTEGER DEFAULT 0,
+		recent_commit_hashes_json TEXT    DEFAULT '[]',
 		created_at                TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
@@ -526,6 +527,14 @@ func runMigrations(db *sql.DB) {
 	// rows with spend_suspended=1 so a runaway cost loop on one task can't
 	// burn another claim cycle.
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN spend_suspended INTEGER DEFAULT 0`)
+
+	// D2 T1-3.5 — BountyBoard.recent_commit_hashes_json. JSON array of the
+	// last `recentCommitHashRingDepth` commit tree-hashes produced by this
+	// task's worktree. Default '[]' so existing rows are coherent without a
+	// backfill UPDATE; reconcile-on-startup Case E reads the most recent
+	// entry as the "task-owned SHA" and verifies the tree-hash is reachable
+	// from the recorded branch.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN recent_commit_hashes_json TEXT DEFAULT '[]'`)
 
 	// D2 T1-1 — TaskSpendWatch dedup ledger. Created here for upgrade-path DBs
 	// that pre-date the createSchema declaration. The CREATE TABLE IF NOT
