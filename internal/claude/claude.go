@@ -31,6 +31,13 @@ func IsRateLimitError(output string) bool {
 //	"[claude_usage: 12345 input 678 output]"
 var tokenUsageLine = regexp.MustCompile(`\[claude_usage:\s*(\d+)\s+input\s+(\d+)\s+output\]`)
 
+// modelLine matches the embedded model annotation appended by CLI runners
+// alongside [claude_usage: ...]: "[claude_model: claude-opus-4-5]". The
+// model id flows through the per-model cost table in pricing.go so the
+// agents writing TaskHistory rows can compute cost_usd_estimate without
+// re-parsing the raw JSON output.
+var modelLine = regexp.MustCompile(`\[claude_model:\s*([^\]]+)\]`)
+
 // tokenPattern matches legacy token lines Claude CLI may emit in text mode, e.g.:
 //
 //	"Tokens: 1,234 input, 567 output"
@@ -68,16 +75,35 @@ func ParseTokenUsage(output string) (int, int) {
 	return in, out
 }
 
+// ParseModel scans Claude CLI output for the embedded [claude_model: <id>]
+// annotation injected by the CLI runners from the JSON output's
+// model field. Returns "" when no annotation is present (older CLI
+// versions, stub runners in tests). Callers feed the result to
+// pricing.CostUSD which gracefully handles unknown / empty models by
+// returning $0.
+func ParseModel(output string) string {
+	if m := modelLine.FindStringSubmatch(output); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
+
 // parseJSONResult parses a claude CLI --output-format json result object.
-// Returns (resultText, totalInputTokens, outputTokens).
+// Returns (resultText, totalInputTokens, outputTokens, model).
 // totalInputTokens sums input_tokens + cache_creation_input_tokens + cache_read_input_tokens
 // for a complete picture of tokens processed.
-// Falls back to returning the raw string with 0 tokens if parsing fails.
-func parseJSONResult(raw string) (string, int, int) {
+// model is the canonical model id reported by the CLI (e.g.
+// "claude-opus-4-5"); empty string when the field is absent.
+// Falls back to returning the raw string with zeros / "" if parsing fails.
+func parseJSONResult(raw string) (string, int, int, string) {
 	var result struct {
-		Type   string `json:"type"`
-		Result string `json:"result"`
-		Usage  struct {
+		Type    string `json:"type"`
+		Result  string `json:"result"`
+		Model   string `json:"model"`
+		Message struct {
+			Model string `json:"model"`
+		} `json:"message"`
+		Usage struct {
 			InputTokens              int `json:"input_tokens"`
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
@@ -85,19 +111,27 @@ func parseJSONResult(raw string) (string, int, int) {
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil || result.Type != "result" {
-		return raw, 0, 0
+		return raw, 0, 0, ""
 	}
 	tokIn := result.Usage.InputTokens + result.Usage.CacheCreationInputTokens + result.Usage.CacheReadInputTokens
-	return result.Result, tokIn, result.Usage.OutputTokens
+	model := result.Model
+	if model == "" {
+		model = result.Message.Model
+	}
+	return result.Result, tokIn, result.Usage.OutputTokens, model
 }
 
 // parseStreamEvent parses one line from --output-format stream-json --verbose output.
 // For assistant messages it returns extracted text. For the result event it returns
 // total input tokens (regular + cache creation + cache reads) and output tokens.
-func parseStreamEvent(line string) (text string, tokIn, tokOut int, isResult bool) {
+// The result event also carries the model id (D2 T1-1) so the streaming path
+// can emit a [claude_model: ...] annotation alongside [claude_usage: ...].
+func parseStreamEvent(line string) (text string, tokIn, tokOut int, model string, isResult bool) {
 	var event struct {
 		Type    string `json:"type"`
+		Model   string `json:"model"`
 		Message struct {
+			Model   string `json:"model"`
 			Content []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -111,7 +145,7 @@ func parseStreamEvent(line string) (text string, tokIn, tokOut int, isResult boo
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(line), &event); err != nil {
-		return "", 0, 0, false
+		return "", 0, 0, "", false
 	}
 	switch event.Type {
 	case "assistant":
@@ -121,12 +155,16 @@ func parseStreamEvent(line string) (text string, tokIn, tokOut int, isResult boo
 				sb.WriteString(c.Text)
 			}
 		}
-		return sb.String(), 0, 0, false
+		return sb.String(), 0, 0, "", false
 	case "result":
 		total := event.Usage.InputTokens + event.Usage.CacheCreationInputTokens + event.Usage.CacheReadInputTokens
-		return "", total, event.Usage.OutputTokens, true
+		m := event.Model
+		if m == "" {
+			m = event.Message.Model
+		}
+		return "", total, event.Usage.OutputTokens, m, true
 	}
-	return "", 0, 0, false
+	return "", 0, 0, "", false
 }
 
 // claudeCLITimeout is the default timeout for simple reasoning calls (Council, etc.).
@@ -210,10 +248,18 @@ func defaultCLIRunner(parentCtx context.Context, prompt, allowedTools, disallowe
 		}
 		return string(rawOut), fmt.Errorf("claude CLI failed: %v", err)
 	}
-	// Parse JSON output to extract result text and token usage.
-	text, tokIn, tokOut := parseJSONResult(strings.TrimSpace(string(rawOut)))
+	// Parse JSON output to extract result text, token usage, and model.
+	// D2 T1-1: model id is appended as a [claude_model: ...] annotation
+	// so downstream agents can compute per-attempt cost via
+	// pricing.CostUSD without re-parsing the raw JSON. task_id is NOT
+	// threaded through this layer in T1-1; T1-2's prompt-assembly refactor
+	// is the natural seam for that.
+	text, tokIn, tokOut, model := parseJSONResult(strings.TrimSpace(string(rawOut)))
 	if tokIn > 0 || tokOut > 0 {
 		text += fmt.Sprintf("\n[claude_usage: %d input %d output]", tokIn, tokOut)
+	}
+	if model != "" {
+		text += fmt.Sprintf("\n[claude_model: %s]", model)
 	}
 	return text, nil
 }
@@ -339,10 +385,11 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, dis
 	var textBuf strings.Builder
 	textBufCapReached := false
 	var tokIn, tokOut int
+	var model string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MB — large events fit
 	for scanner.Scan() {
-		text, in, out, isResult := parseStreamEvent(scanner.Text())
+		text, in, out, eventModel, isResult := parseStreamEvent(scanner.Text())
 		if text != "" {
 			// AUDIT-129 gate: textBuf.Len() < 409600 (400 KB literal inlined
 			// so the audit regex detects the cap check without relying on
@@ -365,6 +412,7 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, dis
 		}
 		if isResult {
 			tokIn, tokOut = in, out
+			model = eventModel
 		}
 	}
 
@@ -389,6 +437,17 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, dis
 		result += tokenLine
 		if w != nil {
 			w.Write([]byte(tokenLine)) //nolint:errcheck
+		}
+	}
+	// D2 T1-1: emit the model id as a separate annotation so downstream
+	// agents can route the value into pricing.CostUSD without re-parsing
+	// the raw JSON output. Stays alongside [claude_usage: ...] for
+	// symmetry with the one-shot path.
+	if model != "" {
+		modelAnnotation := fmt.Sprintf("\n[claude_model: %s]", model)
+		result += modelAnnotation
+		if w != nil {
+			w.Write([]byte(modelAnnotation)) //nolint:errcheck
 		}
 	}
 	return result, nil
@@ -485,10 +544,17 @@ func ClassifyTaskType(prompt, allowedTools, disallowedTools, mcpConfig string) (
 }
 
 // ExtractJSON safely pulls JSON out of Claude's markdown wrappers and strips
-// any trailing [claude_usage: ...] annotation appended by the CLI runner.
+// any trailing [claude_usage: ...] / [claude_model: ...] annotations
+// appended by the CLI runner.
 func ExtractJSON(response string) string {
 	// Strip trailing usage annotation before any other processing.
 	if idx := strings.Index(response, "\n[claude_usage:"); idx != -1 {
+		response = response[:idx]
+	}
+	// D2 T1-1: also strip the model annotation. ExtractJSON callers feed
+	// the result to strictJSONUnmarshal which would otherwise complain
+	// about trailing tokens.
+	if idx := strings.Index(response, "\n[claude_model:"); idx != -1 {
 		response = response[:idx]
 	}
 	start := strings.Index(response, "```json")

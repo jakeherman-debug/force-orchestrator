@@ -345,9 +345,7 @@ func autoInsertReshardTasks(db *sql.DB, bounty, parent *store.Bounty, tasks []st
 	}
 
 	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, rawResponse, "Completed")
-	if tokIn, tokOut := claude.ParseTokenUsage(rawResponse); tokIn > 0 || tokOut > 0 {
-		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-	}
+	RecordUsageAndCost(db, histID, rawResponse)
 	store.LogAudit(db, agentName, "auto-reshard", parent.ID,
 		fmt.Sprintf("inserted %d shard(s) %v into convoy %d; Decompose #%d completed",
 			len(shardIDs), shardIDs, parent.ConvoyID, bounty.ID))
@@ -467,9 +465,7 @@ EXAMPLE:
 		}
 		// Record history even on failure so token costs (if any) appear in force costs.
 		histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, rawOut, "Failed")
-		if tokIn, tokOut := claude.ParseTokenUsage(rawOut); tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, rawOut)
 		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
 		handleInfraFailure(db, agentName, "commander", bounty, sessionID, msg, "Pending", false, logger)
 		return
@@ -537,9 +533,7 @@ EXAMPLE:
 	}
 
 	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "AwaitingChancellorReview")
-	if tokIn, tokOut := claude.ParseTokenUsage(response); tokIn > 0 || tokOut > 0 {
-		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-	}
+	RecordUsageAndCost(db, histID, response)
 	logger.Printf("Task %d: plan (%d task(s)) submitted to Chancellor for review", bounty.ID, len(tasks))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
 		SessionID: sessionID, Agent: agentName, TaskID: bounty.ID,

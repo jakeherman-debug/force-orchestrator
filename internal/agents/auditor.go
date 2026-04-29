@@ -157,15 +157,15 @@ func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
 		runDir, 40, auditorTimeout)
 	outputStr := strings.TrimSpace(rawOut)
+	// tokIn/tokOut still drive the per-task telemetry event below;
+	// RecordUsageAndCost takes the same outputStr and writes the cost to
+	// TaskHistory in one shot.
 	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
-
 	// Check for escalation before error handling.
 	if sev, msg, ok := ParseEscalationSignal(outputStr); ok {
 		logger.Printf("Task %d: escalated (%s): %s", bounty.ID, sev, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Escalated")
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, outputStr)
 		if _, err := CreateEscalation(db, bounty.ID, sev, msg); err != nil {
 			// Escalation row didn't land; fall back to FailBounty + operator
 			// mail so the task isn't left sitting in an Escalated-but-no-row
@@ -188,9 +188,7 @@ func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.
 		msg := fmt.Sprintf("Auditor CLI error: %v", err)
 		logger.Printf("Task %d FAILED: %s", bounty.ID, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Failed")
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, outputStr)
 		handleInfraFailure(db, name, "auditor", bounty, sessionID, msg, "Pending", false, logger)
 		return
 	}
@@ -206,17 +204,13 @@ func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.
 		msg := fmt.Sprintf("Auditor JSON parse error: %v (output: %s)", jsonErr, util.TruncateStr(outputStr, 200))
 		logger.Printf("Task %d: %s", bounty.ID, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Failed")
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, outputStr)
 		handleInfraFailure(db, name, "auditor-parse", bounty, sessionID, msg, "Pending", false, logger)
 		return
 	}
 
 	histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Completed")
-	if tokIn > 0 || tokOut > 0 {
-		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-	}
+	RecordUsageAndCost(db, histID, outputStr)
 
 	// Spawn a convoy of Planned CodeEdit tasks — one per finding.
 	nFindings := len(report.Findings)

@@ -304,8 +304,6 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 	approved := *ruling.Approved
 	telemetry.EmitEvent(telemetry.EventCouncilRuling(sessionID, agentName, b.ID, approved, ruling.Feedback))
 
-	tokIn, tokOut := claude.ParseTokenUsage(response)
-
 	if approved {
 		// Split on pr_flow_enabled: if the repo is on the PR flow, open a sub-PR
 		// instead of local-merging.
@@ -381,9 +379,7 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 			// Record history — the task is now AwaitingSubPRCI; sub-pr-ci-watch drives
 			// the rest. WriteMemory is spawned later when the sub-PR actually merges.
 			histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "AwaitingSubPRCI")
-			if tokIn > 0 || tokOut > 0 {
-				store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-			}
+			RecordUsageAndCost(db, histID, response)
 			store.LogAudit(db, agentName, "council-approve-subpr", b.ID, ruling.Feedback)
 			logger.Printf("Task %d: APPROVED — sub-PR opened, waiting for CI", b.ID)
 			return
@@ -449,10 +445,15 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 					handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
 					return
 				}
+				// D2 T1-1: write tokens AND cost_usd_estimate inside the same tx
+				// so a partial-success state can't leave a row with tokens but
+				// no cost.
+				tokIn, tokOut := claude.ParseTokenUsage(response)
 				if tokIn > 0 || tokOut > 0 {
-					if _, err := tx.Exec(`UPDATE TaskHistory SET tokens_in = ?, tokens_out = ? WHERE id = ?`, tokIn, tokOut, histID); err != nil {
+					cost := claude.CostUSD(claude.ParseModel(response), tokIn, tokOut)
+					if _, err := tx.Exec(`UPDATE TaskHistory SET tokens_in = ?, tokens_out = ?, cost_usd_estimate = ? WHERE id = ?`, tokIn, tokOut, cost, histID); err != nil {
 						tx.Rollback()
-						logger.Printf("Task %d: update history tokens failed: %v", b.ID, err)
+						logger.Printf("Task %d: update history tokens/cost failed: %v", b.ID, err)
 						handleInfraFailure(db, agentName, "council", b, sessionID, msg, "AwaitingCouncilReview", true, logger)
 						return
 					}
@@ -501,9 +502,7 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 			return
 		}
 		histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Completed")
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, response)
 		store.LogAudit(db, agentName, "council-approve", b.ID, ruling.Feedback)
 
 		// Remove dependency edges that pointed to this task so dependents become claimable.
@@ -592,9 +591,7 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 		}
 	} else {
 		histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, "Rejected")
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, response)
 		store.LogAudit(db, agentName, "council-reject", b.ID, ruling.Feedback)
 		retryCount := store.IncrementRetryCount(db, b.ID)
 		logger.Printf("Task %d: REJECTED (attempt %d/%d): %s", b.ID, retryCount, MaxRetries, ruling.Feedback)

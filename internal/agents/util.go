@@ -3,13 +3,53 @@ package agents
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/util"
 )
+
+// RecordUsageAndCost (D2 T1-1) parses tokens + model from a Claude CLI
+// output blob and updates the TaskHistory row with both the token counts
+// AND a per-attempt cost_usd_estimate computed via the per-model price
+// table in claude.pricing. Centralised here so each call site routes
+// through one helper rather than re-implementing the parse → cost →
+// update sequence in seven different agents.
+//
+// Returns nothing — write failures are logged via the underlying
+// store.UpdateTaskHistoryCost (which returns error per the new mutator
+// policy). The dog re-runs every 5 min and would catch a missed cost row
+// on the next pass; the spend gate isn't load-bearing on a single
+// successful write.
+//
+// histID == 0 (RecordTaskHistory failure) makes this a no-op.
+func RecordUsageAndCost(db *sql.DB, histID int64, output string) {
+	if histID == 0 {
+		return
+	}
+	tokIn, tokOut := claude.ParseTokenUsage(output)
+	if tokIn == 0 && tokOut == 0 {
+		// Nothing to record. Skip the UPDATE so existing rows that pre-
+		// dated the cost column don't get re-stamped with $0 over an
+		// already-correct legacy value.
+		return
+	}
+	model := claude.ParseModel(output)
+	cost := claude.CostUSD(model, tokIn, tokOut)
+	if err := store.UpdateTaskHistoryCost(db, histID, tokIn, tokOut, cost); err != nil {
+		// Log but don't escalate — dogTaskSpendWatch sweeps every 5 min and
+		// will see the next attempt's cost if one is recorded; an isolated
+		// missed row degrades the per-task spend signal but doesn't
+		// corrupt other rows. Return-nothing keeps the call-site signature
+		// identical to the legacy UpdateTaskHistoryTokens so the swap is
+		// mechanical.
+		log.Printf("RecordUsageAndCost: UpdateTaskHistoryCost(histID=%d) failed: %v", histID, err)
+	}
+}
 
 // extractClaudeErrorExcerpt pulls a short, diagnostic-looking excerpt out of
 // Claude's stdout when the CLI exits non-zero. We're NOT trying to summarize —

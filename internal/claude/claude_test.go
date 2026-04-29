@@ -284,8 +284,8 @@ func TestParseTokenUsage_EmbeddedUsageLine(t *testing.T) {
 }
 
 func TestParseJSONResult(t *testing.T) {
-	raw := `{"type":"result","subtype":"success","result":"Task done.\n[DONE]","usage":{"input_tokens":500,"cache_creation_input_tokens":2000,"cache_read_input_tokens":8000,"output_tokens":150}}`
-	text, tokIn, tokOut := parseJSONResult(raw)
+	raw := `{"type":"result","subtype":"success","model":"claude-opus-4-5","result":"Task done.\n[DONE]","usage":{"input_tokens":500,"cache_creation_input_tokens":2000,"cache_read_input_tokens":8000,"output_tokens":150}}`
+	text, tokIn, tokOut, model := parseJSONResult(raw)
 	if text != "Task done.\n[DONE]" {
 		t.Errorf("unexpected result text: %q", text)
 	}
@@ -295,11 +295,14 @@ func TestParseJSONResult(t *testing.T) {
 	if tokOut != 150 {
 		t.Errorf("expected 150 output tokens, got %d", tokOut)
 	}
+	if model != "claude-opus-4-5" {
+		t.Errorf("expected model claude-opus-4-5, got %q", model)
+	}
 }
 
 func TestParseStreamEvent_AssistantText(t *testing.T) {
 	line := `{"type":"assistant","message":{"content":[{"type":"text","text":"[CHECKPOINT: work_done]\nAll done."}]}}`
-	text, tokIn, tokOut, isResult := parseStreamEvent(line)
+	text, tokIn, tokOut, _, isResult := parseStreamEvent(line)
 	if text != "[CHECKPOINT: work_done]\nAll done." {
 		t.Errorf("unexpected text: %q", text)
 	}
@@ -309,8 +312,8 @@ func TestParseStreamEvent_AssistantText(t *testing.T) {
 }
 
 func TestParseStreamEvent_Result(t *testing.T) {
-	line := `{"type":"result","subtype":"success","usage":{"input_tokens":100,"cache_creation_input_tokens":500,"cache_read_input_tokens":4000,"output_tokens":75}}`
-	_, tokIn, tokOut, isResult := parseStreamEvent(line)
+	line := `{"type":"result","subtype":"success","model":"claude-sonnet-4-5","usage":{"input_tokens":100,"cache_creation_input_tokens":500,"cache_read_input_tokens":4000,"output_tokens":75}}`
+	_, tokIn, tokOut, model, isResult := parseStreamEvent(line)
 	if !isResult {
 		t.Error("expected isResult=true")
 	}
@@ -319,5 +322,8 @@ func TestParseStreamEvent_Result(t *testing.T) {
 	}
 	if tokOut != 75 {
 		t.Errorf("expected 75 output tokens, got %d", tokOut)
+	}
+	if model != "claude-sonnet-4-5" {
+		t.Errorf("expected model claude-sonnet-4-5, got %q", model)
 	}
 }

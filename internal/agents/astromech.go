@@ -765,10 +765,7 @@ Do not re-do work that is already correctly committed.`
 		logger.Printf("Task %d: infra failure — %s", bounty.ID, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, outputStr, "Failed")
 		store.StampHistoryMemoryIDs(db, histID, injectedMemoryIDs)
-		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, outputStr)
 		handleInfraFailure(db, name, "claude", bounty, sessionID, msg, "Pending", false, logger)
 		return
 	}
@@ -985,10 +982,7 @@ func processAstromechOutput(
 		nextStatus := nextReviewStatus(db, bounty.ConvoyID)
 		logger.Printf("Task %d: [DONE] signal received — submitting for review (%s)", taskID, nextStatus)
 		histID := recordHist(outputStr, "Completed")
-		tokIn, tokOut := claude.ParseTokenUsage(outputStr)
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, outputStr)
 		telemetry.EmitEvent(telemetry.EventTaskDoneSignal(sessionID, name, taskID))
 		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
 		if err := store.UpdateBountyStatus(db, taskID, nextStatus); err != nil {
@@ -1055,10 +1049,7 @@ func processAstromechOutput(
 	}
 
 	histID := recordHist(outputStr, "Completed")
-	tokIn, tokOut := claude.ParseTokenUsage(outputStr)
-	if tokIn > 0 || tokOut > 0 {
-		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-	}
+	RecordUsageAndCost(db, histID, outputStr)
 	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
 	nextStatus := nextReviewStatus(db, bounty.ConvoyID)
 	logger.Printf("Task %d: SUCCESS, status -> %s", taskID, nextStatus)

@@ -536,10 +536,7 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 		captainOutcome = "InfraRetry"
 	}
 	histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, captainOutcome)
-	tokIn, tokOut := claude.ParseTokenUsage(response)
-	if tokIn > 0 || tokOut > 0 {
-		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-	}
+	RecordUsageAndCost(db, histID, response)
 
 	switch ruling.Decision {
 	case "approve":

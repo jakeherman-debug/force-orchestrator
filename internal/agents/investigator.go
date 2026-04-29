@@ -127,9 +127,7 @@ func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *s
 	if sev, msg, ok := ParseEscalationSignal(outputStr); ok {
 		logger.Printf("Task %d: escalated (%s): %s", bounty.ID, sev, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Escalated")
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, outputStr)
 		if _, err := CreateEscalation(db, bounty.ID, sev, msg); err != nil {
 			// Escalation row didn't land; fall back to FailBounty + operator
 			// mail so the task isn't left sitting in an Escalated-but-no-row
@@ -152,9 +150,7 @@ func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *s
 		msg := fmt.Sprintf("Investigator CLI error: %v", err)
 		logger.Printf("Task %d FAILED: %s", bounty.ID, msg)
 		histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Failed")
-		if tokIn > 0 || tokOut > 0 {
-			store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-		}
+		RecordUsageAndCost(db, histID, outputStr)
 		handleInfraFailure(db, name, "investigator", bounty, sessionID, msg, "Pending", false, logger)
 		return
 	}
@@ -177,9 +173,7 @@ func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *s
 		logger.Printf("Investigator #%d: Completed status update failed: %v — report already mailed; stale-lock detector will recover", bounty.ID, err)
 	}
 	histID := store.RecordTaskHistory(db, bounty.ID, name, sessionID, util.TruncateStr(outputStr, 4000), "Completed")
-	if tokIn > 0 || tokOut > 0 {
-		store.UpdateTaskHistoryTokens(db, histID, tokIn, tokOut)
-	}
+	RecordUsageAndCost(db, histID, outputStr)
 
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
 		SessionID: sessionID, Agent: name, TaskID: bounty.ID,
