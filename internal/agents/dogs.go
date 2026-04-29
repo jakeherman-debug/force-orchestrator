@@ -66,6 +66,11 @@ var dogCooldowns = map[string]time.Duration{
 	// landing. Auto-e-stop at $200/h makes the fleet self-contain any runaway
 	// loop regardless of whether anyone is watching the dashboard.
 	"spend-burn-watch":      5 * time.Minute,
+	// task-spend-watch (D2 T1-1) polls TaskHistory per-task for trailing-10-min
+	// spend; mails the operator on a soft alert and suspends the task on a
+	// hard escalate. 5-min cadence matches spend-burn-watch — both cost
+	// signals share the same operator-facing dashboard refresh granularity.
+	"task-spend-watch": 5 * time.Minute,
 	// D2 T1-4: quarantined-repo-watch surfaces operator mail when claim
 	// loops have skipped tasks against quarantined repos. Daily cadence —
 	// internal per-repo dedup prevents spam (one mail per repo per day).
@@ -76,8 +81,13 @@ var dogCooldowns = map[string]time.Duration{
 // spend-burn-watch runs FIRST so that if it flips e-stop, subsequent dogs and
 // any subsequent cycle's agent claims all see the halt immediately — no
 // grace period for the fleet to continue burning tokens past the cap.
+// task-spend-watch (D2 T1-1) runs IMMEDIATELY AFTER spend-burn-watch so a
+// per-task escalate (which suspends one task) is visible to the same cycle's
+// claim loops as a fleet-wide e-stop would be — both cost defenses share the
+// same "land before the next claim cycle starts" constraint.
 var dogOrder = []string{
 	"spend-burn-watch",
+	"task-spend-watch",
 	"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup", "memory-hygiene",
 	"stalled-reviews", "priority-aging", "daily-digest", "stale-convoys-report",
 	"sub-pr-ci-watch", "main-drift-watch", "draft-pr-watch", "ship-it-nag",
@@ -228,6 +238,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogEscalationSweeper(db, logger)
 	case "spend-burn-watch":
 		return dogSpendBurnWatch(db, logger)
+	case "task-spend-watch":
+		return dogTaskSpendWatch(db, logger)
 	case "quarantined-repo-watch":
 		return dogQuarantinedRepoWatch(db, logger)
 	default:

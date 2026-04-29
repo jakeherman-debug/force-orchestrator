@@ -22,6 +22,11 @@ type DashboardStatus struct {
 	HourlySpendCapUSD  float64 `json:"hourly_spend_cap_usd"`
 	AttemptsLastHour   int     `json:"attempts_last_hour"`
 	SpendCapExceeded   bool    `json:"spend_cap_exceeded"`
+	// D2 T1-1: per-task spend anomalies recorded by dogTaskSpendWatch in
+	// the last hour. Surfaces a fast-feedback signal when a single task
+	// is burning above per_task_spend_alert_usd, distinct from the
+	// fleet-wide HourlySpendDollars.
+	TaskSpendAnomaliesLastHour int `json:"task_spend_anomalies_last_hour"`
 	// D2 T1-4 — count of repos in mode='quarantined'. The dashboard
 	// renders a persistent banner whenever this is non-zero so the
 	// operator sees stuck repos without having to drill into the repo
@@ -84,11 +89,15 @@ type DashboardMemory struct {
 // re-query, which would return today's FTS matches instead of what the
 // agent actually saw).
 type DashboardAttempt struct {
-	Attempt          int               `json:"attempt"`
-	Agent            string            `json:"agent"`
-	Outcome          string            `json:"outcome"`
-	TokensIn         int               `json:"tokens_in"`
-	TokensOut        int               `json:"tokens_out"`
+	Attempt   int    `json:"attempt"`
+	Agent     string `json:"agent"`
+	Outcome   string `json:"outcome"`
+	TokensIn  int    `json:"tokens_in"`
+	TokensOut int    `json:"tokens_out"`
+	// D2 T1-1: per-attempt cost in USD as recorded at write time. Stored
+	// directly so dashboard sums and per-task spend dog don't have to re-
+	// derive prices from tokens on every refresh.
+	CostUSDEstimate  float64           `json:"cost_usd_estimate"`
 	CreatedAt        string            `json:"created_at"`
 	InjectedMemories []DashboardMemory `json:"injected_memories,omitempty"`
 }
@@ -119,6 +128,14 @@ type DashboardTaskDetail struct {
 	RuntimeSeconds int                `json:"runtime_seconds"`
 	BlockedBy      []int              `json:"blocked_by"`
 	CostDollars    float64            `json:"cost_dollars"`
+	// D2 T1-1: lifetime cost across every TaskHistory row for this task
+	// (sum of cost_usd_estimate). Distinct from CostDollars which is the
+	// legacy single-rate token-derived value; LifetimeCostUSD reads the
+	// per-attempt write-time cost directly.
+	LifetimeCostUSD float64           `json:"lifetime_cost_usd"`
+	// D2 T1-1: surfaces the spend_suspended flag so the UI can render a
+	// "claim-paused due to spend" badge alongside the lifetime cost.
+	SpendSuspended  bool              `json:"spend_suspended"`
 	Memories       []DashboardMemory  `json:"memories"`
 	History        []DashboardAttempt `json:"history"`
 	Mail           []DashboardMail    `json:"mail"`

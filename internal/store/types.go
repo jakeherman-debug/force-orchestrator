@@ -176,8 +176,12 @@ type TaskHistoryEntry struct {
 	Outcome      string // Completed, Failed, Escalated, Sharded, Timeout
 	TokensIn     int
 	TokensOut    int
-	MemoryIDs    string // CSV of FleetMemory.id values injected into this attempt's prompt
-	CreatedAt    string
+	// CostUSDEstimate (D2 T1-1) is the per-attempt cost in dollars,
+	// computed at write time from the model + tokens via
+	// claude.pricing.CostUSD.
+	CostUSDEstimate float64
+	MemoryIDs       string // CSV of FleetMemory.id values injected into this attempt's prompt
+	CreatedAt       string
 }
 
 // ── Audit log ─────────────────────────────────────────────────────────────────

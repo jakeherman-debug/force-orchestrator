@@ -85,6 +85,9 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 		s.HourlySpendCapUSD = agents.HourlySpendCapUSD(db)
 		s.AttemptsLastHour = store.AttemptsInWindow(db, "1 hours")
 		s.SpendCapExceeded = s.HourlySpendDollars > s.HourlySpendCapUSD
+		// D2 T1-1: per-task anomaly count is the visible "this task is
+		// runaway" signal alongside the fleet-wide cap.
+		s.TaskSpendAnomaliesLastHour = agents.TaskSpendAnomaliesLastHour(db)
 		// D2 T1-4 — quarantined repo count drives the dashboard's persistent banner.
 		_ = db.QueryRow(`SELECT COUNT(*) FROM Repositories WHERE mode = 'quarantined'`).Scan(&s.QuarantinedRepos)
 
@@ -510,12 +513,13 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 	var latestInjectedIDs []int
 	for _, h := range rawHist {
 		attempt := DashboardAttempt{
-			Attempt:   h.Attempt,
-			Agent:     h.Agent,
-			Outcome:   h.Outcome,
-			TokensIn:  h.TokensIn,
-			TokensOut: h.TokensOut,
-			CreatedAt: h.CreatedAt,
+			Attempt:         h.Attempt,
+			Agent:           h.Agent,
+			Outcome:         h.Outcome,
+			TokensIn:        h.TokensIn,
+			TokensOut:       h.TokensOut,
+			CostUSDEstimate: h.CostUSDEstimate,
+			CreatedAt:       h.CreatedAt,
 		}
 		if ids := store.ParseMemoryIDsCSV(h.MemoryIDs); len(ids) > 0 {
 			injected := store.GetFleetMemoriesByIDs(db, ids)
@@ -595,6 +599,12 @@ func serveTaskDetail(db *sql.DB, id int, w http.ResponseWriter) {
 		RuntimeSeconds: runtimeSecs,
 		BlockedBy:      blockers,
 		CostDollars:    store.TaskCostDollars(totalTokensIn, totalTokensOut),
+		// D2 T1-1: lifetime cost reads cost_usd_estimate per attempt
+		// (per-model price table) rather than re-deriving from raw
+		// tokens. SpendSuspended surfaces dogTaskSpendWatch's escalate
+		// gate for the UI.
+		LifetimeCostUSD: store.LifetimeCostUSD(db, id),
+		SpendSuspended:  store.GetSpendSuspended(db, id),
 		Memories:       mems,
 		History:        hist,
 		Mail:           fetchMailForTask(db, id),

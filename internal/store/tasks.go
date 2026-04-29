@@ -1182,7 +1182,7 @@ func ParseMemoryIDsCSV(csv string) []int {
 
 func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 	rows, err := db.Query(`SELECT id, task_id, attempt, agent, session_id, claude_output, outcome,
-		IFNULL(tokens_in,0), IFNULL(tokens_out,0), IFNULL(memory_ids, ''), created_at
+		IFNULL(tokens_in,0), IFNULL(tokens_out,0), IFNULL(cost_usd_estimate,0), IFNULL(memory_ids, ''), created_at
 		FROM TaskHistory WHERE task_id = ? ORDER BY attempt ASC`, taskID)
 	if err != nil {
 		return nil
@@ -1192,7 +1192,7 @@ func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 	for rows.Next() {
 		var e TaskHistoryEntry
 		if err := rows.Scan(&e.ID, &e.TaskID, &e.Attempt, &e.Agent, &e.SessionID, &e.ClaudeOutput, &e.Outcome,
-			&e.TokensIn, &e.TokensOut, &e.MemoryIDs, &e.CreatedAt); err != nil {
+			&e.TokensIn, &e.TokensOut, &e.CostUSDEstimate, &e.MemoryIDs, &e.CreatedAt); err != nil {
 			log.Printf("GetTaskHistory: scan failed: %v", err)
 			continue
 		}
@@ -1202,6 +1202,17 @@ func GetTaskHistory(db *sql.DB, taskID int) []TaskHistoryEntry {
 		log.Printf("tasks.go:GetTaskHistory: rows iter error: %v", rErr)
 	}
 	return entries
+}
+
+// LifetimeCostUSD (D2 T1-1) returns the sum of cost_usd_estimate across every
+// TaskHistory row for the given task. Surfaced on the dashboard's task
+// detail view so the operator sees actual lifetime cost from the per-
+// model price table, not a re-derived estimate from tokens alone.
+func LifetimeCostUSD(db *sql.DB, taskID int) float64 {
+	var total float64
+	db.QueryRow(`SELECT COALESCE(SUM(cost_usd_estimate), 0) FROM TaskHistory WHERE task_id = ?`, taskID).
+		Scan(&total)
+	return total
 }
 
 // ── Fleet memory ──────────────────────────────────────────────────────────────
