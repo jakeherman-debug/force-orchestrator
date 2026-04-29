@@ -156,6 +156,26 @@ func cmdDaemon(db *sql.DB) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// D2 T1-0: crash-recovery + reconciliation, in this exact order, BEFORE
+	// any agent spawns.
+	//
+	//   1. ReleaseInFlightTasks moves Locked / UnderReview / UnderCaptainReview
+	//      rows back to Pending. The shutdown path runs the same call on a
+	//      clean SIGINT, but a daemon that crashed (laptop sleep, kill -9,
+	//      power loss) leaves rows wedged in Locked. Without this call the
+	//      claim loops would skip those rows forever.
+	//   2. ReconcileOnStartup cross-checks every remaining non-terminal row
+	//      against actual disk/git state. A non-nil return is fatal — never
+	//      proceed with an unreliable fleet view (CLAUDE.md "no silent
+	//      failures"; AUDIT-020-class hazard).
+	if n := store.ReleaseInFlightTasks(db, "Fleet: reset on daemon startup (crash recovery)"); n > 0 {
+		fmt.Printf("Released %d in-flight task(s) from prior daemon (status reset to Pending).\n", n)
+	}
+	if err := agents.ReconcileOnStartup(ctx, db); err != nil {
+		fmt.Fprintf(os.Stderr, "[RECONCILE FATAL] daemon start aborted: %v\n", err)
+		os.Exit(1)
+	}
+
 	// D0-B: Construct the in-process Librarian client once at daemon
 	// startup and inject it into every agent that produces WriteMemory
 	// bounties (Jedi Council via JediCouncilConfig; Inquisitor → RunDogs
