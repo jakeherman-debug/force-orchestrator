@@ -61,9 +61,14 @@ func InitHolocronDSN(dsn string) *sql.DB {
 // identity, so Repositories.name is effectively immutable under
 // re-registration.
 func AddRepo(db *sql.DB, name, path, desc string) {
+	// D2 T1-4: New repos default to mode='read_only'. Operators promote to
+	// 'write' via the dashboard's promote-to-write button, which writes an
+	// AuditLog entry. Re-registration of an existing repo does NOT modify
+	// the mode column — the operator's prior promotion decision is
+	// preserved (UPSERT updates only local_path + description).
 	db.Exec(`INSERT INTO Repositories
-			(name, local_path, description)
-			VALUES (?, ?, ?)
+			(name, local_path, description, mode)
+			VALUES (?, ?, ?, 'read_only')
 		ON CONFLICT(name) DO UPDATE SET
 			local_path  = excluded.local_path,
 			description = excluded.description`,
@@ -87,11 +92,12 @@ func GetRepo(db *sql.DB, name string) *Repository {
 	err := db.QueryRow(`SELECT
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
-		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, '')
+		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
+		IFNULL(mode, 'read_only')
 		FROM Repositories WHERE name = ?`, name).
 		Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
-			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason)
+			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason, &r.Mode)
 	if err != nil {
 		return nil
 	}
@@ -105,7 +111,8 @@ func ListRepos(db *sql.DB) []Repository {
 	rows, err := db.Query(`SELECT
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
-		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, '')
+		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
+		IFNULL(mode, 'read_only')
 		FROM Repositories ORDER BY name`)
 	if err != nil {
 		return nil
@@ -119,7 +126,7 @@ func ListRepos(db *sql.DB) []Repository {
 		)
 		if err := rows.Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
-			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason); err != nil {
+			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason, &r.Mode); err != nil {
 			log.Printf("ListRepos: scan error: %v", err)
 			continue
 		}

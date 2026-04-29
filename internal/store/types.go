@@ -107,6 +107,12 @@ type Repository struct {
 	PRFlowEnabled    bool
 	QuarantinedAt    string
 	QuarantineReason string
+	// Mode is the D2 T1-4 tri-state writability flag:
+	//   "read_only"   — astromechs cannot claim, destructive ops refuse.
+	//   "write"       — repo is fully active.
+	//   "quarantined" — read-only behaviour plus dashboard banner +
+	//                   [QUARANTINED REPO] mail on claim attempts.
+	Mode string
 }
 
 // ── Per-(convoy, repo) ask-branch ────────────────────────────────────────────

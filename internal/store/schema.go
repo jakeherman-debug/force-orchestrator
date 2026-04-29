@@ -38,7 +38,8 @@ func createSchema(db *sql.DB) {
 		pr_flow_enabled   INTEGER DEFAULT 1,
 		quarantined_at    TEXT    DEFAULT '',
 		quarantine_reason TEXT    DEFAULT '',
-		pr_review_enabled INTEGER DEFAULT 1
+		pr_review_enabled INTEGER DEFAULT 1,
+		mode              TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined'))
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
@@ -673,6 +674,51 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id)`)
 	// Fix #7 (AUDIT-032) — classifier retry counter bounds transient failures.
 	db.Exec(`ALTER TABLE PRReviewComments ADD COLUMN classify_attempts INTEGER DEFAULT 0`)
+
+	// ── D2 T1-4: Repositories.mode (read_only | write | quarantined) ─────────
+	// Tri-state mode column. Fresh installs (createSchema) carry the CHECK
+	// constraint and a default of 'read_only' — repos opt INTO write mode via
+	// the dashboard's promote-to-write button (audit-logged). Existing repos
+	// get 'write' to preserve current behavior; the operator must explicitly
+	// step them down if a repo should be read-only.
+	//
+	// SQLite ALTER TABLE ADD COLUMN cannot retroactively add a CHECK
+	// constraint to an existing table without a full rebuild. The CHECK lives
+	// on createSchema (where fresh DBs pick it up); migrated DBs rely on the
+	// SetRepoMode store-layer validator and the AssertRepoWritable guard for
+	// enforcement. This is the same belt-and-suspenders pattern used for
+	// other ALTER-added columns where the CHECK lives in createSchema only.
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN mode TEXT NOT NULL DEFAULT 'read_only'`)
+	// Backfill: existing rows (which predate the mode column) keep behaving
+	// as they did pre-migration — i.e. fully writable. New rows added via
+	// store.AddRepo opt INTO read-only by writing 'read_only' explicitly.
+	// The UPDATE is idempotent: re-running it after a fresh install (where
+	// the column already exists with default 'read_only') would clobber
+	// new repos. Gate on the column being NULL or empty (the post-ALTER
+	// state for pre-existing rows on older SQLite versions). Since
+	// `NOT NULL DEFAULT 'read_only'` was applied on ALTER, every existing
+	// row got 'read_only' — but we want them to stay as they were
+	// (effectively 'write'). We backfill ONCE by checking whether the
+	// audit log has ever recorded a mode set for this repo; absent that,
+	// stamp 'write'. This keeps the migration idempotent across restarts.
+	//
+	// Simpler version: a repo whose row pre-existed the migration MUST
+	// have remote_url, default_branch, etc. populated by Layer B at some
+	// point, OR (for test rows) a non-empty local_path. The migration
+	// flag we use is a SystemConfig key — set after the first migration
+	// run, checked on subsequent runs.
+	var migratedAlready string
+	db.QueryRow(`SELECT IFNULL(value, '') FROM SystemConfig WHERE key = 'd2_t14_mode_backfilled'`).Scan(&migratedAlready)
+	if migratedAlready != "1" {
+		// One-shot: every existing repo row gets mode='write' so prior
+		// behavior is preserved. Idempotent guard above prevents
+		// re-clobbering on subsequent startups (which would step a
+		// freshly-created read-only repo back up to write, defeating the
+		// invariant).
+		db.Exec(`UPDATE Repositories SET mode = 'write' WHERE mode = 'read_only' OR mode = '' OR mode IS NULL`)
+		db.Exec(`INSERT INTO SystemConfig (key, value) VALUES ('d2_t14_mode_backfilled', '1')
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+	}
 
 	// ── Fleet memory: topic_tags column + FTS rebuild ────────────────────────
 	// Additive column on the main table; for the FTS5 virtual table we need to

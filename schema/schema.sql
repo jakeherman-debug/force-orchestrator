@@ -122,7 +122,8 @@ CREATE TABLE IF NOT EXISTS Repositories (
     pr_flow_enabled   INTEGER DEFAULT 1,   -- 0 = legacy local-merge, 1 = new PR flow (default)
     quarantined_at    TEXT    DEFAULT '',  -- set by repo-config-check when repo becomes unhealthy
     quarantine_reason TEXT    DEFAULT '',
-    pr_review_enabled INTEGER DEFAULT 1    -- 0 = opt-out of PR review-comment triage (AUDIT-023, Fix #4)
+    pr_review_enabled INTEGER DEFAULT 1,   -- 0 = opt-out of PR review-comment triage (AUDIT-023, Fix #4)
+    mode              TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')) -- D2 T1-4
 );
 
 -- ── Ask-branch sub-PR tracking ────────────────────────────────────────────────
