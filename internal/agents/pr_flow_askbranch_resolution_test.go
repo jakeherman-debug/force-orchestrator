@@ -52,6 +52,9 @@ func TestCompleteAskBranchResolution_ForcePushesAndUpdatesSHA(t *testing.T) {
 	// Ask-branch exists on origin at initial SHA.
 	initialSHA, _ := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
 	store.AddRepo(db, "api", repoDir, "")
+	if err := store.SetRepoMode(db, "api", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 	_ = store.SetRepoRemoteInfo(db, "api", "https://github.com/acme/api.git", "main")
 
 	cid, _ := store.CreateConvoy(db, "[1] conflict-resolution")

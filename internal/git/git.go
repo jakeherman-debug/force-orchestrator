@@ -496,8 +496,14 @@ func CommitsAhead(ctx context.Context, repoPath string, branchName string) strin
 // council members from racing on the same main worktree. Returns error if merge fails.
 // Fix #8e: ctx threads from the caller (Jedi Council's claim ctx) so a hung
 // merge cancels on daemon shutdown.
-func MergeAndCleanup(ctx context.Context, repoPath string, branchName string, worktreeDir string) error {
+// D2 T1-4: db + repoName threaded for the AssertRepoWritable mode guard.
+// Pass (nil, "") in tests that exercise raw merge mechanics without a
+// Holocron — the guard is a no-op in that case.
+func MergeAndCleanup(ctx context.Context, db *sql.DB, repoName, repoPath, branchName, worktreeDir string) error {
 	if err := AssertNotDefaultBranch(ctx, repoPath, branchName); err != nil {
+		return fmt.Errorf("MergeAndCleanup refused: %w", err)
+	}
+	if err := AssertRepoWritable(db, repoName); err != nil {
 		return fmt.Errorf("MergeAndCleanup refused: %w", err)
 	}
 	// AUDIT-046 (Fix #8d): per-repo lock, not global. Two different repos

@@ -64,6 +64,10 @@ func TestPRFlow_EndToEnd(t *testing.T) {
 
 	// Register the repo.
 	store.AddRepo(db, "api", repoDir, "")
+	// D2 T1-4: e2e test exercises the full claim+merge path; promote to write.
+	if err := store.SetRepoMode(db, "api", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 	_ = store.SetRepoRemoteInfo(db, "api", "https://github.com/acme/api.git", "main")
 	_ = store.SetRepoPRTemplatePath(db, "api", tplPath)
 
@@ -279,6 +283,10 @@ func TestPRFlow_LegacyPath_StillWorksWhenPRFlowDisabled(t *testing.T) {
 	exec.Command("git", "-C", dir, "commit", "-q", "-m", "initial").Run()
 
 	store.AddRepo(db, "legacy", dir, "")
+	// D2 T1-4: legacy path still requires mode=write to pass the destructive-op guard.
+	if err := store.SetRepoMode(db, "legacy", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 	_ = store.SetRepoPRFlowEnabled(db, "legacy", false)
 
 	cid, _ := store.CreateConvoy(db, "[1] legacy-test")

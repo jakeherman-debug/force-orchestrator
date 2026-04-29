@@ -390,7 +390,7 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 		}
 
 		logger.Printf("Task %d: APPROVED — merging branch %s", b.ID, branchName)
-		if mergeErr := igit.MergeAndCleanup(ctx, repoPath, branchName, worktreeDir); mergeErr != nil {
+		if mergeErr := igit.MergeAndCleanup(ctx, db, b.TargetRepo, repoPath, branchName, worktreeDir); mergeErr != nil {
 			msg := fmt.Sprintf("Merge Err: %v", mergeErr)
 			logger.Printf("Task %d: merge failed: %v", b.ID, mergeErr)
 			errStr := mergeErr.Error()

@@ -149,7 +149,7 @@ func runRebaseAgentBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty,
 	}
 
 	// Clean rebase — force-push the agent branch so the open sub-PR auto-updates.
-	if pushErr := igit.ForcePushBranch(ctx, repo.LocalPath, p.Branch); pushErr != nil {
+	if pushErr := igit.ForcePushBranch(ctx, db, repo.Name, repo.LocalPath, p.Branch); pushErr != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("force-push %s failed: %v", p.Branch, pushErr)); fbErr != nil {
 			logger.Printf("RebaseAgentBranch #%d: FailBounty after force-push failure failed: %v — stale-lock detector will recover", bounty.ID, fbErr)
 		}

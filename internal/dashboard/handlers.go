@@ -421,7 +421,7 @@ func approveTask(ctx context.Context, db *sql.DB, id int, w http.ResponseWriter)
 	}
 	worktreeDir := igit.ResolveWorktreeDir(db, branchName, repoPath, id, agents.BranchAgentName)
 	diff := igit.GetDiff(ctx, repoPath, branchName)
-	if mergeErr := igit.MergeAndCleanup(ctx, repoPath, branchName, worktreeDir); mergeErr != nil {
+	if mergeErr := igit.MergeAndCleanup(ctx, db, b.TargetRepo, repoPath, branchName, worktreeDir); mergeErr != nil {
 		http.Error(w,
 			fmt.Sprintf(`{"error":"merge failed: %s"}`, strings.ReplaceAll(mergeErr.Error(), `"`, `'`)),
 			http.StatusInternalServerError)

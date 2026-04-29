@@ -462,7 +462,7 @@ func cmdApproveTask(ctx context.Context, db *sql.DB, id int) {
 	worktreeDir := igit.ResolveWorktreeDir(db, branchName, repoPath, id, agents.BranchAgentName)
 	// Get diff before merge — branch is deleted by MergeAndCleanup.
 	diff := igit.GetDiff(ctx, repoPath, branchName)
-	if mergeErr := igit.MergeAndCleanup(ctx, repoPath, branchName, worktreeDir); mergeErr != nil {
+	if mergeErr := igit.MergeAndCleanup(ctx, db, b.TargetRepo, repoPath, branchName, worktreeDir); mergeErr != nil {
 		fmt.Printf("Merge failed: %v\n", mergeErr)
 		os.Exit(1)
 	}

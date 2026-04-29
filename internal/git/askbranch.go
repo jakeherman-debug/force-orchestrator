@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -115,11 +116,17 @@ func CreateAskBranch(ctx context.Context, repoPath, branchName string) (string, 
 // DeleteAskBranch deletes the branch both locally and on origin. Idempotent:
 // missing branches are not errors.
 // Fix #8e: ctx threads from the caller.
-func DeleteAskBranch(ctx context.Context, repoPath, branchName string) error {
+// D2 T1-4: db + repoName threaded for the AssertRepoWritable mode guard.
+// Pass (nil, "") in tests that exercise raw git mechanics without a
+// Holocron — the guard is a no-op in that case.
+func DeleteAskBranch(ctx context.Context, db *sql.DB, repoName, repoPath, branchName string) error {
 	if branchName == "" {
 		return fmt.Errorf("DeleteAskBranch: branchName required")
 	}
 	if err := AssertNotDefaultBranch(ctx, repoPath, branchName); err != nil {
+		return fmt.Errorf("DeleteAskBranch refused: %w", err)
+	}
+	if err := AssertRepoWritable(db, repoName); err != nil {
 		return fmt.Errorf("DeleteAskBranch refused: %w", err)
 	}
 	// Local delete — ignore errors (branch may not exist locally). `--` keeps
@@ -386,8 +393,13 @@ func MergeWithUnionStrategy(ctx context.Context, repoPath, branch, baseRef, mess
 // from clobbering another push that raced us.
 // Fix #8e: ctx threads from the caller (Pilot/Diplomat claim ctx) so the
 // network push cancels on daemon shutdown.
-func ForcePushBranch(ctx context.Context, repoPath, branch string) error {
+// D2 T1-4: db + repoName threaded for the AssertRepoWritable mode guard.
+// Pass (nil, "") in tests that exercise raw push mechanics.
+func ForcePushBranch(ctx context.Context, db *sql.DB, repoName, repoPath, branch string) error {
 	if err := AssertNotDefaultBranch(ctx, repoPath, branch); err != nil {
+		return fmt.Errorf("ForcePushBranch refused: %w", err)
+	}
+	if err := AssertRepoWritable(db, repoName); err != nil {
 		return fmt.Errorf("ForcePushBranch refused: %w", err)
 	}
 	// `--` separator before the branch positional (Fix #9).
@@ -422,8 +434,13 @@ func ForcePushBranch(ctx context.Context, repoPath, branch string) error {
 // what else is checked out.
 // Fix #8e: ctx threads from the caller (the dog ctx for stall retriggers)
 // so the network fetch/push cancels on daemon shutdown.
-func TriggerCIRerun(ctx context.Context, repoPath, branch, message string) error {
+// D2 T1-4: db + repoName threaded for the AssertRepoWritable mode guard.
+// Pass (nil, "") in tests that exercise raw retrigger mechanics.
+func TriggerCIRerun(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error {
 	if err := AssertNotDefaultBranch(ctx, repoPath, branch); err != nil {
+		return fmt.Errorf("TriggerCIRerun refused: %w", err)
+	}
+	if err := AssertRepoWritable(db, repoName); err != nil {
 		return fmt.Errorf("TriggerCIRerun refused: %w", err)
 	}
 	if message == "" {

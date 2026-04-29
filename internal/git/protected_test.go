@@ -111,7 +111,7 @@ func TestForcePushBranch_RefusesProtectedBeforeShellout(t *testing.T) {
 	t.Parallel()
 	// Path never touched. The guard must fire first. If shellout happened,
 	// we'd see a "not a git repository" error instead.
-	err := ForcePushBranch(context.Background(), "/definitely/does/not/exist", "main")
+	err := ForcePushBranch(context.Background(), nil, "", "/definitely/does/not/exist", "main")
 	if err == nil {
 		t.Fatalf("ForcePushBranch(main) returned nil; expected protected-branch error")
 	}
@@ -123,14 +123,14 @@ func TestForcePushBranch_RefusesProtectedBeforeShellout(t *testing.T) {
 	}
 	// Belt-and-suspenders: also test with a real repo whose HEAD is main.
 	repo := makeTempRepoForGuardTest(t)
-	if err := ForcePushBranch(context.Background(), repo, "main"); err == nil {
+	if err := ForcePushBranch(context.Background(), nil, "", repo, "main"); err == nil {
 		t.Fatalf("ForcePushBranch(%s, main) on real repo returned nil", repo)
 	}
 }
 
 func TestTriggerCIRerun_RefusesProtectedBeforeShellout(t *testing.T) {
 	t.Parallel()
-	err := TriggerCIRerun(context.Background(), "/definitely/does/not/exist", "main", "")
+	err := TriggerCIRerun(context.Background(), nil, "", "/definitely/does/not/exist", "main", "")
 	if err == nil {
 		t.Fatalf("TriggerCIRerun(main) returned nil; expected protected-branch error")
 	}
@@ -138,7 +138,7 @@ func TestTriggerCIRerun_RefusesProtectedBeforeShellout(t *testing.T) {
 		t.Fatalf("error does not identify refusal: %v", err)
 	}
 	// Empty-branch attack surface (formerly defaulted to pr.Repo in pr_flow.go).
-	if err := TriggerCIRerun(context.Background(), "/tmp", "", "msg"); err == nil {
+	if err := TriggerCIRerun(context.Background(), nil, "", "/tmp", "", "msg"); err == nil {
 		t.Fatalf("TriggerCIRerun(empty) returned nil; empty branch must be rejected")
 	}
 }

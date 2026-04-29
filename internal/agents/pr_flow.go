@@ -187,6 +187,13 @@ func completeAskBranchResolution(ctx context.Context, db *sql.DB, bounty *store.
 		logger.Printf("Task %d: ask-branch %q rejected by protected-branch guard: %v", bounty.ID, ab.AskBranch, err)
 		return gh.ErrClassPermanent, fmt.Errorf("protected-branch guard: %w", err)
 	}
+	// D2 T1-4: second guard — refuse force-push when the repo is not in
+	// write mode. AssertNotDefaultBranch protects "main"; AssertRepoWritable
+	// is the per-repo opt-in policy on top of that.
+	if err := igit.AssertRepoWritable(db, repo.Name); err != nil {
+		logger.Printf("Task %d: ask-branch %q rejected by repo-mode guard: %v", bounty.ID, ab.AskBranch, err)
+		return gh.ErrClassPermanent, fmt.Errorf("repo-mode guard: %w", err)
+	}
 	if !igit.IsValidAskBranch(ab.AskBranch) {
 		logger.Printf("Task %d: ask-branch %q fails ask-branch naming pattern — refusing force-push", bounty.ID, ab.AskBranch)
 		return gh.ErrClassPermanent, fmt.Errorf("ask-branch %q does not match expected <prefix>force/ask-<id>-<slug> pattern", ab.AskBranch)
@@ -704,14 +711,15 @@ func escalateSubPR(db *sql.DB, pr store.AskBranchPR, severity store.EscalationSe
 // a stuck CI run by force-pushing an empty commit. Tests swap it out.
 // Fix #8e: signature now takes ctx so the underlying TriggerCIRerun (network
 // fetch + push) cancels on daemon shutdown.
-var triggerStalledRerunFn = func(ctx context.Context, repoPath, branch, message string) error {
-	return igit.TriggerCIRerun(ctx, repoPath, branch, message)
+// D2 T1-4: db + repoName threaded for the AssertRepoWritable mode guard.
+var triggerStalledRerunFn = func(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error {
+	return igit.TriggerCIRerun(ctx, db, repoName, repoPath, branch, message)
 }
 
 // SetTriggerStalledRerunForTest lets external packages install a fake re-trigger
 // function for the duration of a test. Call the returned restore fn (or use
 // t.Cleanup) to put the real impl back.
-func SetTriggerStalledRerunForTest(fn func(ctx context.Context, repoPath, branch, message string) error) (restore func()) {
+func SetTriggerStalledRerunForTest(fn func(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error) (restore func()) {
 	prev := triggerStalledRerunFn
 	triggerStalledRerunFn = fn
 	return func() { triggerStalledRerunFn = prev }
@@ -825,7 +833,7 @@ func onSubPRStalled(ctx context.Context, db *sql.DB, ghc interface {
 	}
 
 	retriggerMsg := fmt.Sprintf("ci: retrigger stalled run (sub-PR #%d)", pr.PRNumber)
-	if err := triggerStalledRerunFn(ctx, cwd, branch, retriggerMsg); err != nil {
+	if err := triggerStalledRerunFn(ctx, db, pr.Repo, cwd, branch, retriggerMsg); err != nil {
 		logger.Printf("sub-pr-ci-watch: sub-PR #%d re-trigger push failed: %v — escalating", pr.PRNumber, err)
 		msg := fmt.Sprintf("sub-PR #%d: CI stall re-trigger failed: %v", pr.PRNumber, err)
 		if escErr := escalateSubPR(db, pr, store.SeverityMedium, msg); escErr != nil {

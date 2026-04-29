@@ -55,7 +55,7 @@ func TestOnSubPRStalled_AllQueuedChecks_TriggersRerun(t *testing.T) {
 		called bool
 		branch string
 	}
-	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error {
 		triggered.called = true
 		triggered.branch = branch
 		return nil
@@ -102,7 +102,7 @@ func TestOnSubPRStalled_InProgressCheck_WaitsWithoutAction(t *testing.T) {
 	db, pr := seedStalePRScenario(t, 3*time.Hour)
 
 	var rerunCalled bool
-	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error {
 		rerunCalled = true
 		return nil
 	})
@@ -142,7 +142,7 @@ func TestOnSubPRStalled_RetriggerCapHit_Escalates(t *testing.T) {
 	pr.StallRetriggerCount = subPRMaxStallRetriggers
 
 	var rerunCalled bool
-	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error {
 		rerunCalled = true
 		return nil
 	})
@@ -177,7 +177,7 @@ func TestOnSubPRStalled_HardLimitReached_EscalatesRegardless(t *testing.T) {
 	db, pr := seedStalePRScenario(t, subPRCIHardLimit+30*time.Minute)
 
 	var rerunCalled bool
-	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error {
 		rerunCalled = true
 		return nil
 	})
@@ -206,7 +206,7 @@ func TestOnSubPRStalled_HardLimitReached_EscalatesRegardless(t *testing.T) {
 func TestOnSubPRStalled_RetriggerFailure_Escalates(t *testing.T) {
 	db, pr := seedStalePRScenario(t, 3*time.Hour)
 
-	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, repoPath, branch, message string) error {
+	restore := SetTriggerStalledRerunForTest(func(ctx context.Context, db *sql.DB, repoName, repoPath, branch, message string) error {
 		return &triggerFailErr{msg: "git push: auth rejected"}
 	})
 	defer restore()

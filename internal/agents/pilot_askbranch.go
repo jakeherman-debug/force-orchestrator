@@ -285,7 +285,7 @@ func runCleanupAskBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, 
 			deleted = append(deleted, ab.Repo+"(row-only)")
 			continue
 		}
-		if err := igit.DeleteAskBranch(ctx, repo.LocalPath, ab.AskBranch); err != nil {
+		if err := igit.DeleteAskBranch(ctx, db, repo.Name, repo.LocalPath, ab.AskBranch); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", ab.Repo, err))
 			continue
 		}

@@ -456,7 +456,7 @@ func TestGetDiffAndMerge(t *testing.T) {
 	}
 
 	// MergeAndCleanup should merge successfully
-	if mergeErr := MergeAndCleanup(context.Background(), dir, branch, wt); mergeErr != nil {
+	if mergeErr := MergeAndCleanup(context.Background(), nil, "", dir, branch, wt); mergeErr != nil {
 		t.Fatalf("MergeAndCleanup: %v", mergeErr)
 	}
 
@@ -486,7 +486,7 @@ func TestMergeAndCleanup_MergeFail(t *testing.T) {
 	}
 	dir := initTestRepo(t)
 	// Try to merge a branch that doesn't exist → merge should fail
-	err := MergeAndCleanup(context.Background(), dir, "nonexistent-branch", dir)
+	err := MergeAndCleanup(context.Background(), nil, "", dir, "nonexistent-branch", dir)
 	if err == nil {
 		t.Error("expected error when merging nonexistent branch")
 	}
@@ -498,7 +498,7 @@ func TestMergeAndCleanup_CheckoutFail(t *testing.T) {
 	}
 	// Non-git directory causes `git checkout <branch>` to fail immediately
 	dir := t.TempDir()
-	err := MergeAndCleanup(context.Background(), dir, "some-branch", dir)
+	err := MergeAndCleanup(context.Background(), nil, "", dir, "some-branch", dir)
 	if err == nil {
 		t.Error("expected error from MergeAndCleanup with non-git directory")
 	}
@@ -532,7 +532,7 @@ func TestMergeAndCleanup_Success(t *testing.T) {
 	cmd3.Env = gitEnv
 	cmd3.Run()
 
-	err := MergeAndCleanup(context.Background(), dir, branchName, dir)
+	err := MergeAndCleanup(context.Background(), nil, "", dir, branchName, dir)
 	if err != nil {
 		t.Errorf("expected successful merge, got: %v", err)
 	}

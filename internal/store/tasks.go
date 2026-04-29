@@ -136,6 +136,70 @@ func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) 
 	return nil, false
 }
 
+// ClaimBountyForWrite is the astromech-specific claim variant. It mirrors
+// ClaimBounty but additionally requires the target repo to be in
+// mode='write'. Repos in 'read_only' or 'quarantined' mode are skipped at
+// the SQL level so the astromech never wakes up on them — the
+// AssertRepoWritable guard in destructive git ops is the
+// belt-and-suspenders layer for the rare race where a repo is stepped
+// down between claim and push.
+//
+// The (target_repo IS NULL OR target_repo = '') guard accommodates legacy
+// rows that pre-date the Repositories registry — they fall through the
+// JOIN and are still claimable. New rows always carry a target_repo.
+//
+// D2 T1-4. The Repositories.mode column is NOT NULL DEFAULT 'read_only'
+// (see schema.go createSchema), so the JOIN never produces NULLs except
+// for the legacy-row case above.
+func ClaimBountyForWrite(db *sql.DB, taskType string, agentName string) (*Bounty, bool) {
+	var b Bounty
+	err := db.QueryRow(`
+		SELECT id, parent_id, target_repo, type, status, payload, convoy_id, checkpoint,
+		       priority, IFNULL(task_timeout,0)
+		FROM BountyBoard
+		WHERE status = 'Pending' AND type = ?
+		  AND (
+		    target_repo IS NULL OR target_repo = ''
+		    OR EXISTS (
+		      SELECT 1 FROM Repositories r
+		      WHERE r.name = BountyBoard.target_repo AND r.mode = 'write'
+		    )
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM TaskDependencies td
+		    JOIN BountyBoard dep ON dep.id = td.depends_on
+		    WHERE td.task_id = BountyBoard.id AND dep.status != 'Completed'
+		  )
+		  AND (convoy_id = 0 OR NOT EXISTS (
+		    SELECT 1 FROM FeatureBlockers fb
+		    WHERE fb.blocked_convoy_id = BountyBoard.convoy_id AND fb.resolved_at IS NULL
+		  ))
+		ORDER BY priority DESC, id ASC
+		LIMIT 1`, taskType).
+		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Type, &b.Status,
+			&b.Payload, &b.ConvoyID, &b.Checkpoint, &b.Priority, &b.TaskTimeout)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("ClaimBountyForWrite(type=%s, agent=%s): DB error (not ErrNoRows): %v", taskType, agentName, err)
+		}
+		return nil, false
+	}
+	res, err := db.Exec(`
+		UPDATE BountyBoard SET status = 'Locked', owner = ?, locked_at = datetime('now')
+		WHERE id = ? AND status = 'Pending'`, agentName, b.ID)
+	if err != nil {
+		log.Printf("ClaimBountyForWrite(id=%d, agent=%s): lock UPDATE failed: %v", b.ID, agentName, err)
+		return nil, false
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 1 {
+		b.Status = "Locked"
+		b.Owner = agentName
+		return &b, true
+	}
+	return nil, false
+}
+
 // ClaimForReview atomically claims the next task awaiting council review.
 // Higher-priority tasks are reviewed first, matching the claim order used by Astromechs.
 // AUDIT-068 (Fix #8d): non-ErrNoRows errors are logged.

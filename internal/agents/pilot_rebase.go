@@ -155,7 +155,7 @@ func runRebaseAskBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, l
 		if unionErr == nil {
 			// Union merge succeeded in a temp worktree; the local ref now
 			// points at the merge commit. Push it.
-			if pushErr := igit.ForcePushBranch(ctx, repo.LocalPath, ab.AskBranch); pushErr != nil {
+			if pushErr := igit.ForcePushBranch(ctx, db, repo.Name, repo.LocalPath, ab.AskBranch); pushErr != nil {
 				logger.Printf("RebaseAskBranch #%d: union merge succeeded but push failed: %v — falling through to astromech", bounty.ID, pushErr)
 			} else {
 				if err := store.UpdateConvoyAskBranchBase(db, payload.ConvoyID, payload.Repo, unionTip); err != nil {
@@ -223,7 +223,7 @@ func runRebaseAskBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, l
 	}
 
 	// Clean rebase — force-push with lease, update stored base SHA.
-	if pushErr := igit.ForcePushBranch(ctx, repo.LocalPath, ab.AskBranch); pushErr != nil {
+	if pushErr := igit.ForcePushBranch(ctx, db, repo.Name, repo.LocalPath, ab.AskBranch); pushErr != nil {
 		cls := gh.ClassifyError(pushErr.Error())
 		if cls.ShouldRetry() {
 			// Put the task back to Pending so the next Pilot tick retries.

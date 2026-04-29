@@ -422,7 +422,11 @@ func SpawnAstromech(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		bounty, claimed := store.ClaimBounty(db, "CodeEdit", name)
+		// D2 T1-4: ClaimBountyForWrite filters to repos with mode='write'.
+		// Read-only / quarantined repos never produce CodeEdit claims; the
+		// AssertRepoWritable guard in destructive git ops is the second
+		// layer that catches a step-down race between claim and push.
+		bounty, claimed := store.ClaimBountyForWrite(db, "CodeEdit", name)
 		if !claimed {
 			// Jitter prevents all agents from hammering the DB in lockstep
 			time.Sleep(time.Duration(1500+rand.Intn(1000)) * time.Millisecond)

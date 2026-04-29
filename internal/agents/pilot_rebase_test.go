@@ -52,6 +52,9 @@ func setupRebaseScenario(t *testing.T, db *sql.DB, askBranch string) (convoyID i
 	run("checkout", "main")
 
 	store.AddRepo(db, "api", repoDir, "")
+	if err := store.SetRepoMode(db, "api", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 	_ = store.SetRepoRemoteInfo(db, "api", "https://github.com/acme/api.git", "main")
 	convoyID, _ = store.CreateConvoy(db, "[rebase-test-"+askBranch+"] t")
 	_ = store.UpsertConvoyAskBranch(db, convoyID, "api", askBranch, baseSHA)

@@ -280,7 +280,7 @@ func openDraftPRForAskBranch(ctx context.Context, db *sql.DB, agentName string, 
 		return fmt.Errorf("final rebase of %s onto %s failed: %w — manual intervention needed",
 			ab.AskBranch, defaultBranch, rebaseErr)
 	}
-	if err := igit.ForcePushBranch(ctx, repo.LocalPath, ab.AskBranch); err != nil {
+	if err := igit.ForcePushBranch(ctx, db, repo.Name, repo.LocalPath, ab.AskBranch); err != nil {
 		return fmt.Errorf("force-push after rebase failed: %w", err)
 	}
 	if err := store.UpdateConvoyAskBranchBase(db, ab.ConvoyID, ab.Repo, newTip); err != nil {

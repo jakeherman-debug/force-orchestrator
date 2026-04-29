@@ -108,7 +108,7 @@ func TestDeleteAskBranch_RemovesBothLocalAndRemote(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
 	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-doomed")
 
-	if err := DeleteAskBranch(context.Background(), wt, "force/ask-1-doomed"); err != nil {
+	if err := DeleteAskBranch(context.Background(), nil, "", wt, "force/ask-1-doomed"); err != nil {
 		t.Fatalf("DeleteAskBranch: %v", err)
 	}
 	// Gone from origin.
@@ -126,7 +126,7 @@ func TestDeleteAskBranch_RemovesBothLocalAndRemote(t *testing.T) {
 func TestDeleteAskBranch_IdempotentOnMissingBranch(t *testing.T) {
 	wt, _ := makeOriginAndClone(t)
 	// Branch was never created — delete should succeed without error.
-	if err := DeleteAskBranch(context.Background(), wt, "force/ask-1-neverexisted"); err != nil {
+	if err := DeleteAskBranch(context.Background(), nil, "", wt, "force/ask-1-neverexisted"); err != nil {
 		t.Errorf("expected clean exit for missing branch: %v", err)
 	}
 }
@@ -320,7 +320,7 @@ func TestTriggerCIRerun_PushesEmptyCommit(t *testing.T) {
 	beforeOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-rerun").Output()
 	before := strings.TrimSpace(string(beforeOut))
 
-	if err := TriggerCIRerun(context.Background(), wt, "force/ask-1-rerun", "ci: retrigger"); err != nil {
+	if err := TriggerCIRerun(context.Background(), nil, "", wt, "force/ask-1-rerun", "ci: retrigger"); err != nil {
 		t.Fatalf("TriggerCIRerun: %v", err)
 	}
 
@@ -355,7 +355,7 @@ func TestTriggerCIRerun_DoesNotMoveLocalBranch(t *testing.T) {
 	localBefore, _ := exec.Command("git", "-C", wt, "rev-parse", "force/ask-1-nolocal").Output()
 	headBefore, _ := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
 
-	if err := TriggerCIRerun(context.Background(), wt, "force/ask-1-nolocal", "ci: retrigger"); err != nil {
+	if err := TriggerCIRerun(context.Background(), nil, "", wt, "force/ask-1-nolocal", "ci: retrigger"); err != nil {
 		t.Fatalf("TriggerCIRerun: %v", err)
 	}
 
@@ -373,7 +373,7 @@ func TestTriggerCIRerun_DefaultMessageWhenEmpty(t *testing.T) {
 	wt, origin := makeOriginAndClone(t)
 	_, _ = CreateAskBranch(context.Background(), wt, "force/ask-1-default-msg")
 
-	if err := TriggerCIRerun(context.Background(), wt, "force/ask-1-default-msg", ""); err != nil {
+	if err := TriggerCIRerun(context.Background(), nil, "", wt, "force/ask-1-default-msg", ""); err != nil {
 		t.Fatalf("TriggerCIRerun: %v", err)
 	}
 	tipOut, _ := exec.Command("git", "-C", origin, "rev-parse", "force/ask-1-default-msg").Output()
@@ -505,7 +505,7 @@ func TestForcePushBranch_SucceedsAfterLocalCommit(t *testing.T) {
 	exec.Command("git", "-C", wt, "add", "new.txt").Run()
 	exec.Command("git", "-C", wt, "commit", "-q", "-m", "add new").Run()
 
-	if err := ForcePushBranch(context.Background(), wt, "force/ask-1-push"); err != nil {
+	if err := ForcePushBranch(context.Background(), nil, "", wt, "force/ask-1-push"); err != nil {
 		t.Fatalf("force-push: %v", err)
 	}
 	// Origin should have the new commit.

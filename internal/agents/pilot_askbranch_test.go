@@ -271,6 +271,9 @@ func TestRunCleanupAskBranch_DeletesBranchesAndRows(t *testing.T) {
 
 	wt, _ := makeOriginAndClone(t)
 	store.AddRepo(db, "api", wt, "")
+	if err := store.SetRepoMode(db, "api", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 	_ = store.SetRepoRemoteInfo(db, "api", "file://"+wt, "main")
 
 	cid, _ := store.CreateConvoy(db, "[10] cleanup-me")

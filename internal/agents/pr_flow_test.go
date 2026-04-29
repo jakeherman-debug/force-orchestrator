@@ -96,6 +96,12 @@ func setupSubPRScenario(t *testing.T, db *sql.DB) (convoyID, taskID int, repoDir
 	run("remote", "set-head", "origin", "main")
 
 	store.AddRepo(db, "api", repoDir, "")
+	// D2 T1-4: AddRepo defaults to read_only; promote to write so the
+	// astromech claim filter and destructive-op guard let this fixture
+	// run the full PR/legacy flow.
+	if err := store.SetRepoMode(db, "api", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 	_ = store.SetRepoRemoteInfo(db, "api", "https://github.com/acme/api.git", "main")
 
 	convoyID, _ = store.CreateConvoy(db, "[1] test")

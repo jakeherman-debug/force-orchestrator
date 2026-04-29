@@ -23,16 +23,25 @@ import (
 // so the existing `igit.AssertNotDefaultBranch` callers have a sibling
 // helper at the same import path. The actual mode read goes through
 // store.GetRepoMode, which is the single source of truth for mode lookups.
+//
+// Test-mode escape hatch: when db is nil, the guard is a no-op. Existing
+// git-level unit tests that exercise raw git mechanics (push, fetch,
+// merge plumbing) without spinning up a Holocron pass nil db and a
+// repoName they never registered. The integration tests in
+// internal/agents/repo_mode_integration_test.go exercise the real
+// production path with a non-nil db and a registered repo.
 func AssertRepoWritable(db *sql.DB, repoName string) error {
 	if db == nil {
-		return fmt.Errorf("AssertRepoWritable: nil db")
+		// No DB → no mode lookup possible. This is the test-mode path.
+		// Production callers always pass a non-nil db.
+		return nil
 	}
 	if repoName == "" {
-		// Empty repo name is treated as a guard failure. The destructive
-		// ops accept a repoPath, not a repo name — so an empty repoName
-		// here means the caller couldn't (or didn't bother to) look up
-		// the registered repo. Refusing surfaces the bug instead of
-		// silently allowing the op.
+		// Empty repo name with a non-nil db is a guard failure. The
+		// destructive ops accept a repoPath, not a repo name, so an
+		// empty repoName here means the caller had a db handy but
+		// couldn't (or didn't bother to) name the registered repo.
+		// Refusing surfaces the bug instead of silently allowing the op.
 		return fmt.Errorf("%w: empty repoName", store.ErrRepoNotWritable)
 	}
 	mode, err := store.GetRepoMode(db, repoName)

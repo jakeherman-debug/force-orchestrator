@@ -257,6 +257,9 @@ func setupShipScenario(t *testing.T, db *sql.DB) (convoyID int, repoDir string) 
 	run("checkout", "main")
 
 	store.AddRepo(db, "api", repoDir, "")
+	if err := store.SetRepoMode(db, "api", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 	_ = store.SetRepoRemoteInfo(db, "api", "https://github.com/acme/api.git", "main")
 	convoyID, _ = store.CreateConvoy(db, "[1] ship-test")
 	tid, _ := store.AddConvoyTask(db, 0, "api", "add feature", convoyID, 0, "Pending")

@@ -157,6 +157,9 @@ func TestRunCouncilTask_Approved(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 	store.AddRepo(db, "myrepo", repoDir, "test")
+	if err := store.SetRepoMode(db, "myrepo", store.ModeWrite, "test"); err != nil {
+		t.Fatalf("SetRepoMode write: %v", err)
+	}
 
 	id := store.AddBounty(db, 0, "CodeEdit", "fix bug")
 	db.Exec(`UPDATE BountyBoard SET status = 'UnderReview', target_repo = 'myrepo', branch_name = ? WHERE id = ?`, branchName, id)
