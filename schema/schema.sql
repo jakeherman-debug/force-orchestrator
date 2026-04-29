@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     reshard_generation        INTEGER DEFAULT 0,   -- Fix #6: auto-reshard generation stamp; queueReshardDecompose refuses past maxReshardGeneration (2)
     parse_failure_count       INTEGER DEFAULT 0,   -- Fix #7: LLM JSON-parse failures on this row; ConvoyReview escalates at 2
     last_findings_fingerprint TEXT    DEFAULT '',  -- Fix #7: SHA256 of last pass's finding set; pass-to-pass dedup gate
+    spend_suspended           INTEGER DEFAULT 0,   -- D2 T1-1: dogTaskSpendWatch sets to 1 when trailing-10m cost > escalate threshold; claim queries skip
     created_at                TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty
@@ -187,22 +188,37 @@ CREATE TABLE IF NOT EXISTS Agents (
 -- Full Claude output for every attempt (seance). Used for debugging and context injection.
 
 CREATE TABLE IF NOT EXISTS TaskHistory (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id       INTEGER NOT NULL,
-    attempt       INTEGER NOT NULL,
-    agent         TEXT    NOT NULL,
-    session_id    TEXT    NOT NULL,
-    claude_output TEXT    NOT NULL,
-    outcome       TEXT    NOT NULL,  -- 'Completed' | 'Failed' | 'Escalated' | 'Sharded' | 'Timeout' | 'Rejected'
-    tokens_in     INTEGER DEFAULT 0,
-    tokens_out    INTEGER DEFAULT 0,
-    memory_ids    TEXT    DEFAULT '',  -- CSV of FleetMemory.id values injected into this attempt's prompt
-    created_at    TEXT    DEFAULT (datetime('now'))
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id           INTEGER NOT NULL,
+    attempt           INTEGER NOT NULL,
+    agent             TEXT    NOT NULL,
+    session_id        TEXT    NOT NULL,
+    claude_output     TEXT    NOT NULL,
+    outcome           TEXT    NOT NULL,  -- 'Completed' | 'Failed' | 'Escalated' | 'Sharded' | 'Timeout' | 'Rejected'
+    tokens_in         INTEGER DEFAULT 0,
+    tokens_out        INTEGER DEFAULT 0,
+    cost_usd_estimate REAL    DEFAULT 0,  -- D2 T1-1: per-attempt cost in USD from claude.pricing.CostUSD(model, in, out)
+    memory_ids        TEXT    DEFAULT '', -- CSV of FleetMemory.id values injected into this attempt's prompt
+    created_at        TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-010, Fix #4).
 CREATE INDEX IF NOT EXISTS idx_taskhistory_task_id       ON TaskHistory (task_id);
 CREATE INDEX IF NOT EXISTS idx_taskhistory_created_at    ON TaskHistory (created_at);
 CREATE INDEX IF NOT EXISTS idx_taskhistory_outcome_agent ON TaskHistory (outcome, agent);
+
+-- ── Per-task spend anomaly ledger (D2 T1-1) ──────────────────────────────────
+-- One row per (task_id, window_start) when dogTaskSpendWatch detects a 10-min
+-- trailing window cost above per_task_spend_alert_usd. notified_at is the
+-- idempotency anchor — a subsequent dog tick within the same window finds the
+-- existing row and skips re-mailing.
+CREATE TABLE IF NOT EXISTS TaskSpendWatch (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      INTEGER NOT NULL,
+    window_start TEXT    NOT NULL,
+    cost_usd     REAL    DEFAULT 0,
+    notified_at  TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_taskspendwatch_task_window ON TaskSpendWatch (task_id, window_start);
 
 -- ── Escalations ───────────────────────────────────────────────────────────────
 -- State machine: Open → Acknowledged → Closed.

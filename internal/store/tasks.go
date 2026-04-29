@@ -96,11 +96,17 @@ func GetBounty(db *sql.DB, id int) (*Bounty, error) {
 // identical to "queue empty."
 func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) {
 	var b Bounty
+	// D2 T1-1: filter out spend_suspended rows. dogTaskSpendWatch sets the
+	// flag when a single task's trailing-10-min cost exceeds the escalate
+	// threshold; skipping at the claim query (rather than at task pickup
+	// time) keeps the gate atomic — no race where the spawn loop picks up
+	// the row between the Read and the suspended check.
 	err := db.QueryRow(`
 		SELECT id, parent_id, target_repo, type, status, payload, convoy_id, checkpoint,
 		       priority, IFNULL(task_timeout,0)
 		FROM BountyBoard
 		WHERE status = 'Pending' AND type = ?
+		  AND IFNULL(spend_suspended, 0) = 0
 		  AND NOT EXISTS (
 		    SELECT 1 FROM TaskDependencies td
 		    JOIN BountyBoard dep ON dep.id = td.depends_on
@@ -208,6 +214,7 @@ func ClaimForReview(db *sql.DB, agentName string) (*Bounty, bool) {
 	err := db.QueryRow(`
 		SELECT id, parent_id, target_repo, payload, retry_count, branch_name, convoy_id, priority
 		FROM BountyBoard WHERE status = 'AwaitingCouncilReview'
+		  AND IFNULL(spend_suspended, 0) = 0
 		ORDER BY priority DESC, id ASC
 		LIMIT 1`).
 		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Payload, &b.RetryCount, &b.BranchName, &b.ConvoyID, &b.Priority)
@@ -238,6 +245,7 @@ func ClaimForCaptainReview(db *sql.DB, agentName string) (*Bounty, bool) {
 	err := db.QueryRow(`
 		SELECT id, parent_id, target_repo, payload, retry_count, branch_name, convoy_id, priority
 		FROM BountyBoard WHERE status = 'AwaitingCaptainReview'
+		  AND IFNULL(spend_suspended, 0) = 0
 		ORDER BY priority DESC, id ASC
 		LIMIT 1`).
 		Scan(&b.ID, &b.ParentID, &b.TargetRepo, &b.Payload, &b.RetryCount, &b.BranchName, &b.ConvoyID, &b.Priority)
@@ -1052,6 +1060,46 @@ func RecordTaskHistoryTx(tx *sql.Tx, taskID int, agent, sessionID, output, outco
 // UpdateTaskHistoryTokens records token usage on an existing history row.
 func UpdateTaskHistoryTokens(db *sql.DB, historyID int64, tokensIn, tokensOut int) {
 	db.Exec(`UPDATE TaskHistory SET tokens_in = ?, tokens_out = ? WHERE id = ?`, tokensIn, tokensOut, historyID)
+}
+
+// UpdateTaskHistoryCost (D2 T1-1) records token usage AND the per-attempt
+// cost estimate on an existing history row. Callers compute costUSD via
+// claude.pricing.CostUSD(model, tokensIn, tokensOut) so the model→cost
+// table stays the single source of truth and dashboard sums don't have to
+// re-derive prices from the tokens column.
+//
+// Returns error per CLAUDE.md "new mutator policy" — a write failure here
+// silently dropped per-task cost data, blinding the spend-watch dog to
+// runaway agents.
+func UpdateTaskHistoryCost(db *sql.DB, historyID int64, tokensIn, tokensOut int, costUSD float64) error {
+	_, err := db.Exec(
+		`UPDATE TaskHistory SET tokens_in = ?, tokens_out = ?, cost_usd_estimate = ? WHERE id = ?`,
+		tokensIn, tokensOut, costUSD, historyID)
+	return err
+}
+
+// SetSpendSuspended (D2 T1-1) flips BountyBoard.spend_suspended for one task.
+// Used by dogTaskSpendWatch when a task crosses the per-task escalate
+// threshold; ClaimBounty / ClaimForReview / ClaimForCaptainReview all filter
+// on the flag so the next claim cycle can't pick up the runaway row.
+//
+// Returns error per CLAUDE.md "new mutator policy" — a silent failure here
+// would leave a runaway task claimable on the next tick.
+func SetSpendSuspended(db *sql.DB, taskID int, suspended bool) error {
+	v := 0
+	if suspended {
+		v = 1
+	}
+	_, err := db.Exec(`UPDATE BountyBoard SET spend_suspended = ? WHERE id = ?`, v, taskID)
+	return err
+}
+
+// GetSpendSuspended returns the spend_suspended flag for one task. Used by
+// the dashboard to surface the suspended-state badge.
+func GetSpendSuspended(db *sql.DB, taskID int) bool {
+	var v int
+	db.QueryRow(`SELECT IFNULL(spend_suspended, 0) FROM BountyBoard WHERE id = ?`, taskID).Scan(&v)
+	return v == 1
 }
 
 // StampHistoryMemoryIDs records which FleetMemory rows were injected into an

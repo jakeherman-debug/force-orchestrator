@@ -64,6 +64,7 @@ func createSchema(db *sql.DB) {
 		reshard_generation        INTEGER DEFAULT 0,
 		parse_failure_count       INTEGER DEFAULT 0,
 		last_findings_fingerprint TEXT    DEFAULT '',
+		spend_suspended           INTEGER DEFAULT 0,
 		created_at                TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
@@ -161,18 +162,23 @@ func createSchema(db *sql.DB) {
 	);`)
 
 	// Task history — full record of every Claude run per task (seance).
+	// cost_usd_estimate (D2 T1-1): per-attempt cost in USD, computed at write time
+	// from tokens_in / tokens_out and the per-model price table in
+	// internal/claude/pricing.go. Stored as REAL so dashboard sums and the
+	// per-task spend dog can read it without recomputing.
 	db.Exec(`CREATE TABLE IF NOT EXISTS TaskHistory (
-		id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id       INTEGER NOT NULL,
-		attempt       INTEGER NOT NULL,
-		agent         TEXT    NOT NULL,
-		session_id    TEXT    NOT NULL,
-		claude_output TEXT    NOT NULL,
-		outcome       TEXT    NOT NULL,
-		tokens_in     INTEGER DEFAULT 0,
-		tokens_out    INTEGER DEFAULT 0,
-		memory_ids    TEXT    DEFAULT '',   -- CSV of FleetMemory IDs injected into this attempt's prompt
-		created_at    TEXT    DEFAULT (datetime('now'))
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id           INTEGER NOT NULL,
+		attempt           INTEGER NOT NULL,
+		agent             TEXT    NOT NULL,
+		session_id        TEXT    NOT NULL,
+		claude_output     TEXT    NOT NULL,
+		outcome           TEXT    NOT NULL,
+		tokens_in         INTEGER DEFAULT 0,
+		tokens_out        INTEGER DEFAULT 0,
+		cost_usd_estimate REAL    DEFAULT 0,
+		memory_ids        TEXT    DEFAULT '',   -- CSV of FleetMemory IDs injected into this attempt's prompt
+		created_at        TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes on TaskHistory (AUDIT-010, Fix #4). handleTasks runs
 	// correlated subqueries filtering on task_id per row; leaderboards and
@@ -181,6 +187,20 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_task_id        ON TaskHistory (task_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_created_at     ON TaskHistory (created_at);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskhistory_outcome_agent  ON TaskHistory (outcome, agent);`)
+
+	// TaskSpendWatch — anomaly-dedup ledger written by dogTaskSpendWatch (D2 T1-1).
+	// One row per (task_id, window_start) when a 10-min trailing-window cost
+	// exceeds the per_task_spend_alert_usd threshold. notified_at is the
+	// idempotency key — a dog tick within the same window finds the existing
+	// row and skips re-mailing the operator.
+	db.Exec(`CREATE TABLE IF NOT EXISTS TaskSpendWatch (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id      INTEGER NOT NULL,
+		window_start TEXT    NOT NULL,
+		cost_usd     REAL    DEFAULT 0,
+		notified_at  TEXT    DEFAULT (datetime('now'))
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskspendwatch_task_window ON TaskSpendWatch (task_id, window_start);`)
 
 	// Fleet mail — structured inter-agent messaging.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Fleet_Mail (
@@ -473,6 +493,28 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_in  INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN tokens_out INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN memory_ids TEXT    DEFAULT ''`)
+	// D2 T1-1 — per-attempt cost estimate (REAL). Default 0 so old rows return
+	// a clean zero in dashboard sums without ALTER errors on a re-run.
+	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN cost_usd_estimate REAL DEFAULT 0`)
+
+	// D2 T1-1 — BountyBoard.spend_suspended. Set to 1 by dogTaskSpendWatch
+	// when a single task's trailing-10-min spend crosses the escalate
+	// threshold. ClaimBounty / ClaimForReview / ClaimForCaptainReview filter
+	// rows with spend_suspended=1 so a runaway cost loop on one task can't
+	// burn another claim cycle.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN spend_suspended INTEGER DEFAULT 0`)
+
+	// D2 T1-1 — TaskSpendWatch dedup ledger. Created here for upgrade-path DBs
+	// that pre-date the createSchema declaration. The CREATE TABLE IF NOT
+	// EXISTS form keeps the migration idempotent.
+	db.Exec(`CREATE TABLE IF NOT EXISTS TaskSpendWatch (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id      INTEGER NOT NULL,
+		window_start TEXT    NOT NULL,
+		cost_usd     REAL    DEFAULT 0,
+		notified_at  TEXT    DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_taskspendwatch_task_window ON TaskSpendWatch (task_id, window_start)`)
 
 	// Fleet_Mail column additions
 	db.Exec(`ALTER TABLE Fleet_Mail ADD COLUMN message_type TEXT NOT NULL DEFAULT 'info'`)
