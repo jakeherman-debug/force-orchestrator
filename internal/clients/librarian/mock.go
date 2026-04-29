@@ -27,20 +27,28 @@ type MockClient struct {
 	// Optional behaviour hooks. When non-nil, the corresponding method
 	// delegates to the hook instead of the default mock behaviour. Hooks
 	// receive the same args the real Client method does.
-	WriteMemoryFn         func(ctx context.Context, m Memory) (int, error)
-	WriteMemoryTxFn       func(ctx context.Context, tx *sql.Tx, m Memory) (int, error)
-	GetMemoriesForTaskFn  func(ctx context.Context, taskID int) ([]Memory, error)
-	GetMemoriesByScopeFn  func(ctx context.Context, scope Scope) ([]Memory, error)
-	UpdateMemoryFn        func(ctx context.Context, memoryID int, update MemoryUpdate) error
-	RemoveMemoryFn        func(ctx context.Context, memoryID int) error
+	WriteMemoryFn               func(ctx context.Context, m Memory) (int, error)
+	WriteMemoryTxFn             func(ctx context.Context, tx *sql.Tx, m Memory) (int, error)
+	GetMemoriesForTaskFn        func(ctx context.Context, taskID int) ([]Memory, error)
+	GetMemoriesByScopeFn        func(ctx context.Context, scope Scope) ([]Memory, error)
+	UpdateMemoryFn              func(ctx context.Context, memoryID int, update MemoryUpdate) error
+	RemoveMemoryFn              func(ctx context.Context, memoryID int) error
+	SummarizeForOverflowFn      func(ctx context.Context, prompt string, targetBytes int) (string, error)
 
 	// Recorded call history. Tests assert on these.
-	WriteCalls    []Memory
-	WriteTxCalls  []Memory
-	GetTaskCalls  []int
-	GetScopeCalls []Scope
-	UpdateCalls   []MockUpdateCall
-	RemoveCalls   []int
+	WriteCalls       []Memory
+	WriteTxCalls     []Memory
+	GetTaskCalls     []int
+	GetScopeCalls    []Scope
+	UpdateCalls      []MockUpdateCall
+	RemoveCalls      []int
+	SummarizeCalls   []MockSummarizeCall
+}
+
+// MockSummarizeCall captures one SummarizeForContextOverflow invocation.
+type MockSummarizeCall struct {
+	Prompt      string
+	TargetBytes int
 }
 
 // MockUpdateCall captures one UpdateMemory invocation.
@@ -183,6 +191,23 @@ func (m *MockClient) RemoveMemory(ctx context.Context, memoryID int) error {
 	return ErrNotFound
 }
 
+// SummarizeForContextOverflow records the call and (default
+// behaviour) returns the prompt unchanged. Override via
+// SummarizeForOverflowFn for tests that need to assert the request
+// budget or fixture a specific compression result. The default
+// no-op behaviour keeps tests that don't care about the summarizer
+// from accidentally producing different prompts at the LLM ingress
+// layer.
+func (m *MockClient) SummarizeForContextOverflow(ctx context.Context, prompt string, targetBytes int) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.SummarizeCalls = append(m.SummarizeCalls, MockSummarizeCall{Prompt: prompt, TargetBytes: targetBytes})
+	if m.SummarizeForOverflowFn != nil {
+		return m.SummarizeForOverflowFn(ctx, prompt, targetBytes)
+	}
+	return prompt, nil
+}
+
 // Reset clears all recorded calls and fixture state, restoring NextWriteID
 // to 1. Useful between sub-tests inside the same test function.
 func (m *MockClient) Reset() {
@@ -196,6 +221,7 @@ func (m *MockClient) Reset() {
 	m.GetScopeCalls = nil
 	m.UpdateCalls = nil
 	m.RemoveCalls = nil
+	m.SummarizeCalls = nil
 }
 
 // Compile-time assertion: *MockClient satisfies the Client interface.

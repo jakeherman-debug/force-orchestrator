@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
@@ -182,6 +183,15 @@ func cmdDaemon(db *sql.DB) {
 	// via InquisitorConfig). Subsequent deliverables (D1, D3, D8) will
 	// add more clients to the same Spawn config structs.
 	libClient := librarian.NewInProcess(db)
+
+	// D2 T1-2 — wire the per-agent context-size guard. The DB handle
+	// drives SystemConfig reads (per-agent caps) and persists
+	// PromptByteAttribution rows; the summarizer is the librarian's
+	// SummarizeForContextOverflow closure. Both must be installed
+	// BEFORE any agent Spawn so the very first claim loop sees the
+	// guard active.
+	claude.SetContextSizeDB(db)
+	claude.SetSummarizer(libClient.SummarizeForContextOverflow)
 
 	go agents.SpawnChancellor(ctx, db)
 	for i := 0; i < numCommanders; i++ {

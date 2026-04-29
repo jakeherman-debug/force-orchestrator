@@ -60,6 +60,21 @@ type Client interface {
 
 	// RemoveMemory deletes a memory row (and its FTS index entry) by ID.
 	RemoveMemory(ctx context.Context, memoryID int) error
+
+	// SummarizeForContextOverflow (D2 T1-2) condenses an over-cap LLM
+	// prompt to a shorter variant whose UTF-8 byte length is at or
+	// below targetBytes. Implementations make a single-turn Claude
+	// call (cheapest model available) and return the shortened
+	// prompt. The fleet calls this from the claude.go ingress when an
+	// agent's assembled prompt exceeds the per-agent byte cap; if
+	// the returned summary is still over targetBytes (or this method
+	// errors), the caller routes the LLM call to handleInfraFailure.
+	//
+	// Implementations MUST NOT silently truncate to a smaller value
+	// than targetBytes when they cannot summarize cleanly — return
+	// the prompt as-is or an error so the caller's overflow path
+	// fires correctly.
+	SummarizeForContextOverflow(ctx context.Context, prompt string, targetBytes int) (string, error)
 }
 
 // Memory is the librarian-level view of a FleetMemory row. The write-side

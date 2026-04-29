@@ -333,6 +333,17 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, dis
 	observeInboundRedact("RunCLIStreamingContext", 0, n)
 	prompt = scrubbed
 
+	// D2 T1-2 — per-agent context-size enforcement at the TOP of the
+	// streaming ingress (after redaction, same as the one-shot path).
+	// On overflow + summarizer failure, the call returns
+	// ErrContextOverflow before any subprocess is spawned; the
+	// astromech caller routes through handleInfraFailure.
+	revised, sizeErr := CheckContextSize(parentCtx, activeContextSizeDB(), prompt)
+	if sizeErr != nil {
+		return "", sizeErr
+	}
+	prompt = revised
+
 	if !cliRunnerIsDefault {
 		// Stub installed — call it and write its output to w for consistency.
 		out, err := cliRunner(parentCtx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
@@ -475,12 +486,28 @@ func AskClaudeCLI(systemPrompt, userPrompt, allowedTools, disallowedTools, mcpCo
 // caller's capabilities.Profile, not hardcoded constants.
 func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int) (string, error) {
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
+
+	// D2 T1-2 — per-agent context-size enforcement runs at the TOP of
+	// the ingress, BEFORE redaction (size cap is on the bytes that
+	// get sent to Claude, after redaction; we need the post-scrub
+	// length for the cap check).
 	// D1 T0-2: scrub the assembled prompt before it hits the runner.
 	// Anti-cheat: redaction is enforcement, not advisory — the call
 	// proceeds with the redacted prompt, no "warn but send original"
 	// path.
 	scrubbed, n := ScrubInbound(fullPrompt)
 	observeInboundRedact("AskClaudeCLIContext", 0, n)
+
+	// Context-size guard. db is sourced from the active runtime DB
+	// (set by the daemon at startup); when no DB is configured, the
+	// guard runs with default cap and skips persistence — tests that
+	// don't care about the guard see no behaviour change.
+	revised, err := CheckContextSize(ctx, activeContextSizeDB(), scrubbed)
+	if err != nil {
+		return "", err
+	}
+	scrubbed = revised
+
 	out, err := cliRunner(ctx, scrubbed, allowedTools, disallowedTools, mcpConfig, "", maxTurns, claudeCLITimeout)
 	if err != nil {
 		return "", err

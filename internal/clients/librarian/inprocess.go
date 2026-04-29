@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"force-orchestrator/internal/store"
 )
@@ -251,6 +252,80 @@ func (c *inProcessClient) RemoveMemory(ctx context.Context, memoryID int) error 
 		return ErrNotFound
 	}
 	return nil
+}
+
+// summarizeContextOverflowSystemPrompt instructs Claude to compress
+// the provided prompt down to a target byte budget. The instructions
+// are deliberately strict — we want a tight compression, not a
+// general "shorten this" rewrite, because the output goes back into a
+// downstream agent's prompt. Tone, schema, and JSON-block boundaries
+// must be preserved.
+const summarizeContextOverflowSystemPrompt = `You are the Fleet Librarian's context-overflow summarizer. You receive an LLM prompt that exceeds an agent's byte budget. Your job is to produce a SHORTER version of the SAME prompt that:
+
+1. Preserves every section header (lines starting with #, ##, etc.)
+2. Preserves every JSON schema instruction verbatim
+3. Preserves every XML sentinel tag (<user_content>, </user_content>) intact and in place
+4. Preserves every fleet-rule clause exactly
+5. Compresses long file_read / diff blocks by:
+   - Keeping the first 200 lines and last 100 lines verbatim
+   - Replacing the middle with "[... N lines elided by context-overflow summarizer ...]"
+6. Keeps the total byte length AT OR BELOW the target budget supplied in the user prompt
+
+Respond with ONLY the shortened prompt. No preamble. No explanation. No markdown fence around it. The output replaces the input verbatim in the downstream LLM call, so anything you add (commentary, headers like "Here is the summary:") will derail the next agent.
+
+If you cannot reduce below the target budget while preserving the rules above, return the prompt as-is — the caller routes that case through handleInfraFailure rather than silently truncating.`
+
+// SummarizeForContextOverflow (D2 T1-2) condenses an over-cap LLM
+// prompt via a single-turn Claude call. Implementation note: we do
+// NOT use a Haiku-tier model here yet — the claude CLI doesn't expose
+// per-call model selection through our wrapper. When the wrapper
+// gains a model arg, switch this call to it; for now the default
+// model handles the summarization, which is still cheaper than
+// returning ErrContextOverflow and letting the parent task burn a
+// retry on a context-overflow infra failure.
+//
+// targetBytes is forwarded to the prompt so Claude knows the budget.
+// The returned string MAY exceed targetBytes — the caller checks the
+// length and routes to ErrContextOverflow on failure. We don't
+// silently truncate; that would slice a JSON block or XML tag and
+// produce malformed output for the downstream agent.
+func (c *inProcessClient) SummarizeForContextOverflow(ctx context.Context, prompt string, targetBytes int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if targetBytes <= 0 {
+		return "", fmt.Errorf("librarian: SummarizeForContextOverflow: targetBytes must be positive, got %d", targetBytes)
+	}
+	// The summarize itself is reachable from a callsite that holds an
+	// agent attribution context; stamp our own attribution so the
+	// recursive ingress check in claude.go records "librarian" as the
+	// caller and counts these bytes against the librarian agent's cap
+	// (which is large by default — we don't want a feedback loop
+	// where the summarizer overflows AGAIN).
+	subCtx := contextOverflowCallContext(ctx, prompt)
+	userPrompt := fmt.Sprintf("TARGET BUDGET: %d bytes (UTF-8). Below is the prompt to compress.\n\n%s",
+		targetBytes, prompt)
+
+	out, err := callClaudeForSummarize(subCtx, summarizeContextOverflowSystemPrompt, userPrompt)
+	if err != nil {
+		return "", fmt.Errorf("librarian: SummarizeForContextOverflow Claude call: %w", err)
+	}
+	// Strip any trailing claude_usage annotation that the runner
+	// may append; we want only the summary text.
+	out = stripUsageAnnotation(out)
+	return strings.TrimSpace(out), nil
+}
+
+// stripUsageAnnotation removes the trailing
+// "[claude_usage: X input Y output]" line injected by the CLI runner
+// from a result string. Same logic as claude.ExtractJSON's leading
+// strip, exposed here so we don't drag a JSON-fence parse along.
+func stripUsageAnnotation(s string) string {
+	idx := strings.LastIndex(s, "\n[claude_usage:")
+	if idx < 0 {
+		return s
+	}
+	return s[:idx]
 }
 
 // normalizeUpdateField maps the " " sentinel back to "" so callers can

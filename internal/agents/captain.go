@@ -398,20 +398,43 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 	convoyContext := buildConvoyContext(db, b)
 	inboxContext := buildInboxContext(db, agentName, "captain", b.ID, logger)
 
-	systemPrompt := captainSystemPrompt + directiveSection
+	// D2 T1-2 — assemble the prompt through PromptBuilder so each slice
+	// carries a source tag. The system-prompt half is fleet_rules +
+	// claude_md (the directive section, which renders the operator's
+	// CLAUDE.md content). The user-prompt half is task_payload (convoy
+	// context — pulled from other agents' payloads) + file_read (the
+	// diff, which is git-observed file content). inboxContext is per-
+	// task fleet mail and counts as task_payload.
+	pb := NewPromptBuilder()
+	pb.Add(SourceTagFleetRules, captainSystemPrompt)
+	pb.Add(SourceTagClaudeMD, directiveSection)
+	systemPrompt := strings.TrimSpace(pb.Build())
+
+	userPB := NewPromptBuilder()
+	wrappedConvoy := WrapUserContent("convoy_context", convoyContext)
+	wrappedDiff := WrapUserContent("diff", diff)
+	userPB.Add(SourceTagTaskPayload, wrappedConvoy)
+	userPB.Add(SourceTagFileRead, wrappedDiff)
+	if inboxContext != "" {
+		userPB.Add(SourceTagTaskPayload, inboxContext)
+	}
 	// Fix #8.5 — wrap attacker-controllable inputs (convoy context
 	// includes other agents' payloads; diff is attacker-controlled via
 	// filenames / commit messages) in <user_content> sentinel tags.
 	reviewPrompt := fmt.Sprintf("%s\n# CURRENT TASK DIFF\n%s%s",
-		WrapUserContent("convoy_context", convoyContext),
-		WrapUserContent("diff", diff),
-		inboxContext)
+		wrappedConvoy, wrappedDiff, inboxContext)
+
+	// D2 T1-2 — stamp the per-call attribution onto ctx so the claude
+	// ingress check (CheckContextSize) records PromptByteAttribution
+	// rows tagged "captain" and applies the per-agent cap.
+	contribs := append(pb.Contributions(), userPB.Contributions()...)
+	callCtx := claude.WithClaudeCallContext(ctx, "captain", b.ID, contribs)
 
 	mcpConfig, mcpErr := profile.MCPConfigArg()
 	if mcpErr != nil {
 		logger.Printf("Task %d: captain MCP config write failed (%v) — proceeding without --mcp-config", b.ID, mcpErr)
 	}
-	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt,
+	response, err := claude.AskClaudeCLIContext(callCtx, systemPrompt, reviewPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if err != nil {
 		msg := fmt.Sprintf("Claude CLI Err: %v", err)

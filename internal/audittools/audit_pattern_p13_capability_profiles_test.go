@@ -71,6 +71,15 @@ var p13Allowlist = map[string]string{
 	// call in this file, its tool-arg sources are the function's own
 	// parameters.
 	"internal/claude/claude.go": "claude package internals: AskClaudeCLI / RunCLI helpers ARE the contract; ClassifyTaskType threads tool args from the caller's profile",
+
+	// internal/clients/librarian/summarize_call.go wraps
+	// AskClaudeCLIContext for the SummarizeForContextOverflow path
+	// (D2 T1-2). The summarize is pure-reasoning — empty allowed/
+	// disallowed/mcpConfig args ARE the contract. Routing through a
+	// per-agent capability profile would add a YAML for an internal
+	// client helper that has no tool surface, defeating the purpose
+	// of the profile system.
+	"internal/clients/librarian/summarize_call.go": "librarian client internals: SummarizeForContextOverflow is pure-reasoning, the empty-tool args ARE the contract — a profile here would carve no surface and add maintenance",
 }
 
 // TestPattern_P13_CapabilityProfiles is the D1 / Pattern P13 regression.
