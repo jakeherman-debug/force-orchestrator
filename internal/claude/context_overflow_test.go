@@ -289,3 +289,55 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// TestAskClaudeCLIContext_RecordsAttributionFromContext is the
+// end-to-end glue test: the caller stamps a multi-source context, the
+// ingress check records a PromptByteAttribution row per source. This
+// is the integration covered by the roadmap's
+// TestPromptByteAttribution_SourceTagsPopulated requirement, exercised
+// through the actual claude.AskClaudeCLIContext entry point rather
+// than directly against the store helper.
+func TestAskClaudeCLIContext_RecordsAttributionFromContext(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	SetContextSizeDB(db)
+	t.Cleanup(func() { SetContextSizeDB(nil) })
+
+	stub := func(_ context.Context, _, _, _, _, _ string, _ int, _ time.Duration) (string, error) {
+		return "ok", nil
+	}
+	SetCLIRunner(stub)
+	t.Cleanup(ResetCLIRunner)
+
+	ctx := WithClaudeCallContext(context.Background(), "captain", 100, []store.SourceContribution{
+		{SourceTag: "fleet_rules", Bytes: 1000},
+		{SourceTag: "claude_md", Bytes: 500},
+		{SourceTag: "task_payload", Bytes: 250},
+		{SourceTag: "file_read", Bytes: 4000},
+	})
+	if _, err := AskClaudeCLIContext(ctx, "sys", "user", "", "", "", 1); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rows, err := store.ListPromptByteAttributionsForTask(db, 100)
+	if err != nil {
+		t.Fatalf("ListPromptByteAttributionsForTask: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows (one per source), got %d (%+v)", len(rows), rows)
+	}
+	bySource := map[string]int{}
+	for _, r := range rows {
+		bySource[r.SourceTag] = r.Bytes
+		if r.AgentName != "captain" {
+			t.Errorf("expected agent=captain, got %q", r.AgentName)
+		}
+	}
+	if bySource["fleet_rules"] != 1000 {
+		t.Errorf("fleet_rules: got %d, want 1000", bySource["fleet_rules"])
+	}
+	if bySource["file_read"] != 4000 {
+		t.Errorf("file_read: got %d, want 4000", bySource["file_read"])
+	}
+}

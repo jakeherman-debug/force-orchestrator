@@ -1402,3 +1402,102 @@ func handleAdd(db *sql.DB) http.HandlerFunc {
 		fmt.Fprintf(w, `{"ok":true,"id":%d}`, newID)
 	}
 }
+
+// ── Prompt byte budget (D2 T1-2) ──────────────────────────────────────────────
+//
+// Per-agent rolling-window breakdown of prompt-byte attribution. The
+// operator uses this view to spot drift ("file_read is 60% of captain's
+// prompts — maybe we should tune file-selection heuristics"). Default
+// window is 7 days; a `?since_hours=N` query param overrides.
+//
+// Response shape:
+//
+//   {
+//     "window_since": "2026-04-22 12:34:56",
+//     "agents": [
+//       {
+//         "agent": "captain",
+//         "calls": 42,
+//         "total_bytes": 8_400_000,
+//         "by_source": [
+//           {"source_tag": "file_read",     "bytes": 5_000_000, "pct": 59},
+//           {"source_tag": "claude_md",     "bytes": 2_000_000, "pct": 23},
+//           {"source_tag": "task_payload",  "bytes":   900_000, "pct": 10},
+//           ...
+//         ]
+//       },
+//       ...
+//     ]
+//   }
+//
+// Each agent's by_source list is sorted descending by bytes so the
+// browser can render a stack-bar without further work. The endpoint
+// is read-only; no mutation gating needed beyond the same-origin
+// middleware that wraps every dashboard route.
+func handlePromptBytes(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jsonCORS(w)
+
+		// since_hours query override; default 7 days (168 h).
+		hours := 168
+		if v := r.URL.Query().Get("since_hours"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err == nil && n > 0 && n <= 24*30 { // bound: 30 days
+				hours = n
+			}
+		}
+		windowDur := time.Duration(hours) * time.Hour
+		since := store.PromptByteAttributionWindowSince(windowDur)
+
+		breakdowns, err := store.PromptByteAttributionByAgent(db, since)
+		if err != nil {
+			log.Printf("handlePromptBytes: PromptByteAttributionByAgent: %v", err)
+			http.Error(w, `{"error":"prompt-byte query failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		type sourceEntry struct {
+			SourceTag string `json:"source_tag"`
+			Bytes     int64  `json:"bytes"`
+			Pct       int    `json:"pct"`
+		}
+		type agentEntry struct {
+			Agent      string        `json:"agent"`
+			Calls      int           `json:"calls"`
+			TotalBytes int64         `json:"total_bytes"`
+			BySource   []sourceEntry `json:"by_source"`
+		}
+		type response struct {
+			WindowSince string       `json:"window_since"`
+			WindowHours int          `json:"window_hours"`
+			Agents      []agentEntry `json:"agents"`
+		}
+
+		out := response{
+			WindowSince: since,
+			WindowHours: hours,
+			Agents:      make([]agentEntry, 0, len(breakdowns)),
+		}
+		for _, bd := range breakdowns {
+			ae := agentEntry{
+				Agent:      bd.AgentName,
+				Calls:      bd.Calls,
+				TotalBytes: bd.TotalBytes,
+				BySource:   make([]sourceEntry, 0, len(bd.Ordered)),
+			}
+			for _, t := range bd.Ordered {
+				pct := 0
+				if bd.TotalBytes > 0 {
+					pct = int(float64(t.Bytes) / float64(bd.TotalBytes) * 100)
+				}
+				ae.BySource = append(ae.BySource, sourceEntry{
+					SourceTag: t.SourceTag,
+					Bytes:     t.Bytes,
+					Pct:       pct,
+				})
+			}
+			out.Agents = append(out.Agents, ae)
+		}
+		json.NewEncoder(w).Encode(out)
+	}
+}

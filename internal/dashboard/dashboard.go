@@ -55,6 +55,8 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/dogs", handleDogsList(db))
 	mux.HandleFunc("/api/dogs/", handleDogsRun(db))
 	mux.HandleFunc("/api/pr-comments/", handlePRCommentsSubroutes(db))
+	// D2 T1-2 — per-agent rolling-window prompt-byte budget view.
+	mux.HandleFunc("/api/prompt-bytes", handlePromptBytes(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── Static assets + SPA fallback ─────────────────────────────────────────
