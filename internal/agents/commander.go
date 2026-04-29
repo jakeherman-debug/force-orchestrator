@@ -15,6 +15,7 @@ import (
 
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/repo"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/util"
@@ -83,12 +84,24 @@ func loadKnownRepos(db *sql.DB) map[string]bool {
 }
 
 // readFilePreview reads up to maxLines lines from a file, returning empty string if unavailable.
+//
+// Note (D1 T0-2): production callers in loadRepoContext were rewritten
+// to use repo.ReadRepoFileGated for the read so .forceignore can suppress
+// secret-bearing files; this helper remains as a thin convenience for
+// unreserved (non-target-repo) reads and as the unit-test surface area.
 func readFilePreview(path string, maxLines int) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	lines := strings.Split(string(data), "\n")
+	return truncateLines(string(data), maxLines)
+}
+
+// truncateLines returns the first maxLines lines of s. Pulled out of
+// readFilePreview so the .forceignore-gated path in loadRepoContext can
+// share the truncation rule without re-reading the file.
+func truncateLines(s string, maxLines int) string {
+	lines := strings.Split(s, "\n")
 	if len(lines) > maxLines {
 		lines = lines[:maxLines]
 	}
@@ -113,7 +126,24 @@ func loadRepoContext(db *sql.DB, logger *log.Logger) ([]string, error) {
 		}
 		entry := fmt.Sprintf("### %s\n%s", name, desc)
 		for _, candidate := range []string{"README.md", "readme.md", "README"} {
-			preview := readFilePreview(filepath.Join(localPath, candidate), 60)
+			abs := filepath.Join(localPath, candidate)
+			// D1 T0-2: gate the README read through the target repo's
+			// .forceignore. Operators rarely list README in .forceignore,
+			// but .forceignore handling lives at every Force-side
+			// repo-content read site for consistency — a single missed
+			// gate creates a precedent that future readers can quietly
+			// re-introduce.
+			content, ignored, rerr := repo.ReadRepoFileGated(localPath, abs, "commander")
+			if rerr != nil {
+				continue
+			}
+			if ignored {
+				// Operator marked README ignored — break the candidate
+				// loop so we don't re-trigger the gate for the
+				// case-variant filenames in the same repo.
+				break
+			}
+			preview := truncateLines(content, 60)
 			if preview != "" {
 				entry += fmt.Sprintf("\nREADME (first 60 lines):\n%s", preview)
 				break

@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"math/rand"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
+	repolib "force-orchestrator/internal/repo"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
 )
@@ -339,8 +339,16 @@ func generatePRBody(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab st
 	context := buildDiplomatConvoyContext(ctx, db, convoy, ab, repo)
 	var template string
 	if repo.PRTemplatePath != "" {
-		if data, err := os.ReadFile(repo.PRTemplatePath); err == nil {
-			template = string(data)
+		// D1 T0-2: gate the read through the target repo's .forceignore.
+		// If the operator has marked the PR template path as ignored
+		// (rare, but legitimate when the template lives next to a
+		// secrets-bearing file in the same dir), skip silently and
+		// fall through to the structured fallback.
+		content, ignored, rerr := repolib.ReadRepoFileGated(repo.LocalPath, repo.PRTemplatePath, "diplomat")
+		if rerr != nil {
+			logger.Printf("ShipConvoy: PR template read failed (%v) — falling back to structured PR body", rerr)
+		} else if !ignored {
+			template = content
 		}
 	}
 	if template == "" {
@@ -387,8 +395,12 @@ func generatePRBodyWithCritic(ctx context.Context, db *sql.DB, convoy *store.Con
 	context := buildDiplomatConvoyContext(ctx, db, convoy, ab, repo)
 	var template string
 	if repo.PRTemplatePath != "" {
-		if data, err := os.ReadFile(repo.PRTemplatePath); err == nil {
-			template = string(data)
+		// D1 T0-2: same .forceignore gate as generatePRBody.
+		content, ignored, rerr := repolib.ReadRepoFileGated(repo.LocalPath, repo.PRTemplatePath, "diplomat-critic")
+		if rerr != nil {
+			logger.Printf("ShipConvoy critic: PR template read failed (%v) — falling back to structured PR body", rerr)
+		} else if !ignored {
+			template = content
 		}
 	}
 	if template == "" {

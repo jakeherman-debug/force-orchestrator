@@ -1,0 +1,45 @@
+# Force-orchestrator .forceignore template.
+# Files matching these patterns are skipped when astromech reads
+# repo content into prompts, payloads, or memory.
+#
+# Belt-and-suspenders for the inbound-redact layer; copy to .forceignore
+# in any repo you point Force at.
+
+# Environment / secret files
+.env
+.env.*
+*.env
+.env.local
+.env.production
+
+# Credentials
+credentials.json
+credentials*.json
+*credentials*
+.netrc
+.pgpass
+
+# Keys
+*.pem
+*.key
+*.p12
+*.pfx
+*_rsa
+*_dsa
+*_ed25519
+id_rsa*
+id_ed25519*
+
+# Cloud provider service-account JSON
+*-service-account*.json
+gcp-key*.json
+
+# Common config dirs that often hold secrets
+.aws/
+.gcp/
+.ssh/
+
+# Force-internal — never redistribute the operator's holocron
+holocron.db
+*.db-shm
+*.db-wal
