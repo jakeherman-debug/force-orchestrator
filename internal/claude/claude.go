@@ -238,9 +238,13 @@ var DefaultCLIRunner CLIRunner = defaultCLIRunner
 // Fix #8e: ctx threads from the caller so daemon cancellation propagates to
 // the underlying claude subprocess. D1 T0-1: allowedTools / disallowedTools
 // / mcpConfig come from the caller's capabilities.Profile, not hardcoded
-// constants.
+// constants. D1 T0-2: prompt is scrubbed by ScrubInbound before reaching
+// the runner — secret-bearing content (PEM blocks, .env lines, GCP keys)
+// never enters the Anthropic prompt cache.
 func RunCLI(ctx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
-	return cliRunner(ctx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
+	scrubbed, n := ScrubInbound(prompt)
+	observeInboundRedact("RunCLI", 0, n)
+	return cliRunner(ctx, scrubbed, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 }
 
 // RunCLIStreaming is like RunCLI but also writes Claude's live output to w as
@@ -276,6 +280,13 @@ func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir strin
 // against a long-running Claude session. The heartbeat goroutine wraps this
 // context, polls IsEstopped every 2 minutes, and cancels when flipped.
 func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+	// D1 T0-2: scrub prompt at the boundary before any path (stub or
+	// real exec) sees it. Centralised here so the streaming variant
+	// catches inbound secrets the same way as the one-shot path.
+	scrubbed, n := ScrubInbound(prompt)
+	observeInboundRedact("RunCLIStreamingContext", 0, n)
+	prompt = scrubbed
+
 	if !cliRunnerIsDefault {
 		// Stub installed — call it and write its output to w for consistency.
 		out, err := cliRunner(parentCtx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
@@ -405,7 +416,13 @@ func AskClaudeCLI(systemPrompt, userPrompt, allowedTools, disallowedTools, mcpCo
 // caller's capabilities.Profile, not hardcoded constants.
 func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int) (string, error) {
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
-	out, err := cliRunner(ctx, fullPrompt, allowedTools, disallowedTools, mcpConfig, "", maxTurns, claudeCLITimeout)
+	// D1 T0-2: scrub the assembled prompt before it hits the runner.
+	// Anti-cheat: redaction is enforcement, not advisory — the call
+	// proceeds with the redacted prompt, no "warn but send original"
+	// path.
+	scrubbed, n := ScrubInbound(fullPrompt)
+	observeInboundRedact("AskClaudeCLIContext", 0, n)
+	out, err := cliRunner(ctx, scrubbed, allowedTools, disallowedTools, mcpConfig, "", maxTurns, claudeCLITimeout)
 	if err != nil {
 		return "", err
 	}

@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
@@ -42,6 +43,13 @@ func main() {
 	db := store.InitHolocron()
 	defer db.Close()
 	telemetry.InitTelemetry()
+
+	// D1 T0-2: wire the inbound-redact alerter to the live DB so the
+	// claude-package wrappers can record redaction events and emit
+	// throttled operator mail when the threshold is crossed. Tests
+	// that exercise ScrubInbound in isolation pass nil to disable
+	// alerting.
+	claude.SetInboundRedactDB(db)
 
 	switch command {
 	case "help", "--help", "-h":
