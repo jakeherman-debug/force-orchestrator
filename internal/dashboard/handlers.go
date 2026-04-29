@@ -85,6 +85,8 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 		s.HourlySpendCapUSD = agents.HourlySpendCapUSD(db)
 		s.AttemptsLastHour = store.AttemptsInWindow(db, "1 hours")
 		s.SpendCapExceeded = s.HourlySpendDollars > s.HourlySpendCapUSD
+		// D2 T1-4 — quarantined repo count drives the dashboard's persistent banner.
+		_ = db.QueryRow(`SELECT COUNT(*) FROM Repositories WHERE mode = 'quarantined'`).Scan(&s.QuarantinedRepos)
 
 		if pidBytes, err := os.ReadFile("fleet.pid"); err == nil {
 			var pid int
@@ -1001,6 +1003,34 @@ func handleAgents(db *sql.DB) http.HandlerFunc {
 func handleRepos(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jsonCORS(w)
+		// D2 T1-4: support ?detail=1 for the per-repo mode controls panel.
+		// The legacy form (no query string) returns a flat []string of names
+		// — the existing app.js consumers (knowledge filter, repo dropdown)
+		// rely on that shape, so we keep it the default.
+		if r.URL.Query().Get("detail") == "1" {
+			repos := store.ListRepos(db)
+			type repoDetail struct {
+				Name             string `json:"name"`
+				LocalPath        string `json:"local_path"`
+				Description      string `json:"description"`
+				Mode             string `json:"mode"`
+				QuarantinedAt    string `json:"quarantined_at,omitempty"`
+				QuarantineReason string `json:"quarantine_reason,omitempty"`
+			}
+			out := make([]repoDetail, 0, len(repos))
+			for _, repo := range repos {
+				out = append(out, repoDetail{
+					Name:             repo.Name,
+					LocalPath:        repo.LocalPath,
+					Description:      repo.Description,
+					Mode:             repo.Mode,
+					QuarantinedAt:    repo.QuarantinedAt,
+					QuarantineReason: repo.QuarantineReason,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(out)
+			return
+		}
 		rows, err := db.Query(`SELECT name FROM Repositories ORDER BY name`)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -1023,6 +1053,72 @@ func handleRepos(db *sql.DB) http.HandlerFunc {
 			names = []string{}
 		}
 		json.NewEncoder(w).Encode(names)
+	}
+}
+
+// handleReposSubroutes serves per-repo D2 T1-4 mode controls:
+//
+//	POST /api/repos/{name}/promote-to-write — set mode=write (audit-logged)
+//	POST /api/repos/{name}/quarantine       — set mode=quarantined (audit-logged)
+//	POST /api/repos/{name}/restore          — set mode=read_only (audit-logged)
+//
+// The dashboard front-end shows a confirmation dialog before POSTing the
+// promote-to-write call (per the T1-4 spec); the back-end accepts any
+// transition unconditionally, since by the time the request lands the
+// operator has already confirmed in the UI.
+//
+// All three handlers route through store.SetRepoMode, which writes the
+// AuditLog entry inside the same transaction as the mode UPDATE.
+func handleReposSubroutes(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jsonCORS(w)
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		// Path shape: /api/repos/{name}/{action}
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) != 4 || parts[0] != "api" || parts[1] != "repos" {
+			http.NotFound(w, r)
+			return
+		}
+		repoName := parts[2]
+		action := parts[3]
+		if repoName == "" {
+			http.Error(w, `{"error":"missing repo name"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Operator email comes from the X-Operator-Email header (set by the
+		// front-end if known) — falls back to "operator" inside SetRepoMode.
+		operator := r.Header.Get("X-Operator-Email")
+
+		var newMode store.RepoMode
+		switch action {
+		case "promote-to-write":
+			newMode = store.ModeWrite
+		case "quarantine":
+			newMode = store.ModeQuarantined
+		case "restore":
+			// "restore" steps a quarantined repo back down to read_only —
+			// the operator must explicitly promote-to-write afterwards if
+			// they want it active. This avoids a one-click "I forgot why
+			// it was quarantined → ship it" footgun.
+			newMode = store.ModeReadOnly
+		default:
+			http.Error(w, `{"error":"unknown action"}`, http.StatusNotFound)
+			return
+		}
+
+		if err := store.SetRepoMode(db, repoName, newMode, operator); err != nil {
+			if errors.Is(err, store.ErrRepoNotFound) {
+				http.Error(w, `{"error":"repo not found"}`, http.StatusNotFound)
+				return
+			}
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"ok":true,"repo":%q,"mode":%q}`, repoName, newMode)
 	}
 }
 

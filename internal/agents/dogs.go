@@ -66,6 +66,10 @@ var dogCooldowns = map[string]time.Duration{
 	// landing. Auto-e-stop at $200/h makes the fleet self-contain any runaway
 	// loop regardless of whether anyone is watching the dashboard.
 	"spend-burn-watch":      5 * time.Minute,
+	// D2 T1-4: quarantined-repo-watch surfaces operator mail when claim
+	// loops have skipped tasks against quarantined repos. Daily cadence —
+	// internal per-repo dedup prevents spam (one mail per repo per day).
+	"quarantined-repo-watch": 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -79,6 +83,8 @@ var dogOrder = []string{
 	"sub-pr-ci-watch", "main-drift-watch", "draft-pr-watch", "ship-it-nag",
 	"repo-config-check", "pr-review-poll", "pr-review-resolve", "convoy-review-watch",
 	"escalation-sweeper",
+	// D2 T1-4 — surfaces stuck quarantined repos to the operator.
+	"quarantined-repo-watch",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -222,6 +228,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogEscalationSweeper(db, logger)
 	case "spend-burn-watch":
 		return dogSpendBurnWatch(db, logger)
+	case "quarantined-repo-watch":
+		return dogQuarantinedRepoWatch(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

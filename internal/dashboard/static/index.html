@@ -73,6 +73,15 @@
   <span class="high-esc-banner-cta">Go to Escalations &rarr;</span>
 </div>
 
+<!-- ── Quarantined-repo banner (D2 T1-4) ────────────────────────────────────
+     Visible whenever any registered repo is in mode=quarantined. The astromech
+     claim filter silently skips quarantined repos; this banner is the loud
+     half so the operator sees stuck repos without drilling into the repo list. -->
+<div id="quarantined-repo-banner" class="quarantine-banner hidden" role="alert">
+  <span class="quarantine-banner-icon">&#128679;</span>
+  <span class="quarantine-banner-msg"><span id="quarantined-repo-count">0</span> repository(ies) quarantined &mdash; tasks against them are blocked</span>
+</div>
+
 <!-- ── Ready-to-ship banner ─────────────────────────────────────────────────── -->
 <!-- Shows whenever one or more convoys are in DraftPROpen state. The fleet has
      done its job and is waiting on the operator to click Ship It — this is the

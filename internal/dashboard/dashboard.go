@@ -44,6 +44,7 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/convoys/", handleConvoysSubroutes(db))
 	mux.HandleFunc("/api/agents", handleAgents(db))
 	mux.HandleFunc("/api/repos", handleRepos(db))
+	mux.HandleFunc("/api/repos/", handleReposSubroutes(db))
 	mux.HandleFunc("/api/mail", handleMailList(db))
 	mux.HandleFunc("/api/mail/", handleMailSubroutes(db))
 	mux.HandleFunc("/api/add", handleAdd(db))

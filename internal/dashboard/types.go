@@ -22,6 +22,11 @@ type DashboardStatus struct {
 	HourlySpendCapUSD  float64 `json:"hourly_spend_cap_usd"`
 	AttemptsLastHour   int     `json:"attempts_last_hour"`
 	SpendCapExceeded   bool    `json:"spend_cap_exceeded"`
+	// D2 T1-4 — count of repos in mode='quarantined'. The dashboard
+	// renders a persistent banner whenever this is non-zero so the
+	// operator sees stuck repos without having to drill into the repo
+	// list. Read-only repos are NOT counted here — only quarantined.
+	QuarantinedRepos int `json:"quarantined_repos"`
 }
 
 // TasksResponse is the payload for GET /api/tasks

@@ -190,6 +190,17 @@ function renderStats() {
     highBanner.classList.toggle('hidden', highEscCount < 3);
   }
 
+  // Quarantined-repo banner (D2 T1-4): show when any registered repo is
+  // mode=quarantined. The astromech claim filter silently skips these
+  // repos; the banner is the loud half so backlog doesn't go unnoticed.
+  const quarantinedCount = s.quarantined_repos || 0;
+  const quarantineBanner = $('quarantined-repo-banner');
+  if (quarantineBanner) {
+    const countEl = $('quarantined-repo-count');
+    if (countEl) countEl.textContent = quarantinedCount;
+    quarantineBanner.classList.toggle('hidden', quarantinedCount === 0);
+  }
+
   // Ship-ready banner: show when any convoy is DraftPROpen, hide otherwise.
   // Visible from every tab so the operator can't miss it — the fleet is
   // literally blocked on their Ship It click.

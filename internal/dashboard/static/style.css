@@ -832,6 +832,25 @@ td.mail-body-preview {
   border-radius: 4px;
 }
 
+/* D2 T1-4 — quarantined repo banner. Amber to distinguish from the
+   red high-escalations banner: quarantine is operator-actionable but
+   not a fleet emergency. */
+.quarantine-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  margin: 0 16px 12px;
+  background: #b45309; /* amber-700 */
+  color: #fff7ed;
+  font-weight: 600;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.quarantine-banner.hidden { display: none; }
+.quarantine-banner-icon { font-size: 18px; }
+.quarantine-banner-msg { flex: 1; }
+
 /* Ship-it confirmation modal */
 #ship-modal .modal-body { gap: 0; padding-bottom: 0; }
 
