@@ -83,6 +83,7 @@ var llmSignalTokens = []string{
 	"[DONE]",
 	"[PLAN_ONLY]",
 	"[GOAL:",
+	"[TARGET_CLAUDE_MD_OBSERVATION:",
 }
 
 // SanitizeLLMPayload rejects LLM-authored payloads that contain any of
