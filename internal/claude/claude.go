@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -310,10 +311,10 @@ func RunCLI(ctx context.Context, prompt, allowedTools, disallowedTools, mcpConfi
 // holds a daemon ctx (every astromech path does). The
 // `context.Background()` here is a deliberate exception, isolated to a
 // single non-hot-path call site, and explicitly commented.
-func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer, extraEnv ...string) (string, error) {
 	// context.Background intentional: legacy non-daemon entry-point with no
 	// caller-supplied ctx. Hot-path callers use RunCLIStreamingContext.
-	return RunCLIStreamingContext(context.Background(), prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout, w)
+	return RunCLIStreamingContext(context.Background(), prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout, w, extraEnv...)
 }
 
 // RunCLIStreamingContext is like RunCLIStreaming but accepts an external
@@ -325,7 +326,12 @@ func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir strin
 // AUDIT-105 (Fix #1): this is the entry point that makes e-stop effective
 // against a long-running Claude session. The heartbeat goroutine wraps this
 // context, polls IsEstopped every 2 minutes, and cancels when flipped.
-func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer) (string, error) {
+// extraEnv is an optional list of "KEY=VALUE" entries appended to the
+// claude subprocess environment. Used by the astromech (D2 T1-3) to
+// prepend the bash-guard shim dir onto PATH so the Bash tool's bash
+// invocations route through force-bash-guard before exec'ing the real
+// shell. A nil/empty slice leaves the parent process env intact.
+func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer, extraEnv ...string) (string, error) {
 	// D1 T0-2: scrub prompt at the boundary before any path (stub or
 	// real exec) sees it. Centralised here so the streaming variant
 	// catches inbound secrets the same way as the one-shot path.
@@ -367,6 +373,13 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, dis
 	cmd.WaitDelay = 5 * time.Second
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	// D2 T1-3: extraEnv appends per-call env entries (e.g., the
+	// astromech's PATH=<bash-guard-shim>:<existing> override). We start
+	// from the parent process environment so claude inherits HOME,
+	// CLAUDE_CODE_*, and friends.
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 
 	// Stderr holds error text; stdout holds newline-delimited JSON events.

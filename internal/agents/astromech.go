@@ -663,9 +663,23 @@ Do not re-do work that is already correctly committed.`
 	if mcpErr != nil {
 		logger.Printf("Task %d: astromech MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
 	}
+
+	// D2 T1-3: install the per-worktree force-bash-guard shim and
+	// prepend its dir onto claude's PATH. The shim intercepts
+	// `bash -c <cmd>` invocations from Claude's Bash tool, calls
+	// force-bash-guard for validation, then exec's real bash on
+	// approval. Failure here is non-fatal — the binary is the security
+	// boundary; the shim is best-effort wiring.
+	var bashGuardEnv []string
+	if shimEnv, shimErr := setupBashGuardShim(worktreeDir); shimErr != nil {
+		logger.Printf("Task %d: bash-guard shim setup failed (%v) — astromech proceeds without bash gating", bounty.ID, shimErr)
+	} else {
+		bashGuardEnv = []string{shimEnv}
+	}
+
 	rawOut, err := claude.RunCLIStreamingContext(claudeCtx, fullPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
-		worktreeDir, maxTurnsInt, sessionTimeout, taskWriter)
+		worktreeDir, maxTurnsInt, sessionTimeout, taskWriter, bashGuardEnv...)
 
 	// Heartbeat goroutine is stopped via deferred stopHeartbeat above; no
 	// explicit close here any more.
