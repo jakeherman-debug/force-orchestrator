@@ -25,6 +25,107 @@ import (
 //
 // Plus one integration test that feeds an injection payload through
 // Council and asserts the sentinel survived.
+//
+// D2 T1-2 adds PromptBuilder + SourceTag enum coverage below.
+
+// TestPromptBuilder_Contributions assembles a multi-source prompt and
+// asserts the per-tag byte totals reported back match the input bodies.
+func TestPromptBuilder_Contributions(t *testing.T) {
+	pb := NewPromptBuilder()
+	pb.Add(SourceTagFleetRules, "system instructions")
+	pb.Add(SourceTagClaudeMD, "from CLAUDE.md")
+	pb.Add(SourceTagTaskPayload, "convoy 5 task")
+	pb.Add(SourceTagFileRead, "diff content here")
+	// Same-tag entries are summed.
+	pb.Add(SourceTagFileRead, "more diff bytes")
+
+	contribs := pb.Contributions()
+	if len(contribs) != 4 {
+		t.Fatalf("expected 4 distinct tags, got %d (%+v)", len(contribs), contribs)
+	}
+
+	bySource := map[string]int{}
+	total := 0
+	for _, c := range contribs {
+		bySource[c.SourceTag] = c.Bytes
+		total += c.Bytes
+	}
+	if bySource["fleet_rules"] != len("system instructions") {
+		t.Errorf("fleet_rules: got %d, want %d", bySource["fleet_rules"], len("system instructions"))
+	}
+	if bySource["file_read"] != len("diff content here")+len("more diff bytes") {
+		t.Errorf("file_read sum mismatch: got %d", bySource["file_read"])
+	}
+	if total != pb.TotalBytes() {
+		t.Errorf("total mismatch: contribs sum %d, TotalBytes %d", total, pb.TotalBytes())
+	}
+}
+
+// TestPromptBuilder_Build produces the concatenated prompt body in the
+// add order; empty bodies are dropped.
+func TestPromptBuilder_Build(t *testing.T) {
+	pb := NewPromptBuilder()
+	pb.Add(SourceTagFleetRules, "A")
+	pb.Add(SourceTagClaudeMD, "")    // dropped — empty body
+	pb.Add(SourceTagTaskPayload, "B")
+	got := pb.Build()
+	if got != "A\nB" {
+		t.Errorf("Build: got %q, want %q", got, "A\nB")
+	}
+}
+
+// TestPromptBuilder_RejectsUnknownTag verifies that adding an unknown
+// SourceTag panics — it's a programming-error guard, not a runtime
+// input validator.
+func TestPromptBuilder_RejectsUnknownTag(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on unknown tag, got nil")
+		}
+	}()
+	pb := NewPromptBuilder()
+	pb.Add(SourceTag("definitely_not_a_real_tag"), "body")
+}
+
+// TestIsValidSourceTag covers all eight valid tags + a sentinel
+// negative case.
+func TestIsValidSourceTag(t *testing.T) {
+	for _, tag := range []SourceTag{
+		SourceTagClaudeMD,
+		SourceTagLibrarianMemory,
+		SourceTagTaskPayload,
+		SourceTagFileRead,
+		SourceTagFleetRules,
+		SourceTagSenateContext,
+		SourceTagScopeGuard,
+		SourceTagOther,
+	} {
+		if !IsValidSourceTag(tag) {
+			t.Errorf("IsValidSourceTag(%q) = false, want true", tag)
+		}
+	}
+	if IsValidSourceTag(SourceTag("custom")) {
+		t.Error("IsValidSourceTag(\"custom\") = true, want false")
+	}
+}
+
+// TestPromptBuilder_StoreContribTagsAreStrings ensures that the
+// contributions returned by the builder map cleanly into store-layer
+// strings — i.e., the SourceTag enum values are the exact strings the
+// PromptByteAttribution table stores.
+func TestPromptBuilder_StoreContribTagsAreStrings(t *testing.T) {
+	pb := NewPromptBuilder()
+	pb.Add(SourceTagClaudeMD, "x")
+	contribs := pb.Contributions()
+	if len(contribs) != 1 {
+		t.Fatalf("expected 1 contribution, got %d", len(contribs))
+	}
+	if contribs[0].SourceTag != "claude_md" {
+		t.Errorf("expected tag %q, got %q", "claude_md", contribs[0].SourceTag)
+	}
+	// Compile-time assertion that the type is store.SourceContribution.
+	var _ store.SourceContribution = contribs[0]
+}
 
 // ── Unit tests for the helpers ───────────────────────────────────────
 

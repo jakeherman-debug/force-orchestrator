@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"force-orchestrator/internal/store"
 )
 
 // Fix #8.5 — LLM prompt-injection defense.
@@ -101,6 +103,171 @@ func SanitizeLLMPayload(s string) error {
 		}
 	}
 	return nil
+}
+
+// ── D2 T1-2: per-agent context-size enforcement + byte-source attribution ───
+//
+// Every prompt the fleet sends to Claude is assembled from a fixed set
+// of slice categories. Tagging each slice at assembly time lets us
+// answer "captain's prompt is 60% file_read" without re-parsing the
+// blob — and feeds the per-agent context-size budget guard.
+//
+// SourceTag is an enum (Go const string). The PromptByteAttribution
+// table stores it as TEXT for forward-compat with future enum
+// migrations, but the application layer ONLY accepts these eight
+// values. Pattern P12's regression layer rejects any new tag wired
+// through the helpers without first being declared here.
+
+// SourceTag enumerates the provenance categories a prompt slice can
+// carry. Unknown tags are rejected by the prompt builder.
+type SourceTag string
+
+const (
+	// SourceTagClaudeMD — content sourced from a CLAUDE.md file (force-
+	// orchestrator/CLAUDE.md or a target repo's CLAUDE.md, treated as
+	// advisory per AstromechTargetCLAUDEMDClause).
+	SourceTagClaudeMD SourceTag = "claude_md"
+
+	// SourceTagLibrarianMemory — fleet memory rows (FleetMemory)
+	// retrieved from the librarian client.
+	SourceTagLibrarianMemory SourceTag = "librarian_memory"
+
+	// SourceTagTaskPayload — the BountyBoard.payload of the current
+	// task (or the parent's payload when relevant).
+	SourceTagTaskPayload SourceTag = "task_payload"
+
+	// SourceTagFileRead — content read from disk (file contents
+	// surfaced into the prompt; e.g. Captain's diff context, Medic's
+	// failing-test source).
+	SourceTagFileRead SourceTag = "file_read"
+
+	// SourceTagFleetRules — the agent's static system prompt + every
+	// per-agent invariant clause (promptInjectionClause, the agent's
+	// directives, JSON schema instructions).
+	SourceTagFleetRules SourceTag = "fleet_rules"
+
+	// SourceTagSenateContext — repo-aware Senate advisory context (D2
+	// future track; reserved here so the enum is stable when it lands).
+	SourceTagSenateContext SourceTag = "senate_context"
+
+	// SourceTagScopeGuard — Captain's [SCOPE GUARD] block prepended
+	// to a re-attempt payload listing the rejected files.
+	SourceTagScopeGuard SourceTag = "scope_guard"
+
+	// SourceTagOther — fallback bucket for slices that don't fit any
+	// of the above. Use sparingly; an "other"-heavy prompt is a hint
+	// that a new tag should be added.
+	SourceTagOther SourceTag = "other"
+)
+
+// validSourceTags is the set of accepted SourceTag values, used by
+// the prompt builder to fail-closed on a misspelled tag.
+var validSourceTags = map[SourceTag]struct{}{
+	SourceTagClaudeMD:        {},
+	SourceTagLibrarianMemory: {},
+	SourceTagTaskPayload:     {},
+	SourceTagFileRead:        {},
+	SourceTagFleetRules:      {},
+	SourceTagSenateContext:   {},
+	SourceTagScopeGuard:      {},
+	SourceTagOther:           {},
+}
+
+// IsValidSourceTag reports whether t is one of the eight accepted
+// SourceTag values. Used by tests and by the claude.go ingress check
+// to validate context-carried attributions.
+func IsValidSourceTag(t SourceTag) bool {
+	_, ok := validSourceTags[t]
+	return ok
+}
+
+// PromptBuilder assembles an LLM prompt out of source-tagged slices.
+// The builder is intended to replace ad-hoc fmt.Sprintf prompt
+// concatenation at every Spawn-loop ingress so the byte-source
+// breakdown is captured at assembly time, not reconstructed after the
+// fact.
+//
+// Use:
+//
+//	pb := NewPromptBuilder()
+//	pb.Add(SourceTagFleetRules, captainSystemPrompt)
+//	pb.Add(SourceTagClaudeMD,   directiveSection)
+//	pb.Add(SourceTagTaskPayload, b.Payload)
+//	pb.Add(SourceTagFileRead,    diff)
+//	systemPrompt, userPrompt := pb.Split()
+//	contributions := pb.Contributions()
+//
+// Two-fragment Split: by convention, FleetRules+ClaudeMD+ScopeGuard
+// land in the system prompt; everything else goes to user. Callers
+// that need a different split can use Build() to get the full
+// concatenation and slice manually.
+type PromptBuilder struct {
+	parts []promptPart
+}
+
+type promptPart struct {
+	Tag  SourceTag
+	Body string
+}
+
+// NewPromptBuilder returns an empty PromptBuilder.
+func NewPromptBuilder() *PromptBuilder {
+	return &PromptBuilder{}
+}
+
+// Add appends a tagged slice. Panics on an unknown tag — the tag is
+// a Go-level enum, so an invalid one is a programming error, not a
+// runtime input. Empty body is a no-op (zero-byte contributions are
+// dropped at the persistence layer too).
+func (pb *PromptBuilder) Add(tag SourceTag, body string) {
+	if !IsValidSourceTag(tag) {
+		panic(fmt.Sprintf("PromptBuilder.Add: unknown source tag %q (must be one of the agents.SourceTag* constants)", tag))
+	}
+	if body == "" {
+		return
+	}
+	pb.parts = append(pb.parts, promptPart{Tag: tag, Body: body})
+}
+
+// Contributions returns the per-tag byte totals as a slice suitable
+// for store.RecordSourceTags. Same-tag entries are summed.
+func (pb *PromptBuilder) Contributions() []store.SourceContribution {
+	totals := map[SourceTag]int{}
+	order := []SourceTag{}
+	for _, p := range pb.parts {
+		if _, seen := totals[p.Tag]; !seen {
+			order = append(order, p.Tag)
+		}
+		totals[p.Tag] += len(p.Body)
+	}
+	out := make([]store.SourceContribution, 0, len(order))
+	for _, t := range order {
+		out = append(out, store.SourceContribution{
+			SourceTag: string(t),
+			Bytes:     totals[t],
+		})
+	}
+	return out
+}
+
+// TotalBytes returns the assembled-prompt size in bytes (sum of all
+// part bodies).
+func (pb *PromptBuilder) TotalBytes() int {
+	n := 0
+	for _, p := range pb.parts {
+		n += len(p.Body)
+	}
+	return n
+}
+
+// Build returns the fully concatenated prompt (parts joined by "\n").
+// Caller chooses the system/user split.
+func (pb *PromptBuilder) Build() string {
+	bodies := make([]string, len(pb.parts))
+	for i, p := range pb.parts {
+		bodies[i] = p.Body
+	}
+	return strings.Join(bodies, "\n")
 }
 
 // strictJSONUnmarshal decodes `raw` into `out` with
