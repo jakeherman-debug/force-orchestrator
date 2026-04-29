@@ -253,13 +253,145 @@ func TestReconcile_MissingBranchPostCaptain_Escalates(t *testing.T) {
 
 // ── Case E — branch SHA divergence ─────────────────────────────────────────
 
+// TestReconcile_BranchDivergedFromExpectedSHA_Escalates exercises Case E:
+// branch + worktree present, but the most recent tree-hash recorded in
+// recent_commit_hashes_json is no longer reachable from the branch. We
+// stamp the row with a tree-hash that does NOT exist anywhere in the
+// repo (a fake all-zeros placeholder) so the unreachability is
+// deterministic without having to force-push.
 func TestReconcile_BranchDivergedFromExpectedSHA_Escalates(t *testing.T) {
-	// Per D2 T1-0 closure note: Case E (branch SHA divergence) requires
-	// BountyBoard.recent_commit_hashes_json (T1-3.5) or AskBranchPRs.head_sha
-	// to record the expected SHA. Neither column exists at T1-0 time — the
-	// implementation degrades gracefully (no false positives) and this
-	// test is parked until T1-3.5 lands the column.
-	t.Skip("Case E deferred: requires recent_commit_hashes_json (T1-3.5)")
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	repoPath, repoName := reconcileFixture(t, db, "epsilon")
+	taskID := seedNonTerminal(t, db, repoName, "AwaitingCouncilReview", "")
+	branch := agentBranchName("R5-D4", taskID)
+	if _, err := db.Exec(`UPDATE BountyBoard SET branch_name = ? WHERE id = ?`, branch, taskID); err != nil {
+		t.Fatalf("set branch_name: %v", err)
+	}
+	makeBranchAt(t, repoPath, branch)
+	registerWorktree(t, db, "R5-D4", repoPath)
+
+	// Stamp recent_commit_hashes_json with an unreachable tree-hash. The
+	// real reachable tree-hashes come from `git log <branch> --pretty=%T`;
+	// 40 zeros is syntactically valid but not part of the branch's history.
+	unreachable := "0000000000000000000000000000000000000000"
+	if _, err := db.Exec(`UPDATE BountyBoard SET recent_commit_hashes_json = ? WHERE id = ?`,
+		fmt.Sprintf(`["%s"]`, unreachable), taskID); err != nil {
+		t.Fatalf("stamp ring: %v", err)
+	}
+
+	if err := ReconcileOnStartup(context.Background(), db); err != nil {
+		t.Fatalf("ReconcileOnStartup: %v", err)
+	}
+
+	// Assert: Open escalation created with severity Medium.
+	var escCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ? AND status = 'Open'`, taskID).
+		Scan(&escCount); err != nil {
+		t.Fatalf("escalations count: %v", err)
+	}
+	if escCount != 1 {
+		t.Fatalf("expected 1 Open escalation for task #%d, got %d", taskID, escCount)
+	}
+	var sev string
+	if err := db.QueryRow(`SELECT severity FROM Escalations WHERE task_id = ? AND status = 'Open'`, taskID).
+		Scan(&sev); err != nil {
+		t.Fatalf("escalation read: %v", err)
+	}
+	if sev != string(store.SeverityMedium) {
+		t.Errorf("severity = %q, want %q", sev, store.SeverityMedium)
+	}
+
+	// Operator mail with [RECONCILE] subject mentioning divergence.
+	var subj string
+	if err := db.QueryRow(`SELECT subject FROM Fleet_Mail WHERE to_agent = 'operator' AND subject LIKE '[RECONCILE]%' AND task_id = ? ORDER BY id DESC LIMIT 1`,
+		taskID).Scan(&subj); err != nil {
+		t.Fatalf("mail lookup: %v", err)
+	}
+	if !strings.Contains(subj, "diverged") {
+		t.Errorf("mail subject = %q, want it to mention diverged", subj)
+	}
+
+	// Audit log records the action.
+	var auditDetail string
+	if err := db.QueryRow(`SELECT detail FROM AuditLog WHERE task_id = ? AND action = 'branch-diverged → escalate' ORDER BY id DESC LIMIT 1`,
+		taskID).Scan(&auditDetail); err != nil {
+		t.Fatalf("audit lookup: %v", err)
+	}
+	if !strings.Contains(auditDetail, branch) {
+		t.Errorf("audit detail = %q, want it to contain branch name %q", auditDetail, branch)
+	}
+}
+
+// TestReconcile_BranchSHA_EmptyRing_NoAction asserts the Case E gate
+// short-circuits to clean when the ring is empty, so freshly-created
+// rows don't false-positive.
+func TestReconcile_BranchSHA_EmptyRing_NoAction(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	repoPath, repoName := reconcileFixture(t, db, "zeta")
+	taskID := seedNonTerminal(t, db, repoName, "AwaitingCouncilReview", "")
+	branch := agentBranchName("BB-9", taskID)
+	if _, err := db.Exec(`UPDATE BountyBoard SET branch_name = ? WHERE id = ?`, branch, taskID); err != nil {
+		t.Fatalf("set branch_name: %v", err)
+	}
+	makeBranchAt(t, repoPath, branch)
+	registerWorktree(t, db, "BB-9", repoPath)
+	// recent_commit_hashes_json defaults to '[]' — leave it that way.
+
+	if err := ReconcileOnStartup(context.Background(), db); err != nil {
+		t.Fatalf("ReconcileOnStartup: %v", err)
+	}
+
+	var escCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, taskID).Scan(&escCount); err != nil {
+		t.Fatalf("escalations count: %v", err)
+	}
+	if escCount != 0 {
+		t.Errorf("expected 0 escalations for empty-ring row, got %d", escCount)
+	}
+}
+
+// TestReconcile_BranchSHA_ReachableTree_NoAction confirms a recorded
+// tree-hash that IS reachable via `git log <branch> --pretty=%T` does not
+// trigger Case E.
+func TestReconcile_BranchSHA_ReachableTree_NoAction(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	repoPath, repoName := reconcileFixture(t, db, "eta")
+	taskID := seedNonTerminal(t, db, repoName, "AwaitingCouncilReview", "")
+	branch := agentBranchName("R7-A7", taskID)
+	if _, err := db.Exec(`UPDATE BountyBoard SET branch_name = ? WHERE id = ?`, branch, taskID); err != nil {
+		t.Fatalf("set branch_name: %v", err)
+	}
+	makeBranchAt(t, repoPath, branch)
+	registerWorktree(t, db, "R7-A7", repoPath)
+
+	// Read the actual tree-hash for HEAD and stamp it into the ring.
+	out, err := exec.Command("git", "-C", repoPath, "rev-parse", branch+"^{tree}").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	tree := strings.TrimSpace(string(out))
+	if _, err := db.Exec(`UPDATE BountyBoard SET recent_commit_hashes_json = ? WHERE id = ?`,
+		fmt.Sprintf(`["%s"]`, tree), taskID); err != nil {
+		t.Fatalf("stamp ring: %v", err)
+	}
+
+	if err := ReconcileOnStartup(context.Background(), db); err != nil {
+		t.Fatalf("ReconcileOnStartup: %v", err)
+	}
+
+	var escCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM Escalations WHERE task_id = ?`, taskID).Scan(&escCount); err != nil {
+		t.Fatalf("escalations count: %v", err)
+	}
+	if escCount != 0 {
+		t.Errorf("expected 0 escalations for reachable-tree row, got %d", escCount)
+	}
 }
 
 // ── Happy path — clean fleet, no actions ───────────────────────────────────

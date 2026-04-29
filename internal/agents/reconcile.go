@@ -45,7 +45,7 @@ type reconcileCounters struct {
 	branchMissingPreCaptain  int
 	branchMissingPostCaptain int
 	worktreeMissing          int
-	branchSHADiverged        int // unused until T1-3.5 lands recent_commit_hashes_json
+	branchSHADiverged        int // Case E: branch + worktree present but recorded tree-hash unreachable (D2 T1-3.5)
 	skippedRaceLost          int // CAS race-loss in Case B (operator cancelled while we were loading)
 	errors                   int
 }
@@ -77,8 +77,10 @@ type reconcileRowSnap struct {
 //	                                    AwaitingDraftPR / DraftPROpen / Escalated. Escalate (Medium).
 //	D. Worktree missing               — branch exists but the registered .force-worktrees/<repo>/<agent>
 //	                                    directory is absent. QueueWorktreeReset (idempotent).
-//	E. Branch SHA diverged            — recorded SHA no longer reachable from the branch.
-//	                                    DEFERRED until T1-3.5 lands recent_commit_hashes_json.
+//	E. Branch SHA diverged            — recorded tree-hash no longer reachable from the branch.
+//	                                    Activated by D2 T1-3.5: reads BountyBoard.recent_commit_hashes_json
+//	                                    and verifies the most recent entry is reachable via
+//	                                    `git log <branch> --pretty=%T`. Empty ring = clean.
 //
 // Idempotence: a clean second run produces zero state mutations on rows
 // the first run already moved. Cases C and E may re-fire because they
@@ -209,9 +211,93 @@ func reconcileRow(ctx context.Context, db *sql.DB, logger *log.Logger, s reconci
 		return fmt.Errorf("os.Stat worktree %q: %w", worktreePath, statErr)
 	}
 
+	// Case E (D2 T1-3.5): branch + worktree present, but the most recent
+	// tree-hash recorded by the divergence detector is no longer reachable
+	// from the branch — i.e., the branch was force-pushed externally and
+	// our task-owned commit was lost. Escalate.
+	diverged, divErr := branchDivergedFromRecordedTree(ctx, db, repo.LocalPath, s)
+	if divErr != nil {
+		return fmt.Errorf("branchDivergedFromRecordedTree: %w", divErr)
+	}
+	if diverged {
+		return reconcileBranchDiverged(db, logger, s, c)
+	}
+
 	// Case A: clean.
 	c.clean++
 	logger.Printf("[RECONCILE] task #%d clean", s.ID)
+	return nil
+}
+
+// branchDivergedFromRecordedTree implements the Case E predicate. Returns
+// true iff the BountyBoard.recent_commit_hashes_json column has at least
+// one entry AND the most recent entry is NOT reachable from the recorded
+// branch via `git log <branch> --pretty=%T`. An empty ring (no recorded
+// commit) is NOT divergence — it just means the task hasn't committed
+// anything yet that we'd want to verify.
+func branchDivergedFromRecordedTree(ctx context.Context, db *sql.DB, repoLocalPath string, s reconcileRowSnap) (bool, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	ring, err := loadCommitHashRingTx(tx, s.ID)
+	if err != nil {
+		return false, err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return false, fmt.Errorf("commit tx: %w", commitErr)
+	}
+	if len(ring.Hashes) == 0 {
+		return false, nil
+	}
+	expected := strings.TrimSpace(ring.Hashes[len(ring.Hashes)-1])
+	if expected == "" {
+		return false, nil
+	}
+	if err := igit.ValidateRef(s.BranchName); err != nil {
+		// Defensive — the snapshot already passed branchExistsLocal which
+		// runs the same validator, so this would be a ref invalidated
+		// between the two checks. Fall through to "not diverged" so we
+		// don't escalate on a transient validation race.
+		return false, nil
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, reconcileShortGitTimeout)
+	defer cancel()
+	out, gitErr := exec.CommandContext(lookupCtx, "git", "-C", repoLocalPath,
+		"log", "--pretty=%T", s.BranchName, "--").Output()
+	if gitErr != nil {
+		return false, fmt.Errorf("git log %s: %w", s.BranchName, gitErr)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == expected {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// reconcileBranchDiverged handles Case E.
+func reconcileBranchDiverged(db *sql.DB, logger *log.Logger, s reconcileRowSnap, c *reconcileCounters) error {
+	msg := fmt.Sprintf(
+		"branch %s for task at status %s no longer contains the task-owned commit (recorded tree-hash unreachable). "+
+			"The branch was likely force-pushed or rewritten externally.",
+		s.BranchName, s.Status,
+	)
+	if _, escErr := CreateEscalation(db, s.ID, store.SeverityMedium, msg); escErr != nil {
+		if failErr := store.FailBounty(db, s.ID, fmt.Sprintf(
+			"reconcile: branch %s diverged; escalation insert failed: %v", s.BranchName, escErr,
+		)); failErr != nil {
+			return fmt.Errorf("CreateEscalation failed (%v) AND FailBounty failed (%v)", escErr, failErr)
+		}
+	}
+	subj := fmt.Sprintf("[RECONCILE] branch diverged for task #%d at status %s", s.ID, s.Status)
+	store.SendMail(db, "Reconcile", "operator", subj, msg, s.ID, store.MailTypeAlert)
+	store.LogAudit(db, "reconcile", "branch-diverged → escalate", s.ID,
+		fmt.Sprintf("branch=%s status=%s", s.BranchName, s.Status))
+	logger.Printf("[RECONCILE] task #%d branch diverged → escalated (status=%s, branch=%s)",
+		s.ID, s.Status, s.BranchName)
+	c.branchSHADiverged++
 	return nil
 }
 

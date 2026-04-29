@@ -979,6 +979,14 @@ func processAstromechOutput(
 
 	// Explicit [DONE] signal — agent is confident work is committed, skip inference
 	if strings.Contains(outputStr, "[DONE]") {
+		// D2 T1-3.5: divergence check on worktree HEAD tree-hash. If the
+		// astromech is circling (rewriting the same content), escalate
+		// instead of submitting for review.
+		if escalated := runDivergenceCheckHook(ctx, db, taskID, worktreeDir, "Locked", logger); escalated {
+			recordHist(outputStr, "Escalated")
+			telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, taskID, store.SeverityMedium, "circular commits"))
+			return
+		}
 		nextStatus := nextReviewStatus(db, bounty.ConvoyID)
 		logger.Printf("Task %d: [DONE] signal received — submitting for review (%s)", taskID, nextStatus)
 		histID := recordHist(outputStr, "Completed")
@@ -1046,6 +1054,15 @@ func processAstromechOutput(
 			return
 		}
 		logger.Printf("Task %d: Claude already committed, treating as success", taskID)
+	}
+
+	// D2 T1-3.5: divergence check on the freshly-committed tree. If this
+	// commit's tree-hash matches a non-immediate prior entry in the ring,
+	// escalate instead of routing to review.
+	if escalated := runDivergenceCheckHook(ctx, db, taskID, worktreeDir, "Locked", logger); escalated {
+		recordHist(outputStr, "Escalated")
+		telemetry.EmitEvent(telemetry.EventTaskEscalated(sessionID, name, taskID, store.SeverityMedium, "circular commits"))
+		return
 	}
 
 	histID := recordHist(outputStr, "Completed")
