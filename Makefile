@@ -2,10 +2,17 @@ BINARY  := force
 TAGS    := sqlite_fts5
 GOFLAGS := -tags $(TAGS)
 
-.PHONY: build test cover clean help smoke fuzz test-audit hooks-install
+.PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install
 
 build:
 	go build $(GOFLAGS) -o $(BINARY) ./cmd/force/
+
+# make build-bash-guard — compile the astromech Bash-tool gatekeeper.
+# Output goes to ./bin/force-bash-guard so the astromech wiring code
+# can reference a stable on-disk path. Operator action only — D2 T1-3.
+build-bash-guard:
+	@mkdir -p bin
+	go build $(GOFLAGS) -o bin/force-bash-guard ./cmd/force-bash-guard/
 
 test:
 	go test $(GOFLAGS) -timeout 300s ./...
@@ -25,7 +32,7 @@ smoke:
 # adversarial inputs; confirms no crash paths remain.
 fuzz:
 	@set -e; \
-	for pkg in internal/git internal/store internal/agents internal/claude; do \
+	for pkg in internal/git internal/store internal/agents internal/claude cmd/force-bash-guard; do \
 		for fn in $$(go test $(GOFLAGS) -list 'Fuzz.*' ./$$pkg | grep '^Fuzz'); do \
 			echo "==> $$pkg $$fn"; \
 			go test $(GOFLAGS) -run='^$$' -fuzz="^$$fn$$" -fuzztime=30s ./$$pkg || exit $$?; \
@@ -46,13 +53,15 @@ hooks-install:
 
 clean:
 	rm -f $(BINARY) cover.out
+	rm -rf bin/
 
 help:
-	@echo "make build         — compile the force binary (with FTS5)"
-	@echo "make test          — run all tests (with FTS5)"
-	@echo "make cover         — run tests and print coverage summary"
-	@echo "make smoke         — daemon-boot + minimal task cycle (< 30s)"
-	@echo "make fuzz          — run every Fuzz* target for 30s each"
-	@echo "make test-audit    — fail if any t.Skip(\"AUDIT-...\") marker remains"
-	@echo "make hooks-install — install the .forceignore pre-commit hook (opt-in)"
-	@echo "make clean         — remove build artifacts"
+	@echo "make build              — compile the force binary (with FTS5)"
+	@echo "make build-bash-guard   — compile the astromech Bash-tool gatekeeper to ./bin/"
+	@echo "make test               — run all tests (with FTS5)"
+	@echo "make cover              — run tests and print coverage summary"
+	@echo "make smoke              — daemon-boot + minimal task cycle (< 30s)"
+	@echo "make fuzz               — run every Fuzz* target for 30s each"
+	@echo "make test-audit         — fail if any t.Skip(\"AUDIT-...\") marker remains"
+	@echo "make hooks-install      — install the .forceignore pre-commit hook (opt-in)"
+	@echo "make clean              — remove build artifacts"

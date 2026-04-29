@@ -1,6 +1,8 @@
 # Build output
 /force
 /force-orchestrator
+/force-bash-guard
+/bin/
 
 # Legacy agent worktrees that were created inside the repo before the
 # .force-worktrees migration. New worktrees are created as siblings of the repo
