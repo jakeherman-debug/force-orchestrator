@@ -419,6 +419,29 @@ func createSchema(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_convoy ON PRReviewComments (convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id)`)
+
+	// PromptByteAttribution — D2 T1-2. Per-call source-tag breakdown of
+	// the assembled LLM prompt. One row per (call, source_tag) so an
+	// operator can see "captain's last call was 60% file_read, 25%
+	// claude_md, 10% task_payload". The dashboard's per-agent prompt
+	// byte budget view aggregates this table over a rolling window.
+	// task_id is 0 for context-less calls (e.g. boot, classifier).
+	// source_tag is constrained at the application layer (enum); the
+	// schema keeps it TEXT to permit a future migration of the enum
+	// without a destructive table rebuild.
+	db.Exec(`CREATE TABLE IF NOT EXISTS PromptByteAttribution (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id         INTEGER NOT NULL DEFAULT 0,
+		agent_name      TEXT    NOT NULL,
+		call_timestamp  TEXT    NOT NULL DEFAULT (datetime('now')),
+		source_tag      TEXT    NOT NULL,
+		bytes           INTEGER NOT NULL DEFAULT 0
+	);`)
+	// Hot-table indexes (D2 T1-2). Per-task lookups (task detail view)
+	// filter by task_id; per-agent rolling window aggregations filter by
+	// agent_name + call_timestamp.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_task     ON PromptByteAttribution (task_id, call_timestamp);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_agent_ts ON PromptByteAttribution (agent_name, call_timestamp);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -817,4 +840,19 @@ func runMigrations(db *sql.DB) {
 	// AskBranchPRs — escalation-sweeper's `GROUP BY task_id / MAX(id)` needs
 	// (task_id, id DESC) so SQLite can pick the latest row per task without sorting.
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_ask_branch_prs_task_id_id_desc ON AskBranchPRs (task_id, id DESC)`)
+
+	// ── PromptByteAttribution (D2 T1-2) ──────────────────────────────────────
+	// Per-call source-tag breakdown of the assembled LLM prompt. Idempotent
+	// via IF NOT EXISTS; the indexes match the per-task and per-agent +
+	// time-window aggregation paths used by the dashboard handler.
+	db.Exec(`CREATE TABLE IF NOT EXISTS PromptByteAttribution (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id         INTEGER NOT NULL DEFAULT 0,
+		agent_name      TEXT    NOT NULL,
+		call_timestamp  TEXT    NOT NULL DEFAULT (datetime('now')),
+		source_tag      TEXT    NOT NULL,
+		bytes           INTEGER NOT NULL DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_task     ON PromptByteAttribution (task_id, call_timestamp)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_agent_ts ON PromptByteAttribution (agent_name, call_timestamp)`)
 }

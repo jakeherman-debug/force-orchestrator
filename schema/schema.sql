@@ -437,4 +437,25 @@ CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (re
 -- of the PR review-comment triage flow.
 -- ALTER TABLE Repositories ADD COLUMN pr_review_enabled INTEGER DEFAULT 1;
 
+-- ── Prompt-byte attribution (D2 T1-2) ─────────────────────────────────────────
+-- One row per (LLM call, source_tag) breakdown so an operator can see
+-- "captain's last call was 60% file_read, 25% claude_md, 10% task_payload".
+-- The dashboard's per-agent prompt byte budget view aggregates this table over
+-- a rolling window. task_id is 0 for context-less calls (boot, classifier).
+-- source_tag is constrained at the application layer to a fixed enum
+-- (claude_md / librarian_memory / task_payload / file_read / fleet_rules /
+-- senate_context / scope_guard / other); the schema keeps it TEXT to permit
+-- a future migration of the enum without a destructive table rebuild.
+
+CREATE TABLE IF NOT EXISTS PromptByteAttribution (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         INTEGER NOT NULL DEFAULT 0,
+    agent_name      TEXT    NOT NULL,
+    call_timestamp  TEXT    NOT NULL DEFAULT (datetime('now')),
+    source_tag      TEXT    NOT NULL,
+    bytes           INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_task     ON PromptByteAttribution (task_id, call_timestamp);
+CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_agent_ts ON PromptByteAttribution (agent_name, call_timestamp);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
