@@ -484,6 +484,9 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "render-rules":
+		cmdRenderRules(ctx, db, os.Args[2:])
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\nRun 'force help' for usage.\n", command)
 		os.Exit(1)

@@ -22,7 +22,7 @@ if [[ -z "$REPO_ROOT" ]]; then
   exit 1
 fi
 
-SOURCE="$REPO_ROOT/scripts/pre-commit/forceignore-check.sh"
+SOURCE="$REPO_ROOT/scripts/pre-commit/dispatcher.sh"
 TARGET="$REPO_ROOT/.git/hooks/pre-commit"
 
 if [[ ! -f "$SOURCE" ]]; then
@@ -36,13 +36,22 @@ if [[ -e "$TARGET" && ! -L "$TARGET" ]]; then
   exit 1
 fi
 
+# chmod +x every check + the dispatcher so the freshly-cloned
+# repository state is runnable.
 chmod +x "$SOURCE"
+for check in "$REPO_ROOT/scripts/pre-commit/"*-check.sh; do
+  [[ -f "$check" ]] && chmod +x "$check"
+done
 
 # Use a relative symlink so the installation survives clone-to-clone
-# moves. The dirname dance computes the path from .git/hooks/ up to
-# scripts/pre-commit/ regardless of where the repo lives.
-ln -sf "../../scripts/pre-commit/forceignore-check.sh" "$TARGET"
+# moves. The dispatcher walks scripts/pre-commit/*-check.sh and runs
+# each one in order — adding a new check is a one-file change with no
+# installer update.
+ln -sf "../../scripts/pre-commit/dispatcher.sh" "$TARGET"
 
 printf 'install-hooks: installed %s -> %s\n' "$TARGET" "$SOURCE"
-printf '  pre-commit checks will now run on every commit.\n'
+printf '  Pre-commit checks (run via dispatcher):\n'
+for check in "$REPO_ROOT/scripts/pre-commit/"*-check.sh; do
+  [[ -f "$check" ]] && printf '    %s\n' "$(basename "$check")"
+done
 printf '  Uninstall: rm %s\n' "$TARGET"

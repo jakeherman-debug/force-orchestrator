@@ -2,7 +2,7 @@ BINARY  := force
 TAGS    := sqlite_fts5
 GOFLAGS := -tags $(TAGS)
 
-.PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install
+.PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install render-rules render-rules-check
 
 build:
 	go build $(GOFLAGS) -o $(BINARY) ./cmd/force/
@@ -51,6 +51,19 @@ test-audit:
 hooks-install:
 	bash scripts/install-hooks.sh
 
+# make render-rules — regenerate CLAUDE.md / FIX-LOG.md / docs/* from the
+# FleetRules table (D3 Phase 1). Idempotent: writes only when content
+# changed. Runs against an in-memory DB (bootstrap-then-render) so this
+# target works without a live holocron.db.
+render-rules: build
+	./$(BINARY) render-rules
+
+# make render-rules-check — drift detector. Renders to memory and exits 1
+# if any auto-generated file disagrees with disk. Used by the pre-commit
+# hook (scripts/pre-commit/claude-md-size-check.sh).
+render-rules-check: build
+	./$(BINARY) render-rules --check
+
 clean:
 	rm -f $(BINARY) cover.out
 	rm -rf bin/
@@ -64,4 +77,6 @@ help:
 	@echo "make fuzz               — run every Fuzz* target for 30s each"
 	@echo "make test-audit         — fail if any t.Skip(\"AUDIT-...\") marker remains"
 	@echo "make hooks-install      — install the .forceignore pre-commit hook (opt-in)"
+	@echo "make render-rules       — regenerate CLAUDE.md / FIX-LOG.md / docs/* from FleetRules"
+	@echo "make render-rules-check — drift detector (exit 1 if rendered files disagree with disk)"
 	@echo "make clean              — remove build artifacts"
