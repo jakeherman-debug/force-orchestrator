@@ -295,13 +295,4 @@ func handleMetricAuthor(
 	return ErrNotImplemented
 }
 
-func handleHoldoutMonitor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
+// handleHoldoutMonitor lives in holdout_monitor.go.

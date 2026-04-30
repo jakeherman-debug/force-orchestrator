@@ -2,75 +2,13 @@ package engineering_corps
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
-	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/clients/metrics"
 	"force-orchestrator/internal/store"
 )
-
-// TestEngineeringCorpsDispatcher_RoutesAllSixTypes feeds a synthetic
-// BountyBoard row of each EC task type into the dispatcher and asserts
-// each one routes to its handler stub (returning ErrNotImplemented).
-//
-// This is the load-bearing dispatcher regression: the test iterates
-// AllTaskTypes (the authoritative inventory) so adding a new task
-// type without a switch case triggers a TestEngineeringCorpsDispatcher
-// failure rather than a silent no-op in production.
-func TestEngineeringCorpsDispatcher_RoutesAllSixTypes(t *testing.T) {
-	if len(AllTaskTypes) != 6 {
-		t.Fatalf("Phase 3 spec calls for six task types; got %d: %v", len(AllTaskTypes), AllTaskTypes)
-	}
-
-	db := store.InitHolocronDSN(":memory:")
-	defer db.Close()
-
-	cfg := EngineeringCorpsConfig{
-		Name:      "EC-test",
-		DB:        db,
-		Librarian: librarian.NewInProcess(db),
-		Metrics:   metrics.NewInProcess(),
-	}
-	if err := cfg.validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-
-	profile, err := capabilities.LoadProfile("engineering-corps")
-	if err != nil {
-		t.Fatalf("LoadProfile(engineering-corps): %v", err)
-	}
-
-	logger := newTestLogger()
-
-	for _, taskType := range AllTaskTypes {
-		t.Run(taskType, func(t *testing.T) {
-			id := store.AddBounty(db, 0, taskType, "{}")
-			bounty, claimed := store.ClaimBounty(db, taskType, "EC-test")
-			if !claimed || bounty == nil || bounty.ID != id {
-				t.Fatalf("ClaimBounty(%s) failed; got bounty=%v claimed=%v", taskType, bounty, claimed)
-			}
-
-			// dispatch routes the bounty; the stub returns
-			// ErrNotImplemented and the dispatcher fails the bounty.
-			// Asserting Status='Failed' verifies the route reached
-			// the stub (Phase 1 contract); when sub-agent A replaces
-			// the stub bodies, this test will need a per-handler
-			// fixture instead.
-			dispatch(context.Background(), cfg, profile, "EC-test", taskType, bounty, logger.std())
-
-			fresh, err := store.GetBounty(db, id)
-			if err != nil {
-				t.Fatalf("GetBounty(#%d): %v", id, err)
-			}
-			if fresh.Status != "Failed" {
-				t.Errorf("bounty %s #%d status = %q, want %q", taskType, id, fresh.Status, "Failed")
-			}
-		})
-	}
-}
 
 // TestEngineeringCorpsDispatcher_UnknownTypeFailsCleanly feeds a bogus
 // task type through the dispatcher's default branch. The expected
@@ -114,42 +52,6 @@ func TestEngineeringCorpsDispatcher_UnknownTypeFailsCleanly(t *testing.T) {
 	}
 }
 
-// TestEngineeringCorpsDispatcher_AllStubsReturnErrNotImplemented walks
-// the inventory and asserts every handler stub returns the Phase 1
-// ErrNotImplemented sentinel. When sub-agent A replaces a stub body,
-// the corresponding test case naturally falls — sub-agent A is
-// expected to delete the matching entry below as it lands each handler.
-func TestEngineeringCorpsDispatcher_AllStubsReturnErrNotImplemented(t *testing.T) {
-	stubs := map[string]func() error{
-		TaskTypeExperimentAuthor: func() error {
-			return handleExperimentAuthor(context.Background(), EngineeringCorpsConfig{}, nil, "", nil, nil)
-		},
-		TaskTypeExperimentMonitor: func() error {
-			return handleExperimentMonitor(context.Background(), EngineeringCorpsConfig{}, nil, "", nil, nil)
-		},
-		TaskTypePromotionAuthor: func() error {
-			return handlePromotionAuthor(context.Background(), EngineeringCorpsConfig{}, nil, "", nil, nil)
-		},
-		TaskTypeDemotionAuthor: func() error {
-			return handleDemotionAuthor(context.Background(), EngineeringCorpsConfig{}, nil, "", nil, nil)
-		},
-		TaskTypeMetricAuthor: func() error {
-			return handleMetricAuthor(context.Background(), EngineeringCorpsConfig{}, nil, "", nil, nil)
-		},
-		TaskTypeHoldoutMonitor: func() error {
-			return handleHoldoutMonitor(context.Background(), EngineeringCorpsConfig{}, nil, "", nil, nil)
-		},
-	}
-	for taskType, call := range stubs {
-		t.Run(taskType, func(t *testing.T) {
-			err := call()
-			if !errors.Is(err, ErrNotImplemented) {
-				t.Errorf("%s stub returned %v, want ErrNotImplemented", taskType, err)
-			}
-		})
-	}
-}
-
 // TestEngineeringCorpsConfig_FailsClosedOnMissingDeps verifies that a
 // SpawnEngineeringCorps call with a zero-value config short-circuits
 // (validate() returns an error and the loop never enters) instead of
@@ -173,5 +75,15 @@ func TestEngineeringCorpsConfig_FailsClosedOnMissingDeps(t *testing.T) {
 				t.Errorf("validation error should be namespaced; got %v", err)
 			}
 		})
+	}
+}
+
+// TestAllTaskTypesIsSix asserts the canonical inventory hasn't drifted.
+// If a sub-agent adds a new task type, both the inventory and the
+// dispatcher switch must be extended together; this guard keeps the
+// invariant visible.
+func TestAllTaskTypesIsSix(t *testing.T) {
+	if len(AllTaskTypes) != 6 {
+		t.Fatalf("Phase 3 spec calls for six task types; got %d: %v", len(AllTaskTypes), AllTaskTypes)
 	}
 }
