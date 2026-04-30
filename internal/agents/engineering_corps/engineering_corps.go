@@ -251,16 +251,7 @@ func handleExperimentAuthor(
 	return ErrNotImplemented
 }
 
-func handleExperimentMonitor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
+// handleExperimentMonitor lives in experiment_monitor.go.
 
 func handlePromotionAuthor(
 	_ context.Context,
