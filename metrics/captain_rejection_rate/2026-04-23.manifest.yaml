@@ -1,0 +1,5 @@
+name: captain_rejection_rate
+version: 2026-04-23
+direction: lower_is_better
+unit: rate
+description: Fraction of Captain reviews that rejected. Scope - specified repo and time window.

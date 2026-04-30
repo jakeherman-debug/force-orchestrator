@@ -166,6 +166,43 @@ func SetContextSizeDB(db *sql.DB) {
 // activeContextSizeDB returns the installed handle (or nil).
 func activeContextSizeDB() *sql.DB { return activeContextSizeDBHandle }
 
+// TreatmentApplyHook is the function signature the daemon installs to
+// route every Claude CLI invocation through `treatments.Apply` (D3
+// Phase 1 log-only mode; Phase 2+ live pass-through). Called once per
+// Claude call at the top of AskClaudeCLIContext / RunCLIStreamingContext.
+//
+// The hook receives the (agent, taskID) tuple already on the call ctx
+// via WithClaudeCallContext + the daemon's DB handle. It is expected
+// to return nil unless the call should be aborted (live mode only;
+// Phase 1 always returns nil).
+//
+// Internal/claude does not import internal/treatments to avoid binding
+// the runtime package to a specific treatment implementation. The
+// daemon wires the closure at startup.
+type TreatmentApplyHook func(ctx context.Context, agent string, taskID int) error
+
+var activeTreatmentApplyHook TreatmentApplyHook
+
+// SetTreatmentApplyHook installs the treatment-apply hook. Called by
+// cmdDaemon at startup (after SetContextSizeDB). Pass nil to clear
+// (tests use t.Cleanup -> SetTreatmentApplyHook(nil)).
+func SetTreatmentApplyHook(fn TreatmentApplyHook) {
+	activeTreatmentApplyHook = fn
+}
+
+// invokeTreatmentApplyHook fires the installed hook with the call's
+// (agent, taskID) tuple. No-op when no hook is installed (tests, early
+// boot). Errors are propagated to the caller — Phase 1 returns nil so
+// the upstream caller never sees a non-nil error from this path.
+func invokeTreatmentApplyHook(ctx context.Context) error {
+	hook := activeTreatmentApplyHook
+	if hook == nil {
+		return nil
+	}
+	agent, taskID, _, _ := ClaudeCallContext(ctx)
+	return hook(ctx, agent, taskID)
+}
+
 // SetSummarizer installs the active summarizer. cmdDaemon wires the
 // librarian.Client.SummarizeForContextOverflow closure here at startup.
 // Pass nil to clear (tests use ResetSummarizerForTest).

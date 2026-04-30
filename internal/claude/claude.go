@@ -332,6 +332,12 @@ func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir strin
 // invocations route through force-bash-guard before exec'ing the real
 // shell. A nil/empty slice leaves the parent process env intact.
 func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer, extraEnv ...string) (string, error) {
+	// D3 Phase 1 — log-only treatments.Apply ingress (mirrors
+	// AskClaudeCLIContext). Astromech sessions route through here.
+	if err := invokeTreatmentApplyHook(parentCtx); err != nil {
+		return "", fmt.Errorf("treatments.Apply: %w", err)
+	}
+
 	// D1 T0-2: scrub prompt at the boundary before any path (stub or
 	// real exec) sees it. Centralised here so the streaming variant
 	// catches inbound secrets the same way as the one-shot path.
@@ -499,6 +505,15 @@ func AskClaudeCLI(systemPrompt, userPrompt, allowedTools, disallowedTools, mcpCo
 // caller's capabilities.Profile, not hardcoded constants.
 func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int) (string, error) {
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
+
+	// D3 Phase 1 — log-only treatments.Apply ingress. Records the call
+	// descriptor + (empty in Phase 1) assignment intent without
+	// mutating the call. Phase 2 flips this live; Phase 1 ships the
+	// audit trail so the live flip is a config change, not a code
+	// change.
+	if err := invokeTreatmentApplyHook(ctx); err != nil {
+		return "", fmt.Errorf("treatments.Apply: %w", err)
+	}
 
 	// D2 T1-2 — per-agent context-size enforcement runs at the TOP of
 	// the ingress, BEFORE redaction (size cap is on the bytes that

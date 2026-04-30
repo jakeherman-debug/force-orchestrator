@@ -21,6 +21,7 @@ import (
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
+	"force-orchestrator/internal/treatments"
 )
 
 // readDaemonPID checks if the PID in fleet.pid refers to a running process.
@@ -207,6 +208,25 @@ func cmdDaemon(db *sql.DB) {
 	// guard active.
 	claude.SetContextSizeDB(db)
 	claude.SetSummarizer(libClient.SummarizeForContextOverflow)
+
+	// D3 Phase 1 — install the log-only treatments.Apply hook.
+	// Every Claude CLI invocation now records to TreatmentApplyLog
+	// (mode='log_only'). Phase 2 of D3 swaps this for live pass-through.
+	claude.SetTreatmentApplyHook(func(hookCtx context.Context, agent string, taskID int) error {
+		_, _, err := treatments.Apply(hookCtx, db, treatments.CallDescriptor{
+			AgentName:       agent,
+			NaturalUnitKind: "task",
+			NaturalUnitID:   taskID,
+		})
+		// Phase 1 fail-open: a write failure to TreatmentApplyLog is
+		// observability, not correctness. Log via the daemon's stdout
+		// (no operator mail flood) and let the agent's call proceed.
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[TREATMENTS-APPLY] %s/task %d: %v\n", agent, taskID, err)
+			return nil
+		}
+		return nil
+	})
 
 	go agents.SpawnChancellor(ctx, db)
 	for i := 0; i < numCommanders; i++ {
