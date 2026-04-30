@@ -434,6 +434,20 @@ ok — agent regression matrix is byte-identical for non-experiment, non-holdout
    bootstrap upsert semantics issue is unchanged from the P1 cleanup
    note.
 
+   **2026-04-30 update:** investigated as part of a follow-up drift-fix
+   chunk and reclassified as a **false-positive carryover**. The
+   apparent CLAUDE.md / FIX-LOG.md drift surfaced by `force render-rules
+   --check` reproduces only against a stale persistent dev-DB —
+   `BootstrapFleetRules` uses `ON CONFLICT(rule_key, version) DO
+   NOTHING`, so existing rows are not updated when the audit slice
+   changes. Against a fresh DB the audit slice and on-disk rendered
+   files actually agree (verified: exit 0). The drift-fix worktree
+   (`deliverable/3/phase-2-drift-fix`) closed as a no-op; the systemic
+   fix is queued as a separate D3 chunk: convergent
+   `BootstrapFleetRules` + `force render-rules` operating against an
+   in-memory DB by default so the dev-DB-staleness signal stops being
+   confused with real drift.
+
 2. **Dashboard tab is intentionally minimal.** D3 Phase 6 rebuilds
    around Pulse / Briefing / Reflection and absorbs this tab.
    Operator-side experiment ratification UI lands in 6A.
@@ -472,3 +486,68 @@ already consumes the column.
 
 The dashboard-tab + endpoints are explicitly thin so the Phase 6
 rebuild can absorb them without legacy carry-over.
+
+---
+
+### 2026-04-30 — operational hygiene addendum (db-protection branch)
+
+Not a new D3 phase. While investigating the false-positive drift
+(operator-discretion item #1 above), the persistent `holocron.db` was
+inadvertently removed during a backup/restore compound command. The
+DB was recreated from a fresh schema + bootstrap (operational state
+loss limited to the operator's local dev-DB; no shared state was
+affected), and three layers of protection were added so the same
+mistake cannot recur.
+
+**Branch:** `db-protection` (merged + cleaned, not pushed).
+
+**Layers added:**
+
+1. **Filesystem ACL (load-bearing).** `make protect-db` applies a
+   macOS ACL (`everyone deny delete,delete_child`) to `holocron.db`,
+   `holocron.db-wal`, `holocron.db-shm`. SQLite read/write operations
+   are unaffected; only `unlink` / `rename` syscalls are blocked.
+   Idempotent on re-run. Reverse: `make unprotect-db`.
+2. **Claude Code deny rules.** `.claude/settings.json` rejects any
+   Bash invocation matching `rm` / `mv` / `unlink` / `cp` / `dd` on
+   `holocron*` paths before the syscall reaches the kernel. Belt-and-
+   suspenders alongside the ACL, and the only layer that catches
+   intent (vs effect).
+3. **Hourly snapshot cron.** `make install-snapshots` schedules an
+   hourly `sqlite3 .backup` (WAL-consistent, unlike `cp`) into
+   `~/.force/backups/`, with a daily 04:00 cleanup that prunes
+   snapshots older than 30 days. Idempotent installer.
+
+**Files added:**
+
+| Path | Purpose |
+|---|---|
+| `.claude/settings.json` | deny rules for rm/mv/unlink/cp/dd on holocron* |
+| `scripts/setup-snapshots.sh` | idempotent crontab installer |
+| `scripts/uninstall-snapshots.sh` | mirror — remove crontab entries |
+
+**Files modified:**
+
+| Path | Change |
+|---|---|
+| `Makefile` | `protect-db` / `unprotect-db` / `install-snapshots` / `uninstall-snapshots` / `db-status` targets |
+| `README.md` | operator-protection subsection (under Security & Safety) |
+| `DELIVERABLE-3-CLOSURE.md` | this addendum + reclassification of operator-discretion item #1 |
+
+**Operator-state actions (per-machine, not committed):**
+
+- `./force render-rules --check` recreated `holocron.db` (exit 0 →
+  drift theory confirmed false-positive).
+- A brief `force daemon` start triggered the daemon-startup-only
+  registrations (Bayesian framework into `AnalysisFrameworks`,
+  baseline-2026 into `GlobalHoldouts`) so the dev-DB matches what
+  Phase 2 ships.
+- `make protect-db` applied the ACL.
+- `make install-snapshots` installed the crontab entries.
+
+**Self-healing fix queued as a separate chunk.** The convergent-
+bootstrap fix (so `BootstrapFleetRules` upserts content-changed rows,
+plus `force render-rules` operating against a fresh in-memory DB by
+default) is the systemic fix that makes the dev-DB-staleness signal
+stop being mistaken for source-level drift. It's small and lands on
+its own branch ahead of D3 Phase 3.
