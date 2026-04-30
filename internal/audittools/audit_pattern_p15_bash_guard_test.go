@@ -81,3 +81,43 @@ func TestPattern_P15_BashGuardIntegrity(t *testing.T) {
 		}
 	}
 }
+
+// TestPattern_P15_BashGuardEnvWiring asserts that setupBashGuardShim
+// returns BOTH a PATH= entry and a SHELL= entry. PATH-only wiring was
+// the gap the 2026-04-29 empirical investigation surfaced — Claude
+// CLI's Bash tool resolves the shell via $SHELL as an absolute path,
+// so a PATH-only env override never reaches the shim. This static
+// guard catches a future refactor that drops one of the two entries
+// without depending on the runtime-effectiveness test under
+// internal/agents being run.
+//
+// We pure-string-match the constructed env entries inside
+// bash_guard_setup.go — string-level enforcement is equivalent to the
+// other Pattern-style guards in this package (P12, P13, P15
+// wiring-presence) and stays agnostic to import-graph constraints.
+func TestPattern_P15_BashGuardEnvWiring(t *testing.T) {
+	root := moduleRoot(t)
+	path := filepath.Join(root, "internal", "agents", "bash_guard_setup.go")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Pattern P15 env-wiring: cannot read %s: %v", path, err)
+	}
+	text := string(body)
+
+	required := []string{
+		// The PATH entry is the original wiring; keep both layers.
+		`pathEntry := fmt.Sprintf("PATH=%s`,
+		// The SHELL entry is the Fix's load-bearing addition. Without
+		// this Claude's Bash tool bypasses the shim entirely.
+		`shellEntry := fmt.Sprintf("SHELL=%s"`,
+		// And both must be returned together.
+		`return []string{pathEntry, shellEntry}, nil`,
+	}
+	for _, want := range required {
+		if !strings.Contains(text, want) {
+			t.Errorf("Pattern P15 env-wiring: %s missing required snippet %q\n"+
+				"  -> the bash-guard shim is unreachable in production without both PATH and SHELL entries",
+				path, want)
+		}
+	}
+}
