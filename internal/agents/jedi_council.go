@@ -251,6 +251,8 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 	if mcpErr != nil {
 		logger.Printf("Task %d: council MCP config write failed (%v) — proceeding without --mcp-config", b.ID, mcpErr)
 	}
+	// D3 P1: append every active FleetRules row scoped to 'council'.
+	systemPrompt = AppendFleetRulesToPrompt(ctx, db, "council", systemPrompt, logger)
 	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if err != nil {

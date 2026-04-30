@@ -195,7 +195,9 @@ func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *sto
 	if mcpErr != nil {
 		logger.Printf("Medic #%d: MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
 	}
-	rawOut, claudeErr := claude.AskClaudeCLI(medicSystemPrompt, userPrompt,
+	// D3 P1: append every active FleetRules row scoped to 'medic'.
+	medicSystemPromptWithRules := AppendFleetRulesToPrompt(ctx, db, "medic", medicSystemPrompt, logger)
+	rawOut, claudeErr := claude.AskClaudeCLI(medicSystemPromptWithRules, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if claudeErr != nil {
 		// Claude CLI flakes are infra-class failures, not task-analysis

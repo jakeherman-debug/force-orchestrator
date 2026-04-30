@@ -177,6 +177,21 @@ func cmdDaemon(db *sql.DB) {
 		os.Exit(1)
 	}
 
+	// D3 Phase 1 — populate FleetRules from the audit so per-agent prompt
+	// injection (`AssemblePerAgentPrompt`) sees content at runtime.
+	// Idempotent: a re-run finds (rule_key, version=1) already present and
+	// no-ops. Pass empty string to skip the all-sections-covered check —
+	// the daemon's CWD may not match the development tree (a release-
+	// installed force binary can run from anywhere); the check is a
+	// development guard exercised by `force render-rules` and the test
+	// suite, not by every daemon start.
+	if n, err := store.BootstrapFleetRules(ctx, db, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "[FLEET-RULES BOOTSTRAP] daemon start aborted: %v\n", err)
+		os.Exit(1)
+	} else if n > 0 {
+		fmt.Printf("Seeded %d FleetRules row(s) from the bootstrap audit.\n", n)
+	}
+
 	// D0-B: Construct the in-process Librarian client once at daemon
 	// startup and inject it into every agent that produces WriteMemory
 	// bounties (Jedi Council via JediCouncilConfig; Inquisitor → RunDogs

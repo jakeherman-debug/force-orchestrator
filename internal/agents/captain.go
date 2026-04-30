@@ -408,6 +408,8 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 	pb := NewPromptBuilder()
 	pb.Add(SourceTagFleetRules, captainSystemPrompt)
 	pb.Add(SourceTagClaudeMD, directiveSection)
+	// D3 P1: append every active FleetRules row scoped to 'captain'.
+	InjectFleetRulesAgentPrompt(ctx, db, pb, "captain", logger)
 	systemPrompt := strings.TrimSpace(pb.Build())
 
 	userPB := NewPromptBuilder()

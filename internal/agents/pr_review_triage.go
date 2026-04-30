@@ -135,7 +135,7 @@ func runPRReviewTriage(ctx context.Context, db *sql.DB, agentName string, bounty
 		thread := store.LoadThreadHistory(db, payload.ConvoyID, c.ReviewThreadID)
 		convoyTasks := summarizeConvoyTasks(db, payload.ConvoyID)
 
-		decision, classifyErr := classifyPRReviewComment(c, thread, convoyTasks, depthCap, profile, logger)
+		decision, classifyErr := classifyPRReviewComment(ctx, db, c, thread, convoyTasks, depthCap, profile, logger)
 		if classifyErr != nil {
 			// Fix #7 (AUDIT-032) — bound transient classifier retries.
 			// Previously the row stayed unclassified forever and every
@@ -191,6 +191,8 @@ func runPRReviewTriage(ctx context.Context, db *sql.DB, agentName string, bounty
 // classifyPRReviewComment assembles the prompt, calls Claude, parses the JSON.
 // The caller post-processes (e.g. forcing 'human' for human authors).
 func classifyPRReviewComment(
+	ctx context.Context,
+	db *sql.DB,
 	c store.PRReviewComment,
 	thread []store.PRReviewComment,
 	convoyTasks string,
@@ -203,7 +205,9 @@ func classifyPRReviewComment(
 	if mcpErr != nil {
 		logger.Printf("PRReviewTriage: MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
 	}
-	raw, err := claude.AskClaudeCLI(prReviewSystemPrompt, userPrompt,
+	// D3 P1: append every active FleetRules row scoped to 'pr-review-triage'.
+	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "pr-review-triage", prReviewSystemPrompt, nil)
+	raw, err := claude.AskClaudeCLI(systemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 	if err != nil {
 		return prReviewDecision{}, err

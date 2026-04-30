@@ -390,6 +390,11 @@ func runFindPRTemplate(ctx context.Context, db *sql.DB, bounty *store.Bounty, pr
 		logger.Printf("FindPRTemplate #%d: pilot MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
 	}
 	runCLI := func(systemPrompt, userPrompt, _ string, maxTurns int) (string, error) {
+		// D3 P1: append every active FleetRules row scoped to 'pilot'.
+		// Pilot's runFindPRTemplate uses an interface{Printf} logger, not
+		// *log.Logger; pass nil and rely on AppendFleetRulesToPrompt's
+		// fail-open semantics on DB errors.
+		systemPrompt = AppendFleetRulesToPrompt(ctx, db, "pilot", systemPrompt, nil)
 		return claude.AskClaudeCLI(systemPrompt, userPrompt,
 			profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, maxTurns)
 	}

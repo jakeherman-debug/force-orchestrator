@@ -329,7 +329,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	logger.Printf("ConvoyReview #%d: running pass %d/%d for convoy %d (%s)",
 		bounty.ID, completedPasses+1, maxPasses, payload.ConvoyID, convoy.Name)
 
-	result, err := runConvoyReviewLLM(userPrompt, profile, logger)
+	result, err := runConvoyReviewLLM(ctx, db, userPrompt, profile, logger)
 	if err != nil {
 		// Fix #7 (AUDIT-007): parse failures are tracked via
 		// BountyBoard.parse_failure_count on THIS ConvoyReview row. We
@@ -362,7 +362,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		logger.Printf("ConvoyReview #%d: retrying with critic note (attempt %d/%d)",
 			bounty.ID, nFail+1, convoyReviewParseFailureCap)
 		retryPrompt := userPrompt + "\n\nIMPORTANT: Your previous response could not be parsed as JSON. Respond ONLY with valid JSON matching the schema above — no markdown, no preamble, no trailing text."
-		result, err = runConvoyReviewLLM(retryPrompt, profile, logger)
+		result, err = runConvoyReviewLLM(ctx, db, retryPrompt, profile, logger)
 		if err != nil {
 			// Retry also failed — bump counter, and on cap, escalate (Fix #7).
 			nFail = incrementParseFailureCount(db, bounty.ID)
@@ -554,12 +554,16 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	}
 }
 
-func runConvoyReviewLLM(userPrompt string, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) (convoyReviewResult, error) {
+func runConvoyReviewLLM(ctx context.Context, db *sql.DB, userPrompt string, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) (convoyReviewResult, error) {
 	mcpConfig, mcpErr := profile.MCPConfigArg()
 	if mcpErr != nil {
 		logger.Printf("ConvoyReview LLM: MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
 	}
-	raw, err := claude.AskClaudeCLI(convoyReviewSystemPrompt, userPrompt,
+	// D3 P1: append every active FleetRules row scoped to 'convoy-review'.
+	// The interface{Printf} logger doesn't satisfy *log.Logger so pass nil
+	// — the inject helper falls back to silent fail-open.
+	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "convoy-review", convoyReviewSystemPrompt, nil)
+	raw, err := claude.AskClaudeCLI(systemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		return convoyReviewResult{}, fmt.Errorf("claude CLI: %w", err)

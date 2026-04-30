@@ -118,7 +118,12 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 	if mcpErr != nil {
 		logger.Printf("Feature #%d: chancellor MCP config write failed (%v) — proceeding without --mcp-config", feature.ID, mcpErr)
 	}
-	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, userPrompt,
+	// D3 P1: append every active FleetRules row scoped to 'chancellor'.
+	// runChancellorReview lacks a context.Context parameter; threading
+	// it is a follow-up. Use context.Background() — the AssemblePerAgentPrompt
+	// SELECT is sub-millisecond so loss of ctx-cancellation is acceptable.
+	systemPrompt := AppendFleetRulesToPrompt(context.Background(), db, "chancellor", chancellorSystemPrompt, nil)
+	response, err := claude.AskClaudeCLI(systemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on Claude CLI failure.
@@ -634,7 +639,9 @@ Respond with ONLY the raw JSON array — no explanation, no markdown, no code fe
 	if mcpErr != nil {
 		logger.Printf("Merge synthesis MCP config write failed: %v — proceeding without --mcp-config", mcpErr)
 	}
-	response, err := claude.AskClaudeCLI(chancellorSystemPrompt, mergePrompt,
+	// D3 P1: append every active FleetRules row scoped to 'chancellor'.
+	systemPrompt := AppendFleetRulesToPrompt(context.Background(), db, "chancellor", chancellorSystemPrompt, nil)
+	response, err := claude.AskClaudeCLI(systemPrompt, mergePrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		logger.Printf("Merge synthesis Claude call failed: %v", err)

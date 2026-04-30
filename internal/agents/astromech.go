@@ -578,6 +578,8 @@ Do not re-do work that is already correctly committed.`
 	// controllable user-content section — so it is the most-recent
 	// system-prompt content the model sees before user material.
 	systemPrompt := AstromechSystemPrompt + directiveSection + AstromechTargetCLAUDEMDClause
+	// D3 P1: append every active FleetRules row scoped to 'astromech'.
+	systemPrompt = AppendFleetRulesToPrompt(ctx, db, "astromech", systemPrompt, logger)
 	fullPrompt := fmt.Sprintf("%s%s%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s%s",
 		systemPrompt, goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext,
 		specialCtx, notesBlock, directiveText(bounty.Payload))
@@ -1177,6 +1179,8 @@ func RunTaskForeground(ctx context.Context, db *sql.DB, taskID int) {
 	// Match runAstromechTask's clause placement so the foreground runner
 	// produces the same fleet-invariant tail in its system prompt.
 	systemPrompt := AstromechSystemPrompt + directiveSection + AstromechTargetCLAUDEMDClause
+	// D3 P1: append every active FleetRules row scoped to 'astromech'.
+	systemPrompt = AppendFleetRulesToPrompt(ctx, db, "astromech", systemPrompt, fgLogger)
 	fullPrompt := fmt.Sprintf("%s%s%s%s%s\n\nYOUR CURRENT DIRECTIVE:\n%s%s",
 		systemPrompt, goalCtx, fleetMemCtx, seanceCtx, inboxCtx, notesBlock, directiveText(b.Payload))
 
