@@ -230,6 +230,24 @@ ExperimentRuns
   model_substituted_to         TEXT               -- nullable
   is_provisional               BOOLEAN            -- true for llm_judge pending downstream
 
+TreatmentApplyLog
+  -- log-only mode of treatments.Apply records the call descriptor and
+  -- intended assignment without mutating the call; Phase 2 of D3 flips it
+  -- to live; this table is the audit trail that lets the live flip be a
+  -- config change rather than a code change.
+  id                           INTEGER PRIMARY KEY
+  applied_at                   TIMESTAMP
+  agent_name                   TEXT NOT NULL
+  natural_unit_kind            TEXT               -- 'feature' | 'convoy' | 'task'
+  natural_unit_id              INTEGER
+  prompt_template              TEXT
+  model                        TEXT
+  in_holdout                   BOOLEAN
+  assignments_json             TEXT               -- JSON array of intended assignment records
+  mode                         TEXT NOT NULL      -- 'log_only' (Phase 1) | 'live' (Phase 2+)
+
+  INDEX (applied_at)
+
 ExperimentOutcomes
   id                           INTEGER PRIMARY KEY
   experiment_id                INTEGER FK UNIQUE
