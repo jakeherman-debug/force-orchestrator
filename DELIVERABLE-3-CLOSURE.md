@@ -2,12 +2,12 @@
 
 **Date:** 2026-04-29
 **Operator:** jake.herman@upstart.com
-**Net verdict:** 🟡 PARTIAL — Phase 1 CLOSED; Phases 2–6 OPEN
+**Net verdict:** 🟡 PARTIAL — Phases 1-2 CLOSED; Phases 3–6 OPEN
 
 D3 uses a partial-closure pattern (per D1's precedent). Phase 1 is the
-first of six D3 phases; this document is created NEW at Phase 1 closure
-and the addendum log section will accept Phase 2–6 closure entries as
-they land.
+first of six D3 phases; this document was created NEW at Phase 1
+closure and the addendum log section accepts Phase 2–6 closure entries
+as they land.
 
 ---
 
@@ -16,7 +16,7 @@ they land.
 | Phase | Description | Status | Commits |
 |---|---|---|---|
 | 1 | Foundations + Rule Audit | ✅ CLOSED 2026-04-29 | 908c51d → e86a282 (14 commits) |
-| 2 | Holdout + single-treatment experiments | Open | — |
+| 2 | Holdout + single-treatment experiments | ✅ CLOSED 2026-04-29 | 20e0329 → e1cdc83 (5 commits) |
 | 3 | Engineering Corps + Trust Metrics Infrastructure | Open | — |
 | 4 | Factorial + orthogonal-overlap scheduler | Open | — |
 | 5 | Level-3 paired shadow + Adversarial Pairing + Golden-Set | Open | — |
@@ -260,3 +260,215 @@ build against a stable shape.
 ## Addendum log
 
 (Phase 2–6 closure entries append below, oldest at the top.)
+
+---
+
+### Phase 2 — Holdout + single-treatment experiments — CLOSED 2026-04-29
+
+**Operator:** jake.herman@upstart.com
+**Commits (local only, not pushed):**
+
+| Phase | Commit | Subject |
+|---|---|---|
+| 1 (Bayesian framework) | `20e0329` | feat(D3-P2): Bayesian Beta-Binomial analysis framework + registration |
+| 2 (baseline-2026 holdout) | `0cf498e` | feat(D3-P2): mint baseline-2026 global holdout + deterministic assignment |
+| 3 (Apply live flip) | `e9356da` | feat(D3-P2): treatments.Apply live mode + SystemConfig kill switch |
+| 4 (lifecycle + CLI + sample) | `5fa0ed8` | feat(D3-P2): experiment lifecycle + CLI + shakedown manifest |
+| 5 (dashboard endpoints) | `e1cdc83` | feat(D3-P2): dashboard experiments endpoints + minimal tab |
+| 6 (closure addendum + docs) | (this commit) | docs(D3-P2): closure addendum + README/Security update |
+
+#### What landed
+
+**internal/analysis** — Bayesian Beta-Binomial framework (commit `20e0329`).
+`BetaBinomialPosterior` with closed-form conjugate update (Beta(a,b) +
+k/n → Beta(a+k, b+n-k)). `CredibleInterval` via bisection on the
+regularised incomplete beta function `I_x(a, b)` implemented with
+Lentz's continued-fraction expansion. `ComparePosteriors` estimates
+P(treatment > control) by Monte Carlo over Marsaglia-Tsang Gamma
+samples (deterministic seed for replay). `DecideOutcome` returns
+{treatment | control | inconclusive} with a default
+`MinSamplesPerArm=30` gate so small-n experiments are forced
+inconclusive regardless of effect size. `RegisterBayesianBetaBinomial`
+inserts the framework into `AnalysisFrameworks` with `version='2026-04-29'`,
+idempotent on the version PK and rejecting re-registrations whose
+config_hash drifts. Wired into daemon startup AFTER
+`BootstrapFleetRules` and BEFORE the holdout mint.
+
+**internal/holdout** — baseline-2026 global holdout (commit `0cf498e`).
+`MintBaseline2026` inserts the row into `GlobalHoldouts` (idempotent
+on the UNIQUE name index), defaults match paired-runs.md § Lifecycle
+(7-day ramp, 2% indefinite plateau, 90-day fade once retired).
+`Holdout.CurrentFraction(t)` is a pure function of `now` over the
+ramp/plateau/fade math. `IsInHoldout` / `IsInHoldoutAt` /
+`IsInHoldoutWithSnapshot` decide membership: SHA-256 over
+`fmt.Sprintf("%d:%s:%d", holdoutID, kind, id)` → first 8 bytes as
+big-endian uint64 / 2^64 ∈ [0, 1), member iff < CurrentFraction(now).
+The hash domain is part of the contract.
+
+**internal/treatments live flip** (commit `e9356da`). `Apply` now
+defaults to live behaviour: the holdout check, experiment enrollment,
+descriptor rewrite, and journal sequence runs by default. The
+`SystemConfig` key `treatments_apply_mode` is the single-write
+rollback (default `'live'`, set to `'log-only'` to stop enrollment
+without a re-deploy). Holdout members short-circuit the experiment
+loop. Multiple-experiment composition is in id order (factorial
+orthogonality lands in Phase 4). Stickiness across Medic re-queues is
+preserved by the existing-row check before INSERT.
+
+**internal/experiments lifecycle + CLI** (commit `5fa0ed8`).
+`AuthorFromYAML` / `Ratify` / `EnrollUnit` / `Terminate` /
+`MaybePromoteRule` / `GetStatus` cover the single-treatment lifecycle.
+Operator-routed gate via `Ratify`: empty operator email rejects, a
+re-ratify against a running experiment errors via the CAS update,
+each successful Ratify writes an `AuditLog` row. Termination computes
+the outcome via the Bayesian framework over per-arm Bernoulli rollups
+of `ExperimentRuns.score`. `MaybePromoteRule` mints a
+`PromotionProposal` with an evidence trail iff the manifest's
+`promote` block is set AND the outcome declared a winner.
+
+`force experiment author <yaml> | ratify <id> | terminate <id> |
+status <id> | list [--status]` ships the operator surface.
+
+`experiments/2026-04-29-test-captain-prompt-v18/manifest.yaml` is the
+shakedown experiment — a benign single-treatment experiment that
+varies one Captain prompt-template version against control. Real-
+shape, low-stakes (a no-op rename) so the lifecycle is exercised
+without divergent behaviour.
+
+**Dashboard endpoints + minimal tab** (commit `e1cdc83`).
+`/api/experiments[?status=...]` lists; `/api/experiments/:id` returns
+the full record with arms / metrics / outcome / per-arm enrollment +
+observed rate; `/api/fleet-progress` returns the holdout's lifecycle
+phase, current fraction, member count, and three rolling windows
+(24h / 7d / 30d) of holdout-vs-current `ExperimentRuns.score`. The
+new "Experiments" tab is intentionally thin — list + detail panel +
+holdout strip — because Phase 6 absorbs and rebuilds it. POST/PATCH
+on the singleton endpoint returns 405; operator mutations stay on the
+CLI.
+
+#### What did NOT land (deferred)
+
+- **Cross-experiment treatment-spec dedup.** The current
+  `TreatmentSpecs.spec_hash` is salted with `expID`, so two manifests
+  authoring the same `(arm_label, prompt_template_ref, model)` triple
+  produce distinct spec rows. paired-runs.md § Data Model contemplates
+  cross-experiment sharing; the lookup-or-insert dance lands in a
+  later phase that handles `ON CONFLICT(spec_hash) DO NOTHING
+  RETURNING id` properly.
+- **Operator-side experiment ratification UI.** The dashboard tab is
+  read-only; operator mutations flow through the CLI until Phase 6
+  ships UI-side ratification.
+- **Live `ExperimentRuns.score` writeback.** The Bayesian outcome is
+  computed when Terminate runs, but the score field on each
+  `ExperimentRuns` row is whatever the score-source agent (a metric
+  evaluator, ConvoyReview rollup, etc.) wrote. Phase 2 ships the
+  framework; the score-source pipeline lands in Phase 3 (Engineering
+  Corps + Trust Metrics).
+- **`fleet_state_hash` on the holdout row.** `FleetStateSnapshots`
+  isn't yet populated by any other agent, so the mint leaves
+  `fleet_state_hash` blank. Backfill is an operator-discretion item.
+
+#### Heavy validation (closure-time)
+
+```
+$ make test
+ok  	force-orchestrator/cmd/force                   6.430s
+ok  	force-orchestrator/cmd/force-bash-guard        (cached)
+ok  	force-orchestrator/internal/agents             259.341s
+ok  	force-orchestrator/internal/analysis           (cached)
+ok  	force-orchestrator/internal/audittools         0.745s
+ok  	force-orchestrator/internal/dashboard          2.266s
+ok  	force-orchestrator/internal/experiments        1.128s
+ok  	force-orchestrator/internal/holdout            (cached)
+ok  	force-orchestrator/internal/treatments         (cached)
+... (all packages green)
+
+$ go test -tags sqlite_fts5 -run TestSchemaParity ./internal/store/...
+ok
+
+$ go test -tags sqlite_fts5 -run TestPattern_P8 ./internal/dashboard/...
+ok — same-origin allow-list intact, no wildcard CORS reintroduced
+
+$ go test -tags sqlite_fts5 -run "TestBetaBinomial|TestComparePosteriors|TestDecideOutcome|TestRegisterBayesianBetaBinomial" ./internal/analysis/...
+ok — 15 tests, all pass
+
+$ go test -tags sqlite_fts5 -run "TestMintBaseline2026|TestIsInHoldout" ./internal/holdout/...
+ok — 9 tests, all pass
+
+$ go test -tags sqlite_fts5 -run "TestApply_" ./internal/treatments/...
+ok — 9 tests covering: pass-through, journal mode, rollback, holdout
+membership, single-treatment enrollment, deterministic + spread, nil
+db, sticky retries
+
+$ go test -tags sqlite_fts5 -run "TestAuthorFromYAML|TestRatify|TestEnrollUnit|TestTerminate|TestMaybePromoteRule|TestLifecycle_EndToEnd" ./internal/experiments/...
+ok — 11 tests, end-to-end shakedown round-trip green
+
+$ go test -tags sqlite_fts5 -run "TestCaptain|TestCouncil|TestMedic|TestChancellor|TestConvoyReview|TestAstromech|TestPilot|TestDiplomat" ./internal/agents/...
+ok — agent regression matrix is byte-identical for non-experiment, non-holdout units (Phase 3 invariant held)
+```
+
+#### Anti-cheat self-check
+
+| Directive | Status |
+|---|---|
+| Each gate is non-negotiable; halt on red | ✅ Gates 1-5 + final all green |
+| No `--no-verify` / `--force` / `rebase --skip` | ✅ none used |
+| No pushes anywhere | ✅ commits stayed local on `main` |
+| Live flip is byte-identical for non-experiment + non-holdout units | ✅ TestApply_NotInHoldout_NoActiveExperiments_PassesThrough + agent regression matrix |
+| Live flip applies HOLDOUT-IDENTICAL behaviour to holdout members | ✅ TestApply_HoldoutMember_SkipsExperimentEnrollment |
+| Live flip applies TREATMENT-MODIFIED behaviour to enrolled units | ✅ TestApply_SingleActiveExperiment_AppliesAssignedTreatment |
+| Holdout assignment is deterministic | ✅ TestIsInHoldout_DeterministicAssignment over 5× repeat per unit |
+| Experiment ratification is operator-routed + audit-logged | ✅ TestRatify_RequiresOperatorRoute_AuditLogged |
+| All new mutators return error | ✅ MintBaseline2026, RegisterBayesianBetaBinomial, AuthorFrom*, Ratify, EnrollUnit, Terminate, MaybePromoteRule |
+| Schema parity re-runs after every commit | ✅ green |
+| No edits to D1/D2/D3 P1 closures | ✅ this addendum is the only D3 closure write |
+| Phase 5 dashboard endpoints inherit securityMiddleware | ✅ no new http.Server, no wildcard CORS, P8 green |
+
+#### Operator-discretion items surfaced
+
+1. **Bootstrap upsert observation (P1 cleanup carryover).** Not
+   re-encountered in this chunk — Phase 2 inserts go through fresh
+   tables (`AnalysisFrameworks`, `GlobalHoldouts`) whose primary keys
+   are explicit version / name strings, so a long-running operator
+   dev-DB sees idempotent no-ops on re-mint. The previously-surfaced
+   bootstrap upsert semantics issue is unchanged from the P1 cleanup
+   note.
+
+2. **Dashboard tab is intentionally minimal.** D3 Phase 6 rebuilds
+   around Pulse / Briefing / Reflection and absorbs this tab.
+   Operator-side experiment ratification UI lands in 6A.
+
+3. **Operator-pre-approval is CLI-only.** `force experiment ratify
+   <id> --operator <email>` is the only ratification path. Dashboard
+   `POST /api/experiments/:id/ratify` is intentionally absent (returns
+   405 today) and ships in Phase 6 with the broader operator-action
+   audit-trail surface.
+
+4. **`fleet_state_hash` on the holdout row is blank.**
+   `FleetStateSnapshots` is not yet populated by any other agent, so
+   the mint leaves the column empty. Backfill via an explicit operator
+   command is a follow-up.
+
+5. **Cross-experiment TreatmentSpec dedup is deferred.** spec_hash is
+   salted with expID for now to avoid the UNIQUE collision when the
+   same manifest is authored twice. The cross-experiment sharing
+   property mentioned in paired-runs.md § Data Model lands in a later
+   phase that handles `ON CONFLICT DO NOTHING RETURNING id` properly
+   for SQLite.
+
+6. **Live ExperimentRuns score writeback is not yet wired.**
+   `ExperimentRuns.score` is whatever the score-source pipeline writes;
+   Phase 2 ships the framework that consumes the column, Phase 3 ships
+   the producer (per-prompt-version metrics correlation in EC).
+
+#### Forward integration to Phase 3
+
+The lifecycle's `MaybePromoteRule` writes `PromotionProposals` rows
+with `authored_by='engineering-corps'`. Phase 3 formalises the EC
+claim loop that consumes those rows + reverse-feeds the candidates
+from Librarian. The score-source pipeline (writing
+`ExperimentRuns.score`) is also a Phase 3 deliverable; the framework
+already consumes the column.
+
+The dashboard-tab + endpoints are explicitly thin so the Phase 6
+rebuild can absorb them without legacy carry-over.

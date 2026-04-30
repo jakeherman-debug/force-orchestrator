@@ -258,6 +258,10 @@ The Fleet Memory browser. Shows every success and failure memory the Librarian h
 
 Each row shows the repo, originating task (linked), outcome, memory summary, and files changed. Clicking a row opens a detail modal with the full text. Individual memories can be deleted from the table or the modal.
 
+#### Experiments
+
+The paired-runs lifecycle surface (D3 Phase 2). Lists every authored / running / terminated experiment with the per-arm enrollment, observed-rate per arm, and outcome (when terminated). The header strip shows the global `baseline-2026` holdout — its current ramp/plateau/fade phase, the fraction of natural units enrolled, and rolling 24h / 7d / 30d holdout-vs-current metric snapshots. Operator mutations (author, ratify, terminate) flow through `force experiment …` on the CLI for now; D3 Phase 6 rebuilds this tab around Pulse / Briefing / Reflection. Full mechanics in [`docs/paired-runs.md`](docs/paired-runs.md).
+
 #### Logs
 
 A live-tailing log viewer, auto-scrolling with a 1000-line cap. Two sources:
@@ -661,6 +665,17 @@ What this does NOT cover: pricing accuracy across model upgrades. A model that e
 Every Claude CLI invocation checks `len(systemPrompt) + len(userPrompt)` against a per-agent cap (`agent_max_prompt_bytes_<agent>`, falling back to `agent_max_prompt_bytes_default` = 200 KB). Overflow does **not** silently truncate: it logs `[CONTEXT OVERFLOW]` operator mail with a per-source byte breakdown (`claude_md`, `librarian_memory`, `task_payload`, `file_read`, `fleet_rules`, `senate_context`, `scope_guard`, `other`), then invokes `librarian.SummarizeForContextOverflow` to compress what can be compressed. If the summarised prompt still exceeds the cap, the call returns `ErrContextOverflow` and the caller routes to `handleInfraFailure`. The `PromptByteAttribution` table (one row per source-tag per call) backs the dashboard's "what's bloating the prompt" view.
 
 What this does NOT cover: the model's own context-window consumption inside its turn. The cap is on what Force sends; what Claude does with it (tool-call output, sub-agent fan-out, scratch reasoning) is the model's budget, not Force's.
+
+### Experiment + holdout discipline (operator-visible audit/control surface)
+
+D3 Phase 2 introduces the paired-runs experimentation primitive — `treatments.Apply` runs in `live` mode at every Claude CLI ingress, and a baseline-2026 global holdout indefinitely freezes 2% of natural units against the reference fleet config. This is **not a security mitigation per se**; it is an operator-visible audit + control surface, the same way the spend caps and the dashboard isolation are. The properties:
+
+- **Experiments require operator ratification before going live.** `force experiment author <yaml>` writes an `Experiments` row in `'authored'` state; only `force experiment ratify <id> --operator <email>` flips it to `'running'`, recording an `AuditLog` row tagged `experiment.ratify`. There is no auto-ratify path. Engineering Corps (D3 Phase 3) authors candidate experiments; the operator is the gate.
+- **Holdout is the deterministic baseline.** `baseline-2026` is minted at daemon startup (idempotent on the UNIQUE name index) with a 7-day ramp to a 2% indefinite plateau. Membership is decided by SHA-256(`holdoutID:kind:id`) — same input, same answer indefinitely; no random reassignment. Holdout members short-circuit `treatments.Apply` and run with the unmodified configuration.
+- **`treatments_apply_mode` is the single-write rollback.** A `SystemConfig` row with key `treatments_apply_mode` selects `'live'` (default) vs `'log-only'`. Setting it to `'log-only'` immediately stops experiment enrollment and descriptor rewrite at every call site — no re-deploy, no code change. Every Apply call always lands one row in `TreatmentApplyLog` regardless of mode, so the audit trail does not depend on the mode.
+- **The Bayesian framework is content-addressed.** The analysis algorithm is registered into `AnalysisFrameworks` at startup with a `version='2026-04-29'` PRIMARY KEY and a SHA-256 `config_hash`; a re-registration with the same version but a different manifest is rejected. Published versions are immutable, which is what lets the experiment-replay property hold across daemon restarts.
+
+What this does NOT cover: the contents of an EC-authored manifest itself. The Pre-registration validator catches structural problems (missing hypothesis, no primary metric, < 2 arms), but a semantically-misleading metric is still on the operator. `paired-runs.md` § Mode 3 is the documented mitigation: the YAML structurally validates AND the operator pre-approval gate is the operator's last chance to read it.
 
 ### State-coherence guarantees
 
