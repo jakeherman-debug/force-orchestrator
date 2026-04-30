@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/analysis"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
@@ -191,6 +192,17 @@ func cmdDaemon(db *sql.DB) {
 		os.Exit(1)
 	} else if n > 0 {
 		fmt.Printf("Seeded %d FleetRules row(s) from the bootstrap audit.\n", n)
+	}
+
+	// D3 Phase 2 — register the Bayesian Beta-Binomial analysis
+	// framework so experiments authored later in this run can reference
+	// it via Experiments.analysis_framework_version. Idempotent: a
+	// re-run finds the (version) primary key already present and
+	// returns nil. Must run BEFORE the holdout mint and the
+	// treatments.Apply live flip — both can reference framework rows.
+	if err := analysis.RegisterBayesianBetaBinomial(ctx, db); err != nil {
+		fmt.Fprintf(os.Stderr, "[ANALYSIS-FRAMEWORK] daemon start aborted: %v\n", err)
+		os.Exit(1)
 	}
 
 	// D0-B: Construct the in-process Librarian client once at daemon
