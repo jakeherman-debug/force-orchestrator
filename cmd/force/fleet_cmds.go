@@ -20,6 +20,7 @@ import (
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
+	"force-orchestrator/internal/holdout"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/treatments"
@@ -202,6 +203,17 @@ func cmdDaemon(db *sql.DB) {
 	// treatments.Apply live flip — both can reference framework rows.
 	if err := analysis.RegisterBayesianBetaBinomial(ctx, db); err != nil {
 		fmt.Fprintf(os.Stderr, "[ANALYSIS-FRAMEWORK] daemon start aborted: %v\n", err)
+		os.Exit(1)
+	}
+
+	// D3 Phase 2 — mint the baseline-2026 global holdout. Idempotent
+	// on the UNIQUE name index. Must run AFTER the framework register
+	// (so future code that wants to attach a fleet_state_hash from a
+	// framework version can do so) and BEFORE the treatments.Apply
+	// live flip (so Apply sees the holdout row when it queries
+	// membership).
+	if _, err := holdout.MintBaseline2026(ctx, db); err != nil {
+		fmt.Fprintf(os.Stderr, "[HOLDOUT MINT] daemon start aborted: %v\n", err)
 		os.Exit(1)
 	}
 
