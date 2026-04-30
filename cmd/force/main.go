@@ -490,6 +490,9 @@ func main() {
 	case "experiment":
 		cmdExperiment(ctx, db, os.Args[2:])
 
+	case "ec":
+		cmdEC(ctx, db, os.Args[2:])
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\nRun 'force help' for usage.\n", command)
 		os.Exit(1)

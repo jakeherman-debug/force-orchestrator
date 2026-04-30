@@ -75,6 +75,42 @@ type Client interface {
 	// the prompt as-is or an error so the caller's overflow path
 	// fires correctly.
 	SummarizeForContextOverflow(ctx context.Context, prompt string, targetBytes int) (string, error)
+
+	// EmitCandidate writes a Librarian-curated candidate
+	// PromotionProposal — the handoff surface from the evolved
+	// Librarian to Engineering Corps's ExperimentAuthor (paired-runs.md
+	// § Composition with Promotion Pipeline). Rows are written with
+	// `kind='candidate'` and `authored_by='librarian'`; this convention
+	// (P2 closure note) doubles `authored_by` as the origin column,
+	// avoiding a schema migration. Returns the new PromotionProposals.id.
+	//
+	// Candidates are pending until either ratified (operator approves
+	// → status flips via Ratify) or rejected (operator rejects → row
+	// stays for the audit trail with rejected_at populated). The EC
+	// claim loop polls ListPendingCandidates to discover work.
+	EmitCandidate(ctx context.Context, candidate Candidate) (int, error)
+
+	// ListPendingCandidates returns all PromotionProposals rows that
+	// represent Librarian-emitted candidates which have not yet been
+	// ratified or rejected — i.e. `kind='candidate' AND ratified_at=''
+	// AND rejected_at=''`. Newest-first. The EC claim loop reads this
+	// to pick up new hypotheses; the dashboard EC tab reads it (joined
+	// with kind='promote' rows) for the operator-ratification surface.
+	ListPendingCandidates(ctx context.Context) ([]Candidate, error)
+}
+
+// Candidate is the handoff payload between the Librarian and EC. The
+// shape mirrors the PromotionProposals row but flattens the
+// evidence_summary_json string into a Go-side opaque (the caller
+// chooses whether to parse it). Authored* fields are populated on
+// the read path (ListPendingCandidates); EmitCandidate populates
+// AuthoredAt itself via datetime('now').
+type Candidate struct {
+	ProposalID    int    // zero on emit; populated on read
+	HypothesisKey string // becomes PromotionProposals.rule_key
+	HypothesisRaw string // becomes PromotionProposals.proposed_content
+	EvidenceJSON  string // becomes PromotionProposals.evidence_summary_json (must be valid JSON or "")
+	AuthoredAt    string // populated on read; ignored on emit
 }
 
 // Memory is the librarian-level view of a FleetMemory row. The write-side

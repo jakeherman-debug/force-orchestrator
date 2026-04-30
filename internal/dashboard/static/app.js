@@ -273,6 +273,7 @@ function switchTab(name) {
     case 'mail':        loadMail(); break;
     case 'knowledge':   loadMemoryRepos().then(() => loadMemories()); break;
     case 'experiments': loadExperiments(); loadFleetProgress(); break;
+    case 'ec':          loadECProposals(); break;
     case 'logs':        startLogStream(); break;
   }
   if (name !== 'logs') stopLogStream();
@@ -394,6 +395,173 @@ async function loadFleetProgress() {
     wrap.innerHTML = html;
   } catch (err) {
     wrap.textContent = 'fleet-progress: ' + err;
+  }
+}
+
+// ── Engineering Corps ratification (D3 Phase 3) ─────────────────────────
+// Operator surface for PromotionProposals: list pending (both Librarian
+// candidates and EC promotes), open detail, ratify or reject. Ratify
+// requires the operator email; Reject likewise — and additionally a
+// rejection_rationale ≥ 20 chars when rejection_action != 'leave_as_is'
+// (concern #7). All mutations route through the same securityMiddleware
+// stack as the rest of the dashboard.
+
+let ecStatusFilter = 'pending';
+let ecKindFilter = '';
+
+function setECFilter(status) {
+  ecStatusFilter = status;
+  document.querySelectorAll('[data-ec-status]').forEach(b => {
+    b.classList.toggle('active', b.dataset.ecStatus === status);
+  });
+  loadECProposals();
+}
+
+function setECKindFilter(kind) {
+  ecKindFilter = kind || '';
+  loadECProposals();
+}
+
+function ecEscape(s) {
+  return (s || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+}
+
+async function loadECProposals() {
+  const wrap = document.getElementById('ec-list-wrap');
+  if (!wrap) return;
+  try {
+    const params = [];
+    if (ecStatusFilter && ecStatusFilter !== 'pending') params.push('status=' + encodeURIComponent(ecStatusFilter));
+    // status=pending is the API default but we still send it explicitly
+    // so the active-filter state matches the server response.
+    if (ecStatusFilter === 'pending') params.push('status=pending');
+    if (ecKindFilter) params.push('kind=' + encodeURIComponent(ecKindFilter));
+    const url = '/api/ec/proposals' + (params.length ? '?' + params.join('&') : '');
+    const res = await fetch(url);
+    const data = await res.json();
+    const rows = (data && data.proposals) || [];
+    if (!rows.length) {
+      wrap.textContent = 'No proposals match this filter.';
+      return;
+    }
+    const html = ['<table class="data-table"><thead><tr>',
+      '<th>id</th><th>kind</th><th>rule_key</th><th>authored_by</th><th>authored_at</th><th>status</th>',
+      '</tr></thead><tbody>'];
+    for (const p of rows) {
+      let status = 'pending';
+      if (p.ratified_at) status = 'ratified by ' + ecEscape(p.ratified_by || '?');
+      else if (p.rejected_at) status = 'rejected (' + ecEscape(p.rejection_action || '') + ')';
+      html.push('<tr style="cursor:pointer" onclick="loadECDetail(' + p.id + ')">');
+      html.push('<td>' + p.id + '</td>');
+      html.push('<td>' + ecEscape(p.kind) + '</td>');
+      html.push('<td>' + ecEscape(p.rule_key) + '</td>');
+      html.push('<td>' + ecEscape(p.authored_by) + '</td>');
+      html.push('<td>' + ecEscape(p.authored_at) + '</td>');
+      html.push('<td>' + status + '</td>');
+      html.push('</tr>');
+    }
+    html.push('</tbody></table>');
+    wrap.innerHTML = html.join('');
+  } catch (err) {
+    wrap.textContent = 'Failed to load EC proposals: ' + err;
+  }
+}
+
+async function loadECDetail(id) {
+  const wrap = document.getElementById('ec-detail-wrap');
+  if (!wrap) return;
+  try {
+    const res = await fetch('/api/ec/proposals/' + encodeURIComponent(id));
+    if (res.status === 404) {
+      wrap.style.display = 'block';
+      wrap.textContent = 'Proposal ' + id + ' not found.';
+      return;
+    }
+    const p = await res.json();
+    const html = [
+      '<h3>Proposal ' + p.id + ' (' + ecEscape(p.kind) + ')</h3>',
+      '<dl class="kv-list">',
+      '<dt>rule_key</dt><dd>' + ecEscape(p.rule_key) + '</dd>',
+      '<dt>authored_by</dt><dd>' + ecEscape(p.authored_by) + '</dd>',
+      '<dt>authored_at</dt><dd>' + ecEscape(p.authored_at) + '</dd>',
+      p.experiment_id ? '<dt>experiment_id</dt><dd>' + p.experiment_id + '</dd>' : '',
+      p.ratified_at ? '<dt>ratified_at</dt><dd>' + ecEscape(p.ratified_at) + ' by ' + ecEscape(p.ratified_by) + '</dd>' : '',
+      p.rejected_at ? '<dt>rejected_at</dt><dd>' + ecEscape(p.rejected_at) + ' (' + ecEscape(p.rejection_action || '') + ')</dd>' : '',
+      '</dl>',
+      '<h4>Proposed content</h4>',
+      '<pre style="white-space:pre-wrap">' + ecEscape(p.proposed_content) + '</pre>',
+      '<h4>Evidence</h4>',
+      '<pre style="white-space:pre-wrap">' + ecEscape(p.evidence_summary_json) + '</pre>',
+    ];
+    if (!p.ratified_at && !p.rejected_at) {
+      html.push('<div style="margin-top:14px;display:flex;gap:8px">');
+      html.push('<button class="btn btn-primary" onclick="ecRatify(' + p.id + ')">Ratify</button>');
+      html.push('<button class="btn" onclick="ecRejectPrompt(' + p.id + ')">Reject…</button>');
+      html.push('</div>');
+    }
+    wrap.innerHTML = html.join('');
+    wrap.style.display = 'block';
+  } catch (err) {
+    wrap.style.display = 'block';
+    wrap.textContent = 'Failed to load proposal ' + id + ': ' + err;
+  }
+}
+
+async function ecRatify(id) {
+  const op = prompt('Operator email for ratification:');
+  if (!op) return;
+  try {
+    const res = await fetch('/api/ec/proposals/' + encodeURIComponent(id) + '/ratify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operator_email: op }),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('Ratify failed: ' + txt);
+      return;
+    }
+    loadECProposals();
+    loadECDetail(id);
+  } catch (err) {
+    alert('Ratify error: ' + err);
+  }
+}
+
+async function ecRejectPrompt(id) {
+  const op = prompt('Operator email:');
+  if (!op) return;
+  const action = prompt('rejection_action: leave_as_is | clean_revert | cascade_revert | surgical_revert | escalate', 'leave_as_is');
+  if (!action) return;
+  let rationale = '';
+  if (action !== 'leave_as_is') {
+    rationale = prompt('rejection_rationale (≥ 20 chars):') || '';
+    if (rationale.length < 20) {
+      alert('rationale must be ≥ 20 chars when action != leave_as_is');
+      return;
+    }
+  }
+  const reason = prompt('rejected_reason (free-form, optional):') || '';
+  try {
+    const res = await fetch('/api/ec/proposals/' + encodeURIComponent(id) + '/reject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operator_email: op,
+        rejection_action: action,
+        rejection_rationale: rationale,
+        rejected_reason: reason,
+      }),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('Reject failed: ' + txt);
+      return;
+    }
+    loadECProposals();
+    loadECDetail(id);
+  } catch (err) {
+    alert('Reject error: ' + err);
   }
 }
 
