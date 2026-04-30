@@ -101,6 +101,7 @@
   <button class="tab-btn"        data-tab="mail"        onclick="switchTab('mail')">Mail <span class="tab-badge" id="tbadge-mail"></span></button>
   <button class="tab-btn"        data-tab="knowledge"   onclick="switchTab('knowledge')">Knowledge <span class="tab-badge" id="tbadge-knowledge"></span></button>
   <button class="tab-btn"        data-tab="experiments" onclick="switchTab('experiments')">Experiments <span class="tab-badge" id="tbadge-experiments"></span></button>
+  <button class="tab-btn"        data-tab="ec"          onclick="switchTab('ec')">EC <span class="tab-badge" id="tbadge-ec"></span></button>
   <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
   <div id="tab-spacer"></div>
   <span id="last-refresh" style="font-size:11px;color:var(--text2);align-self:center"></span>
@@ -291,6 +292,29 @@
     <div id="experiment-fleet-progress" style="padding:10px 14px;font-size:12px;color:var(--text1);border-bottom:1px solid var(--border)"></div>
     <div id="experiment-list-wrap" style="padding:10px 14px"></div>
     <div id="experiment-detail-wrap" style="padding:10px 14px;border-top:1px solid var(--border);display:none"></div>
+  </div>
+
+  <!-- EC tab — D3 Phase 3. Operator ratifies / rejects PromotionProposals
+       (Librarian candidates + EC promotes). Phase 6 absorbs this tab into
+       Pulse / Briefing / Reflection; for now it's the minimal surface so
+       the Librarian → EC handoff is operator-visible. -->
+  <div class="tab-pane" id="tab-ec">
+    <div class="filter-bar">
+      <button class="filter-btn active" data-ec-status="pending"  onclick="setECFilter('pending')">Pending</button>
+      <button class="filter-btn"        data-ec-status="ratified" onclick="setECFilter('ratified')">Ratified</button>
+      <button class="filter-btn"        data-ec-status="rejected" onclick="setECFilter('rejected')">Rejected</button>
+      <button class="filter-btn"        data-ec-status="all"      onclick="setECFilter('all')">All</button>
+      <div style="width:12px"></div>
+      <select class="field-select" id="ec-kind-filter" style="width:160px;padding:3px 8px;font-size:12px" onchange="setECKindFilter(this.value)">
+        <option value="">All kinds</option>
+        <option value="candidate">Librarian candidates</option>
+        <option value="promote">EC promotes</option>
+      </select>
+      <div class="filter-spacer"></div>
+      <button class="hdr-btn" onclick="loadECProposals()">Refresh</button>
+    </div>
+    <div id="ec-list-wrap" style="padding:10px 14px"></div>
+    <div id="ec-detail-wrap" style="padding:10px 14px;border-top:1px solid var(--border);display:none"></div>
   </div>
 
   <!-- Logs tab -->

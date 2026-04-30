@@ -64,6 +64,14 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/experiments", handleExperimentsList(db))
 	mux.HandleFunc("/api/experiments/", handleExperimentsSubroutes(db))
 	mux.HandleFunc("/api/fleet-progress", handleFleetProgress(db))
+	// D3 Phase 3 — EC ratification surface (operator approves /
+	// rejects PromotionProposals). Both Librarian-emitted candidates
+	// (kind='candidate') and EC-emitted promotions (kind='promote')
+	// flow through the same handlers; operator email is required on
+	// every mutation. handlers_ec.go enforces rejection_rationale
+	// >= 20 chars when rejection_action != 'leave_as_is' (concern #7).
+	mux.HandleFunc("/api/ec/proposals", handleECProposalsList(db))
+	mux.HandleFunc("/api/ec/proposals/", handleECProposalsSubroutes(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── Static assets + SPA fallback ─────────────────────────────────────────
