@@ -587,3 +587,57 @@ Repo layout section), `internal/store/fixlog/fix8d.md` (2),
 
 No deliverable-status change; D3 remains 🟡 PARTIAL (Phases 1–2
 closed). This addendum records operational hygiene only.
+
+---
+
+### 2026-04-30 — convergent bootstrap + P18 + pre-commit hook
+
+The systemic fix for the recurring "false-drift signal" class.
+Three coupled changes plus a hook upgrade landed on branch
+`convergent-bootstrap` and merged back to `main` via `--no-ff`:
+
+1. **`BootstrapFleetRules` is now convergent on `content_hash`
+   mismatch** (only for bootstrap-managed rows; operator-direct-write
+   rules are untouched). When the audit slice's content for an
+   existing `(rule_key, version)` row diverges from the persisted DB
+   content, bootstrap refreshes the DB row to match. Eliminates the
+   "stale persistent DB" failure mode that produced false-drift
+   signals on every audit-slice content edit.
+
+2. **`force render-rules` uses a fresh in-memory DB by default.**
+   `--use-runtime-db` is the explicit opt-in for inspecting renders
+   that include operator-direct-write rules. The CLI's render output
+   no longer depends on operator-side persistent DB state.
+
+3. **`TestPattern_P18_RenderCoherence` lands as an in-suite drift
+   gate.** Asserts on-disk `CLAUDE.md` / `FIX-LOG.md` / per-domain
+   docs byte-equal what the audit slice renders against a fresh
+   in-memory DB. A synthetic-regression sanity test
+   (`TestPattern_P18_DetectsInjectedDrift`) proves the comparison
+   helper actually surfaces drift — P18 is not toothless.
+
+4. **Pre-commit hook upgraded from size-only to coherence-check.**
+   `scripts/pre-commit/render-coherence-check.sh` runs `force
+   render-rules --check` when audit-relevant files
+   (`fleet_rules_audit.go`, `fixlog/`, `fleet_rules_bootstrap.go`,
+   `rule_renderer.go`) are staged. Cheap fast-path skips otherwise.
+   Auto-discovered by the existing `dispatcher.sh`; activates on
+   the next operator `make hooks-install`.
+
+The drift class is sealed in three layers:
+
+| Layer | Mechanism | Catches |
+|---|---|---|
+| 1 | Convergent `BootstrapFleetRules` | Stale DB at the source — re-bootstrap refreshes drifted rows. |
+| 2 | `TestPattern_P18_RenderCoherence` | Drift in `make test` / CI before merge. |
+| 3 | `render-coherence-check.sh` pre-commit hook | Drift one step earlier at commit time. |
+
+Auto-resolution of the doc-reorg drift wrinkle: the persistent
+dev-DB drift on `main` (the stale `fix8d-code-red-full-closure`
+row) refreshes automatically on the first daemon-side
+`BootstrapFleetRules` run after this merge. No operator action
+required.
+
+No deliverable-status change; D3 remains 🟡 PARTIAL (Phases 1–2
+closed + drift class sealed). Phase 3 (Engineering Corps + Trust
+Metrics Infrastructure) starts on a clean baseline.
