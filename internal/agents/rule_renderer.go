@@ -78,6 +78,12 @@ func RenderClaudeMdFile(ctx context.Context, db *sql.DB) ([]byte, error) {
 // RenderFixLog produces the FIX-LOG.md bytes from the historical-narrative
 // rules. Append-only narrative; no size cap (FIX-LOG.md is operator-browsed,
 // not auto-loaded).
+//
+// D3-P1 follow-up C: the rendered file now carries the AUTO-GENERATED
+// preamble (every operator who opens FIX-LOG.md sees it is machine-
+// managed) plus the historic intro paragraph that used to live above
+// the first ## Fix entry. Drift detection via CheckRenderDrift covers
+// FIX-LOG.md by default once the audit owns every narrative.
 func RenderFixLog(ctx context.Context, db *sql.DB) ([]byte, error) {
 	rules, err := selectActiveRules(ctx, db, `render_to = 'fix-log'`)
 	if err != nil {
@@ -86,13 +92,16 @@ func RenderFixLog(ctx context.Context, db *sql.DB) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString(renderHeader)
 	b.WriteString("# Fix Log\n\n")
+	b.WriteString("Operator narrative for each audit-fix PR. ")
+	b.WriteString("Written as each fix merges to main. ")
+	b.WriteString("Each entry answers: what broke, what shipped, how it was proved, what to watch for next.\n\n")
 	for i, r := range rules {
 		if i > 0 {
-			b.WriteString("\n\n")
+			b.WriteString("\n")
 		}
-		b.WriteString(r.Content)
+		b.WriteString(strings.TrimRight(r.Content, "\n"))
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
 	return []byte(b.String()), nil
 }
 
