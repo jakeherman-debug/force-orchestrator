@@ -257,15 +257,6 @@ func handleExperimentAuthor(
 
 // handleDemotionAuthor lives in demotion_author.go.
 
-func handleMetricAuthor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
+// handleMetricAuthor lives in metric_author.go.
 
 // handleHoldoutMonitor lives in holdout_monitor.go.
