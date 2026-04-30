@@ -316,6 +316,78 @@ func (c *inProcessClient) SummarizeForContextOverflow(ctx context.Context, promp
 	return strings.TrimSpace(out), nil
 }
 
+// EmitCandidate writes a candidate PromotionProposal authored by the
+// Librarian. Convention: kind='candidate', authored_by='librarian'.
+// The PromotionProposals row's experiment_id is set to 0 — candidates
+// are pre-experiment artefacts (EC's ExperimentAuthor consumes them
+// to mint Experiments rows). Returns the new proposal id.
+func (c *inProcessClient) EmitCandidate(ctx context.Context, cand Candidate) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(cand.HypothesisKey) == "" {
+		return 0, fmt.Errorf("librarian: EmitCandidate requires HypothesisKey")
+	}
+	if strings.TrimSpace(cand.HypothesisRaw) == "" {
+		return 0, fmt.Errorf("librarian: EmitCandidate requires HypothesisRaw")
+	}
+	evidence := cand.EvidenceJSON
+	if strings.TrimSpace(evidence) == "" {
+		evidence = "{}"
+	}
+	var id int
+	err := c.db.QueryRowContext(ctx, `
+		INSERT INTO PromotionProposals
+			(experiment_id, kind, rule_key, proposed_content, evidence_summary_json,
+			 authored_by, authored_at)
+		VALUES (0, 'candidate', ?, ?, ?, 'librarian', datetime('now'))
+		RETURNING id
+	`, cand.HypothesisKey, cand.HypothesisRaw, evidence).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("librarian: EmitCandidate insert: %w", err)
+	}
+	return id, nil
+}
+
+// ListPendingCandidates returns rows where kind='candidate'
+// AND ratified_at='' AND rejected_at=''. Filter on authored_by is
+// implicit: the candidate convention (paired-runs.md § Composition
+// with Promotion Pipeline) is that only the Librarian emits
+// kind='candidate' rows. Newest-first ordering matches the dashboard
+// list view's expectations (most recent hypotheses surface first).
+func (c *inProcessClient) ListPendingCandidates(ctx context.Context) ([]Candidate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT id, IFNULL(rule_key,''), IFNULL(proposed_content,''),
+		       IFNULL(evidence_summary_json,''), IFNULL(authored_at,'')
+		  FROM PromotionProposals
+		 WHERE kind = 'candidate'
+		   AND IFNULL(ratified_at,'') = ''
+		   AND IFNULL(rejected_at,'') = ''
+		   AND authored_by = 'librarian'
+		 ORDER BY id DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("librarian: ListPendingCandidates query: %w", err)
+	}
+	defer rows.Close()
+	var out []Candidate
+	for rows.Next() {
+		var c Candidate
+		if scanErr := rows.Scan(&c.ProposalID, &c.HypothesisKey, &c.HypothesisRaw,
+			&c.EvidenceJSON, &c.AuthoredAt); scanErr != nil {
+			return nil, fmt.Errorf("librarian: ListPendingCandidates scan: %w", scanErr)
+		}
+		out = append(out, c)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, fmt.Errorf("librarian: ListPendingCandidates rows iter: %w", rerr)
+	}
+	return out, nil
+}
+
 // stripUsageAnnotation removes the trailing
 // "[claude_usage: X input Y output]" line injected by the CLI runner
 // from a result string. Same logic as claude.ExtractJSON's leading

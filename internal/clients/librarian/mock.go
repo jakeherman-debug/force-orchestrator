@@ -34,6 +34,13 @@ type MockClient struct {
 	UpdateMemoryFn              func(ctx context.Context, memoryID int, update MemoryUpdate) error
 	RemoveMemoryFn              func(ctx context.Context, memoryID int) error
 	SummarizeForOverflowFn      func(ctx context.Context, prompt string, targetBytes int) (string, error)
+	EmitCandidateFn             func(ctx context.Context, candidate Candidate) (int, error)
+	ListPendingCandidatesFn     func(ctx context.Context) ([]Candidate, error)
+
+	// D3 Phase 3 — Librarian → EC handoff state. Candidates added via
+	// EmitCandidate live here; ListPendingCandidates returns the slice.
+	Candidates       []Candidate
+	NextCandidateID  int
 
 	// Recorded call history. Tests assert on these.
 	WriteCalls       []Memory
@@ -43,6 +50,8 @@ type MockClient struct {
 	UpdateCalls      []MockUpdateCall
 	RemoveCalls      []int
 	SummarizeCalls   []MockSummarizeCall
+	EmitCalls        []Candidate
+	ListPendingCalls int
 }
 
 // MockSummarizeCall captures one SummarizeForContextOverflow invocation.
@@ -208,6 +217,42 @@ func (m *MockClient) SummarizeForContextOverflow(ctx context.Context, prompt str
 	return prompt, nil
 }
 
+// EmitCandidate records the call and (default behaviour) appends the
+// candidate to m.Candidates with an auto-incrementing ProposalID
+// drawn from NextCandidateID (which starts at 1 and bumps each call).
+// Override via EmitCandidateFn.
+func (m *MockClient) EmitCandidate(ctx context.Context, c Candidate) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.EmitCalls = append(m.EmitCalls, c)
+	if m.EmitCandidateFn != nil {
+		return m.EmitCandidateFn(ctx, c)
+	}
+	if m.NextCandidateID == 0 {
+		m.NextCandidateID = 1
+	}
+	id := m.NextCandidateID
+	m.NextCandidateID++
+	c.ProposalID = id
+	m.Candidates = append(m.Candidates, c)
+	return id, nil
+}
+
+// ListPendingCandidates returns the recorded candidates slice (every
+// EmitCandidate-pushed row is treated as pending unless the caller
+// explicitly mutates m.Candidates). Override via ListPendingCandidatesFn.
+func (m *MockClient) ListPendingCandidates(ctx context.Context) ([]Candidate, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ListPendingCalls++
+	if m.ListPendingCandidatesFn != nil {
+		return m.ListPendingCandidatesFn(ctx)
+	}
+	out := make([]Candidate, len(m.Candidates))
+	copy(out, m.Candidates)
+	return out, nil
+}
+
 // Reset clears all recorded calls and fixture state, restoring NextWriteID
 // to 1. Useful between sub-tests inside the same test function.
 func (m *MockClient) Reset() {
@@ -215,6 +260,8 @@ func (m *MockClient) Reset() {
 	defer m.mu.Unlock()
 	m.Memories = nil
 	m.NextWriteID = 1
+	m.Candidates = nil
+	m.NextCandidateID = 1
 	m.WriteCalls = nil
 	m.WriteTxCalls = nil
 	m.GetTaskCalls = nil
@@ -222,6 +269,8 @@ func (m *MockClient) Reset() {
 	m.UpdateCalls = nil
 	m.RemoveCalls = nil
 	m.SummarizeCalls = nil
+	m.EmitCalls = nil
+	m.ListPendingCalls = 0
 }
 
 // Compile-time assertion: *MockClient satisfies the Client interface.
