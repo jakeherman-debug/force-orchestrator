@@ -821,6 +821,69 @@ func createSchema(db *sql.DB) {
 		UNIQUE (convoy_id, cycle_number)
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_crc_convoy ON ConvoyReviewCycles(convoy_id, cycle_number);`)
+
+	// AdversarialPairings — Council/Medic/ConvoyReview adversarial-pair
+	// results. The primary prompt and a critic prompt run on the same
+	// decision; a disagreement surfaces to the operator.
+	db.Exec(`CREATE TABLE IF NOT EXISTS AdversarialPairings (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id         INTEGER NOT NULL,
+		agent               TEXT    NOT NULL,
+		primary_outcome     TEXT    NOT NULL,
+		critic_outcome      TEXT    NOT NULL,
+		agreement           INTEGER DEFAULT 0,
+		surfaced_at         TEXT    DEFAULT '',
+		operator_resolution TEXT    DEFAULT '',
+		created_at          TEXT    DEFAULT (datetime('now'))
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_agent ON AdversarialPairings(agent, created_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_disagreements
+		ON AdversarialPairings(agent) WHERE agreement = 0;`)
+
+	// GoldenSetFixtures — curated input fixtures with known-correct
+	// outputs. Source and curator captured for audit; retired_at allows
+	// removing fixtures whose contracts have shifted.
+	db.Exec(`CREATE TABLE IF NOT EXISTS GoldenSetFixtures (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent           TEXT    NOT NULL,
+		input           TEXT    NOT NULL,
+		expected_output TEXT    NOT NULL,
+		source          TEXT    NOT NULL,
+		curated_at      TEXT    DEFAULT (datetime('now')),
+		curated_by      TEXT    DEFAULT '',
+		retired_at      TEXT    DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gsf_agent ON GoldenSetFixtures(agent) WHERE retired_at = '';`)
+
+	// GoldenSetEvaluations — periodic prompt-vs-fixture evaluation
+	// results. Aggregated per (agent, prompt_version, week) for
+	// accuracy-trend tracking.
+	db.Exec(`CREATE TABLE IF NOT EXISTS GoldenSetEvaluations (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent           TEXT    NOT NULL,
+		prompt_version  TEXT    NOT NULL,
+		fixture_id      INTEGER NOT NULL,
+		actual_output   TEXT    NOT NULL,
+		accuracy_score  REAL,
+		evaluated_at    TEXT    DEFAULT (datetime('now'))
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gse_agent_version
+		ON GoldenSetEvaluations(agent, prompt_version, evaluated_at);`)
+
+	// CalibrationAuditSamples — weekly calibration sample widget records.
+	// Operator confirms / overrides past auto-decisions; surfaces
+	// systematic bias.
+	db.Exec(`CREATE TABLE IF NOT EXISTS CalibrationAuditSamples (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		sample_week         TEXT    NOT NULL,
+		proposal_id         INTEGER NOT NULL,
+		selection_bucket    TEXT    NOT NULL,
+		surfaced_at         TEXT    DEFAULT (datetime('now')),
+		operator_action     TEXT    DEFAULT '',
+		operator_acted_at   TEXT    DEFAULT '',
+		operator_rationale  TEXT    DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -1564,4 +1627,56 @@ func runMigrations(db *sql.DB) {
 		UNIQUE (convoy_id, cycle_number)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_crc_convoy ON ConvoyReviewCycles(convoy_id, cycle_number)`)
+
+	// AdversarialPairings + GoldenSet* + CalibrationAuditSamples (upgrade path).
+	db.Exec(`CREATE TABLE IF NOT EXISTS AdversarialPairings (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id         INTEGER NOT NULL,
+		agent               TEXT    NOT NULL,
+		primary_outcome     TEXT    NOT NULL,
+		critic_outcome      TEXT    NOT NULL,
+		agreement           INTEGER DEFAULT 0,
+		surfaced_at         TEXT    DEFAULT '',
+		operator_resolution TEXT    DEFAULT '',
+		created_at          TEXT    DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_agent ON AdversarialPairings(agent, created_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_disagreements
+		ON AdversarialPairings(agent) WHERE agreement = 0`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS GoldenSetFixtures (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent           TEXT    NOT NULL,
+		input           TEXT    NOT NULL,
+		expected_output TEXT    NOT NULL,
+		source          TEXT    NOT NULL,
+		curated_at      TEXT    DEFAULT (datetime('now')),
+		curated_by      TEXT    DEFAULT '',
+		retired_at      TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gsf_agent ON GoldenSetFixtures(agent) WHERE retired_at = ''`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS GoldenSetEvaluations (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent           TEXT    NOT NULL,
+		prompt_version  TEXT    NOT NULL,
+		fixture_id      INTEGER NOT NULL,
+		actual_output   TEXT    NOT NULL,
+		accuracy_score  REAL,
+		evaluated_at    TEXT    DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gse_agent_version
+		ON GoldenSetEvaluations(agent, prompt_version, evaluated_at)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS CalibrationAuditSamples (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		sample_week         TEXT    NOT NULL,
+		proposal_id         INTEGER NOT NULL,
+		selection_bucket    TEXT    NOT NULL,
+		surfaced_at         TEXT    DEFAULT (datetime('now')),
+		operator_action     TEXT    DEFAULT '',
+		operator_acted_at   TEXT    DEFAULT '',
+		operator_rationale  TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week)`)
 }

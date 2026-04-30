@@ -829,4 +829,67 @@ CREATE TABLE IF NOT EXISTS ConvoyReviewCycles (
 );
 CREATE INDEX IF NOT EXISTS idx_crc_convoy ON ConvoyReviewCycles(convoy_id, cycle_number);
 
+-- ── D3 Phase 1 — adversarial pairing + golden set + calibration audit ────────
+-- AdversarialPairings — Council/Medic/ConvoyReview adversarial-pair results.
+-- A primary prompt and a critic prompt run on the same decision; a
+-- disagreement surfaces to the operator for resolution.
+CREATE TABLE IF NOT EXISTS AdversarialPairings (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id         INTEGER NOT NULL,                        -- references the original task/decision
+    agent               TEXT    NOT NULL,                        -- 'council'|'medic'|'convoy_review'
+    primary_outcome     TEXT    NOT NULL,                        -- structured decision from primary prompt
+    critic_outcome      TEXT    NOT NULL,                        -- structured decision from critic prompt
+    agreement           INTEGER DEFAULT 0,                       -- 1 if outcomes match
+    surfaced_at         TEXT    DEFAULT '',                      -- set when surfaced to operator
+    operator_resolution TEXT    DEFAULT '',                      -- what operator decided when surfaced
+    created_at          TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_adv_pairings_agent ON AdversarialPairings(agent, created_at);
+CREATE INDEX IF NOT EXISTS idx_adv_pairings_disagreements
+    ON AdversarialPairings(agent) WHERE agreement = 0;
+
+-- GoldenSetFixtures — curated input fixtures with known-correct outputs.
+-- Source records provenance; retired_at allows removing fixtures whose
+-- contracts have shifted.
+CREATE TABLE IF NOT EXISTS GoldenSetFixtures (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent           TEXT    NOT NULL,                            -- 'captain'|'council'|'medic'|...
+    input           TEXT    NOT NULL,                            -- the input the prompt receives
+    expected_output TEXT    NOT NULL,                            -- known-correct structured output
+    source          TEXT    NOT NULL,                            -- 'auto-clean-shipping'|'operator-curated'|'archaeologist'
+    curated_at      TEXT    DEFAULT (datetime('now')),
+    curated_by      TEXT    DEFAULT '',                          -- 'system'|'operator:<name>'|'archaeologist'
+    retired_at      TEXT    DEFAULT ''                           -- nullable; for fixtures no longer relevant
+);
+CREATE INDEX IF NOT EXISTS idx_gsf_agent ON GoldenSetFixtures(agent) WHERE retired_at = '';
+
+-- GoldenSetEvaluations — periodic prompt-vs-fixture evaluation results.
+-- Aggregated per (agent, prompt_version, week) for accuracy-trend tracking.
+CREATE TABLE IF NOT EXISTS GoldenSetEvaluations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent           TEXT    NOT NULL,
+    prompt_version  TEXT    NOT NULL,
+    fixture_id      INTEGER NOT NULL,                            -- FK → GoldenSetFixtures.id
+    actual_output   TEXT    NOT NULL,                            -- what the current prompt produced
+    accuracy_score  REAL,                                        -- 0.0-1.0; how closely actual matches expected
+    evaluated_at    TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_gse_agent_version
+    ON GoldenSetEvaluations(agent, prompt_version, evaluated_at);
+
+-- CalibrationAuditSamples — weekly calibration sample widget records.
+-- Operator confirms / overrides past auto-decisions; surfaces systematic
+-- bias.
+CREATE TABLE IF NOT EXISTS CalibrationAuditSamples (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_week         TEXT    NOT NULL,                        -- ISO week identifier
+    proposal_id         INTEGER NOT NULL,                        -- FK → PromotionProposals.id
+    selection_bucket    TEXT    NOT NULL,                        -- 'fast_high_stakes'|'high_approve_rate'|'random'
+    surfaced_at         TEXT    DEFAULT (datetime('now')),
+    operator_action     TEXT    DEFAULT '',                      -- 'confirm'|'still_approve_after_review'|'should_have_been_rejected'|'snoozed'
+    operator_acted_at   TEXT    DEFAULT '',
+    operator_rationale  TEXT    DEFAULT ''                       -- when 'should_have_been_rejected'
+);
+CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
