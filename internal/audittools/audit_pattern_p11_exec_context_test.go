@@ -289,3 +289,105 @@ func TestPattern_P11_AllowlistReasonsTruthful(t *testing.T) {
 	}
 	t.Errorf("\nA reason MUST name what the command actually does (push/fetch/ls-remote/clone) OR the cancellation mechanism that stands in for daemon ctx (dog-level timeout, CLI session bound, runner-layer Timeout, sub-second). Reasons like \"short\" or \"rev-parse\" alone are rejected — those were the exact mislabels Fix #8e closed.")
 }
+
+// agentCodeBackgroundCtxAllowlist names files under internal/agents/ where
+// `context.Background()` is acceptable in production code. Each entry MUST
+// describe (a) what the call does, and (b) why a daemon-cancellable ctx
+// cannot be threaded at this site. Currently empty — every agent code
+// path has access to a Spawn-supplied ctx; if a new entry lands here it
+// must justify why the standard ctx-threading path doesn't apply.
+var agentCodeBackgroundCtxAllowlist = map[string]string{}
+
+// TestPattern_P11_AgentCodeBackgroundCtx is the D3 P1 follow-up B regression
+// for the gap that closed runChancellorReview's stale `context.Background()`
+// calls. Pattern P11's exec.CommandContext check catches direct subprocess
+// detachment, but it didn't catch the next layer up: an agent function that
+// uses `context.Background()` for an LLM call, even though its caller (e.g.
+// SpawnChancellor) already has a daemon-cancellable ctx in scope.
+//
+// This sub-test enforces the "ctx is in scope so use it" contract for
+// production code under internal/agents/. Bare `context.Background()` is
+// rejected unless the file is on the allowlist with a truthful reason.
+//
+// Accepted shapes in agent production code:
+//  1. Function takes `ctx context.Context` and uses it for downstream calls.
+//  2. Function is reachable from a SpawnX entry point that threads ctx.
+//
+// Rejected:
+//   - `context.Background()` in any production agent file outside the
+//     allowlist. The fix is to thread ctx through from the SpawnX entry
+//     point (see chancellor.go's D3 P1 follow-up B for the canonical shape).
+func TestPattern_P11_AgentCodeBackgroundCtx(t *testing.T) {
+	root := moduleRoot(t)
+	bgRe := regexp.MustCompile(`\bcontext\.Background\(\)`)
+
+	type offender struct {
+		path string
+		line int
+		text string
+	}
+	var offenders []offender
+
+	agentsDir := filepath.Join(root, "internal", "agents")
+	err := filepath.WalkDir(agentsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".build-worktrees" || name == ".force-worktrees" ||
+				name == "vendor" || name == ".git" || name == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		relPath := rel(root, path)
+		if _, ok := agentCodeBackgroundCtxAllowlist[relPath]; ok {
+			return nil
+		}
+		body, rerr := readFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		text := string(body)
+		lines := strings.Split(text, "\n")
+		for i, line := range lines {
+			// Skip comments — references to context.Background() in
+			// docstrings or fix narratives are not runtime calls.
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if bgRe.MatchString(line) {
+				offenders = append(offenders, offender{
+					path: relPath, line: i + 1, text: trimmed,
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	if len(offenders) == 0 {
+		return
+	}
+	sort.Slice(offenders, func(i, j int) bool {
+		if offenders[i].path != offenders[j].path {
+			return offenders[i].path < offenders[j].path
+		}
+		return offenders[i].line < offenders[j].line
+	})
+	t.Errorf("Pattern P11 (D3 P1 follow-up B): %d disallowed `context.Background()` call(s) in agent production code:", len(offenders))
+	for _, o := range offenders {
+		t.Errorf("  %s:%d — %s", o.path, o.line, o.text)
+	}
+	t.Errorf("\nFix: thread ctx through from the SpawnX entry point. See chancellor.go's D3 P1 follow-up B (runChancellorReview / synthesizeMergedPlan) for the canonical shape: add `ctx context.Context` as the first parameter, propagate it from SpawnChancellor, and use claude.AskClaudeCLIContext(ctx, …) instead of claude.AskClaudeCLI(…).")
+}
