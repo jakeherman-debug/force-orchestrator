@@ -16,9 +16,11 @@ import (
 	"path/filepath"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/agents/engineering_corps"
 	"force-orchestrator/internal/analysis"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
+	"force-orchestrator/internal/clients/metrics"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/holdout"
 	"force-orchestrator/internal/store"
@@ -324,6 +326,19 @@ func cmdDaemon(db *sql.DB) {
 		go agents.SpawnDiplomat(ctx, db, name)
 	}
 	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient})
+
+	// D3 Phase 3 — Engineering Corps. Spawned AFTER the review-agent
+	// roster is up and AFTER treatments.Apply is wired (above) so the
+	// EC claim loop sees the same hook-driven enrollment behaviour
+	// every other agent does. Phase 1 ships the skeleton + dispatcher
+	// + ErrNotImplemented stubs; sub-agents A/B/C fill in the six
+	// task type handlers in subsequent commits.
+	go engineering_corps.SpawnEngineeringCorps(ctx, engineering_corps.EngineeringCorpsConfig{
+		Name:      "EngineeringCorps-1",
+		DB:        db,
+		Librarian: libClient,
+		Metrics:   metrics.NewInProcess(),
+	})
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
