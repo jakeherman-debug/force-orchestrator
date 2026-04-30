@@ -1,0 +1,18 @@
+agent: engineering-corps
+description: |
+  Engineering Corps is the experimentation orchestrator. Its task
+  handlers (ExperimentAuthor, ExperimentMonitor, PromotionAuthor,
+  DemotionAuthor, MetricAuthor, HoldoutMonitor) generate experiment
+  YAML, metric SQL, and promotion-proposal evidence summaries. All
+  inputs are inlined into the prompt and the output is text destined
+  for direct DB writes — no MCP tool surface needed.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Phase 1 baseline: empty tools string, mirroring Diplomat. The
+  engineering corps does not edit files in a worktree (its
+  deliverables are DB rows + ratifiable proposals); the operator
+  reviews and applies the rendered render_to='claude-md-file' / etc
+  via the rule-renderer, so EC itself does not need Edit / Write /
+  Bash. Phase 3 sub-agent A may revisit this if a handler needs a
+  subprocess call.
