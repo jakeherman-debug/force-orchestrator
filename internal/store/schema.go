@@ -733,6 +733,94 @@ func createSchema(db *sql.DB) {
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp ON PromotionProposals (experiment_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);`)
+
+	// ProposedFeatures — Investigator's cross-convoy aggregation queue.
+	// `fingerprint` (canonical-content SHA256) + partial UNIQUE on active
+	// rows enforces dedup (concern #10). value_score / complexity_score are
+	// CHECK-constrained to {low, medium, high}; rationale columns let the
+	// proposer justify the score.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedFeatures (
+		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+		observation_summary  TEXT    NOT NULL,
+		category             TEXT    NOT NULL,
+		source               TEXT    NOT NULL,
+		source_observations  TEXT    DEFAULT '[]',
+		fingerprint          TEXT    NOT NULL DEFAULT '',
+		occurrence_count     INTEGER DEFAULT 1,
+		first_seen_at        TEXT    DEFAULT (datetime('now')),
+		last_seen_at         TEXT    DEFAULT (datetime('now')),
+		evidence_history_json TEXT   DEFAULT '[]',
+		value_score          TEXT    NOT NULL DEFAULT 'medium' CHECK(value_score IN ('low','medium','high')),
+		complexity_score     TEXT    NOT NULL DEFAULT 'medium' CHECK(complexity_score IN ('low','medium','high')),
+		value_rationale      TEXT    DEFAULT '',
+		complexity_rationale TEXT    DEFAULT '',
+		scored_by            TEXT    NOT NULL DEFAULT '',
+		promoted_at          TEXT    DEFAULT '',
+		promotion_deadline   TEXT    DEFAULT '',
+		status               TEXT    DEFAULT 'pending',
+		decided_at           TEXT    DEFAULT '',
+		decided_by           TEXT    DEFAULT '',
+		decision_action      TEXT    DEFAULT '',
+		archived_at          TEXT    DEFAULT '',
+		archive_reason       TEXT    DEFAULT ''
+	);`)
+	// Partial UNIQUE: enforces dedup on active rows; archived dups allowed
+	// for history. fingerprint != '' avoids the "blank fingerprint blocks
+	// every other blank-fingerprint row" footgun.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pf_active_fingerprint
+		ON ProposedFeatures(fingerprint)
+		WHERE archived_at = '' AND fingerprint != '';`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pf_status ON ProposedFeatures(status, last_seen_at);`)
+
+	// ProposedFeatureSuppressions — operator-installed mute rules. CHECK
+	// constraint enforces ≥ 20-char rationale; suppressed_until caps at
+	// 1 year out (enforced at the store-helper layer, not the schema).
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedFeatureSuppressions (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		fingerprint       TEXT    NOT NULL,
+		rationale         TEXT    NOT NULL CHECK(length(rationale) >= 20),
+		suppressed_until  TEXT    NOT NULL,
+		created_at        TEXT    DEFAULT (datetime('now')),
+		created_by_email  TEXT    NOT NULL
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pfs_fp
+		ON ProposedFeatureSuppressions(fingerprint, suppressed_until);`)
+
+	// ProposedFeatureScoreOverrides — audit trail for operator score
+	// changes. rationale is mandatory (the operator must justify why they
+	// overrode the proposer's value/complexity score).
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedFeatureScoreOverrides (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		proposed_feature_id    INTEGER NOT NULL,
+		prior_value_score      TEXT    DEFAULT '',
+		prior_complexity_score TEXT    DEFAULT '',
+		new_value_score        TEXT    DEFAULT '',
+		new_complexity_score   TEXT    DEFAULT '',
+		rationale              TEXT    NOT NULL,
+		overridden_at          TEXT    DEFAULT (datetime('now')),
+		overridden_by_email    TEXT    NOT NULL
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pfso_pf
+		ON ProposedFeatureScoreOverrides(proposed_feature_id);`)
+
+	// ConvoyReviewCycles — concern #6: atomic snapshot evaluations against
+	// a frozen spec. cycle_number is monotonic per convoy (UNIQUE) and the
+	// spec_version_at_start is frozen at cycle start so amendments
+	// mid-cycle take effect at the next cycle, never the in-flight one.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyReviewCycles (
+		id                                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id                             INTEGER NOT NULL,
+		cycle_number                          INTEGER NOT NULL,
+		spec_version_at_start                 TEXT    NOT NULL,
+		cycle_started_at                      TEXT    DEFAULT (datetime('now')),
+		cycle_completed_at                    TEXT    DEFAULT '',
+		outcomes_json                         TEXT    DEFAULT '{}',
+		fix_tasks_spawned_json                TEXT    DEFAULT '[]',
+		amendments_proposed_json              TEXT    DEFAULT '[]',
+		amendments_ratified_during_cycle_json TEXT    DEFAULT '[]',
+		UNIQUE (convoy_id, cycle_number)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_crc_convoy ON ConvoyReviewCycles(convoy_id, cycle_number);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -1404,4 +1492,76 @@ func runMigrations(db *sql.DB) {
 
 	// TaskHistory — per-prompt-version metric correlation.
 	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN prompt_version TEXT DEFAULT ''`)
+
+	// ProposedFeatures + suppressions + score overrides + ConvoyReviewCycles
+	// (upgrade path).
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedFeatures (
+		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+		observation_summary  TEXT    NOT NULL,
+		category             TEXT    NOT NULL,
+		source               TEXT    NOT NULL,
+		source_observations  TEXT    DEFAULT '[]',
+		fingerprint          TEXT    NOT NULL DEFAULT '',
+		occurrence_count     INTEGER DEFAULT 1,
+		first_seen_at        TEXT    DEFAULT (datetime('now')),
+		last_seen_at         TEXT    DEFAULT (datetime('now')),
+		evidence_history_json TEXT   DEFAULT '[]',
+		value_score          TEXT    NOT NULL DEFAULT 'medium' CHECK(value_score IN ('low','medium','high')),
+		complexity_score     TEXT    NOT NULL DEFAULT 'medium' CHECK(complexity_score IN ('low','medium','high')),
+		value_rationale      TEXT    DEFAULT '',
+		complexity_rationale TEXT    DEFAULT '',
+		scored_by            TEXT    NOT NULL DEFAULT '',
+		promoted_at          TEXT    DEFAULT '',
+		promotion_deadline   TEXT    DEFAULT '',
+		status               TEXT    DEFAULT 'pending',
+		decided_at           TEXT    DEFAULT '',
+		decided_by           TEXT    DEFAULT '',
+		decision_action      TEXT    DEFAULT '',
+		archived_at          TEXT    DEFAULT '',
+		archive_reason       TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pf_active_fingerprint
+		ON ProposedFeatures(fingerprint)
+		WHERE archived_at = '' AND fingerprint != ''`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pf_status ON ProposedFeatures(status, last_seen_at)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedFeatureSuppressions (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		fingerprint       TEXT    NOT NULL,
+		rationale         TEXT    NOT NULL CHECK(length(rationale) >= 20),
+		suppressed_until  TEXT    NOT NULL,
+		created_at        TEXT    DEFAULT (datetime('now')),
+		created_by_email  TEXT    NOT NULL
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pfs_fp
+		ON ProposedFeatureSuppressions(fingerprint, suppressed_until)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ProposedFeatureScoreOverrides (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		proposed_feature_id    INTEGER NOT NULL,
+		prior_value_score      TEXT    DEFAULT '',
+		prior_complexity_score TEXT    DEFAULT '',
+		new_value_score        TEXT    DEFAULT '',
+		new_complexity_score   TEXT    DEFAULT '',
+		rationale              TEXT    NOT NULL,
+		overridden_at          TEXT    DEFAULT (datetime('now')),
+		overridden_by_email    TEXT    NOT NULL
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pfso_pf
+		ON ProposedFeatureScoreOverrides(proposed_feature_id)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyReviewCycles (
+		id                                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id                             INTEGER NOT NULL,
+		cycle_number                          INTEGER NOT NULL,
+		spec_version_at_start                 TEXT    NOT NULL,
+		cycle_started_at                      TEXT    DEFAULT (datetime('now')),
+		cycle_completed_at                    TEXT    DEFAULT '',
+		outcomes_json                         TEXT    DEFAULT '{}',
+		fix_tasks_spawned_json                TEXT    DEFAULT '[]',
+		amendments_proposed_json              TEXT    DEFAULT '[]',
+		amendments_ratified_during_cycle_json TEXT    DEFAULT '[]',
+		UNIQUE (convoy_id, cycle_number)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_crc_convoy ON ConvoyReviewCycles(convoy_id, cycle_number)`)
 }

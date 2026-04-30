@@ -746,4 +746,87 @@ CREATE TABLE IF NOT EXISTS PromotionProposals (
 CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp   ON PromotionProposals (experiment_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);
 
+-- ── D3 Phase 1 — ProposedFeatures + suppressions + score overrides ───────────
+-- ProposedFeatures — Investigator's cross-convoy aggregation queue.
+-- fingerprint (canonical-content SHA256) + partial UNIQUE on active rows
+-- enforces dedup (concern #10). value_score / complexity_score are
+-- CHECK-constrained to {low, medium, high}.
+CREATE TABLE IF NOT EXISTS ProposedFeatures (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    observation_summary  TEXT    NOT NULL,
+    category             TEXT    NOT NULL,                       -- 'category_b_new_work'|'category_c_spec_amendment'|...
+    source               TEXT    NOT NULL,                       -- 'investigator'|'captain'|'ec'|'operator'|'convoy_review'
+    source_observations  TEXT    DEFAULT '[]',                   -- JSON [{convoy_id, agent, evidence}, ...]
+    fingerprint          TEXT    NOT NULL DEFAULT '',            -- canonical-content SHA256
+    occurrence_count     INTEGER DEFAULT 1,                      -- bundled across multiple convoys
+    first_seen_at        TEXT    DEFAULT (datetime('now')),
+    last_seen_at         TEXT    DEFAULT (datetime('now')),
+    evidence_history_json TEXT   DEFAULT '[]',                   -- per-occurrence evidence trail
+    value_score          TEXT    NOT NULL DEFAULT 'medium' CHECK(value_score IN ('low','medium','high')),
+    complexity_score     TEXT    NOT NULL DEFAULT 'medium' CHECK(complexity_score IN ('low','medium','high')),
+    value_rationale      TEXT    DEFAULT '',
+    complexity_rationale TEXT    DEFAULT '',
+    scored_by            TEXT    NOT NULL DEFAULT '',            -- matches `source` at insert; updated to 'operator' on override
+    promoted_at          TEXT    DEFAULT '',                     -- operator-marked active interest
+    promotion_deadline   TEXT    DEFAULT '',                     -- self-imposed deadline at promotion time
+    status               TEXT    DEFAULT 'pending',              -- 'pending'|'spawned_convoy'|'merged'|'discarded'
+    decided_at           TEXT    DEFAULT '',
+    decided_by           TEXT    DEFAULT '',                     -- 'operator:<name>'
+    decision_action      TEXT    DEFAULT '',                     -- 'new_convoy:<id>'|'amendment:<convoy_id>'|'discard:<reason>'
+    archived_at          TEXT    DEFAULT '',                     -- soft-archive (housekeeping or operator)
+    archive_reason       TEXT    DEFAULT ''
+);
+-- Partial UNIQUE: dedup on active rows (archived dups allowed for history).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pf_active_fingerprint
+    ON ProposedFeatures(fingerprint)
+    WHERE archived_at = '' AND fingerprint != '';
+CREATE INDEX IF NOT EXISTS idx_pf_status ON ProposedFeatures(status, last_seen_at);
+
+-- ProposedFeatureSuppressions — operator-installed mute rules.
+CREATE TABLE IF NOT EXISTS ProposedFeatureSuppressions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint       TEXT    NOT NULL,                          -- matches ProposedFeatures.fingerprint
+    rationale         TEXT    NOT NULL CHECK(length(rationale) >= 20),  -- ≥ 20 chars; no infinite mutes
+    suppressed_until  TEXT    NOT NULL,                          -- max 1 year out (enforced at store layer)
+    created_at        TEXT    DEFAULT (datetime('now')),
+    created_by_email  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pfs_fp
+    ON ProposedFeatureSuppressions(fingerprint, suppressed_until);
+
+-- ProposedFeatureScoreOverrides — audit trail for operator score changes.
+CREATE TABLE IF NOT EXISTS ProposedFeatureScoreOverrides (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposed_feature_id    INTEGER NOT NULL,
+    prior_value_score      TEXT    DEFAULT '',
+    prior_complexity_score TEXT    DEFAULT '',
+    new_value_score        TEXT    DEFAULT '',
+    new_complexity_score   TEXT    DEFAULT '',
+    rationale              TEXT    NOT NULL,                     -- mandatory; why operator overrode the score
+    overridden_at          TEXT    DEFAULT (datetime('now')),
+    overridden_by_email    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pfso_pf
+    ON ProposedFeatureScoreOverrides(proposed_feature_id);
+
+-- ConvoyReviewCycles — concern #6: atomic snapshot evaluations against a
+-- frozen spec. cycle_number is monotonic per convoy (UNIQUE) and the
+-- spec_version_at_start is frozen at cycle start so amendments mid-cycle
+-- take effect at the next cycle, never the in-flight one — prevents the
+-- 8d→8e→8f noisy-spec drift the operator flagged.
+CREATE TABLE IF NOT EXISTS ConvoyReviewCycles (
+    id                                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    convoy_id                             INTEGER NOT NULL,
+    cycle_number                          INTEGER NOT NULL,      -- monotonic per convoy
+    spec_version_at_start                 TEXT    NOT NULL,      -- snapshot of spec version this cycle ran against
+    cycle_started_at                      TEXT    DEFAULT (datetime('now')),
+    cycle_completed_at                    TEXT    DEFAULT '',
+    outcomes_json                         TEXT    DEFAULT '{}',  -- {AT-NNN: 'passed'|'failed'|'inconclusive', ...}
+    fix_tasks_spawned_json                TEXT    DEFAULT '[]',  -- [{task_id, target_at_id, ...}]
+    amendments_proposed_json              TEXT    DEFAULT '[]',  -- LLM-suggested spec amendments
+    amendments_ratified_during_cycle_json TEXT    DEFAULT '[]',  -- audit: which amendments operator approved this cycle
+    UNIQUE (convoy_id, cycle_number)
+);
+CREATE INDEX IF NOT EXISTS idx_crc_convoy ON ConvoyReviewCycles(convoy_id, cycle_number);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
