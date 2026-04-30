@@ -278,8 +278,42 @@ MetricVersions
 FleetRules
   id                           INTEGER PRIMARY KEY
   rule_key                     TEXT
-  category                     TEXT               -- 'claude-md' | 'senate' | 'bos' | 'isb'
-  agent_scope                  TEXT               -- 'all' | 'captain' | 'medic' | 'senate:<repo>'
+  category                     TEXT               -- semantic kind: 'architecture' | 'schema' |
+                                                  -- 'security' | 'pr-flow' | 'dashboard' |
+                                                  -- 'llm-prompt-discipline' | 'self-healing' |
+                                                  -- 'senate' | 'bos' | 'isb' | 'fix-narrative'
+  agent_scope                  TEXT               -- audience: 'all' | 'operator' | 'claude-code-build'
+                                                  -- | 'captain' | 'council' | 'medic' | 'astromech'
+                                                  -- | 'diplomat' | 'pilot' | 'convoy-review'
+                                                  -- | 'chancellor' | 'commander' | 'investigator'
+                                                  -- | 'librarian' | 'auditor' | 'inquisitor'
+                                                  -- | 'pr-review-triage' | 'medic-ci' | 'boot'
+                                                  -- | 'senate:<repo>' | <comma-separated combinations>
+  render_to                    TEXT NOT NULL      -- physical render target (controlled enum):
+                                                  --   'claude-md-file'      → CLAUDE.md the file
+                                                  --                          (auto-loaded by Claude Code
+                                                  --                          + review agents in daemon CWD).
+                                                  --                          HARD-CAPPED. Tight criteria —
+                                                  --                          rule applies to operator AND
+                                                  --                          Claude Code building Force AND
+                                                  --                          every review agent.
+                                                  --   'agent-prompt'        → rendered ONLY into per-agent
+                                                  --                          --append-system-prompt content
+                                                  --                          via agent_scope filter; NEVER
+                                                  --                          to a shared file.
+                                                  --   'fix-log'             → appended to FIX-LOG.md
+                                                  --                          (historical narrative; not
+                                                  --                          auto-loaded into prompts).
+                                                  --   'pattern-test-docstring' → lives in the Pattern test
+                                                  --                          file's docstring; CLAUDE.md
+                                                  --                          gets a one-line cross-ref.
+                                                  --   'per-domain-doc:<file>' → renders to a domain-specific
+                                                  --                          markdown file (e.g.,
+                                                  --                          'docs/dashboard-conventions.md');
+                                                  --                          loaded by relevant agents only.
+                                                  --   'discard'             → removed entirely (audit-time
+                                                  --                          decision; row kept for history
+                                                  --                          but renders nowhere).
   content                      TEXT
   content_hash                 TEXT
   version                      INTEGER            -- increments per rule_key
@@ -291,6 +325,7 @@ FleetRules
 
   UNIQUE INDEX (rule_key, version)
   PARTIAL INDEX (rule_key) WHERE active_until IS NULL   -- one active per key
+  INDEX (render_to, agent_scope) WHERE active_until IS NULL  -- renderer query path
 
 PromotionProposals
   id                           INTEGER PRIMARY KEY
@@ -494,6 +529,15 @@ FleetRules     + enforced_by TEXT             -- references a Pattern test ID
                                               -- (e.g., 'TestPattern_P12') OR 'trust-only'
                                               -- if no mechanical enforcement exists.
                                               -- Insert rejects rules with neither.
+FleetRules     + render_to TEXT NOT NULL      -- physical render target. Controlled enum:
+                                              --   'claude-md-file' | 'agent-prompt'
+                                              --   | 'fix-log' | 'pattern-test-docstring'
+                                              --   | 'per-domain-doc:<file-path>' | 'discard'.
+                                              -- See § Rule Registry → Rendered exports.
+                                              -- Bootstrap migration audit categorizes every
+                                              -- absorbed CLAUDE.md section by render_to;
+                                              -- default is NOT 'claude-md-file' — auditor
+                                              -- must justify each universal-load rule.
 ```
 
 Dashboard tables introduced for D3 Phase 6 (concern #11 + Drill); landed in Phase 1's schema migration so 6A/6B can build against a stable data layer:
@@ -886,18 +930,24 @@ All fleet rules — what today lives in CLAUDE.md, SENATE.md, BoS rule files, IS
 
 ### Assembly at call time
 
-Each LLM call's rule preamble is assembled by SQL at `treatments.Apply` time:
+Each LLM call's rule preamble is assembled by SQL at `treatments.Apply` time. The query filters by `render_to`, NOT by `category` — `category` is the semantic-kind tag (architecture / security / pr-flow / etc.); `render_to` is the physical render target. Per-agent injection pulls only `agent-prompt` rows scoped to the agent:
 
 ```sql
 SELECT content FROM FleetRules
-WHERE category = 'claude-md'
-  AND agent_scope IN ('all', ?)           -- agent name
+WHERE render_to = 'agent-prompt'
   AND active_from <= datetime('now')
   AND (active_until IS NULL OR active_until > datetime('now'))
-ORDER BY rule_key
+  AND (
+      agent_scope = 'all'
+      OR agent_scope = ?                     -- agent name
+      OR ',' || agent_scope || ',' LIKE '%,' || ? || ',%'  -- comma-separated multi-scope
+  )
+ORDER BY category, rule_key
 ```
 
-The retrieved contents are concatenated with section headings and injected into the system prompt. This is structurally identical to today's "read CLAUDE.md before the call" — we've just made the read queryable.
+The retrieved contents are concatenated with section headings and injected into the system prompt. This is structurally identical to today's "read CLAUDE.md before the call" except the read is now queryable AND filtered to JUST the rules the agent needs (not the universal-load 50 KB).
+
+The CLAUDE.md FILE (auto-loaded by Claude Code + review agents in daemon CWD) is rendered separately via a tighter filter — see [Rendered exports](#rendered-exports) below.
 
 ### Experiments on rules
 
@@ -911,12 +961,22 @@ Layer 3 Treatment Specs store rule changes as `rule_set_refs_json` — the list 
 
 ### Rendered exports
 
-A `rule-renderer` dog fires on every rule promotion/demotion:
+A `rule-renderer` dog fires on every rule promotion/demotion. The renderer is dispatched by `render_to`, not `category`:
 
-- `CLAUDE.md` — rendered from `category='claude-md' AND agent_scope='all'`, section-ordered.
-- `SENATE.md` per-repo — from `category='senate'`.
-- `bos/rules/*.yaml` — from `category='bos'`.
-- `isb/finders/*.yaml` — from `category='isb'`.
+- **`CLAUDE.md`** ← `WHERE render_to='claude-md-file'`, section-ordered. **Hard-capped at 10 KB.** Tight criteria — rule applies to operator AND Claude Code building Force AND every review agent. Almost nothing meets the bar; bulk of today's CLAUDE.md content does NOT belong here.
+- **Per-agent system prompts** ← `WHERE render_to='agent-prompt'` filtered by `agent_scope`. Rendered at `treatments.Apply` time into `--append-system-prompt`; never written to a shared file. Each agent only sees rules tagged for them; aggregate doesn't compound.
+- **`FIX-LOG.md`** ← `WHERE render_to='fix-log'`, append-only narrative history. Not auto-loaded into prompts; lives at repo root for operator browsing.
+- **Pattern test docstrings** ← `WHERE render_to='pattern-test-docstring'`. Generated alongside the pattern test files; CLAUDE.md gets a one-line cross-reference (e.g., "Pattern P11 enforces exec.CommandContext propagation; see internal/audittools/audit_pattern_p11_exec_context_test.go") rather than the full narrative.
+- **`docs/<domain>.md` files** ← `WHERE render_to LIKE 'per-domain-doc:%'`, target file extracted from the suffix. Examples: `per-domain-doc:docs/dashboard-conventions.md`, `per-domain-doc:docs/pr-flow-invariants.md`. Loaded by relevant agents only (those whose `agent_scope` mentions the domain) AND by developers reading the doc.
+- **`SENATE.md` per-repo** ← `WHERE render_to='per-domain-doc:SENATE-<repo>.md'` (or equivalent — Senate's exact filing convention is D4 territory).
+- **`bos/rules/*.yaml`, `isb/finders/*.yaml`** — domain-specific structured renderers; same pattern.
+
+The CLAUDE.md hard cap (10 KB target post-Phase-1; 20 KB absolute upper bound) is enforced by:
+1. The renderer's size-assertion (refuses to write a render exceeding the cap; emits `[RULE-RENDERER OVERFLOW]` operator mail).
+2. The CLAUDE.md size-budget pre-commit hook (rejects commits where rendered CLAUDE.md exceeds the cap).
+3. A pattern test (`TestPattern_PNN_ClaudeMdSize`) that fails CI if the file is over budget.
+
+The categorization audit during Phase 1 bootstrap aggressively pushes content out of `render_to='claude-md-file'` and into `agent-prompt` / `fix-log` / `pattern-test-docstring` / `per-domain-doc:*`. Default render target during bootstrap is **NOT** `claude-md-file` — the auditor must affirmatively justify each rule that stays in the universal-load file.
 
 Each rendered file carries a header:
 
