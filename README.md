@@ -20,6 +20,7 @@ Inspired by Steve Yegge's **Gas Town** pattern: all coordination happens through
 - [Command Reference](#command-reference)
 - [Configuration](#configuration)
 - [Watchdog Dogs](#watchdog-dogs)
+- [Repo layout](#repo-layout)
 - [Development](#development)
 
 ---
@@ -1246,6 +1247,20 @@ Background maintenance tasks that run on a cooldown managed by the Inquisitor. V
 | `quarantined-repo-watch` | 1 hour | Alerts the operator while any `Repositories.mode='quarantined'` row remains; surfaces the persistent dashboard banner. |
 
 If any dog fails, the operator receives an alert mail. All dogs short-circuit at the top when e-stop is active so an emergency halt actually halts.
+
+---
+
+## Repo layout
+
+- `README.md`, `CLAUDE.md`, `FIX-LOG.md` — operator-facing root docs (the latter two are auto-rendered from `internal/store/fleet_rules_audit.go` and `internal/store/fixlog/*.md` via `make render-rules`).
+- `docs/` — planning specs (`roadmap.md`, `paired-runs.md`, `dashboard-implementation.md`, `next-gen-agents.md`).
+- `docs/architecture/` — architectural references (`claude-cli-invocation.md`, etc.).
+- `docs/closures/` — deliverable closure documents (D0, D1, D2, D3, plus Fix #8d/#8e/#8f campaign closures). Future closures (D4–D10) ship here.
+- `docs/operator-archives/` — Code Red audit (`AUDIT.md`, `AUDIT-VERIFICATION.md`, `AUDIT-TEST-MANIFEST.md`, `FINAL-STATUS.md`) and per-Fix working notes (`FIX-*-PROMPT.md`, `FIX-*-VERIFICATION.md`). Historical investigation artifacts; not actively-relevant but preserved for audit.
+- `cmd/force/` — main binary entry point.
+- `internal/` — agents, store, dashboard, claude-cli wrappers, dogs, etc.
+- `agents/capabilities/` — per-agent YAML profiles + `REGISTRY.yaml` + `.forceblocklist.yaml` (D1 T0-1 capability profiles).
+- `scripts/` — pre-commit hooks, snapshot installers, etc.
 
 ---
 
