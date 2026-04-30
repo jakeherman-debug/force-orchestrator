@@ -443,6 +443,214 @@ func createSchema(db *sql.DB) {
 	// agent_name + call_timestamp.
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_task     ON PromptByteAttribution (task_id, call_timestamp);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_agent_ts ON PromptByteAttribution (agent_name, call_timestamp);`)
+
+	// ── D3 Phase 1: paired-runs core schema ──────────────────────────────────
+	// Tables for the experiment / treatment / metric primitive (paired-runs.md
+	// § Data Model). Phase 1 lands these as data-layer prerequisites; no
+	// runtime code consumes them yet — the log-only treatments.Apply wiring
+	// in Phase 4 is the first writer. Subsequent D3 phases (single-treatment
+	// experiments, EC, factorial, paired shadow) build against these.
+
+	// Experiments — one row per registered experiment. status walks
+	// authored → ratified → running → confirming → terminated.
+	db.Exec(`CREATE TABLE IF NOT EXISTS Experiments (
+		id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+		name                        TEXT    NOT NULL,
+		hypothesis_text             TEXT    NOT NULL DEFAULT '',
+		min_practical_effect        REAL    DEFAULT 0,
+		stakes_tier                 TEXT    NOT NULL DEFAULT 'low',
+		declare_threshold_override  REAL,
+		factorial_dimensions_json   TEXT    DEFAULT '[]',
+		subject_agent               TEXT    NOT NULL DEFAULT '',
+		assignment_unit             TEXT    NOT NULL DEFAULT 'task',
+		analysis_framework_version  TEXT    DEFAULT '',
+		status                      TEXT    NOT NULL DEFAULT 'authored',
+		termination_reason          TEXT    DEFAULT '',
+		budget_usd                  REAL    DEFAULT 0,
+		hard_cap_usd                REAL    DEFAULT 0,
+		duration_cap_hours          INTEGER DEFAULT 0,
+		confirm_phase_id            INTEGER DEFAULT 0,
+		created_by                  TEXT    NOT NULL DEFAULT '',
+		created_at                  TEXT    DEFAULT (datetime('now')),
+		ratified_at                 TEXT    DEFAULT '',
+		ratified_by                 TEXT    DEFAULT '',
+		started_at                  TEXT    DEFAULT '',
+		terminated_at               TEXT    DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_status      ON Experiments (status);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_subject     ON Experiments (subject_agent, status);`)
+
+	// TreatmentSpecs — content-snapshotted treatment definitions.
+	// `spec_hash` is unique so identical treatments across experiments share
+	// rows (cross-experiment "has this exact treatment ever won?" queries).
+	db.Exec(`CREATE TABLE IF NOT EXISTS TreatmentSpecs (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		spec_hash                TEXT    UNIQUE NOT NULL,
+		prompt_template_ref      TEXT    DEFAULT '',
+		prompt_template_content  TEXT    DEFAULT '',
+		rule_set_refs_json       TEXT    DEFAULT '[]',
+		memory_bundle_ref        TEXT    DEFAULT '',
+		memory_bundle_content    TEXT    DEFAULT '',
+		model_identifier         TEXT    DEFAULT '',
+		max_turns                INTEGER DEFAULT 0,
+		context_size_bytes       INTEGER DEFAULT 0,
+		tool_availability_json   TEXT    DEFAULT '[]',
+		routing_thresholds_json  TEXT    DEFAULT '{}',
+		created_at               TEXT    DEFAULT (datetime('now'))
+	);`)
+
+	// ExperimentTreatments — one row per arm of an experiment.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentTreatments (
+		id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id         INTEGER NOT NULL,
+		arm_label             TEXT    NOT NULL,
+		cell_json             TEXT    DEFAULT '{}',
+		treatment_spec_id     INTEGER NOT NULL,
+		target_cell_weight    REAL    DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_treatments_exp ON ExperimentTreatments (experiment_id);`)
+
+	// ExperimentMetrics — metrics tracked per experiment, with one primary
+	// metric driving declare-winner.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentMetrics (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id   INTEGER NOT NULL,
+		metric_name     TEXT    NOT NULL,
+		metric_version  TEXT    NOT NULL,
+		direction       TEXT    NOT NULL DEFAULT 'higher_is_better',
+		params_json     TEXT    DEFAULT '{}',
+		is_primary      INTEGER DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_metrics_exp ON ExperimentMetrics (experiment_id);`)
+
+	// ExperimentRuns — one row per natural-unit assignment to a treatment.
+	// `mode` discriminates holdout / paired_real / paired_shadow.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentRuns (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id            INTEGER NOT NULL,
+		treatment_id             INTEGER NOT NULL,
+		cell_json                TEXT    DEFAULT '{}',
+		natural_unit_kind        TEXT    NOT NULL,
+		natural_unit_id          INTEGER NOT NULL,
+		mode                     TEXT    NOT NULL DEFAULT 'holdout',
+		paired_with_run_id       INTEGER DEFAULT 0,
+		agent_name               TEXT    NOT NULL DEFAULT '',
+		assigned_at              TEXT    DEFAULT (datetime('now')),
+		completed_at             TEXT    DEFAULT '',
+		score                    REAL,
+		score_source             TEXT    DEFAULT '',
+		metric_version           TEXT    DEFAULT '',
+		model_substituted_from   TEXT    DEFAULT '',
+		model_substituted_to     TEXT    DEFAULT '',
+		is_provisional           INTEGER DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_exp_treat ON ExperimentRuns (experiment_id, treatment_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_unit      ON ExperimentRuns (natural_unit_kind, natural_unit_id);`)
+
+	// ExperimentOutcomes — one row per terminated experiment (UNIQUE on
+	// experiment_id). Frozen snapshot at termination time.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentOutcomes (
+		id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id               INTEGER NOT NULL UNIQUE,
+		terminated_at               TEXT    DEFAULT (datetime('now')),
+		termination_reason          TEXT    NOT NULL,
+		winner_treatment_id         INTEGER DEFAULT 0,
+		winner_posterior            REAL,
+		winner_effect_estimate      REAL,
+		cell_means_json             TEXT    DEFAULT '{}',
+		fleet_state_hash_at_start   TEXT    DEFAULT '',
+		fleet_state_hash_at_end     TEXT    DEFAULT '',
+		confirm_phase_outcome       TEXT    DEFAULT '',
+		promotion_proposal_id       INTEGER DEFAULT 0
+	);`)
+
+	// AnalysisFrameworks — versioned algorithm config; published
+	// definitions are immutable (deprecated_at marks retirement).
+	db.Exec(`CREATE TABLE IF NOT EXISTS AnalysisFrameworks (
+		version           TEXT PRIMARY KEY,
+		config_content    TEXT    NOT NULL,
+		config_hash       TEXT    NOT NULL,
+		algorithm_git_sha TEXT    DEFAULT '',
+		published_at      TEXT    DEFAULT (datetime('now')),
+		published_by      TEXT    NOT NULL DEFAULT '',
+		description       TEXT    DEFAULT '',
+		deprecated_at     TEXT    DEFAULT ''
+	);`)
+
+	// MetricVersions — versioned (metric_name, version) pairs. SQL body
+	// + test SQL + manifest JSON snapshotted at publish time.
+	db.Exec(`CREATE TABLE IF NOT EXISTS MetricVersions (
+		metric_name    TEXT NOT NULL,
+		version        TEXT NOT NULL,
+		sql_content    TEXT NOT NULL,
+		test_content   TEXT DEFAULT '',
+		manifest_json  TEXT DEFAULT '{}',
+		published_at   TEXT DEFAULT (datetime('now')),
+		published_by   TEXT DEFAULT '',
+		description    TEXT DEFAULT '',
+		deprecated_at  TEXT DEFAULT '',
+		PRIMARY KEY (metric_name, version)
+	);`)
+
+	// FleetStateSnapshots — content-addressed snapshots of fleet rule /
+	// memory / model / prompt manifests at experiment start/end.
+	db.Exec(`CREATE TABLE IF NOT EXISTS FleetStateSnapshots (
+		state_hash                    TEXT PRIMARY KEY,
+		computed_at                   TEXT DEFAULT (datetime('now')),
+		active_rules_manifest_json    TEXT DEFAULT '{}',
+		active_memories_manifest_json TEXT DEFAULT '{}',
+		active_models_manifest_json   TEXT DEFAULT '{}',
+		active_prompts_manifest_json  TEXT DEFAULT '{}',
+		agent_binary_git_sha          TEXT DEFAULT ''
+	);`)
+
+	// GlobalHoldouts — long-term reference cohorts (e.g. baseline-2026).
+	db.Exec(`CREATE TABLE IF NOT EXISTS GlobalHoldouts (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		name               TEXT UNIQUE NOT NULL,
+		reference_date     TEXT DEFAULT (datetime('now')),
+		fleet_state_hash   TEXT DEFAULT '',
+		ramp_up_days       INTEGER DEFAULT 7,
+		plateau_fraction   REAL    DEFAULT 0.02,
+		fade_start_at      TEXT    DEFAULT '',
+		fade_days          INTEGER DEFAULT 90,
+		retired_at         TEXT    DEFAULT '',
+		retired_reason     TEXT    DEFAULT '',
+		created_by         TEXT    DEFAULT '',
+		notes              TEXT    DEFAULT ''
+	);`)
+
+	// ModelAvailability — health-watch ledger for model identifiers used
+	// as treatment dimensions. Updated by a model-availability dog.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ModelAvailability (
+		model_id                 TEXT PRIMARY KEY,
+		last_checked_at          TEXT DEFAULT '',
+		last_success_at          TEXT DEFAULT '',
+		deprecation_detected_at  TEXT DEFAULT '',
+		announced_kill_at        TEXT DEFAULT '',
+		successor_suggested      TEXT DEFAULT ''
+	);`)
+
+	// TreatmentApplyLog — log-only audit trail for treatments.Apply.
+	// Phase 4 of D3 ships log-only mode (records the call descriptor +
+	// assignment intent without mutating the call). Phase 2 flips this
+	// live; the log row stays as the source-of-truth audit record.
+	// Mentioned in D3 Phase 4's implementation prompt; not in
+	// paired-runs.md schema block — added here so log-only writes have
+	// a permanent home that does not corrupt live ExperimentRuns data.
+	db.Exec(`CREATE TABLE IF NOT EXISTS TreatmentApplyLog (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		applied_at          TEXT    DEFAULT (datetime('now')),
+		agent_name          TEXT    NOT NULL,
+		natural_unit_kind   TEXT    DEFAULT '',
+		natural_unit_id     INTEGER DEFAULT 0,
+		prompt_template     TEXT    DEFAULT '',
+		model               TEXT    DEFAULT '',
+		in_holdout          INTEGER DEFAULT 0,
+		assignments_json    TEXT    DEFAULT '[]',
+		mode                TEXT    NOT NULL DEFAULT 'log_only'
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_treatment_apply_log_ts ON TreatmentApplyLog (applied_at);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -864,4 +1072,181 @@ func runMigrations(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_task     ON PromptByteAttribution (task_id, call_timestamp)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_agent_ts ON PromptByteAttribution (agent_name, call_timestamp)`)
+
+	// ── D3 Phase 1: paired-runs core schema (upgrade path) ───────────────────
+	// Idempotent CREATE TABLE IF NOT EXISTS for upgraded DBs. createSchema
+	// holds the authoritative column list (parity-tested); these mirrors
+	// keep upgraded DBs in lockstep without paying for a full rebuild.
+	db.Exec(`CREATE TABLE IF NOT EXISTS Experiments (
+		id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+		name                        TEXT    NOT NULL,
+		hypothesis_text             TEXT    NOT NULL DEFAULT '',
+		min_practical_effect        REAL    DEFAULT 0,
+		stakes_tier                 TEXT    NOT NULL DEFAULT 'low',
+		declare_threshold_override  REAL,
+		factorial_dimensions_json   TEXT    DEFAULT '[]',
+		subject_agent               TEXT    NOT NULL DEFAULT '',
+		assignment_unit             TEXT    NOT NULL DEFAULT 'task',
+		analysis_framework_version  TEXT    DEFAULT '',
+		status                      TEXT    NOT NULL DEFAULT 'authored',
+		termination_reason          TEXT    DEFAULT '',
+		budget_usd                  REAL    DEFAULT 0,
+		hard_cap_usd                REAL    DEFAULT 0,
+		duration_cap_hours          INTEGER DEFAULT 0,
+		confirm_phase_id            INTEGER DEFAULT 0,
+		created_by                  TEXT    NOT NULL DEFAULT '',
+		created_at                  TEXT    DEFAULT (datetime('now')),
+		ratified_at                 TEXT    DEFAULT '',
+		ratified_by                 TEXT    DEFAULT '',
+		started_at                  TEXT    DEFAULT '',
+		terminated_at               TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_status  ON Experiments (status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_subject ON Experiments (subject_agent, status)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS TreatmentSpecs (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		spec_hash                TEXT    UNIQUE NOT NULL,
+		prompt_template_ref      TEXT    DEFAULT '',
+		prompt_template_content  TEXT    DEFAULT '',
+		rule_set_refs_json       TEXT    DEFAULT '[]',
+		memory_bundle_ref        TEXT    DEFAULT '',
+		memory_bundle_content    TEXT    DEFAULT '',
+		model_identifier         TEXT    DEFAULT '',
+		max_turns                INTEGER DEFAULT 0,
+		context_size_bytes       INTEGER DEFAULT 0,
+		tool_availability_json   TEXT    DEFAULT '[]',
+		routing_thresholds_json  TEXT    DEFAULT '{}',
+		created_at               TEXT    DEFAULT (datetime('now'))
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentTreatments (
+		id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id         INTEGER NOT NULL,
+		arm_label             TEXT    NOT NULL,
+		cell_json             TEXT    DEFAULT '{}',
+		treatment_spec_id     INTEGER NOT NULL,
+		target_cell_weight    REAL    DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_treatments_exp ON ExperimentTreatments (experiment_id)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentMetrics (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id   INTEGER NOT NULL,
+		metric_name     TEXT    NOT NULL,
+		metric_version  TEXT    NOT NULL,
+		direction       TEXT    NOT NULL DEFAULT 'higher_is_better',
+		params_json     TEXT    DEFAULT '{}',
+		is_primary      INTEGER DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_metrics_exp ON ExperimentMetrics (experiment_id)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentRuns (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id            INTEGER NOT NULL,
+		treatment_id             INTEGER NOT NULL,
+		cell_json                TEXT    DEFAULT '{}',
+		natural_unit_kind        TEXT    NOT NULL,
+		natural_unit_id          INTEGER NOT NULL,
+		mode                     TEXT    NOT NULL DEFAULT 'holdout',
+		paired_with_run_id       INTEGER DEFAULT 0,
+		agent_name               TEXT    NOT NULL DEFAULT '',
+		assigned_at              TEXT    DEFAULT (datetime('now')),
+		completed_at             TEXT    DEFAULT '',
+		score                    REAL,
+		score_source             TEXT    DEFAULT '',
+		metric_version           TEXT    DEFAULT '',
+		model_substituted_from   TEXT    DEFAULT '',
+		model_substituted_to     TEXT    DEFAULT '',
+		is_provisional           INTEGER DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_exp_treat ON ExperimentRuns (experiment_id, treatment_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_unit      ON ExperimentRuns (natural_unit_kind, natural_unit_id)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentOutcomes (
+		id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id               INTEGER NOT NULL UNIQUE,
+		terminated_at               TEXT    DEFAULT (datetime('now')),
+		termination_reason          TEXT    NOT NULL,
+		winner_treatment_id         INTEGER DEFAULT 0,
+		winner_posterior            REAL,
+		winner_effect_estimate      REAL,
+		cell_means_json             TEXT    DEFAULT '{}',
+		fleet_state_hash_at_start   TEXT    DEFAULT '',
+		fleet_state_hash_at_end     TEXT    DEFAULT '',
+		confirm_phase_outcome       TEXT    DEFAULT '',
+		promotion_proposal_id       INTEGER DEFAULT 0
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS AnalysisFrameworks (
+		version           TEXT PRIMARY KEY,
+		config_content    TEXT    NOT NULL,
+		config_hash       TEXT    NOT NULL,
+		algorithm_git_sha TEXT    DEFAULT '',
+		published_at      TEXT    DEFAULT (datetime('now')),
+		published_by      TEXT    NOT NULL DEFAULT '',
+		description       TEXT    DEFAULT '',
+		deprecated_at     TEXT    DEFAULT ''
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS MetricVersions (
+		metric_name    TEXT NOT NULL,
+		version        TEXT NOT NULL,
+		sql_content    TEXT NOT NULL,
+		test_content   TEXT DEFAULT '',
+		manifest_json  TEXT DEFAULT '{}',
+		published_at   TEXT DEFAULT (datetime('now')),
+		published_by   TEXT DEFAULT '',
+		description    TEXT DEFAULT '',
+		deprecated_at  TEXT DEFAULT '',
+		PRIMARY KEY (metric_name, version)
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS FleetStateSnapshots (
+		state_hash                    TEXT PRIMARY KEY,
+		computed_at                   TEXT DEFAULT (datetime('now')),
+		active_rules_manifest_json    TEXT DEFAULT '{}',
+		active_memories_manifest_json TEXT DEFAULT '{}',
+		active_models_manifest_json   TEXT DEFAULT '{}',
+		active_prompts_manifest_json  TEXT DEFAULT '{}',
+		agent_binary_git_sha          TEXT DEFAULT ''
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS GlobalHoldouts (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		name               TEXT UNIQUE NOT NULL,
+		reference_date     TEXT DEFAULT (datetime('now')),
+		fleet_state_hash   TEXT DEFAULT '',
+		ramp_up_days       INTEGER DEFAULT 7,
+		plateau_fraction   REAL    DEFAULT 0.02,
+		fade_start_at      TEXT    DEFAULT '',
+		fade_days          INTEGER DEFAULT 90,
+		retired_at         TEXT    DEFAULT '',
+		retired_reason     TEXT    DEFAULT '',
+		created_by         TEXT    DEFAULT '',
+		notes              TEXT    DEFAULT ''
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ModelAvailability (
+		model_id                 TEXT PRIMARY KEY,
+		last_checked_at          TEXT DEFAULT '',
+		last_success_at          TEXT DEFAULT '',
+		deprecation_detected_at  TEXT DEFAULT '',
+		announced_kill_at        TEXT DEFAULT '',
+		successor_suggested      TEXT DEFAULT ''
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS TreatmentApplyLog (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		applied_at          TEXT    DEFAULT (datetime('now')),
+		agent_name          TEXT    NOT NULL,
+		natural_unit_kind   TEXT    DEFAULT '',
+		natural_unit_id     INTEGER DEFAULT 0,
+		prompt_template     TEXT    DEFAULT '',
+		model               TEXT    DEFAULT '',
+		in_holdout          INTEGER DEFAULT 0,
+		assignments_json    TEXT    DEFAULT '[]',
+		mode                TEXT    NOT NULL DEFAULT 'log_only'
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_treatment_apply_log_ts ON TreatmentApplyLog (applied_at)`)
 }

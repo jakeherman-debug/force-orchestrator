@@ -459,4 +459,204 @@ CREATE TABLE IF NOT EXISTS PromptByteAttribution (
 CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_task     ON PromptByteAttribution (task_id, call_timestamp);
 CREATE INDEX IF NOT EXISTS idx_prompt_byte_attr_agent_ts ON PromptByteAttribution (agent_name, call_timestamp);
 
+-- ── D3 Phase 1 — paired-runs core schema ──────────────────────────────────────
+-- Tables for the experiment / treatment / metric primitive (paired-runs.md
+-- § Data Model). Phase 1 lands these as data-layer prerequisites; the log-only
+-- treatments.Apply wiring in Phase 4 is the first writer. Subsequent phases
+-- (single-treatment experiments, EC, factorial, paired shadow) build against
+-- these tables.
+
+CREATE TABLE IF NOT EXISTS Experiments (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                        TEXT    NOT NULL,
+    hypothesis_text             TEXT    NOT NULL DEFAULT '',
+    min_practical_effect        REAL    DEFAULT 0,
+    stakes_tier                 TEXT    NOT NULL DEFAULT 'low',  -- low|medium|high|safety_critical
+    declare_threshold_override  REAL,                            -- nullable; operator-approved
+    factorial_dimensions_json   TEXT    DEFAULT '[]',
+    subject_agent               TEXT    NOT NULL DEFAULT '',     -- 'captain'|'chancellor'|...
+    assignment_unit             TEXT    NOT NULL DEFAULT 'task', -- 'feature'|'convoy'|'task'
+    analysis_framework_version  TEXT    DEFAULT '',
+    status                      TEXT    NOT NULL DEFAULT 'authored',
+    termination_reason          TEXT    DEFAULT '',
+    budget_usd                  REAL    DEFAULT 0,
+    hard_cap_usd                REAL    DEFAULT 0,
+    duration_cap_hours          INTEGER DEFAULT 0,
+    confirm_phase_id            INTEGER DEFAULT 0,
+    created_by                  TEXT    NOT NULL DEFAULT '',
+    created_at                  TEXT    DEFAULT (datetime('now')),
+    ratified_at                 TEXT    DEFAULT '',
+    ratified_by                 TEXT    DEFAULT '',
+    started_at                  TEXT    DEFAULT '',
+    terminated_at               TEXT    DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_experiments_status  ON Experiments (status);
+CREATE INDEX IF NOT EXISTS idx_experiments_subject ON Experiments (subject_agent, status);
+
+-- TreatmentSpecs — content-snapshotted treatment definitions. spec_hash is
+-- unique so identical treatments across experiments share rows.
+CREATE TABLE IF NOT EXISTS TreatmentSpecs (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    spec_hash                TEXT    UNIQUE NOT NULL,            -- SHA256 of normalised spec
+    prompt_template_ref      TEXT    DEFAULT '',                 -- 'captain/default@<git-sha>'
+    prompt_template_content  TEXT    DEFAULT '',                 -- frozen snapshot
+    rule_set_refs_json       TEXT    DEFAULT '[]',               -- JSON array of FleetRules.id
+    memory_bundle_ref        TEXT    DEFAULT '',
+    memory_bundle_content    TEXT    DEFAULT '',
+    model_identifier         TEXT    DEFAULT '',
+    max_turns                INTEGER DEFAULT 0,
+    context_size_bytes       INTEGER DEFAULT 0,
+    tool_availability_json   TEXT    DEFAULT '[]',
+    routing_thresholds_json  TEXT    DEFAULT '{}',
+    created_at               TEXT    DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS ExperimentTreatments (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id         INTEGER NOT NULL,
+    arm_label             TEXT    NOT NULL,                      -- 'control', 'tight_rules', ...
+    cell_json             TEXT    DEFAULT '{}',                  -- {"prompt":"B","rules":"on"}
+    treatment_spec_id     INTEGER NOT NULL,                      -- FK → TreatmentSpecs.id
+    target_cell_weight    REAL    DEFAULT 0                      -- 0.25 for balanced 2x2
+);
+CREATE INDEX IF NOT EXISTS idx_exp_treatments_exp ON ExperimentTreatments (experiment_id);
+
+CREATE TABLE IF NOT EXISTS ExperimentMetrics (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id   INTEGER NOT NULL,
+    metric_name     TEXT    NOT NULL,
+    metric_version  TEXT    NOT NULL,                            -- resolved at experiment start
+    direction       TEXT    NOT NULL DEFAULT 'higher_is_better', -- 'higher_is_better'|'lower_is_better'
+    params_json     TEXT    DEFAULT '{}',
+    is_primary      INTEGER DEFAULT 0                            -- exactly one per experiment drives declare-winner
+);
+CREATE INDEX IF NOT EXISTS idx_exp_metrics_exp ON ExperimentMetrics (experiment_id);
+
+CREATE TABLE IF NOT EXISTS ExperimentRuns (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id            INTEGER NOT NULL,
+    treatment_id             INTEGER NOT NULL,
+    cell_json                TEXT    DEFAULT '{}',
+    natural_unit_kind        TEXT    NOT NULL,                   -- 'feature'|'convoy'|'task'
+    natural_unit_id          INTEGER NOT NULL,
+    mode                     TEXT    NOT NULL DEFAULT 'holdout', -- 'holdout'|'paired_real'|'paired_shadow'
+    paired_with_run_id       INTEGER DEFAULT 0,                  -- self-FK for paired mode
+    agent_name               TEXT    NOT NULL DEFAULT '',
+    assigned_at              TEXT    DEFAULT (datetime('now')),
+    completed_at             TEXT    DEFAULT '',
+    score                    REAL,                               -- frozen at scoring time
+    score_source             TEXT    DEFAULT '',                 -- 'downstream_verdict'|'llm_judge'|'operator_ratification'
+    metric_version           TEXT    DEFAULT '',
+    model_substituted_from   TEXT    DEFAULT '',                 -- holdout model substitutions
+    model_substituted_to     TEXT    DEFAULT '',
+    is_provisional           INTEGER DEFAULT 0                   -- true for llm_judge pending downstream
+);
+CREATE INDEX IF NOT EXISTS idx_exp_runs_exp_treat ON ExperimentRuns (experiment_id, treatment_id);
+CREATE INDEX IF NOT EXISTS idx_exp_runs_unit      ON ExperimentRuns (natural_unit_kind, natural_unit_id);
+
+CREATE TABLE IF NOT EXISTS ExperimentOutcomes (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id               INTEGER NOT NULL UNIQUE,
+    terminated_at               TEXT    DEFAULT (datetime('now')),
+    termination_reason          TEXT    NOT NULL,                -- declared_winner|declared_null|inconclusive|budget_exhausted|emergency_stop|operator_closed
+    winner_treatment_id         INTEGER DEFAULT 0,
+    winner_posterior            REAL,
+    winner_effect_estimate      REAL,
+    cell_means_json             TEXT    DEFAULT '{}',
+    fleet_state_hash_at_start   TEXT    DEFAULT '',              -- FK → FleetStateSnapshots.state_hash
+    fleet_state_hash_at_end     TEXT    DEFAULT '',
+    confirm_phase_outcome       TEXT    DEFAULT '',
+    promotion_proposal_id       INTEGER DEFAULT 0
+);
+
+-- AnalysisFrameworks — versioned algorithm config; published frameworks are
+-- immutable (deprecated_at marks retirement).
+CREATE TABLE IF NOT EXISTS AnalysisFrameworks (
+    version           TEXT PRIMARY KEY,                          -- '2026-04-23'
+    config_content    TEXT    NOT NULL,
+    config_hash       TEXT    NOT NULL,
+    algorithm_git_sha TEXT    DEFAULT '',
+    published_at      TEXT    DEFAULT (datetime('now')),
+    published_by      TEXT    NOT NULL DEFAULT '',
+    description       TEXT    DEFAULT '',
+    deprecated_at     TEXT    DEFAULT ''
+);
+
+-- MetricVersions — versioned (metric_name, version) pairs. SQL body + test SQL
+-- + manifest JSON snapshotted at publish time.
+CREATE TABLE IF NOT EXISTS MetricVersions (
+    metric_name    TEXT NOT NULL,
+    version        TEXT NOT NULL,
+    sql_content    TEXT NOT NULL,
+    test_content   TEXT DEFAULT '',
+    manifest_json  TEXT DEFAULT '{}',
+    published_at   TEXT DEFAULT (datetime('now')),
+    published_by   TEXT DEFAULT '',
+    description    TEXT DEFAULT '',
+    deprecated_at  TEXT DEFAULT '',
+    PRIMARY KEY (metric_name, version)
+);
+
+-- FleetStateSnapshots — content-addressed snapshots of fleet rule / memory /
+-- model / prompt manifests at experiment start/end. state_hash is the FK key
+-- referenced by ExperimentOutcomes.
+CREATE TABLE IF NOT EXISTS FleetStateSnapshots (
+    state_hash                    TEXT PRIMARY KEY,
+    computed_at                   TEXT DEFAULT (datetime('now')),
+    active_rules_manifest_json    TEXT DEFAULT '{}',             -- hash per rule_key
+    active_memories_manifest_json TEXT DEFAULT '{}',             -- hash per repo memory
+    active_models_manifest_json   TEXT DEFAULT '{}',             -- model per agent
+    active_prompts_manifest_json  TEXT DEFAULT '{}',             -- prompt version per agent
+    agent_binary_git_sha          TEXT DEFAULT ''
+);
+
+-- GlobalHoldouts — long-term reference cohorts (e.g. baseline-2026).
+-- See paired-runs.md § Global Holdout for ramp-up / plateau / fade semantics.
+CREATE TABLE IF NOT EXISTS GlobalHoldouts (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT UNIQUE NOT NULL,                     -- 'baseline-2026'
+    reference_date     TEXT DEFAULT (datetime('now')),
+    fleet_state_hash   TEXT DEFAULT '',                          -- FK → FleetStateSnapshots
+    ramp_up_days       INTEGER DEFAULT 7,
+    plateau_fraction   REAL    DEFAULT 0.02,
+    fade_start_at      TEXT    DEFAULT '',
+    fade_days          INTEGER DEFAULT 90,
+    retired_at         TEXT    DEFAULT '',
+    retired_reason     TEXT    DEFAULT '',
+    created_by         TEXT    DEFAULT '',
+    notes              TEXT    DEFAULT ''
+);
+
+-- ModelAvailability — health-watch ledger for model identifiers. Models are
+-- the uniquely fragile treatment dimension — we don't control their
+-- availability. Updated by a model-availability dog.
+CREATE TABLE IF NOT EXISTS ModelAvailability (
+    model_id                 TEXT PRIMARY KEY,
+    last_checked_at          TEXT DEFAULT '',
+    last_success_at          TEXT DEFAULT '',
+    deprecation_detected_at  TEXT DEFAULT '',
+    announced_kill_at        TEXT DEFAULT '',
+    successor_suggested      TEXT DEFAULT ''
+);
+
+-- TreatmentApplyLog — log-only audit trail for treatments.Apply. Phase 4 of
+-- D3 ships log-only mode (records the call descriptor + assignment intent
+-- without mutating the call). Phase 2 flips this live; the log row stays as
+-- the source-of-truth audit record. Mentioned in D3 Phase 4's implementation
+-- prompt; not in paired-runs.md schema block — added here so log-only writes
+-- have a permanent home that does not corrupt live ExperimentRuns data.
+CREATE TABLE IF NOT EXISTS TreatmentApplyLog (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    applied_at          TEXT    DEFAULT (datetime('now')),
+    agent_name          TEXT    NOT NULL,
+    natural_unit_kind   TEXT    DEFAULT '',
+    natural_unit_id     INTEGER DEFAULT 0,
+    prompt_template     TEXT    DEFAULT '',
+    model               TEXT    DEFAULT '',
+    in_holdout          INTEGER DEFAULT 0,
+    assignments_json    TEXT    DEFAULT '[]',
+    mode                TEXT    NOT NULL DEFAULT 'log_only'      -- 'log_only' (Phase 1) | 'live' (Phase 2+)
+);
+CREATE INDEX IF NOT EXISTS idx_treatment_apply_log_ts ON TreatmentApplyLog (applied_at);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
