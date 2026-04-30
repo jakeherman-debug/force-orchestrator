@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-29
 **Operator:** jake.herman@upstart.com
-**Net verdict:** 🟡 PARTIAL — Phases 1-2 CLOSED; Phases 3–6 OPEN
+**Net verdict:** 🟡 PARTIAL — Phases 1-3 CLOSED; Phases 4–6 OPEN
 
 D3 uses a partial-closure pattern (per D1's precedent). Phase 1 is the
 first of six D3 phases; this document was created NEW at Phase 1
@@ -17,7 +17,7 @@ as they land.
 |---|---|---|---|
 | 1 | Foundations + Rule Audit | ✅ CLOSED 2026-04-29 | 908c51d → e86a282 (14 commits) |
 | 2 | Holdout + single-treatment experiments | ✅ CLOSED 2026-04-29 | 20e0329 → e1cdc83 (5 commits) |
-| 3 | Engineering Corps + Trust Metrics Infrastructure | Open | — |
+| 3 | Engineering Corps + Trust Metrics Infrastructure | ✅ CLOSED 2026-04-30 | 208fafd → 338b144 (22 commits across 5 merge branches) |
 | 4 | Factorial + orthogonal-overlap scheduler | Open | — |
 | 5 | Level-3 paired shadow + Adversarial Pairing + Golden-Set | Open | — |
 | 6A | Dashboard scaffolding + Pulse + Briefing | Open | — |
@@ -641,3 +641,234 @@ required.
 No deliverable-status change; D3 remains 🟡 PARTIAL (Phases 1–2
 closed + drift class sealed). Phase 3 (Engineering Corps + Trust
 Metrics Infrastructure) starts on a clean baseline.
+
+---
+
+### Phase 3 — Engineering Corps + Trust Metrics Infrastructure — CLOSED 2026-04-30
+
+**Operator:** jake.herman@upstart.com
+**Topology:** five merge-back branches via `--no-ff` (skeleton →
+task-types → handoff-ratify → disagreement-metrics → shakedown).
+22 commits total. Worktrees: `.build-worktrees/D3-P3-{skeleton,A,B,C,
+shakedown,closure}` — all removed at closure.
+
+#### What landed
+
+**1. EC skeleton (Phase 1 of P3 — orchestrator's own worktree, branch `deliverable/3/phase-3-skeleton`).**
+SpawnEngineeringCorps claim loop, six-task-type dispatcher, shared
+types, capability profile (`engineering-corps.yaml` — empty tools,
+mirroring Diplomat's read-only baseline), daemon spawn wiring after
+the existing review-agent roster + treatments.Apply hook.
+
+| Commit | Subject |
+|---|---|
+| `208fafd` | feat(D3-P3): EngineeringCorps skeleton — Spawn loop + dispatcher + types |
+| `5ab4be5` | feat(D3-P3): wire SpawnEngineeringCorps into daemon startup |
+| `32f38be` | Merge branch 'deliverable/3/phase-3-skeleton' (--no-ff) |
+
+The const block in `internal/agents/engineering_corps/types.go` is
+the authoritative task-type inventory. Sub-agents A/B/C discovered
+the inventory from this file. Dispatcher's default branch fails
+the bounty cleanly via `store.FailBounty` (the captain pattern P12
+fail-closed-on-unknown-decision shape). Pattern P13 honored:
+`capabilities.LoadProfile("engineering-corps")` sources tool args.
+Pattern P16 honored: `EngineeringCorpsConfig` holds
+`librarian.Client` + `metrics.Client` interfaces, never concrete
+struct types.
+
+**2. Six task type handlers (sub-agent A — branch `deliverable/3/phase-3-task-types`, 6 commits + merge).**
+Each handler in its own file under `internal/agents/engineering_corps/`:
+
+| Handler | Shape | Operator-routing |
+|---|---|---|
+| `HoldoutMonitor` | SQL-only — counts active GlobalHoldouts, emits debug heartbeat. Full availability watch deferred to P5/P6. | No mutation of FleetRules or PromotionProposals. |
+| `ExperimentMonitor` | SQL-only — Bayesian framework over (treatment, control); declares winners (≥0.95 posterior, ≥30 trials per arm via `analysis.DecisionRule.MinSamplesPerArm`); emergency-stops (P(treatment worse) > 0.9, ≥20 trials); queues `ECPromotionAuthor` follow-up. | Never sets `ratified_at`. Promotion is downstream. |
+| `PromotionAuthor` | SQL-only — assembles `PromotionProposals` row from terminated declared-winner experiment with full evidence trail; idempotent on existing open proposals. | Writes `ratified_at=''` + 14-day TTL. Operator gate preserved. |
+| `DemotionAuthor` | SQL-only — finds promote-proposals ratified > N days ago (default 30); writes placeholder `kind='demote'` rows. Full retention scoring deferred to P4/P5. | Demote proposal unratified; idempotent. |
+| `MetricAuthor` | LLM — generates metric SQL via Claude; validates read-only via word-boundary deny-list (INSERT/UPDATE/DELETE/ALTER/DROP/CREATE/REPLACE/TRUNCATE/ATTACH/DETACH/VACUUM/PRAGMA/BEGIN/COMMIT/ROLLBACK); writes MetricVersions row. | Metric never auto-attaches to ExperimentMetrics; no FleetRules edit. |
+| `ExperimentAuthor` | LLM — generates experiment manifest; sentinel-tag wraps untrusted hypothesis + librarian evidence (Pattern P12); strict-decodes (Fix #8.5); writes Experiments rows in `authored` state via `experiments.AuthorFromManifest`; stages manifest YAML to `experiments/<stamp>-<id>/manifest.yaml`. | Lands in `authored`; operator must call `Ratify` before `running`. |
+
+Dispatcher fully wired — `ErrNotImplemented` removed, every task
+type routes to a real handler. Pattern P12 sentinel-wrap + Pattern
+P13 capability-profile sourcing honored at every LLM call site.
+
+**3. Librarian → EC handoff + dashboard ratification surface (sub-agent B — branch `deliverable/3/phase-3-handoff-ratify`, 3 commits + merge).**
+
+- `librarian.Client` extended with `EmitCandidate(ctx, Candidate) (int, error)` and `ListPendingCandidates(ctx) ([]Candidate, error)`. Schema convention: `kind='candidate' AND authored_by='librarian'` doubles `authored_by` as the origin column — no schema migration (`origin` column not added; the P2 closure note's pattern stands).
+- Dashboard handlers in `internal/dashboard/handlers_ec.go`: GET `/api/ec/proposals` (list pending), GET `/api/ec/proposals/:id` (single), POST `/api/ec/proposals/:id/ratify` (operator-routed; CAS UPDATE + AuditLog), POST `/api/ec/proposals/:id/reject` (rejection_rationale ≥ 20 chars when `rejection_action != 'leave_as_is'` per concern #7).
+- CLI: `force ec list / ratify / reject / status` (`cmd/force/ec.go`).
+- Frontend: minimal "EC" tab in `internal/dashboard/static/{index.html,app.js}`. Phase 6 absorbs into Pulse / Briefing / Reflection.
+
+Ratify rejects empty operator email (header fallback `X-Operator-Email` allowed); CAS conflict on terminal rows returns 409. Pattern P8 stays green: no wildcard CORS, no new `http.Server`, body cap inherited from `securityMiddleware`.
+
+**4. Cross-layer disagreement tracking + per-prompt-version metrics (sub-agent C — branch `deliverable/3/phase-3-disagreement-metrics`, 5 commits + merge).**
+
+Schema addition: `DisagreementPairs` table (rolling-window aggregate, distinct from `AdversarialPairings` which is per-decision primary-vs-critic). Added to `createSchema` + `runMigrations` + `schema/schema.sql` in commit `919daef` — `TestSchemaParity` green.
+
+Disagreement pairs computed:
+
+| Pair | Shape | Status |
+|---|---|---|
+| `captain-council-reject` | Captain "Completed" → later Council "Rejected" on same task_id | live |
+| `council-ci-fail` | Council "Completed" / "AwaitingSubPRCI" → later Failed outcome | live |
+| `convoy-review-cant-fix` | CodeEdit fix-task whose parent has a ConvoyReview TaskHistory entry → fix-task ended Failed | live |
+| `senate-chancellor-decline` | Senate concur → Chancellor declines | **deferred until D4** (Senate ships in D4; pair returns `Deferred=true` with `DeferredReason="Senate agent ships in D4; pair will populate then"`) |
+| `operator-revert-30d` | BountyBoard `Completed` → revert task with `revert_target_task_id` pointing back, within 30 days | live |
+
+`internal/analytics/disagreement.go` exposes `ComputeDisagreementRates(ctx, db, window)`; `internal/agents/dog_disagreement_tracker.go` runs hourly (post `dogTaskSpendWatch`), honors `IsEstopped` + `SpendCapExceeded`, persists via `PersistDisagreementRates`. `TestListDogs` count bumped 21 → 22.
+
+`internal/metrics/per_prompt_version.go` exposes `MetricByPromptVersion(ctx, db, metricName, since)` returning a `map[promptVersion]value`. Reads `TaskHistory.prompt_version` (added in P1 schema). `RegisterGroupedMetric` is the registry sibling.
+
+Dashboard: GET `/api/disagreement-rates` returns latest row per pair × window combination (`internal/dashboard/handlers_disagreement.go`).
+
+**5. End-to-end shakedown (orchestrator's own worktree — branch `deliverable/3/phase-3-shakedown`, 1 commit + merge).**
+
+`internal/agents/engineering_corps/shakedown_test.go` —
+`TestShakedown_LibrarianToFleetRulesRoundTrip` — exercises the
+full chain in a hermetic test:
+
+```
+Librarian.EmitCandidate
+  → experiments.AuthorFromManifest (synthetic; bypasses LLM)
+  → operator-routed experiments.Ratify (with AuditLog)
+  → seeded ExperimentRuns (35 trials per arm; treatment 100% / control 28%)
+  → handleExperimentMonitor (declares winner via Bayesian framework)
+  → handlePromotionAuthor (assembles ratifiable proposal)
+  → operator-routed dashboard ratify (CAS UPDATE + AuditLog)
+  → simulated FleetRules INSERT (P6 atomic-DB+render+commit deferred)
+  → fresh-DB bootstrap convergence smoke check
+```
+
+Determinism: posterior > 0.95 every run. Two AuditLog rows for
+the operator across the round-trip. `experiments.Ratify` with
+empty operator email is rejected (operator-routed gate).
+
+#### Heavy validation (closure-time)
+
+```
+$ go build -tags sqlite_fts5 -o force ./cmd/force/
+(silent — clean build)
+
+$ make test
+ok  force-orchestrator/agents/capabilities          [no test files]
+ok  force-orchestrator/cmd/force                       8.190s
+ok  force-orchestrator/cmd/force-bash-guard          (cached)
+ok  force-orchestrator/internal/agents               256.473s
+ok  force-orchestrator/internal/agents/capabilities  (cached)
+ok  force-orchestrator/internal/agents/engineering_corps   1.770s
+ok  force-orchestrator/internal/analysis             1.359s
+ok  force-orchestrator/internal/analytics            1.852s
+ok  force-orchestrator/internal/audittools           2.523s
+ok  force-orchestrator/internal/claude               6.278s
+ok  force-orchestrator/internal/clients/{capabilities,experiments,graph,librarian,metrics,rules}  (cached)
+ok  force-orchestrator/internal/dashboard            4.392s
+ok  force-orchestrator/internal/experiments          3.090s
+ok  force-orchestrator/internal/git                 24.323s
+ok  force-orchestrator/internal/holdout              3.111s
+ok  force-orchestrator/internal/metrics              2.911s
+ok  force-orchestrator/internal/repo                 (cached)
+ok  force-orchestrator/internal/store                7.692s
+ok  force-orchestrator/internal/telemetry            (cached)
+ok  force-orchestrator/internal/treatments           3.332s
+
+$ go test -tags sqlite_fts5 -run "TestShakedown_LibrarianToFleetRulesRoundTrip" ./internal/agents/engineering_corps/...
+PASS — round-trip: candidate=1 → exp=1 → promotion=2 → ratified — winner posterior > 0.95
+
+$ go test -tags sqlite_fts5 -run "TestSchemaParity" ./internal/store/...
+PASS
+
+$ ./force render-rules --check
+render-rules --check: OK (no drift)
+Exit: 0
+```
+
+Pattern test inventory (P1, P1.1, P3, P7, P8, P10, P11, P12, P13,
+P15, P16, P17, P18) + Phase 3-specific tests
+(`TestEngineeringCorps`, `TestHandle*`, `TestEmitCandidate`,
+`TestECHandler`, `TestComputeDisagreementRates`,
+`TestMetricByPromptVersion`,
+`TestShakedown_LibrarianToFleetRulesRoundTrip`) all green.
+
+#### Anti-cheat self-check
+
+| Directive | Status |
+|---|---|
+| Each gate is non-negotiable; halt on red | ✅ all gates passed; one rebase conflict resolved (dashboard.go — both B and C added handlers in same block; both kept) |
+| No `--no-verify` / `--force` / `rebase --skip` | ✅ none used |
+| No pushes anywhere | ✅ commits stayed local on `main` |
+| Capability profile sourced from YAML at every Claude CLI call site | ✅ `engineering-corps.yaml` + `LoadProfile` at every handler |
+| Cross-agent dependencies route through `Client` interfaces | ✅ Pattern P16 green; `EngineeringCorpsConfig` holds `librarian.Client` + `metrics.Client` |
+| All new mutators return `error` | ✅ `EmitCandidate`, `PersistDisagreementRates`, `RegisterGroupedMetric`, all P3 handlers |
+| Dispatcher fail-closed on unknown task type | ✅ `TestEngineeringCorpsDispatcher_UnknownTypeFailsCleanly` |
+| Sentinel-tag wraps attacker-controllable LLM input | ✅ `ExperimentAuthor` wraps hypothesis + evidence (Pattern P12) |
+| Strict-JSON-decode on LLM responses | ✅ `strictJSONDecode` / `strictDecode` at every call site (Fix #8.5) |
+| Schema parity re-runs after every merge | ✅ green; `DisagreementPairs` added to all three sources |
+| Render coherence re-checked after every merge | ✅ `force render-rules --check` exit 0; P18 green |
+| Topology preserved (`--no-ff` + visible merge commits) | ✅ five merges (skeleton, task-types, handoff-ratify, disagreement-metrics, shakedown) all visible in `git log --graph` |
+
+#### Operator-discretion items surfaced
+
+1. **FleetRules INSERT from ratified PromotionProposal is Phase 6 work.**
+   `internal/dashboard/handlers_ec.go` header explicitly notes that
+   "the FleetRules write itself is Phase 6's atomic DB+render+commit
+   dance." Phase 3's ratify handler flips `ratified_at` and writes
+   AuditLog; the actual FleetRules INSERT lives in Phase 6. The
+   shakedown simulates the future row with a direct INSERT to
+   demonstrate the renderer's robustness against operator-direct-write
+   rules; the production path lands in Phase 6.
+
+2. **`ExperimentAuthor`'s LLM-using path is unit-tested separately.**
+   The shakedown bypasses it via `experiments.AuthorFromManifest` to
+   keep the round-trip hermetic (no Claude CLI dependency in the test
+   binary). `experiment_author_test.go` covers the LLM path
+   (happy / parse-error / operator-routing-preserved).
+
+3. **`MetricAuthor` write does NOT auto-attach metrics to
+   `ExperimentMetrics`.** The handler writes a `MetricVersions` row
+   only — wiring a new metric into an experiment requires explicit
+   operator action (the manifest references it). This is deliberate
+   per paired-runs.md § Metric registry: "Metric does not go live
+   until operator ratifies. Metrics are higher stakes than
+   experiments."
+
+4. **`DemotionAuthor` is placeholder-shape.** The handler enumerates
+   stale ratified `kind='promote'` proposals and writes a `kind='demote'`
+   placeholder. Full retention scoring (Tier 2 metrics, regression
+   detection) lands in P4/P5 once the metric registry has accumulated
+   downstream-outcome data.
+
+5. **`HoldoutMonitor` is heartbeat-only.** Phase 3 ships the SQL
+   plumbing; the model-availability watch (probing model identifiers
+   for deprecation headers / 404s) lands in P5/P6.
+
+6. **`Senate → Chancellor` disagreement pair is `Deferred=true`.**
+   Senate ships in D4. The pair's docstring + `DeferredReason` field
+   explicitly name the deferral; tests assert the deferred state
+   rather than fabricating a value.
+
+7. **One rebase conflict during merge-back.** Both sub-agent B and
+   sub-agent C added a `mux.HandleFunc` block to
+   `internal/dashboard/dashboard.go`. The conflict was a clean
+   "both add" — kept both blocks (B's `/api/ec/proposals` + C's
+   `/api/disagreement-rates`). No semantic conflict, no test churn.
+   Documented here so the cross-track adjacency surface is
+   explicit if a future Phase 6A track touches the same region.
+
+#### Forward integration to Phase 4
+
+EC's ExperimentAuthor today writes single-treatment manifests
+(treatment + control). Phase 4 introduces factorial dimensions
+(cell-based storage, stratified randomization, main-effects + 2-way
+interactions). The handler signature stays stable; the manifest
+schema extends with a `factors` block.
+
+The disagreement-tracker dog populates `DisagreementPairs` hourly
+starting now; by Phase 4's close the rolling 7d / 30d / 90d windows
+will have data the factorial-scheduler can use to refuse overlap on
+shared dimensions.
+
+The per-prompt-version metric correlation lands the substrate that
+Phase 5's golden-set evaluation framework consumes — accuracy
+regression alerts join `TaskHistory.prompt_version` with the
+fixture-evaluation outcomes via the same `MetricByPromptVersion`
+shape.
