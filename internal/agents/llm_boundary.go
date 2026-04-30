@@ -125,7 +125,8 @@ type SourceTag string
 const (
 	// SourceTagClaudeMD — content sourced from a CLAUDE.md file (force-
 	// orchestrator/CLAUDE.md or a target repo's CLAUDE.md, treated as
-	// advisory per AstromechTargetCLAUDEMDClause).
+	// advisory per the FleetRules-injected
+	// 'astromech-target-claude-md-advisory' clause).
 	SourceTagClaudeMD SourceTag = "claude_md"
 
 	// SourceTagLibrarianMemory — fleet memory rows (FleetMemory)

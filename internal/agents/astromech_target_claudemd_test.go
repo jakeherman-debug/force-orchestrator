@@ -2,8 +2,14 @@ package agents
 
 // D1 T0-1 follow-up — astromech-only target-repo CLAUDE.md mitigation.
 //
-// These tests pin the three runtime invariants that back
-// AstromechTargetCLAUDEMDClause:
+// D3-P1 follow-up C: the legacy AstromechTargetCLAUDEMDClause Go const
+// was removed. The clause now lives as FleetRules row
+// 'astromech-target-claude-md-advisory' and is concatenated into
+// astromech's system prompt at runtime via AppendFleetRulesToPrompt.
+// These tests query the FleetRules-rendered prompt rather than the
+// (now-deleted) const.
+//
+// The three runtime invariants under test:
 //
 //   1. The clause is present in astromech's composed system prompt
 //      (and includes the [TARGET_CLAUDE_MD_OBSERVATION: signal token
@@ -12,7 +18,10 @@ package agents
 //   2. The clause is NOT present in any other LLM-invoking agent's
 //      system prompt. Adding it elsewhere would be confusing noise:
 //      no other agent operates inside a target-repo worktree, so
-//      Claude Code never auto-loads target CLAUDE.md for them.
+//      Claude Code never auto-loads target CLAUDE.md for them. The
+//      FleetRules row's agent_scope='astromech' is the structural
+//      enforcement; this test is the regression layer that catches a
+//      future scope-broadening or const-revival.
 //
 //   3. SanitizeLLMPayload rejects payloads carrying the
 //      [TARGET_CLAUDE_MD_OBSERVATION: token. This closes the
@@ -27,12 +36,17 @@ package agents
 // reference.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"force-orchestrator/internal/store"
 )
+
+const targetClaudeMDObservationMarker = "[TARGET_CLAUDE_MD_OBSERVATION:"
 
 // readAgentSource loads an agent source file relative to the repo
 // root. Mirrors Pattern P12's helper without re-exporting it (P12 is
@@ -52,60 +66,80 @@ func readAgentSource(t *testing.T, rel string) string {
 	return string(data)
 }
 
-// TestAstromech_TargetCLAUDEMDClauseInSystemPrompt asserts the clause
-// reaches astromech's composed system prompt. It mirrors the
-// concatenation runAstromechTask and RunTaskForeground perform — a
-// future refactor that drops the clause from either call site fails
-// this test.
+// astromechAdvisoryFromFleetRules bootstraps a fresh in-memory store,
+// runs the FleetRules bootstrap, and returns the assembled astromech
+// agent-prompt string. This is the runtime path the daemon takes via
+// AppendFleetRulesToPrompt — testing against it is more honest than
+// inspecting a Go const.
+func astromechAdvisoryFromFleetRules(t *testing.T) string {
+	t.Helper()
+	db := store.InitHolocronDSN(":memory:")
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	if _, err := store.BootstrapFleetRules(ctx, db, ""); err != nil {
+		t.Fatalf("bootstrap FleetRules: %v", err)
+	}
+	prompt, err := AssemblePerAgentPrompt(ctx, db, "astromech")
+	if err != nil {
+		t.Fatalf("assemble astromech prompt: %v", err)
+	}
+	return prompt
+}
+
+// TestAstromech_TargetCLAUDEMDClauseInSystemPrompt asserts the
+// FleetRules-injected clause reaches astromech's composed system
+// prompt. The bootstrap path is exactly the one SpawnAstromech uses
+// at runtime via AppendFleetRulesToPrompt(ctx, db, "astromech", …).
 func TestAstromech_TargetCLAUDEMDClauseInSystemPrompt(t *testing.T) {
-	// Empty repo → LoadDirective returns empty → directiveSection is
-	// the empty string. We model the daemon-side composition exactly:
-	// AstromechSystemPrompt + directiveSection + AstromechTargetCLAUDEMDClause.
-	directiveSection := ""
-	systemPrompt := AstromechSystemPrompt + directiveSection + AstromechTargetCLAUDEMDClause
+	advisory := astromechAdvisoryFromFleetRules(t)
 
-	if !strings.Contains(systemPrompt, AstromechTargetCLAUDEMDClause) {
-		t.Fatalf("astromech system prompt missing AstromechTargetCLAUDEMDClause")
+	if !strings.Contains(advisory, "TARGET-REPO CLAUDE.md HANDLING") {
+		t.Fatalf("astromech FleetRules-rendered prompt missing the target-CLAUDE.md advisory framing header — the FleetRules row has been silently retired or scoped away from astromech")
 	}
 
-	const observationMarker = "[TARGET_CLAUDE_MD_OBSERVATION:"
-	if !strings.Contains(systemPrompt, observationMarker) {
-		t.Errorf("astromech system prompt missing %q signal marker — Investigator would never see target-CLAUDE.md conflicts", observationMarker)
-	}
-
-	// Belt-and-braces: confirm the clause itself names the marker so
-	// astromechs can locate it in their own prompt context.
-	if !strings.Contains(AstromechTargetCLAUDEMDClause, observationMarker) {
-		t.Errorf("AstromechTargetCLAUDEMDClause does not reference %q — clause has been silently re-templated", observationMarker)
+	if !strings.Contains(advisory, targetClaudeMDObservationMarker) {
+		t.Errorf("astromech FleetRules-rendered prompt missing %q signal marker — Investigator would never see target-CLAUDE.md conflicts", targetClaudeMDObservationMarker)
 	}
 
 	// Verify the load-bearing framing is present: target CLAUDE.md is
 	// advisory, not authoritative.
-	if !strings.Contains(AstromechTargetCLAUDEMDClause, "ADVISORY") {
-		t.Errorf("AstromechTargetCLAUDEMDClause missing the 'ADVISORY' framing — the clause must explicitly downgrade target CLAUDE.md from authoritative to advisory")
+	if !strings.Contains(advisory, "ADVISORY") {
+		t.Errorf("astromech FleetRules-rendered prompt missing the 'ADVISORY' framing — the clause must explicitly downgrade target CLAUDE.md from authoritative to advisory")
 	}
 
 	// Wiring smoke-test: confirm both call sites in astromech.go
-	// still concatenate the clause. A refactor that wraps the
-	// composition in a helper but drops the clause would slip past
-	// the prompt-content assertion above.
+	// still call AppendFleetRulesToPrompt with the "astromech" scope.
+	// A refactor that wraps the composition in a helper but drops
+	// the FleetRules injection would slip past the content assertion
+	// above (the prompt would simply lack the clause).
 	src := readAgentSource(t, "internal/agents/astromech.go")
-	occurrences := strings.Count(src, "AstromechTargetCLAUDEMDClause")
-	// Expect: the const declaration itself + 2 call sites
-	// (runAstromechTask and RunTaskForeground) = 3 minimum.
-	if occurrences < 3 {
-		t.Errorf("astromech.go references AstromechTargetCLAUDEMDClause %d times; expected ≥ 3 (const decl + 2 call sites). A call site has been removed.", occurrences)
+	occurrences := strings.Count(src, `AppendFleetRulesToPrompt(ctx, db, "astromech"`)
+	// Expect: 2 call sites (runAstromechTask and RunTaskForeground).
+	if occurrences < 2 {
+		t.Errorf("astromech.go calls AppendFleetRulesToPrompt(ctx, db, \"astromech\", …) %d times; expected ≥ 2 (runAstromechTask + RunTaskForeground). A call site has been removed.", occurrences)
+	}
+
+	// And confirm the dead const isn't being reintroduced as a symbol.
+	// Comments referencing the historic name are allowed (they document
+	// the migration); a `const AstromechTargetCLAUDEMDClause = …` decl
+	// or a use-site `+ AstromechTargetCLAUDEMDClause` is not.
+	if strings.Contains(src, "const AstromechTargetCLAUDEMDClause") ||
+		strings.Contains(src, "+ AstromechTargetCLAUDEMDClause") {
+		t.Errorf("astromech.go re-introduced the legacy AstromechTargetCLAUDEMDClause const — D3-P1 follow-up C removed this in favour of the FleetRules row. Restore the FleetRules path instead of reviving the const.")
 	}
 }
 
 // TestNonAstromechAgents_DoNotIncludeTargetCLAUDEMDClause is a
 // table-driven defense against a future agent inheriting the
 // astromech-specific clause. Each entry names an agent and the
-// system-prompt const (or source file, for inline prompts) we
-// expect to be free of the clause text.
+// system-prompt content (assembled at runtime by querying FleetRules
+// with the agent's scope) we expect to be free of the clause text.
 func TestNonAstromechAgents_DoNotIncludeTargetCLAUDEMDClause(t *testing.T) {
-	// Agents whose system prompt is held in a package-level const we
-	// can read directly from the agents package.
+	// Static agents whose system prompt is held in a package-level
+	// const PLUS the FleetRules-injected per-agent extras. The const
+	// MUST NOT contain the clause; the FleetRules row's
+	// agent_scope='astromech' filters it out from non-astromech
+	// extras automatically.
 	constCases := []struct {
 		name   string
 		prompt string
@@ -120,27 +154,43 @@ func TestNonAstromechAgents_DoNotIncludeTargetCLAUDEMDClause(t *testing.T) {
 	for _, tc := range constCases {
 		tc := tc
 		t.Run(tc.name+"_const", func(t *testing.T) {
-			if strings.Contains(tc.prompt, AstromechTargetCLAUDEMDClause) {
-				t.Fatalf("%s system prompt contains AstromechTargetCLAUDEMDClause — the clause is astromech-only because no other agent runs in a target-repo worktree", tc.name)
-			}
-			// Also reject the standalone marker text — a partial copy
-			// without the const reference would slip past the substring
-			// check on the const value but still pollute the prompt.
 			if strings.Contains(tc.prompt, "TARGET-REPO CLAUDE.md HANDLING") {
-				t.Errorf("%s system prompt contains the target-CLAUDE.md framing header — clause has been duplicated by hand", tc.name)
+				t.Errorf("%s system prompt const contains the target-CLAUDE.md framing header — clause has been duplicated by hand", tc.name)
+			}
+		})
+	}
+
+	// FleetRules-side assertion: assembling the per-agent prompt for
+	// every non-astromech agent MUST NOT yield the advisory clause.
+	// agent_scope='astromech' is the structural mechanism; this is
+	// the regression layer that catches a future scope broadening
+	// (e.g., agent_scope='all' would silently leak the clause).
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := store.BootstrapFleetRules(ctx, db, ""); err != nil {
+		t.Fatalf("bootstrap FleetRules: %v", err)
+	}
+	for _, tc := range constCases {
+		tc := tc
+		t.Run(tc.name+"_fleetrules", func(t *testing.T) {
+			prompt, err := AssemblePerAgentPrompt(ctx, db, tc.name)
+			if err != nil {
+				t.Fatalf("assemble %s prompt: %v", tc.name, err)
+			}
+			if strings.Contains(prompt, "TARGET-REPO CLAUDE.md HANDLING") {
+				t.Errorf("FleetRules-rendered %s prompt contains the target-CLAUDE.md framing header — agent_scope filter has broken or the row's scope was widened beyond 'astromech'", tc.name)
 			}
 		})
 	}
 
 	// Jedi Council builds its system prompt inline in jedi_council.go's
 	// runCouncilTask, so we read the source file and confirm the
-	// astromech-only const identifier never appears there. This is
-	// the same defense as the const-based assertion above, applied
-	// at source-grep granularity for the inline-builder case.
+	// removed const identifier never reappears (revival guard).
 	t.Run("jedi-council_source", func(t *testing.T) {
 		src := readAgentSource(t, "internal/agents/jedi_council.go")
 		if strings.Contains(src, "AstromechTargetCLAUDEMDClause") {
-			t.Errorf("jedi_council.go references AstromechTargetCLAUDEMDClause — astromech-only clause has leaked into Council's prompt assembly")
+			t.Errorf("jedi_council.go references the legacy AstromechTargetCLAUDEMDClause const — astromech-only clause has been revived by hand")
 		}
 		if strings.Contains(src, "TARGET-REPO CLAUDE.md HANDLING") {
 			t.Errorf("jedi_council.go contains the target-CLAUDE.md framing header — clause has been duplicated by hand")

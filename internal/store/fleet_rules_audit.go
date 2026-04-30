@@ -118,7 +118,8 @@ var bootstrapAudit = []FleetRuleSeed{
 		Content: `**Claude CLI invocation layering.** Review agents (Captain, Council, Medic, Chancellor, ` +
 			`ConvoyReview, PR-review-triage, Commander) run with daemon CWD = ` + "`force-orchestrator/`" + `, ` +
 			`auto-loading ` + "`force-orchestrator/CLAUDE.md`" + `. Astromechs run inside target-repo worktrees, ` +
-			`auto-loading the target's CLAUDE.md (treated as advisory per ` + "`AstromechTargetCLAUDEMDClause`" + `). ` +
+			`auto-loading the target's CLAUDE.md (treated as advisory per FleetRules row ` +
+			"`astromech-target-claude-md-advisory`" + `, injected via ` + "`AppendFleetRulesToPrompt`" + `). ` +
 			`Full layering reference: ` + "`docs/architecture/claude-cli-invocation.md`" + `.`,
 	},
 
