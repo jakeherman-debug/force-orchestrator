@@ -884,6 +884,211 @@ func createSchema(db *sql.DB) {
 		operator_rationale  TEXT    DEFAULT ''
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week);`)
+
+	// ── D3 Phase 6 dashboard data-layer prerequisites ────────────────────────
+	// Per dashboard-implementation.md: schema lands in Phase 1 so 6A/6B build
+	// against a stable data layer. No runtime code consumes these yet — the
+	// dashboard tasks (6A.2, 6A.4, 6A.5, etc.) wire them up.
+
+	// DashboardHealthHeartbeats (6A.2) — heartbeat goroutine ticks every 30s.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DashboardHealthHeartbeats (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		ticked_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+		process_pid        INTEGER DEFAULT 0,
+		bind_addr          TEXT    DEFAULT '',
+		in_flight_requests INTEGER DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_dh_heartbeats_recent ON DashboardHealthHeartbeats(ticked_at DESC);`)
+
+	// OperatorNotificationBudgets (6A.4) — per-(operator, source, channel)
+	// rate-limit configuration; respectNotificationBudget queries this.
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorNotificationBudgets (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		source          TEXT    NOT NULL,
+		channel         TEXT    NOT NULL,
+		max_per_period  INTEGER NOT NULL,
+		period_minutes  INTEGER NOT NULL,
+		digest_remainder INTEGER NOT NULL DEFAULT 1,
+		UNIQUE(operator_email, source, channel)
+	);`)
+
+	// OperatorNotificationDigest (6A.4) — deferred-notification spool.
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorNotificationDigest (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		source          TEXT    NOT NULL,
+		channel         TEXT    NOT NULL,
+		digest_for_date TEXT    NOT NULL,
+		payload_json    TEXT    NOT NULL,
+		flushed_at      TEXT    DEFAULT '',
+		UNIQUE(operator_email, source, channel, digest_for_date)
+	);`)
+
+	// OperatorSessionState (6A.5) — resume-where-you-left-off state.
+	// partial_review_state_json is bounded at 32 KB at write time.
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorSessionState (
+		id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email            TEXT    NOT NULL UNIQUE,
+		last_active_at            TEXT    DEFAULT (datetime('now')),
+		last_viewed_surface       TEXT    DEFAULT '',
+		last_viewed_route         TEXT    DEFAULT '',
+		last_focused_decision_id  INTEGER DEFAULT 0,
+		partial_review_state_json TEXT    DEFAULT ''
+	);`)
+
+	// OperatorTrustDials (6A.6) — per-(operator, agent) trust slider.
+	// History-preserving: latest set_at row is current value.
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorTrustDials (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		agent           TEXT    NOT NULL,
+		dial_value      INTEGER NOT NULL CHECK(dial_value BETWEEN 0 AND 100),
+		set_at          TEXT    DEFAULT (datetime('now')),
+		set_by          TEXT    NOT NULL DEFAULT '',
+		rationale       TEXT    DEFAULT '',
+		UNIQUE(operator_email, agent, set_at)
+	);`)
+
+	// NarrativeRenders (6A.7) — LLM-batched live narrative panel results.
+	db.Exec(`CREATE TABLE IF NOT EXISTS NarrativeRenders (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		rendered_at            TEXT    DEFAULT (datetime('now')),
+		event_window_start     TEXT    NOT NULL,
+		event_window_end       TEXT    NOT NULL,
+		source_event_count     INTEGER NOT NULL DEFAULT 0,
+		source_event_refs_json TEXT    NOT NULL DEFAULT '[]',
+		prose                  TEXT    NOT NULL,
+		prompt_version         TEXT    NOT NULL DEFAULT '',
+		cost_usd               REAL    DEFAULT 0,
+		cache_hit              INTEGER DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_nr_window ON NarrativeRenders(event_window_end DESC);`)
+
+	// BriefingRenders (6A.10/6A.11) — Briefing decision rendered text +
+	// counter-proposal capture.
+	db.Exec(`CREATE TABLE IF NOT EXISTS BriefingRenders (
+		id                           INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id                  INTEGER NOT NULL,
+		decision_kind                TEXT    NOT NULL,
+		rendered_at                  TEXT    DEFAULT (datetime('now')),
+		briefing_text                TEXT    NOT NULL,
+		prior_similar_decisions_json TEXT    DEFAULT '[]',
+		prompt_version               TEXT    NOT NULL DEFAULT '',
+		cost_usd                     REAL    DEFAULT 0,
+		operator_decision            TEXT    DEFAULT '',
+		decision_time_seconds        INTEGER DEFAULT 0,
+		counter_proposal_kind        TEXT    DEFAULT '',
+		counter_proposal_text        TEXT    DEFAULT '',
+		counter_proposal_routed_id   INTEGER DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_br_decision ON BriefingRenders(decision_kind, decision_id, rendered_at DESC);`)
+
+	// CooldownPauses (6A.13) — high-stakes auto-execute cooldown banner.
+	db.Exec(`CREATE TABLE IF NOT EXISTS CooldownPauses (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id         INTEGER NOT NULL,
+		decision_kind       TEXT    NOT NULL,
+		scheduled_action_at TEXT    NOT NULL,
+		paused_at           TEXT    DEFAULT '',
+		paused_by_email     TEXT    DEFAULT '',
+		resumed_at          TEXT    DEFAULT '',
+		cancelled_at        TEXT    DEFAULT '',
+		executed_at         TEXT    DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cp_pending ON CooldownPauses(scheduled_action_at)
+		WHERE executed_at = '' AND cancelled_at = '';`)
+
+	// OperatorAttentionTags (6A.14) — operator-pinned attention to convoys
+	// / features / agents / rule keys.
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorAttentionTags (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		target_kind     TEXT    NOT NULL,
+		target_id       TEXT    NOT NULL,
+		attention_level TEXT    NOT NULL CHECK(attention_level IN ('following','normal','muted')),
+		set_at          TEXT    DEFAULT (datetime('now')),
+		rationale       TEXT    DEFAULT '',
+		UNIQUE(operator_email, target_kind, target_id)
+	);`)
+
+	// LLMCallTranscripts (6B.1) — redacted at write time per Fix #10.
+	db.Exec(`CREATE TABLE IF NOT EXISTS LLMCallTranscripts (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id                INTEGER DEFAULT 0,
+		agent                  TEXT    NOT NULL,
+		prompt_version         TEXT    NOT NULL DEFAULT '',
+		call_started_at        TEXT    NOT NULL,
+		call_completed_at      TEXT    DEFAULT '',
+		system_prompt          TEXT    NOT NULL,
+		user_prompt            TEXT    NOT NULL,
+		response_text          TEXT    DEFAULT '',
+		tool_calls_json        TEXT    DEFAULT '[]',
+		cost_usd               REAL    DEFAULT 0,
+		input_tokens           INTEGER DEFAULT 0,
+		output_tokens          INTEGER DEFAULT 0,
+		cache_read_tokens      INTEGER DEFAULT 0,
+		cache_creation_tokens  INTEGER DEFAULT 0,
+		archived_at            TEXT    DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_llmct_task ON LLMCallTranscripts(task_id, call_started_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_llmct_agent ON LLMCallTranscripts(agent, call_started_at);`)
+
+	// GitOperationLog (6B.2) — every git/gh op is recorded for the drill view.
+	db.Exec(`CREATE TABLE IF NOT EXISTS GitOperationLog (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id         INTEGER DEFAULT 0,
+		convoy_id       INTEGER DEFAULT 0,
+		repo            TEXT    NOT NULL,
+		operation       TEXT    NOT NULL,
+		args_json       TEXT    DEFAULT '[]',
+		started_at      TEXT    NOT NULL,
+		duration_ms     INTEGER DEFAULT 0,
+		exit_code       INTEGER DEFAULT 0,
+		stdout_excerpt  TEXT    DEFAULT '',
+		stderr_excerpt  TEXT    DEFAULT '',
+		branch          TEXT    DEFAULT '',
+		before_sha      TEXT    DEFAULT '',
+		after_sha       TEXT    DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gol_convoy ON GitOperationLog(convoy_id, started_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gol_task   ON GitOperationLog(task_id, started_at);`)
+
+	// OperatorEventAnnotations (6B.8) — operator notes on events.
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorEventAnnotations (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		event_kind      TEXT    NOT NULL,
+		event_ref       TEXT    NOT NULL,
+		note_text       TEXT    NOT NULL,
+		flag            TEXT    DEFAULT '',
+		noted_at        TEXT    DEFAULT (datetime('now'))
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_oea_event ON OperatorEventAnnotations(event_kind, event_ref);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_oea_flag  ON OperatorEventAnnotations(flag, noted_at) WHERE flag != '';`)
+
+	// ReplayResults (6B.7) — replay an old decision against the current prompt.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ReplayResults (
+		id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		original_event_id     INTEGER NOT NULL,
+		original_event_kind   TEXT    NOT NULL,
+		replay_prompt_version TEXT    NOT NULL,
+		replay_started_at     TEXT    DEFAULT (datetime('now')),
+		replay_response       TEXT    DEFAULT '',
+		decision_changed      INTEGER DEFAULT 0,
+		cost_usd              REAL    DEFAULT 0,
+		triggered_by_email    TEXT    NOT NULL DEFAULT ''
+	);`)
+
+	// FleetLearningPanels (6B.12) — synthesised "what the fleet learned" panels.
+	db.Exec(`CREATE TABLE IF NOT EXISTS FleetLearningPanels (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		rendered_at            TEXT    DEFAULT (datetime('now')),
+		prose                  TEXT    NOT NULL,
+		cost_usd               REAL    DEFAULT 0,
+		prompt_version         TEXT    NOT NULL DEFAULT '',
+		source_event_refs_json TEXT    DEFAULT '[]'
+	);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -1679,4 +1884,186 @@ func runMigrations(db *sql.DB) {
 		operator_rationale  TEXT    DEFAULT ''
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week)`)
+
+	// Dashboard data-layer tables (upgrade path; D3 Phase 6 prerequisites).
+	db.Exec(`CREATE TABLE IF NOT EXISTS DashboardHealthHeartbeats (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		ticked_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+		process_pid        INTEGER DEFAULT 0,
+		bind_addr          TEXT    DEFAULT '',
+		in_flight_requests INTEGER DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_dh_heartbeats_recent ON DashboardHealthHeartbeats(ticked_at DESC)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorNotificationBudgets (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		source          TEXT    NOT NULL,
+		channel         TEXT    NOT NULL,
+		max_per_period  INTEGER NOT NULL,
+		period_minutes  INTEGER NOT NULL,
+		digest_remainder INTEGER NOT NULL DEFAULT 1,
+		UNIQUE(operator_email, source, channel)
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorNotificationDigest (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		source          TEXT    NOT NULL,
+		channel         TEXT    NOT NULL,
+		digest_for_date TEXT    NOT NULL,
+		payload_json    TEXT    NOT NULL,
+		flushed_at      TEXT    DEFAULT '',
+		UNIQUE(operator_email, source, channel, digest_for_date)
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorSessionState (
+		id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email            TEXT    NOT NULL UNIQUE,
+		last_active_at            TEXT    DEFAULT (datetime('now')),
+		last_viewed_surface       TEXT    DEFAULT '',
+		last_viewed_route         TEXT    DEFAULT '',
+		last_focused_decision_id  INTEGER DEFAULT 0,
+		partial_review_state_json TEXT    DEFAULT ''
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorTrustDials (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		agent           TEXT    NOT NULL,
+		dial_value      INTEGER NOT NULL CHECK(dial_value BETWEEN 0 AND 100),
+		set_at          TEXT    DEFAULT (datetime('now')),
+		set_by          TEXT    NOT NULL DEFAULT '',
+		rationale       TEXT    DEFAULT '',
+		UNIQUE(operator_email, agent, set_at)
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS NarrativeRenders (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		rendered_at            TEXT    DEFAULT (datetime('now')),
+		event_window_start     TEXT    NOT NULL,
+		event_window_end       TEXT    NOT NULL,
+		source_event_count     INTEGER NOT NULL DEFAULT 0,
+		source_event_refs_json TEXT    NOT NULL DEFAULT '[]',
+		prose                  TEXT    NOT NULL,
+		prompt_version         TEXT    NOT NULL DEFAULT '',
+		cost_usd               REAL    DEFAULT 0,
+		cache_hit              INTEGER DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_nr_window ON NarrativeRenders(event_window_end DESC)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS BriefingRenders (
+		id                           INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id                  INTEGER NOT NULL,
+		decision_kind                TEXT    NOT NULL,
+		rendered_at                  TEXT    DEFAULT (datetime('now')),
+		briefing_text                TEXT    NOT NULL,
+		prior_similar_decisions_json TEXT    DEFAULT '[]',
+		prompt_version               TEXT    NOT NULL DEFAULT '',
+		cost_usd                     REAL    DEFAULT 0,
+		operator_decision            TEXT    DEFAULT '',
+		decision_time_seconds        INTEGER DEFAULT 0,
+		counter_proposal_kind        TEXT    DEFAULT '',
+		counter_proposal_text        TEXT    DEFAULT '',
+		counter_proposal_routed_id   INTEGER DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_br_decision ON BriefingRenders(decision_kind, decision_id, rendered_at DESC)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS CooldownPauses (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id         INTEGER NOT NULL,
+		decision_kind       TEXT    NOT NULL,
+		scheduled_action_at TEXT    NOT NULL,
+		paused_at           TEXT    DEFAULT '',
+		paused_by_email     TEXT    DEFAULT '',
+		resumed_at          TEXT    DEFAULT '',
+		cancelled_at        TEXT    DEFAULT '',
+		executed_at         TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cp_pending ON CooldownPauses(scheduled_action_at)
+		WHERE executed_at = '' AND cancelled_at = ''`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorAttentionTags (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		target_kind     TEXT    NOT NULL,
+		target_id       TEXT    NOT NULL,
+		attention_level TEXT    NOT NULL CHECK(attention_level IN ('following','normal','muted')),
+		set_at          TEXT    DEFAULT (datetime('now')),
+		rationale       TEXT    DEFAULT '',
+		UNIQUE(operator_email, target_kind, target_id)
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS LLMCallTranscripts (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id                INTEGER DEFAULT 0,
+		agent                  TEXT    NOT NULL,
+		prompt_version         TEXT    NOT NULL DEFAULT '',
+		call_started_at        TEXT    NOT NULL,
+		call_completed_at      TEXT    DEFAULT '',
+		system_prompt          TEXT    NOT NULL,
+		user_prompt            TEXT    NOT NULL,
+		response_text          TEXT    DEFAULT '',
+		tool_calls_json        TEXT    DEFAULT '[]',
+		cost_usd               REAL    DEFAULT 0,
+		input_tokens           INTEGER DEFAULT 0,
+		output_tokens          INTEGER DEFAULT 0,
+		cache_read_tokens      INTEGER DEFAULT 0,
+		cache_creation_tokens  INTEGER DEFAULT 0,
+		archived_at            TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_llmct_task  ON LLMCallTranscripts(task_id, call_started_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_llmct_agent ON LLMCallTranscripts(agent, call_started_at)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS GitOperationLog (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id         INTEGER DEFAULT 0,
+		convoy_id       INTEGER DEFAULT 0,
+		repo            TEXT    NOT NULL,
+		operation       TEXT    NOT NULL,
+		args_json       TEXT    DEFAULT '[]',
+		started_at      TEXT    NOT NULL,
+		duration_ms     INTEGER DEFAULT 0,
+		exit_code       INTEGER DEFAULT 0,
+		stdout_excerpt  TEXT    DEFAULT '',
+		stderr_excerpt  TEXT    DEFAULT '',
+		branch          TEXT    DEFAULT '',
+		before_sha      TEXT    DEFAULT '',
+		after_sha       TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gol_convoy ON GitOperationLog(convoy_id, started_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_gol_task   ON GitOperationLog(task_id, started_at)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS OperatorEventAnnotations (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operator_email  TEXT    NOT NULL,
+		event_kind      TEXT    NOT NULL,
+		event_ref       TEXT    NOT NULL,
+		note_text       TEXT    NOT NULL,
+		flag            TEXT    DEFAULT '',
+		noted_at        TEXT    DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_oea_event ON OperatorEventAnnotations(event_kind, event_ref)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_oea_flag  ON OperatorEventAnnotations(flag, noted_at) WHERE flag != ''`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS ReplayResults (
+		id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		original_event_id     INTEGER NOT NULL,
+		original_event_kind   TEXT    NOT NULL,
+		replay_prompt_version TEXT    NOT NULL,
+		replay_started_at     TEXT    DEFAULT (datetime('now')),
+		replay_response       TEXT    DEFAULT '',
+		decision_changed      INTEGER DEFAULT 0,
+		cost_usd              REAL    DEFAULT 0,
+		triggered_by_email    TEXT    NOT NULL DEFAULT ''
+	)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS FleetLearningPanels (
+		id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+		rendered_at            TEXT    DEFAULT (datetime('now')),
+		prose                  TEXT    NOT NULL,
+		cost_usd               REAL    DEFAULT 0,
+		prompt_version         TEXT    NOT NULL DEFAULT '',
+		source_event_refs_json TEXT    DEFAULT '[]'
+	)`)
 }
