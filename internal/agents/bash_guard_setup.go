@@ -104,23 +104,64 @@ func setupBashGuardShim(worktreeDir string) ([]string, error) {
 }
 
 // bashShimSource returns the contents of the per-worktree bash shim.
-// The shim handles three invocation shapes:
+// The shim recognizes any bash invocation that carries a `-c <command>`
+// form, with any combination of standard login / interactive flags
+// (-l, -i) before or after the -c token. Specifically:
 //
-//   - bash -c "<command>"          (Claude CLI's Bash tool)
-//   - bash -lc "<command>"         (rare; treated like -c)
-//   - bash <other args>            (fall through to real bash)
+//   - bash -c <cmd>              (Claude CLI's Bash tool, common form)
+//   - bash -lc <cmd>             (login + command, combined flag)
+//   - bash -c -l <cmd>           (Claude's per-call snapshot bootstrap)
+//   - bash -l -c <cmd>           (operator-typed equivalent)
+//   - bash -i -c <cmd>           (interactive flag, defensive)
+//   - bash -li -c <cmd>          (combined login+interactive then -c)
+//   - bash -ilc <cmd>            (everything combined into one flag)
 //
-// For -c form, the shim feeds the command line to force-bash-guard
-// via argv. On exit 0, exec /bin/bash with the original argv. On any
-// non-zero exit, propagate the exit code so the Bash tool surfaces a
-// rejection.
+// For these, the shim extracts <cmd> and feeds it to force-bash-guard.
+// On exit 0, exec /bin/bash with the original argv (so bash itself
+// applies any login/interactive semantics). On non-zero exit, propagate
+// so the Bash tool surfaces a rejection.
+//
+// Shapes that genuinely don't carry a `-c <cmd>` (e.g., bash script.sh,
+// interactive bash with no command, or any flag outside {l, i, c} like
+// --norc, -p, -D) fall through to /bin/bash unmodified — those don't
+// fit the validation contract. Conservative fall-through is preferred
+// over guessing.
 func bashShimSource(guardBin string) string {
 	return "#!/bin/sh\n" +
 		"# force-bash-guard shim (D2 T1-3). DO NOT EDIT — regenerated per astromech run.\n" +
 		"# Bypassing this shim defeats the astromech Bash boundary; see CLAUDE.md.\n" +
 		"GUARD=" + shellQuote(guardBin) + "\n" +
-		"if [ \"$1\" = \"-c\" ] || [ \"$1\" = \"-lc\" ]; then\n" +
-		"  CMD=\"$2\"\n" +
+		"# Walk argv looking for `-c <cmd>`. Recognized flag chars are {l, i, c}.\n" +
+		"# saw_c flips once -c is seen (alone or as part of a combined -lc/-ilc/-cl/etc).\n" +
+		"# The first non-flag argv after that point is the command we hand to the guard.\n" +
+		"CMD=\"\"\n" +
+		"saw_c=0\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    -c)\n" +
+		"      saw_c=1\n" +
+		"      ;;\n" +
+		"    -*)\n" +
+		"      rest=${arg#-}\n" +
+		"      if [ -z \"$rest\" ]; then\n" +
+		"        break\n" +
+		"      fi\n" +
+		"      case \"$rest\" in\n" +
+		"        *[!lic]*) break ;;\n" +
+		"      esac\n" +
+		"      case \"$rest\" in\n" +
+		"        *c*) saw_c=1 ;;\n" +
+		"      esac\n" +
+		"      ;;\n" +
+		"    *)\n" +
+		"      if [ \"$saw_c\" -eq 1 ]; then\n" +
+		"        CMD=\"$arg\"\n" +
+		"      fi\n" +
+		"      break\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"if [ \"$saw_c\" -eq 1 ]; then\n" +
 		"  if ! \"$GUARD\" \"$CMD\"; then\n" +
 		"    exit 1\n" +
 		"  fi\n" +

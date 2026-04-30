@@ -2,6 +2,7 @@ package agents
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,13 +135,153 @@ func TestBashShimSource_ContainsValidationPath(t *testing.T) {
 	src := bashShimSource("/opt/force/bin/force-bash-guard")
 	mustContain := []string{
 		`'/opt/force/bin/force-bash-guard'`,
-		"if [ \"$1\" = \"-c\" ]",
+		// Argv-walking parser, not the old single-position match.
+		`for arg in "$@"`,
+		// -c terminator triggers saw_c.
+		`-c)`,
+		// Combined flag {l,i,c} pattern check.
+		`*[!lic]*`,
+		// Guard call shape preserved.
+		`"$GUARD" "$CMD"`,
 		"exec /bin/bash",
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(src, want) {
 			t.Errorf("shim source missing %q; full source:\n%s", want, src)
 		}
+	}
+}
+
+// writeStubGuardLogger writes a stub force-bash-guard binary that
+// appends its argv (one arg per line) to logFile and exits 0. Returns
+// the binary path. Used by the parser-shape tests below to verify the
+// shim is feeding the correct command portion to the guard.
+func writeStubGuardLogger(t *testing.T, dir, logFile string) string {
+	t.Helper()
+	bin := filepath.Join(dir, "stub-bash-guard")
+	src := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> '" + logFile + "'; done\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(src), 0o755); err != nil {
+		t.Fatalf("write stub guard: %v", err)
+	}
+	return bin
+}
+
+// runShim spawns the per-worktree bash shim with the given argv and
+// returns the exit code (or -1 on spawn failure) and stderr output.
+func runShim(t *testing.T, shim string, argv ...string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(shim, argv...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode(), string(out)
+		}
+		return -1, string(out) + " err=" + err.Error()
+	}
+	return 0, string(out)
+}
+
+// TestBashShim_RecognizesArgvShapes drives the per-worktree shim with
+// every flag combination the prompt called out + the legacy ones, and
+// asserts the stub guard binary saw the *command* portion (not a flag)
+// as its argv[1]. A regression where the parser falls through on
+// `-c -l <cmd>` (Claude's snapshot bootstrap) trips this test.
+func TestBashShim_RecognizesArgvShapes(t *testing.T) {
+	worktree := t.TempDir()
+	logFile := filepath.Join(worktree, "guard-argv.log")
+	stubGuard := writeStubGuardLogger(t, worktree, logFile)
+
+	// Generate the shim with the stub guard wired in.
+	shimDir := filepath.Join(worktree, bashGuardShimDirName)
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("mkdir shim dir: %v", err)
+	}
+	shim := filepath.Join(shimDir, "bash")
+	if err := os.WriteFile(shim, []byte(bashShimSource(stubGuard)), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		argv    []string
+		wantCmd string // expected command string fed to the guard
+	}{
+		{"plain -c", []string{"-c", "echo hi"}, "echo hi"},
+		{"combined -lc", []string{"-lc", "echo hi"}, "echo hi"},
+		{"-c then -l (Claude snapshot bootstrap)", []string{"-c", "-l", "echo hi"}, "echo hi"},
+		{"-l then -c", []string{"-l", "-c", "echo hi"}, "echo hi"},
+		{"-i then -c", []string{"-i", "-c", "echo hi"}, "echo hi"},
+		{"-li then -c", []string{"-li", "-c", "echo hi"}, "echo hi"},
+		{"combined -ilc", []string{"-ilc", "echo hi"}, "echo hi"},
+		{"-c then -li (flags after -c)", []string{"-c", "-li", "echo hi"}, "echo hi"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(logFile, nil, 0o644); err != nil {
+				t.Fatalf("reset log: %v", err)
+			}
+			// We don't care if the trailing exec /bin/bash succeeds —
+			// the guard log is the assertion target.
+			runShim(t, shim, tc.argv...)
+			got, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatalf("read guard log: %v", err)
+			}
+			lines := strings.Split(strings.TrimRight(string(got), "\n"), "\n")
+			if len(lines) == 0 || lines[0] == "" {
+				t.Fatalf("guard never invoked; argv=%v", tc.argv)
+			}
+			// The stub guard records each argv as a line. Argv[1] of the
+			// guard is the command (since stub iterates "$@").
+			if lines[0] != tc.wantCmd {
+				t.Errorf("argv=%v: guard saw %q, want %q\nfull log: %q",
+					tc.argv, lines[0], tc.wantCmd, string(got))
+			}
+		})
+	}
+}
+
+// TestBashShim_FallsThroughOnNonCommandShapes ensures we don't validate
+// (and therefore don't reject) shapes that don't carry a -c <cmd>. The
+// guard log must be empty after invoking these.
+func TestBashShim_FallsThroughOnNonCommandShapes(t *testing.T) {
+	worktree := t.TempDir()
+	logFile := filepath.Join(worktree, "guard-argv.log")
+	stubGuard := writeStubGuardLogger(t, worktree, logFile)
+
+	shimDir := filepath.Join(worktree, bashGuardShimDirName)
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("mkdir shim dir: %v", err)
+	}
+	shim := filepath.Join(shimDir, "bash")
+	if err := os.WriteFile(shim, []byte(bashShimSource(stubGuard)), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		argv []string
+	}{
+		// The trailing /dev/null script keeps bash from hanging on stdin
+		// during these "fall-through" cases.
+		{"bash <script.sh>", []string{"/dev/null"}},
+		{"bash -l <script.sh>", []string{"-l", "/dev/null"}},
+		{"bash -i <script.sh>", []string{"-i", "/dev/null"}},
+		{"bash --norc -c <cmd> (unrecognized flag — conservative fall-through)",
+			[]string{"--norc", "-c", "echo hi"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(logFile, nil, 0o644); err != nil {
+				t.Fatalf("reset log: %v", err)
+			}
+			runShim(t, shim, tc.argv...)
+			got, _ := os.ReadFile(logFile)
+			if len(strings.TrimSpace(string(got))) != 0 {
+				t.Errorf("guard was invoked unexpectedly for argv=%v; log=%q",
+					tc.argv, string(got))
+			}
+		})
 	}
 }
 
