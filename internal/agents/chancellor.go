@@ -93,11 +93,11 @@ func SpawnChancellor(ctx context.Context, db *sql.DB) {
 			continue
 		}
 
-		runChancellorReview(db, feature, tasks, profile, logger)
+		runChancellorReview(ctx, db, feature, tasks, profile, logger)
 	}
 }
 
-func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
+func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	logger.Printf("Reviewing Feature #%d (%d proposed task(s)): %s",
 		feature.ID, len(tasks), util.TruncateStr(feature.Payload, 80))
 
@@ -118,12 +118,10 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 	if mcpErr != nil {
 		logger.Printf("Feature #%d: chancellor MCP config write failed (%v) — proceeding without --mcp-config", feature.ID, mcpErr)
 	}
-	// D3 P1: append every active FleetRules row scoped to 'chancellor'.
-	// runChancellorReview lacks a context.Context parameter; threading
-	// it is a follow-up. Use context.Background() — the AssemblePerAgentPrompt
-	// SELECT is sub-millisecond so loss of ctx-cancellation is acceptable.
-	systemPrompt := AppendFleetRulesToPrompt(context.Background(), db, "chancellor", chancellorSystemPrompt, nil)
-	response, err := claude.AskClaudeCLI(systemPrompt, userPrompt,
+	// D3 P1 follow-up B: ctx threads from SpawnChancellor → runChancellorReview
+	// so daemon shutdown / e-stop cancels the in-flight LLM call.
+	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "chancellor", chancellorSystemPrompt, nil)
+	response, err := claude.AskClaudeCLIContext(ctx, systemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on Claude CLI failure.
@@ -227,7 +225,7 @@ func runChancellorReview(db *sql.DB, feature *store.Bounty, tasks []store.TaskPl
 			return
 		}
 		logger.Printf("Feature #%d: MERGE with Feature #%d — %s", feature.ID, ruling.MergeWithFeatureID, ruling.Reason)
-		actionErr = mergeProposals(db, feature, tasks, ruling, profile, logger)
+		actionErr = mergeProposals(ctx, db, feature, tasks, ruling, profile, logger)
 
 	default:
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on unknown action.
@@ -508,7 +506,7 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 // Fix #8b: returns error so runChancellorReview can log DB-write failures.
 // When the merge path falls back to independent approval, the fallback
 // errors are joined and returned together so neither is lost.
-func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) error {
+func mergeProposals(ctx context.Context, db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) error {
 	featureBID := ruling.MergeWithFeatureID
 	reason := ruling.Reason
 	featureB, tasksB, ok := store.ClaimMergeTarget(db, featureBID, chancellorName)
@@ -520,7 +518,7 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 
 	logger.Printf("Merging Feature #%d + Feature #%d", featureA.ID, featureB.ID)
 
-	mergedTasks := synthesizeMergedPlan(db, featureA, tasksA, featureB, tasksB, profile, logger)
+	mergedTasks := synthesizeMergedPlan(ctx, db, featureA, tasksA, featureB, tasksB, profile, logger)
 	if mergedTasks == nil {
 		// Synthesis failed — approve both independently. Join errors so a
 		// single-leg failure doesn't silently succeed under a two-leg return.
@@ -608,7 +606,7 @@ func mergeProposals(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan,
 }
 
 // synthesizeMergedPlan calls Claude to produce a unified task list from two plans.
-func synthesizeMergedPlan(db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, featureB *store.Bounty, tasksB []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) []store.TaskPlan {
+func synthesizeMergedPlan(ctx context.Context, db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, featureB *store.Bounty, tasksB []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) []store.TaskPlan {
 	planAJSON, _ := json.MarshalIndent(tasksA, "", "  ")
 	planBJSON, _ := json.MarshalIndent(tasksB, "", "  ")
 
@@ -639,9 +637,10 @@ Respond with ONLY the raw JSON array — no explanation, no markdown, no code fe
 	if mcpErr != nil {
 		logger.Printf("Merge synthesis MCP config write failed: %v — proceeding without --mcp-config", mcpErr)
 	}
-	// D3 P1: append every active FleetRules row scoped to 'chancellor'.
-	systemPrompt := AppendFleetRulesToPrompt(context.Background(), db, "chancellor", chancellorSystemPrompt, nil)
-	response, err := claude.AskClaudeCLI(systemPrompt, mergePrompt,
+	// D3 P1 follow-up B: ctx threads from runChancellorReview → mergeProposals
+	// → synthesizeMergedPlan so daemon shutdown cancels the merge LLM call.
+	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "chancellor", chancellorSystemPrompt, nil)
+	response, err := claude.AskClaudeCLIContext(ctx, systemPrompt, mergePrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		logger.Printf("Merge synthesis Claude call failed: %v", err)
