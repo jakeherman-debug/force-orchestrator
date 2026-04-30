@@ -892,6 +892,27 @@ CREATE TABLE IF NOT EXISTS CalibrationAuditSamples (
 );
 CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week);
 
+-- DisagreementPairs (D3 P3) — rolling-window per-pair cross-layer disagreement
+-- rates populated by dogDisagreementTracker. Surfaced by
+-- /api/disagreement-rates. One row per (pair_name, window_start, window_end);
+-- a re-tick over the same window UPSERT-overwrites.
+-- Pairs: 'captain-council-reject', 'council-ci-fail', 'convoy-review-cant-fix',
+-- 'senate-chancellor-decline' (deferred until D4 — Senate ships then),
+-- 'operator-revert-30d'.
+CREATE TABLE IF NOT EXISTS DisagreementPairs (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_name          TEXT    NOT NULL,                            -- e.g. 'captain-council-reject'
+    window_start       TEXT    NOT NULL,                            -- ISO timestamp
+    window_end         TEXT    NOT NULL,
+    sample_count       INTEGER NOT NULL,                            -- denominator
+    disagreement_count INTEGER NOT NULL,                            -- numerator
+    rate               REAL    NOT NULL,                            -- disagreement_count / max(sample_count, 1)
+    computed_at        TEXT    DEFAULT (datetime('now')),
+    UNIQUE(pair_name, window_start, window_end)
+);
+CREATE INDEX IF NOT EXISTS idx_disagreement_pair_window
+    ON DisagreementPairs(pair_name, window_end DESC);
+
 -- ── D3 Phase 6 dashboard data-layer prerequisites ────────────────────────────
 -- Per dashboard-implementation.md: schema lands in Phase 1 so 6A/6B build
 -- against a stable data layer. No runtime code consumes these yet — the

@@ -885,6 +885,27 @@ func createSchema(db *sql.DB) {
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week);`)
 
+	// DisagreementPairs (D3 P3) — rolling-window per-pair cross-layer
+	// disagreement rates. Populated by dogDisagreementTracker; surfaced by
+	// /api/disagreement-rates. One row per (pair_name, window_start,
+	// window_end); a re-tick over the same window UPSERT-overwrites.
+	// Pairs tracked: 'captain-council-reject', 'council-ci-fail',
+	// 'convoy-review-cant-fix', 'senate-chancellor-decline' (deferred until
+	// D4 — Senate ships then), 'operator-revert-30d'.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DisagreementPairs (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		pair_name          TEXT    NOT NULL,
+		window_start       TEXT    NOT NULL,
+		window_end         TEXT    NOT NULL,
+		sample_count       INTEGER NOT NULL,
+		disagreement_count INTEGER NOT NULL,
+		rate               REAL    NOT NULL,
+		computed_at        TEXT    DEFAULT (datetime('now')),
+		UNIQUE(pair_name, window_start, window_end)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_disagreement_pair_window
+		ON DisagreementPairs(pair_name, window_end DESC);`)
+
 	// ── D3 Phase 6 dashboard data-layer prerequisites ────────────────────────
 	// Per dashboard-implementation.md: schema lands in Phase 1 so 6A/6B build
 	// against a stable data layer. No runtime code consumes these yet — the
@@ -1884,6 +1905,22 @@ func runMigrations(db *sql.DB) {
 		operator_rationale  TEXT    DEFAULT ''
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cas_week ON CalibrationAuditSamples(sample_week)`)
+
+	// DisagreementPairs (D3 P3, upgrade path) — per-pair cross-layer
+	// disagreement rate aggregates.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DisagreementPairs (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		pair_name          TEXT    NOT NULL,
+		window_start       TEXT    NOT NULL,
+		window_end         TEXT    NOT NULL,
+		sample_count       INTEGER NOT NULL,
+		disagreement_count INTEGER NOT NULL,
+		rate               REAL    NOT NULL,
+		computed_at        TEXT    DEFAULT (datetime('now')),
+		UNIQUE(pair_name, window_start, window_end)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_disagreement_pair_window
+		ON DisagreementPairs(pair_name, window_end DESC)`)
 
 	// Dashboard data-layer tables (upgrade path; D3 Phase 6 prerequisites).
 	db.Exec(`CREATE TABLE IF NOT EXISTS DashboardHealthHeartbeats (
