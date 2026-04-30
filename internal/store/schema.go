@@ -651,6 +651,71 @@ func createSchema(db *sql.DB) {
 		mode                TEXT    NOT NULL DEFAULT 'log_only'
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_treatment_apply_log_ts ON TreatmentApplyLog (applied_at);`)
+
+	// FleetRules — DB as source of truth for what today lives in CLAUDE.md /
+	// SENATE.md / BoS rule files / ISB finder configs. Versioned per
+	// rule_key; one row is "active" at a time (active_until IS NULL). The
+	// renderer (D3 Phase 3) dispatches by render_to:
+	//   'claude-md-file'        → CLAUDE.md the file (hard-capped 20 KB)
+	//   'agent-prompt'          → per-agent --append-system-prompt content
+	//                              filtered by agent_scope
+	//   'fix-log'               → FIX-LOG.md historical narrative
+	//   'pattern-test-docstring'→ test file docstring + CLAUDE.md cross-ref
+	//   'per-domain-doc:<file>' → docs/<file> domain-specific markdown
+	//   'discard'               → row kept for history but renders nowhere
+	// `enforced_by` references a Pattern test ID (e.g. 'TestPattern_P12') or
+	// the literal 'trust-only' for rules without mechanical enforcement.
+	db.Exec(`CREATE TABLE IF NOT EXISTS FleetRules (
+		id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+		rule_key                   TEXT    NOT NULL,
+		category                   TEXT    NOT NULL DEFAULT '',
+		agent_scope                TEXT    NOT NULL DEFAULT 'all',
+		render_to                  TEXT    NOT NULL,
+		enforced_by                TEXT    NOT NULL DEFAULT 'trust-only',
+		content                    TEXT    NOT NULL,
+		content_hash               TEXT    NOT NULL DEFAULT '',
+		version                    INTEGER NOT NULL DEFAULT 1,
+		active_from                TEXT    DEFAULT (datetime('now')),
+		active_until               TEXT    DEFAULT '',
+		promoted_by_experiment_id  INTEGER DEFAULT 0,
+		created_by                 TEXT    NOT NULL DEFAULT '',
+		created_at                 TEXT    DEFAULT (datetime('now'))
+	);`)
+	// One row per (rule_key, version) — historical lineage is preserved.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_rules_key_version
+		ON FleetRules(rule_key, version);`)
+	// Partial UNIQUE: at most one ACTIVE row per rule_key.
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_rules_active_key
+		ON FleetRules(rule_key) WHERE active_until = '';`)
+	// Renderer query path — filter by render_to + agent_scope on active rows.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_fleet_rules_render_active
+		ON FleetRules(render_to, agent_scope) WHERE active_until = '';`)
+
+	// PromotionProposals — Engineering Corps emits these when an experiment
+	// concludes; operator ratifies. Concern #7 revert handling is encoded in
+	// the rejection_action / rejection_rationale / revert_task_id /
+	// refiled_feature_id columns.
+	db.Exec(`CREATE TABLE IF NOT EXISTS PromotionProposals (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id      INTEGER NOT NULL,
+		kind               TEXT    NOT NULL DEFAULT 'promote',
+		rule_key           TEXT    DEFAULT '',
+		proposed_content   TEXT    DEFAULT '',
+		evidence_summary_json TEXT DEFAULT '{}',
+		authored_by        TEXT    NOT NULL DEFAULT '',
+		authored_at        TEXT    DEFAULT (datetime('now')),
+		ratified_at        TEXT    DEFAULT '',
+		ratified_by        TEXT    DEFAULT '',
+		rejected_at        TEXT    DEFAULT '',
+		rejected_reason    TEXT    DEFAULT '',
+		ttl_expires_at     TEXT    DEFAULT '',
+		rejection_action   TEXT    DEFAULT 'leave_as_is',
+		rejection_rationale TEXT   DEFAULT '',
+		revert_task_id     INTEGER DEFAULT 0,
+		refiled_feature_id INTEGER DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp ON PromotionProposals (experiment_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -1249,4 +1314,50 @@ func runMigrations(db *sql.DB) {
 		mode                TEXT    NOT NULL DEFAULT 'log_only'
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_treatment_apply_log_ts ON TreatmentApplyLog (applied_at)`)
+
+	// FleetRules + PromotionProposals (upgrade path).
+	db.Exec(`CREATE TABLE IF NOT EXISTS FleetRules (
+		id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+		rule_key                   TEXT    NOT NULL,
+		category                   TEXT    NOT NULL DEFAULT '',
+		agent_scope                TEXT    NOT NULL DEFAULT 'all',
+		render_to                  TEXT    NOT NULL,
+		enforced_by                TEXT    NOT NULL DEFAULT 'trust-only',
+		content                    TEXT    NOT NULL,
+		content_hash               TEXT    NOT NULL DEFAULT '',
+		version                    INTEGER NOT NULL DEFAULT 1,
+		active_from                TEXT    DEFAULT (datetime('now')),
+		active_until               TEXT    DEFAULT '',
+		promoted_by_experiment_id  INTEGER DEFAULT 0,
+		created_by                 TEXT    NOT NULL DEFAULT '',
+		created_at                 TEXT    DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_rules_key_version
+		ON FleetRules(rule_key, version)`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_rules_active_key
+		ON FleetRules(rule_key) WHERE active_until = ''`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_fleet_rules_render_active
+		ON FleetRules(render_to, agent_scope) WHERE active_until = ''`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS PromotionProposals (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id      INTEGER NOT NULL,
+		kind               TEXT    NOT NULL DEFAULT 'promote',
+		rule_key           TEXT    DEFAULT '',
+		proposed_content   TEXT    DEFAULT '',
+		evidence_summary_json TEXT DEFAULT '{}',
+		authored_by        TEXT    NOT NULL DEFAULT '',
+		authored_at        TEXT    DEFAULT (datetime('now')),
+		ratified_at        TEXT    DEFAULT '',
+		ratified_by        TEXT    DEFAULT '',
+		rejected_at        TEXT    DEFAULT '',
+		rejected_reason    TEXT    DEFAULT '',
+		ttl_expires_at     TEXT    DEFAULT '',
+		rejection_action   TEXT    DEFAULT 'leave_as_is',
+		rejection_rationale TEXT   DEFAULT '',
+		revert_task_id     INTEGER DEFAULT 0,
+		refiled_feature_id INTEGER DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp   ON PromotionProposals (experiment_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at)`)
 }

@@ -659,4 +659,72 @@ CREATE TABLE IF NOT EXISTS TreatmentApplyLog (
 );
 CREATE INDEX IF NOT EXISTS idx_treatment_apply_log_ts ON TreatmentApplyLog (applied_at);
 
+-- ── D3 Phase 1 — FleetRules + PromotionProposals ─────────────────────────────
+-- FleetRules — DB as source of truth for what today lives in CLAUDE.md /
+-- SENATE.md / BoS rule files / ISB finder configs. Versioned per rule_key;
+-- one row is "active" at a time (active_until = ''). The renderer (D3
+-- Phase 3) dispatches by render_to:
+--   'claude-md-file'         → CLAUDE.md the file (10 KB target / 20 KB cap)
+--   'agent-prompt'           → per-agent --append-system-prompt content
+--                               filtered by agent_scope
+--   'fix-log'                → FIX-LOG.md historical narrative
+--   'pattern-test-docstring' → test file docstring + CLAUDE.md cross-ref
+--   'per-domain-doc:<file>'  → docs/<file> domain-specific markdown
+--   'discard'                → row kept for history but renders nowhere
+-- enforced_by references a Pattern test ID (e.g. 'TestPattern_P12') or the
+-- literal 'trust-only' for rules without mechanical enforcement.
+CREATE TABLE IF NOT EXISTS FleetRules (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_key                   TEXT    NOT NULL,
+    category                   TEXT    NOT NULL DEFAULT '',     -- semantic kind: architecture|schema|security|...
+    agent_scope                TEXT    NOT NULL DEFAULT 'all',  -- 'all' or comma-separated list (captain,council,...)
+    render_to                  TEXT    NOT NULL,                -- physical render target (controlled enum)
+    enforced_by                TEXT    NOT NULL DEFAULT 'trust-only',  -- pattern test ID OR 'trust-only'
+    content                    TEXT    NOT NULL,
+    content_hash               TEXT    NOT NULL DEFAULT '',
+    version                    INTEGER NOT NULL DEFAULT 1,
+    active_from                TEXT    DEFAULT (datetime('now')),
+    active_until               TEXT    DEFAULT '',              -- '' = active; non-empty = retired
+    promoted_by_experiment_id  INTEGER DEFAULT 0,
+    created_by                 TEXT    NOT NULL DEFAULT '',
+    created_at                 TEXT    DEFAULT (datetime('now'))
+);
+-- Lineage: one row per (rule_key, version).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_rules_key_version
+    ON FleetRules(rule_key, version);
+-- Partial UNIQUE: at most one ACTIVE row per rule_key (active_until = '').
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_rules_active_key
+    ON FleetRules(rule_key) WHERE active_until = '';
+-- Renderer query path — filter by render_to + agent_scope on active rows.
+CREATE INDEX IF NOT EXISTS idx_fleet_rules_render_active
+    ON FleetRules(render_to, agent_scope) WHERE active_until = '';
+
+-- PromotionProposals — Engineering Corps emits these when an experiment
+-- concludes; operator ratifies. Concern #7 revert handling lives in the
+-- rejection_action / rejection_rationale / revert_task_id /
+-- refiled_feature_id columns: a rejected proposal can leave_as_is,
+-- clean_revert, cascade_revert, surgical_revert, or escalate.
+CREATE TABLE IF NOT EXISTS PromotionProposals (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id      INTEGER NOT NULL,
+    kind               TEXT    NOT NULL DEFAULT 'promote',      -- 'promote'|'demote'
+    rule_key           TEXT    DEFAULT '',                      -- nullable for new rules
+    proposed_content   TEXT    DEFAULT '',
+    evidence_summary_json TEXT DEFAULT '{}',                    -- cell means, posterior, confirm results
+    authored_by        TEXT    NOT NULL DEFAULT '',             -- 'engineering-corps'
+    authored_at        TEXT    DEFAULT (datetime('now')),
+    ratified_at        TEXT    DEFAULT '',
+    ratified_by        TEXT    DEFAULT '',
+    rejected_at        TEXT    DEFAULT '',
+    rejected_reason    TEXT    DEFAULT '',
+    ttl_expires_at     TEXT    DEFAULT '',                      -- 14 days from authored_at
+    -- concern #7 revert handling:
+    rejection_action   TEXT    DEFAULT 'leave_as_is',           -- leave_as_is|clean_revert|cascade_revert|surgical_revert|escalate
+    rejection_rationale TEXT   DEFAULT '',                      -- mandatory when rejection_action != 'leave_as_is'
+    revert_task_id     INTEGER DEFAULT 0,                       -- spawned CodeEdit that performs the revert
+    refiled_feature_id INTEGER DEFAULT 0                        -- if rejection re-files as a new feature
+);
+CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp   ON PromotionProposals (experiment_id);
+CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
