@@ -42,10 +42,18 @@ func TestBootstrapFleetRules_AllSectionsCategorized(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 
+	// Run the check against the pre-Phase-3 CLAUDE.md snapshot. The live
+	// CLAUDE.md becomes auto-generated content with category-labeled
+	// section headings after Phase 3's render — those section names do
+	// not match the audit's Section fields by design (the Section field
+	// captures the ORIGINAL hand-authored heading the rule came from).
+	// The snapshot is the audit-time witness; if a future audit
+	// extension references a section not in the snapshot, the snapshot
+	// gets refreshed in lockstep.
 	root := repoRoot(t)
-	mdPath := filepath.Join(root, "CLAUDE.md")
-	if _, err := BootstrapFleetRules(ctx, db, mdPath); err != nil {
-		t.Fatalf("BootstrapFleetRules with all-sections check: %v", err)
+	fixturePath := filepath.Join(root, "internal", "store", "testdata", "claude_md_pre_p3.md")
+	if _, err := BootstrapFleetRules(ctx, db, fixturePath); err != nil {
+		t.Fatalf("BootstrapFleetRules with all-sections check against pre-P3 fixture: %v", err)
 	}
 }
 

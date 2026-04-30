@@ -26,25 +26,40 @@ import (
 // auto-generated files.
 func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	check := false
+	includeFixLog := false
 	for _, a := range args {
 		switch a {
 		case "--check":
 			check = true
+		case "--include-fix-log":
+			// FIX-LOG.md is a 140 KB historical record. The Phase 1 audit
+			// only migrated ~5 fix narratives into FleetRules; rendering
+			// would shrink the file to ~4 KB, dropping content. Behind
+			// this flag until the migration is complete.
+			includeFixLog = true
 		case "-h", "--help":
-			fmt.Println("Usage: force render-rules [--check]")
-			fmt.Println("  Without flags: bootstraps FleetRules + renders CLAUDE.md / FIX-LOG.md / docs/* from the audit.")
-			fmt.Println("  --check       : renders to memory and exits 1 if any on-disk file disagrees (drift detector).")
+			fmt.Println("Usage: force render-rules [--check] [--include-fix-log]")
+			fmt.Println("  Without flags     : bootstraps FleetRules + renders CLAUDE.md + docs/* from the audit.")
+			fmt.Println("  --check           : renders to memory and exits 1 if any on-disk file disagrees (drift detector).")
+			fmt.Println("  --include-fix-log : ALSO render FIX-LOG.md. Off by default — Phase 1's audit covers")
+			fmt.Println("                      ~5 fix narratives; rendering would shrink the existing 140 KB")
+			fmt.Println("                      historical record. Use only after the audit covers every entry.")
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "render-rules: unknown flag %q\nUsage: force render-rules [--check]\n", a)
+			fmt.Fprintf(os.Stderr, "render-rules: unknown flag %q\nUsage: force render-rules [--check] [--include-fix-log]\n", a)
 			os.Exit(2)
 		}
 	}
 
 	repoRoot := findRepoRoot()
 
-	// Bootstrap is idempotent — safe to run on every render.
-	if _, err := store.BootstrapFleetRules(ctx, db, filepath.Join(repoRoot, "CLAUDE.md")); err != nil {
+	// Bootstrap is idempotent — safe to run on every render. Pass empty
+	// path to skip the all-sections-covered check; that guard is a
+	// dev-time regression captured by the test suite, not a runtime
+	// invariant. After Phase 3 renders CLAUDE.md, the on-disk file's
+	// H2 headings are category labels, not the audit's original section
+	// names — running the check at runtime would always trip.
+	if _, err := store.BootstrapFleetRules(ctx, db, ""); err != nil {
 		fmt.Fprintf(os.Stderr, "render-rules: bootstrap: %v\n", err)
 		os.Exit(1)
 	}
@@ -79,13 +94,17 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	}
 	report("CLAUDE.md", n, changed)
 
-	// FIX-LOG.md
-	n, changed, err = agents.WriteRenderedFixLog(ctx, db, filepath.Join(repoRoot, "FIX-LOG.md"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "render-rules: FIX-LOG.md: %v\n", err)
-		os.Exit(1)
+	// FIX-LOG.md — opt-in.
+	if includeFixLog {
+		n, changed, err = agents.WriteRenderedFixLog(ctx, db, filepath.Join(repoRoot, "FIX-LOG.md"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "render-rules: FIX-LOG.md: %v\n", err)
+			os.Exit(1)
+		}
+		report("FIX-LOG.md", n, changed)
+	} else {
+		fmt.Println("  skip    FIX-LOG.md (use --include-fix-log to render; 140 KB historical content preserved)")
 	}
-	report("FIX-LOG.md", n, changed)
 
 	// Per-domain docs
 	sizes, changedPaths, err := agents.WriteRenderedPerDomainDocs(ctx, db, repoRoot)
