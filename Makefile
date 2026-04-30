@@ -2,7 +2,7 @@ BINARY  := force
 TAGS    := sqlite_fts5
 GOFLAGS := -tags $(TAGS)
 
-.PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install render-rules render-rules-check
+.PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install render-rules render-rules-check protect-db unprotect-db install-snapshots uninstall-snapshots db-status
 
 build:
 	go build $(GOFLAGS) -o $(BINARY) ./cmd/force/
@@ -68,6 +68,62 @@ clean:
 	rm -f $(BINARY) cover.out
 	rm -rf bin/
 
+# make protect-db — apply a macOS ACL (deny delete,delete_child) to
+# holocron.db and its WAL/SHM sidecars. SQLite read/write operations
+# remain unaffected; only unlink() is blocked. Idempotent: re-running
+# detects the existing ACL and short-circuits per file. Files that
+# don't exist yet are skipped with a log line — run again after the
+# daemon first creates them.
+protect-db:
+	@for f in holocron.db holocron.db-wal holocron.db-shm; do \
+		if [ -f "$$f" ]; then \
+			if ls -le "$$f" 2>/dev/null | grep -q "deny delete"; then \
+				echo "Already protected: $$f"; \
+			else \
+				chmod +a "everyone deny delete,delete_child" "$$f" && echo "Protected: $$f"; \
+			fi; \
+		else \
+			echo "Skipping (not present): $$f"; \
+		fi; \
+	done
+	@echo ""
+	@echo "Current ACLs on protected files:"
+	@ls -le holocron.db* 2>/dev/null | grep -B 1 "deny delete" || echo "(none found — expected if all files are missing)"
+
+# make unprotect-db — reverse of protect-db. Run before legitimate
+# maintenance that requires removing holocron.db (e.g. a destructive
+# migration rollback that the operator has consciously chosen).
+unprotect-db:
+	@for f in holocron.db holocron.db-wal holocron.db-shm; do \
+		if [ -f "$$f" ]; then \
+			chmod -a "everyone deny delete,delete_child" "$$f" 2>/dev/null && echo "Unprotected: $$f" || echo "$$f: no ACL to remove"; \
+		fi; \
+	done
+
+# make install-snapshots — install hourly WAL-consistent sqlite3 .backup
+# snapshots into ~/.force/backups/ via crontab, plus a daily 04:00
+# cleanup that prunes snapshots older than 30 days. Idempotent.
+install-snapshots:
+	@scripts/setup-snapshots.sh
+
+# make uninstall-snapshots — remove the snapshot crontab entries
+# installed by install-snapshots. Existing snapshot files in
+# ~/.force/backups/ are left untouched.
+uninstall-snapshots:
+	@scripts/uninstall-snapshots.sh
+
+# make db-status — show holocron.db file ACLs, snapshot crontab entries,
+# and the most recent snapshots. Read-only diagnostic.
+db-status:
+	@echo "holocron.db files:"
+	@ls -le holocron.db* 2>/dev/null || echo "  (none present)"
+	@echo ""
+	@echo "Crontab snapshot entries:"
+	@crontab -l 2>/dev/null | grep -A 1 "force-orchestrator" || echo "  (none — run \`make install-snapshots\`)"
+	@echo ""
+	@echo "Recent snapshots:"
+	@ls -lt $$HOME/.force/backups/ 2>/dev/null | head -5 || echo "  (none — backup dir may not exist yet)"
+
 help:
 	@echo "make build              — compile the force binary (with FTS5)"
 	@echo "make build-bash-guard   — compile the astromech Bash-tool gatekeeper to ./bin/"
@@ -79,4 +135,9 @@ help:
 	@echo "make hooks-install      — install the .forceignore pre-commit hook (opt-in)"
 	@echo "make render-rules       — regenerate CLAUDE.md / FIX-LOG.md / docs/* from FleetRules"
 	@echo "make render-rules-check — drift detector (exit 1 if rendered files disagree with disk)"
+	@echo "make protect-db         — macOS ACL: deny delete on holocron.db (+ -wal/-shm)"
+	@echo "make unprotect-db       — remove the deny-delete ACL"
+	@echo "make install-snapshots  — install hourly snapshot cron + daily cleanup"
+	@echo "make uninstall-snapshots — remove the snapshot crontab entries"
+	@echo "make db-status          — show ACLs, crontab, and recent snapshots"
 	@echo "make clean              — remove build artifacts"
