@@ -72,6 +72,10 @@ func RunDashboard(db *sql.DB, port int) {
 	// >= 20 chars when rejection_action != 'leave_as_is' (concern #7).
 	mux.HandleFunc("/api/ec/proposals", handleECProposalsList(db))
 	mux.HandleFunc("/api/ec/proposals/", handleECProposalsSubroutes(db))
+	// D3 Phase 3 — cross-layer disagreement rates (Captain → Council, etc.).
+	// Reads the latest DisagreementPairs row per pair × window combination;
+	// the dog (dogDisagreementTracker) writes; this endpoint reads.
+	mux.HandleFunc("/api/disagreement-rates", handleDisagreementRates(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── Static assets + SPA fallback ─────────────────────────────────────────

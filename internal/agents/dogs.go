@@ -75,6 +75,12 @@ var dogCooldowns = map[string]time.Duration{
 	// loops have skipped tasks against quarantined repos. Daily cadence —
 	// internal per-repo dedup prevents spam (one mail per repo per day).
 	"quarantined-repo-watch": 24 * time.Hour,
+	// D3 P3: disagreement-tracker computes cross-layer disagreement rates
+	// (Captain→Council, Council→CI, ConvoyReview→astromech, operator-revert)
+	// over rolling 7d/30d/90d windows. Hourly cadence — fast enough for
+	// the operator to see new signal within the working hour, slow enough
+	// that the SQL aggregations don't dominate the daemon's CPU budget.
+	"disagreement-tracker":  1 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -95,6 +101,9 @@ var dogOrder = []string{
 	"escalation-sweeper",
 	// D2 T1-4 — surfaces stuck quarantined repos to the operator.
 	"quarantined-repo-watch",
+	// D3 P3 — runs after task-spend-watch (per the spec's ordering
+	// requirement); computes per-pair cross-layer disagreement rates.
+	"disagreement-tracker",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -242,6 +251,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogTaskSpendWatch(db, logger)
 	case "quarantined-repo-watch":
 		return dogQuarantinedRepoWatch(db, logger)
+	case "disagreement-tracker":
+		return dogDisagreementTracker(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
