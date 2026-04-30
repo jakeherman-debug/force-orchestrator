@@ -66,6 +66,16 @@ func createSchema(db *sql.DB) {
 		last_findings_fingerprint TEXT    DEFAULT '',
 		spend_suspended           INTEGER DEFAULT 0,
 		recent_commit_hashes_json TEXT    DEFAULT '[]',
+		in_holdout                INTEGER DEFAULT 0,
+		experiment_assignments_json TEXT  DEFAULT '{}',
+		proposed_action_json      TEXT    DEFAULT '',
+		prompt_version            TEXT    DEFAULT '',
+		prior_review_outcomes_json TEXT   DEFAULT '[]',
+		spawn_spec_link           TEXT    DEFAULT '',
+		spawn_classification_confidence TEXT DEFAULT '',
+		spawning_at_id            TEXT    DEFAULT '',
+		deferred_revert           INTEGER DEFAULT 0,
+		revert_target_task_id     INTEGER DEFAULT 0,
 		created_at                TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
@@ -141,17 +151,23 @@ func createSchema(db *sql.DB) {
 	// draft_pr_* track the final human-gated PR into main. shipped_at is set when
 	// the draft PR is merged.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Convoys (
-		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-		name                 TEXT UNIQUE NOT NULL,
-		status               TEXT    DEFAULT 'Active',
-		coordinated          INTEGER DEFAULT 0,
-		ask_branch           TEXT    DEFAULT '',
-		ask_branch_base_sha  TEXT    DEFAULT '',
-		draft_pr_url         TEXT    DEFAULT '',
-		draft_pr_number      INTEGER DEFAULT 0,
-		draft_pr_state       TEXT    DEFAULT '',
-		shipped_at           TEXT    DEFAULT '',
-		created_at           TEXT    DEFAULT (datetime('now'))
+		id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+		name                        TEXT UNIQUE NOT NULL,
+		status                      TEXT    DEFAULT 'Active',
+		coordinated                 INTEGER DEFAULT 0,
+		ask_branch                  TEXT    DEFAULT '',
+		ask_branch_base_sha         TEXT    DEFAULT '',
+		draft_pr_url                TEXT    DEFAULT '',
+		draft_pr_number             INTEGER DEFAULT 0,
+		draft_pr_state              TEXT    DEFAULT '',
+		shipped_at                  TEXT    DEFAULT '',
+		in_holdout                  INTEGER DEFAULT 0,
+		experiment_assignments_json TEXT    DEFAULT '{}',
+		parent_feature_id           INTEGER DEFAULT 0,
+		verification_spec_json      TEXT    DEFAULT '',
+		spec_history_json           TEXT    DEFAULT '[]',
+		critical                    INTEGER DEFAULT 0,
+		created_at                  TEXT    DEFAULT (datetime('now'))
 	);`)
 
 	// Persistent agent worktrees — one per agent per repo, reused across task assignments.
@@ -179,6 +195,7 @@ func createSchema(db *sql.DB) {
 		tokens_out        INTEGER DEFAULT 0,
 		cost_usd_estimate REAL    DEFAULT 0,
 		memory_ids        TEXT    DEFAULT '',   -- CSV of FleetMemory IDs injected into this attempt's prompt
+		prompt_version    TEXT    DEFAULT '',   -- D3 P1: enables per-prompt-version metric correlation
 		created_at        TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes on TaskHistory (AUDIT-010, Fix #4). handleTasks runs
@@ -1360,4 +1377,31 @@ func runMigrations(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp   ON PromotionProposals (experiment_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at)`)
+
+	// ── D3 Phase 1: column extensions on existing tables (upgrade path) ──────
+	// BountyBoard — paired-runs holdout/assignment + Captain proposal +
+	// prompt-version + revert handling. Each ALTER no-ops on a fresh DB
+	// (column already present from createSchema) and on a re-run.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN in_holdout                      INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN experiment_assignments_json     TEXT    DEFAULT '{}'`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN proposed_action_json            TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN prompt_version                  TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN prior_review_outcomes_json      TEXT    DEFAULT '[]'`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN spawn_spec_link                 TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN spawn_classification_confidence TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN spawning_at_id                  TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN deferred_revert                 INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN revert_target_task_id           INTEGER DEFAULT 0`)
+
+	// Convoys — paired-runs holdout/assignment + verification spec +
+	// parent-feature backreference + critical flag.
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN in_holdout                  INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN experiment_assignments_json TEXT    DEFAULT '{}'`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN parent_feature_id           INTEGER DEFAULT 0`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN verification_spec_json      TEXT    DEFAULT ''`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN spec_history_json           TEXT    DEFAULT '[]'`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN critical                    INTEGER DEFAULT 0`)
+
+	// TaskHistory — per-prompt-version metric correlation.
+	db.Exec(`ALTER TABLE TaskHistory ADD COLUMN prompt_version TEXT DEFAULT ''`)
 }

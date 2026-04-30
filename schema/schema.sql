@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     last_findings_fingerprint TEXT    DEFAULT '',  -- Fix #7: SHA256 of last pass's finding set; pass-to-pass dedup gate
     spend_suspended           INTEGER DEFAULT 0,   -- D2 T1-1: dogTaskSpendWatch sets to 1 when trailing-10m cost > escalate threshold; claim queries skip
     recent_commit_hashes_json TEXT    DEFAULT '[]', -- D2 T1-3.5: JSON array of the last 5 commit tree-hashes produced by this task's worktree; divergence detector escalates on circle
+    -- D3 P1: paired-runs holdout/assignment + Captain proposal + prompt-version + revert handling.
+    in_holdout                INTEGER DEFAULT 0,   -- inherited from natural unit; populated by treatments.Apply
+    experiment_assignments_json TEXT  DEFAULT '{}',-- JSON map: experiment_id -> treatment_id
+    proposed_action_json      TEXT    DEFAULT '',  -- Captain's spec-amendment proposal for unmapped spawns
+    prompt_version            TEXT    DEFAULT '',  -- which prompt produced this decision (per-version metric correlation)
+    prior_review_outcomes_json TEXT   DEFAULT '[]',-- chain of agent decisions on this task
+    spawn_spec_link           TEXT    DEFAULT '',  -- 'tied_to_AT-NNN' | 'glue' | 'unmapped' (when this row was Captain-spawned)
+    spawn_classification_confidence TEXT DEFAULT '', -- 'high' | 'medium' | 'low'
+    spawning_at_id            TEXT    DEFAULT '',  -- concern #9: which AT a ConvoyReview-spawned fix task targets
+    deferred_revert           INTEGER DEFAULT 0,   -- concern #7: row scheduled to revert when its dependents complete
+    revert_target_task_id     INTEGER DEFAULT 0,   -- concern #7: the task this row reverts (cascade-revert flow)
     created_at                TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty
@@ -87,17 +98,24 @@ CREATE INDEX IF NOT EXISTS idx_taskdeps_depends_on ON TaskDependencies (depends_
 -- draft_pr_* track the final human-gated PR into main.
 
 CREATE TABLE IF NOT EXISTS Convoys (
-    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-    name                  TEXT UNIQUE NOT NULL,  -- '[<feature_id>] <preview>'
-    status                TEXT    DEFAULT 'Active',
-    coordinated           INTEGER DEFAULT 0,     -- 1 = Astromech completions route through Captain
-    ask_branch            TEXT    DEFAULT '',    -- 'force/ask-<id>-<slug>'; '' = legacy convoy
-    ask_branch_base_sha   TEXT    DEFAULT '',    -- main's HEAD at branch creation; updated on rebase
-    draft_pr_url          TEXT    DEFAULT '',
-    draft_pr_number       INTEGER DEFAULT 0,
-    draft_pr_state        TEXT    DEFAULT '',    -- 'Open' | 'Merged' | 'Closed'
-    shipped_at            TEXT    DEFAULT '',    -- set when draft PR is merged
-    created_at            TEXT    DEFAULT (datetime('now'))
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                        TEXT UNIQUE NOT NULL,  -- '[<feature_id>] <preview>'
+    status                      TEXT    DEFAULT 'Active',
+    coordinated                 INTEGER DEFAULT 0,     -- 1 = Astromech completions route through Captain
+    ask_branch                  TEXT    DEFAULT '',    -- 'force/ask-<id>-<slug>'; '' = legacy convoy
+    ask_branch_base_sha         TEXT    DEFAULT '',    -- main's HEAD at branch creation; updated on rebase
+    draft_pr_url                TEXT    DEFAULT '',
+    draft_pr_number             INTEGER DEFAULT 0,
+    draft_pr_state              TEXT    DEFAULT '',    -- 'Open' | 'Merged' | 'Closed'
+    shipped_at                  TEXT    DEFAULT '',    -- set when draft PR is merged
+    -- D3 P1: paired-runs + verification spec.
+    in_holdout                  INTEGER DEFAULT 0,
+    experiment_assignments_json TEXT    DEFAULT '{}',
+    parent_feature_id           INTEGER DEFAULT 0,
+    verification_spec_json      TEXT    DEFAULT '',    -- acceptance tests, exit criteria; { ats: [...], deprecated: [...] } per concern #9
+    spec_history_json           TEXT    DEFAULT '[]',  -- operator-ratified amendment audit trail (append-only)
+    critical                    INTEGER DEFAULT 0,     -- triage-priority flag
+    created_at                  TEXT    DEFAULT (datetime('now'))
 );
 
 -- Convoy status values:
@@ -200,6 +218,7 @@ CREATE TABLE IF NOT EXISTS TaskHistory (
     tokens_out        INTEGER DEFAULT 0,
     cost_usd_estimate REAL    DEFAULT 0,  -- D2 T1-1: per-attempt cost in USD from claude.pricing.CostUSD(model, in, out)
     memory_ids        TEXT    DEFAULT '', -- CSV of FleetMemory.id values injected into this attempt's prompt
+    prompt_version    TEXT    DEFAULT '', -- D3 P1: per-prompt-version metric correlation
     created_at        TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-010, Fix #4).
