@@ -3,7 +3,6 @@ package engineering_corps
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -15,14 +14,6 @@ import (
 	"force-orchestrator/internal/clients/metrics"
 	"force-orchestrator/internal/store"
 )
-
-// ── Phase 1 stub guard ───────────────────────────────────────────────
-
-// ErrNotImplemented is returned by every handler stub the dispatcher
-// routes to in Phase 1. Phase 3 sub-agent A replaces these with real
-// handler bodies. Tests assert each handler returns this error so
-// regression catches a sub-agent silently dropping a task type.
-var ErrNotImplemented = errors.New("engineering_corps: handler not implemented (Phase 1 stub)")
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -191,15 +182,13 @@ func dispatch(
 		return
 	}
 	if err != nil {
-		// Phase 1 stub: Phase 3 sub-agent A replaces this with the
-		// real handleInfraFailure-driven retry shape. For the skeleton
-		// we surface ErrNotImplemented as a clean failure so the
-		// claim loop releases the row and operator mail surfaces the
-		// missing handler. This is safe to keep visible — the
-		// dispatcher_test.go fixture seeds rows just to exercise
-		// routing; production never enqueues an EC task until sub-
-		// agent A's handlers land.
-		failBountyOrLog(cfg.DB, bounty.ID, fmt.Sprintf("EC %s handler stub: %v", taskType, err), logger)
+		// Handler returned an error. CLAUDE.md no-silent-failures
+		// invariant: the bounty is failed via store.FailBounty so
+		// the operator dashboard surfaces the failure and the claim
+		// loop releases the row. Phase 4/5 may extend this with the
+		// handleInfraFailure-driven retry shape (rule-author critic
+		// note loop, EC retry-cap honored); P3 keeps it minimal.
+		failBountyOrLog(cfg.DB, bounty.ID, fmt.Sprintf("EC %s handler: %v", taskType, err), logger)
 	}
 }
 
@@ -229,79 +218,18 @@ func failBountyOrLog(db *sql.DB, bountyID int, msg string, logger *log.Logger) {
 	}
 }
 
-// ── Handler stubs ────────────────────────────────────────────────────
+// ── Handler files ────────────────────────────────────────────────────
 //
-// Each handler lives in its own file (handler_<task>.go) — Phase 3
-// sub-agent A fills in the bodies. The stub bodies below return
-// ErrNotImplemented so dispatcher_test.go can verify routing without
-// requiring real LLM plumbing.
+// Each EC task type's handler lives in its own file (handler<_type>.go)
+// per the "small files reduce merge friction" anti-cheat goal:
 //
-// Phase 1 keeps the stubs INLINE here (rather than in separate files)
-// so sub-agent A can replace each one in a single commit. Sub-agent A
-// is expected to MOVE each handler into its own file as it lands.
-
-func handleExperimentAuthor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
-
-func handleExperimentMonitor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
-
-func handlePromotionAuthor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
-
-func handleDemotionAuthor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
-
-func handleMetricAuthor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
-
-func handleHoldoutMonitor(
-	_ context.Context,
-	_ EngineeringCorpsConfig,
-	_ *capabilities.Profile,
-	_ string,
-	_ *store.Bounty,
-	_ *log.Logger,
-) error {
-	return ErrNotImplemented
-}
+//   - experiment_author.go    → handleExperimentAuthor
+//   - experiment_monitor.go   → handleExperimentMonitor
+//   - promotion_author.go     → handlePromotionAuthor
+//   - demotion_author.go      → handleDemotionAuthor
+//   - metric_author.go        → handleMetricAuthor
+//   - holdout_monitor.go      → handleHoldoutMonitor
+//
+// All six handlers conform to the dispatch() signature above. Adding
+// a new task type means: const in types.go, switch case in dispatch,
+// new <type>.go file, new <type>_test.go file.

@@ -8,10 +8,12 @@
 // docs/paired-runs.md § Engineering Corps and docs/next-gen-agents.md
 // § Engineering Corps for the spec.
 //
-// Phase 1 (this commit) ships the SpawnEngineeringCorps loop, the
-// dispatcher, and stub handlers returning ErrNotImplemented. Phase 3
-// sub-agent A fills in the six task type handlers behind the dispatcher
-// switch.
+// Phase 1 shipped the SpawnEngineeringCorps loop + dispatcher with
+// stub handlers; Phase 3 sub-agent A replaced the stubs with real
+// per-file handlers. See engineering_corps.go for the dispatcher
+// switch and the per-handler files (experiment_author.go,
+// experiment_monitor.go, promotion_author.go, demotion_author.go,
+// metric_author.go, holdout_monitor.go).
 package engineering_corps
 
 // ── Authoritative task type inventory ────────────────────────────────
