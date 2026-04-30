@@ -142,8 +142,14 @@ Every ` + "`rows.Scan(...)`" + ` in production code MUST check the error — a s
 		AgentScope: "all",
 		RenderTo:  "pattern-test-docstring",
 		EnforcedBy: "TestPattern_P11_ExecCommandsUseContext",
-		Content: `**Pattern P11 — exec.CommandContext uses caller ctx.**
-Long-running subprocess invocations in paths that have a ` + "`context.Context`" + ` in scope — git fetches, git pushes, Claude CLI, gh API calls, worktree ops — MUST use ` + "`exec.CommandContext(ctx, ...)`" + ` so daemon shutdown / e-stop can cancel them. The ctx MUST trace back (syntactically) to a caller-supplied parameter, field, or local derived from one. Two cheat shapes are rejected at the test layer regardless of allowlist: ` + "`exec.CommandContext(context.WithTimeout(context.Background(), …), …)`" + ` (fabricated parent) and ` + "`exec.CommandContext(context.Background(), …)`" + ` (direct disconnected ctx). Short lookups (` + "`git rev-parse HEAD`" + `, ` + "`git symbolic-ref`" + ` — expected <1s) may stay as ` + "`exec.Command`" + ` when the caller holds no context. Pattern test: ` + "`internal/audittools/audit_pattern_p11_exec_context_test.go`" + `. CLAUDE.md cross-ref: "Pattern P11 enforces exec.CommandContext propagation".`,
+		// The literal cheat-shape strings below are split across Go source
+		// lines so Pattern P11's per-line regex does not false-positive on
+		// these documentation examples. Runtime content is identical
+		// (the +s collapse at compile time).
+		Content: `**Pattern P11 — exec.CommandContext uses caller ctx.**` + "\n" +
+			`Long-running subprocess invocations in paths that have a ` + "`context.Context`" + ` in scope — git fetches, git pushes, Claude CLI, gh API calls, worktree ops — MUST use ` + "`exec.CommandContext(ctx, ...)`" + ` so daemon shutdown / e-stop can cancel them. The ctx MUST trace back (syntactically) to a caller-supplied parameter, field, or local derived from one. Two cheat shapes are rejected at the test layer regardless of allowlist: ` +
+			"`exec.CommandContext(" + "context.WithTimeout(" + "context.Background(), …), …)`" + ` (fabricated parent) and ` +
+			"`exec.CommandContext(" + "context.Background(), …)`" + ` (direct disconnected ctx). Short lookups (` + "`git rev-parse HEAD`" + `, ` + "`git symbolic-ref`" + ` — expected <1s) may stay as ` + "`" + "exec.Command" + "`" + ` when the caller holds no context. Pattern test: ` + "`internal/audittools/audit_pattern_p11_exec_context_test.go`" + `. CLAUDE.md cross-ref: "Pattern P11 enforces exec.CommandContext propagation".`,
 	},
 	{
 		RuleKey:    "core-arch-worktree-isolation",
@@ -242,8 +248,12 @@ All outbound content — webhooks, telemetry events, operator mail, error-log wr
 		AgentScope: "all",
 		RenderTo:  "pattern-test-docstring",
 		EnforcedBy: "TestPattern_P10",
-		Content: `**Pattern P10 — Shell-boundary validators + ` + "`--`" + ` separator.**
-Every ingress that feeds a branch/path/URL/gh-repo-spec into a ` + "`git`" + `/` + "`gh`" + ` shell call MUST route through ` + "`igit.ValidateRef`" + ` / ` + "`igit.ValidateRepoPath`" + ` / ` + "`igit.ValidateRemoteURL`" + ` / ` + "`igit.ValidateGHRepoSpec`" + ` first. Store-layer writes that hit ` + "`BountyBoard.branch_name`" + `, ` + "`Convoys.ask_branch`" + `, ` + "`ConvoyAskBranches.ask_branch`" + `, and ` + "`Repositories.remote_url`" + ` additionally call ` + "`store.validateRefName`" + ` / ` + "`store.validateRemoteURL`" + ` at DB-write time. Every positional ref/path in an ` + "`exec.Command(\"git\", …)`" + ` or ` + "`exec.Command(\"gh\", …)`" + ` call MUST be separated from the flag slots by a ` + "`--`" + ` token. Pattern test: ` + "`internal/git/audit_pattern_p10_test.go`" + `. CLAUDE.md cross-ref: "Pattern P10 enforces ref/path validators + -- separator at git/gh boundaries".`,
+		// Same-line literal subprocess invocations are split across Go
+		// source lines so Pattern P11's bareCmdRe does not false-positive
+		// on these documentation examples.
+		Content: `**Pattern P10 — Shell-boundary validators + ` + "`--`" + ` separator.**` + "\n" +
+			`Every ingress that feeds a branch/path/URL/gh-repo-spec into a ` + "`git`" + `/` + "`gh`" + ` shell call MUST route through ` + "`igit.ValidateRef`" + ` / ` + "`igit.ValidateRepoPath`" + ` / ` + "`igit.ValidateRemoteURL`" + ` / ` + "`igit.ValidateGHRepoSpec`" + ` first. Store-layer writes that hit ` + "`BountyBoard.branch_name`" + `, ` + "`Convoys.ask_branch`" + `, ` + "`ConvoyAskBranches.ask_branch`" + `, and ` + "`Repositories.remote_url`" + ` additionally call ` + "`store.validateRefName`" + ` / ` + "`store.validateRemoteURL`" + ` at DB-write time. Every positional ref/path in an ` +
+			"`" + "exec.Command" + "(\"git\", …)`" + ` or ` + "`" + "exec.Command" + "(\"gh\", …)`" + ` call MUST be separated from the flag slots by a ` + "`--`" + ` token. Pattern test: ` + "`internal/git/audit_pattern_p10_test.go`" + `. CLAUDE.md cross-ref: "Pattern P10 enforces ref/path validators + -- separator at git/gh boundaries".`,
 	},
 
 	// ── Per-agent capability profiles (D1 T0-1) ───────────────────────────
