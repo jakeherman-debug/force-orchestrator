@@ -100,6 +100,7 @@
   <button class="tab-btn"        data-tab="agents"      onclick="switchTab('agents')">Agents <span class="tab-badge" id="tbadge-agents"></span></button>
   <button class="tab-btn"        data-tab="mail"        onclick="switchTab('mail')">Mail <span class="tab-badge" id="tbadge-mail"></span></button>
   <button class="tab-btn"        data-tab="knowledge"   onclick="switchTab('knowledge')">Knowledge <span class="tab-badge" id="tbadge-knowledge"></span></button>
+  <button class="tab-btn"        data-tab="experiments" onclick="switchTab('experiments')">Experiments <span class="tab-badge" id="tbadge-experiments"></span></button>
   <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
   <div id="tab-spacer"></div>
   <span id="last-refresh" style="font-size:11px;color:var(--text2);align-self:center"></span>
@@ -273,6 +274,23 @@
         <tbody id="mem-tbody"></tbody>
       </table>
     </div>
+  </div>
+
+  <!-- Experiments tab — D3 Phase 2. Phase 6 rebuilds around Pulse / Briefing /
+       Reflection and absorbs this tab; for now this is a minimal list + detail
+       view that lets operators see authored experiments through the lifecycle. -->
+  <div class="tab-pane" id="tab-experiments">
+    <div class="filter-bar">
+      <button class="filter-btn active" data-experiment-status="all"        onclick="setExperimentFilter('all')">All</button>
+      <button class="filter-btn"        data-experiment-status="authored"   onclick="setExperimentFilter('authored')">Authored</button>
+      <button class="filter-btn"        data-experiment-status="running"    onclick="setExperimentFilter('running')">Running</button>
+      <button class="filter-btn"        data-experiment-status="terminated" onclick="setExperimentFilter('terminated')">Terminated</button>
+      <div class="filter-spacer"></div>
+      <button class="hdr-btn" onclick="loadExperiments()">Refresh</button>
+    </div>
+    <div id="experiment-fleet-progress" style="padding:10px 14px;font-size:12px;color:var(--text1);border-bottom:1px solid var(--border)"></div>
+    <div id="experiment-list-wrap" style="padding:10px 14px"></div>
+    <div id="experiment-detail-wrap" style="padding:10px 14px;border-top:1px solid var(--border);display:none"></div>
   </div>
 
   <!-- Logs tab -->

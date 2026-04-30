@@ -57,6 +57,13 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/pr-comments/", handlePRCommentsSubroutes(db))
 	// D2 T1-2 — per-agent rolling-window prompt-byte budget view.
 	mux.HandleFunc("/api/prompt-bytes", handlePromptBytes(db))
+	// D3 Phase 2 — experiments + holdout views. Phase 6 rebuilds the
+	// dashboard around Pulse / Briefing / Reflection and absorbs
+	// these endpoints; for now they ship in the current shape so
+	// operators can see authored experiments through the lifecycle.
+	mux.HandleFunc("/api/experiments", handleExperimentsList(db))
+	mux.HandleFunc("/api/experiments/", handleExperimentsSubroutes(db))
+	mux.HandleFunc("/api/fleet-progress", handleFleetProgress(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── Static assets + SPA fallback ─────────────────────────────────────────

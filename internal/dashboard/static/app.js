@@ -272,9 +272,129 @@ function switchTab(name) {
     case 'agents':      loadAgents(); break;
     case 'mail':        loadMail(); break;
     case 'knowledge':   loadMemoryRepos().then(() => loadMemories()); break;
+    case 'experiments': loadExperiments(); loadFleetProgress(); break;
     case 'logs':        startLogStream(); break;
   }
   if (name !== 'logs') stopLogStream();
+}
+
+// ── Experiments tab (D3 Phase 2) ─────────────────────────────────────────
+// Minimal list + detail view. Phase 6 rebuilds around Pulse / Briefing /
+// Reflection; these calls move there. Read-only — operator mutations
+// (ratify, terminate) flow through `force experiment ...` for now.
+
+let experimentStatusFilter = 'all';
+
+function setExperimentFilter(status) {
+  experimentStatusFilter = status;
+  document.querySelectorAll('[data-experiment-status]').forEach(b => {
+    b.classList.toggle('active', b.dataset.experimentStatus === status);
+  });
+  loadExperiments();
+}
+
+async function loadExperiments() {
+  const wrap = document.getElementById('experiment-list-wrap');
+  if (!wrap) return;
+  try {
+    const url = '/api/experiments' + (experimentStatusFilter && experimentStatusFilter !== 'all'
+      ? '?status=' + encodeURIComponent(experimentStatusFilter) : '');
+    const res = await fetch(url);
+    const data = await res.json();
+    const rows = (data && data.experiments) || [];
+    if (!rows.length) {
+      wrap.textContent = 'No experiments yet. Author one with `force experiment author <yaml>`.';
+      return;
+    }
+    const html = ['<table class="data-table"><thead><tr>',
+      '<th>id</th><th>name</th><th>status</th><th>tier</th><th>agent</th><th>outcome</th>',
+      '</tr></thead><tbody>'];
+    for (const e of rows) {
+      const safeName = (e.name || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+      html.push('<tr style="cursor:pointer" onclick="loadExperimentDetail(' + e.id + ')">');
+      html.push('<td>' + e.id + '</td>');
+      html.push('<td>' + safeName + '</td>');
+      html.push('<td><span class="badge">' + e.status + '</span></td>');
+      html.push('<td>' + (e.stakes_tier || '') + '</td>');
+      html.push('<td>' + (e.subject_agent || '') + '</td>');
+      html.push('<td>' + (e.outcome_reason || '—') + '</td>');
+      html.push('</tr>');
+    }
+    html.push('</tbody></table>');
+    wrap.innerHTML = html.join('');
+  } catch (err) {
+    wrap.textContent = 'Failed to load experiments: ' + err;
+  }
+}
+
+async function loadExperimentDetail(id) {
+  const wrap = document.getElementById('experiment-detail-wrap');
+  if (!wrap) return;
+  try {
+    const res = await fetch('/api/experiments/' + encodeURIComponent(id));
+    if (res.status === 404) {
+      wrap.style.display = 'block';
+      wrap.textContent = 'Experiment ' + id + ' not found.';
+      return;
+    }
+    const d = await res.json();
+    const armRows = (d.treatments || []).map(t => {
+      const rate = t.observed_rate ? (t.observed_rate * 100).toFixed(1) + '%' : '—';
+      return '<tr><td>' + (t.arm_label || '') + '</td>' +
+        '<td>' + (t.target_cell_weight || 0).toFixed(2) + '</td>' +
+        '<td>' + (t.prompt_template_ref || '') + '</td>' +
+        '<td>' + (t.enrollment || 0) + '</td>' +
+        '<td>' + (t.success_count || 0) + '</td>' +
+        '<td>' + rate + '</td></tr>';
+    }).join('');
+    const html = [
+      '<h3>Experiment ' + d.id + ' — ' + (d.name || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</h3>',
+      '<p style="color:var(--text2)">' + (d.hypothesis || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</p>',
+      '<dl class="kv-list">',
+      '<dt>status</dt><dd>' + d.status + '</dd>',
+      '<dt>stakes_tier</dt><dd>' + (d.stakes_tier || '') + '</dd>',
+      '<dt>subject_agent</dt><dd>' + (d.subject_agent || '') + '</dd>',
+      '<dt>analysis_framework</dt><dd>' + (d.analysis_framework_version || '') + '</dd>',
+      '<dt>min_practical_effect</dt><dd>' + (d.min_practical_effect || 0) + '</dd>',
+      d.winner_treatment_id ? '<dt>winner</dt><dd>treatment ' + d.winner_treatment_id + ' (posterior=' + Number(d.winner_posterior || 0).toFixed(4) + ')</dd>' : '',
+      '</dl>',
+      '<h4>Treatments</h4>',
+      '<table class="data-table"><thead><tr><th>arm</th><th>weight</th><th>prompt_ref</th><th>enrol</th><th>succ</th><th>rate</th></tr></thead><tbody>',
+      armRows,
+      '</tbody></table>',
+    ].join('');
+    wrap.innerHTML = html;
+    wrap.style.display = 'block';
+  } catch (err) {
+    wrap.style.display = 'block';
+    wrap.textContent = 'Failed to load experiment ' + id + ': ' + err;
+  }
+}
+
+async function loadFleetProgress() {
+  const wrap = document.getElementById('experiment-fleet-progress');
+  if (!wrap) return;
+  try {
+    const res = await fetch('/api/fleet-progress');
+    const d = await res.json();
+    const lines = [
+      'Holdout <strong>' + (d.holdout_name || '—') + '</strong>',
+      'phase=' + (d.holdout_lifecycle || '—'),
+      'fraction=' + Number(d.holdout_fraction_now || 0).toFixed(4),
+      'members=' + (d.holdout_members || 0),
+    ];
+    let html = lines.join(' · ');
+    if (Array.isArray(d.windows) && d.windows.length) {
+      html += '<br>';
+      html += d.windows.map(w =>
+        w.label + ': holdout n=' + (w.holdout_run_count || 0) + ' rate=' + Number(w.holdout_success_rate || 0).toFixed(3) +
+        ' / current n=' + (w.current_run_count || 0) + ' rate=' + Number(w.current_success_rate || 0).toFixed(3)
+      ).join(' · ');
+    }
+    wrap.innerHTML = html;
+  } catch (err) {
+    wrap.textContent = 'fleet-progress: ' + err;
+  }
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
