@@ -87,16 +87,21 @@ Inspired by Steve Yegge's **Gas Town** pattern: all coordination happens through
 | Table | Purpose |
 |---|---|
 | `BountyBoard` | The task queue. Every task from `Pending` through `Completed` lives here. |
-| `Repositories` | Registered repos the fleet can touch. |
+| `Repositories` | Registered repos the fleet can touch. The `mode` column (`'read_only'` / `'write'` / `'quarantined'`) gates whether the fleet may write to a repo. |
 | `Convoys` | Named groups of tasks spawned from a single feature request. |
+| `ConvoyAskBranches` | Per-(convoy, repo) integration branches in the PR-based delivery flow. |
 | `Fleet_Mail` | Inter-agent messaging. Role-addressed, type-categorized. |
 | `FleetMemory` | Cross-task learning store. Indexed with FTS5 for semantic retrieval. |
-| `TaskHistory` | Full Claude output for every attempt on every task (the seance). |
+| `TaskHistory` | Full Claude output for every attempt on every task (the seance), plus per-attempt `tokens_in` / `tokens_out` / `cost_usd_estimate`. |
+| `TaskSpendWatch` | Per-task trailing-window spend rows; backs the `task-spend-watch` dog. |
+| `PromptByteAttribution` | Per-source byte breakdown for every Claude call (`claude_md`, `librarian_memory`, `task_payload`, `file_read`, …); used to enforce per-agent prompt-byte caps. |
 | `Escalations` | Human-required blockers raised by agents. |
 | `Agents` | Persistent worktree registry — one worktree per agent per repo. |
 | `AuditLog` | Record of every operator and agent action. |
-| `SystemConfig` | Runtime configuration (concurrency, delays, etc). |
+| `SystemConfig` | Runtime configuration (concurrency, delays, spend caps, etc.). |
 | `Dogs` | Cooldown tracking for background watchdog tasks. |
+
+`BountyBoard` carries several columns added during D1/D2 hardening that don't warrant their own table row but are worth knowing about: `idempotency_key` (canonical key for self-heal spawners — partial UNIQUE index), `branch_name`, `spend_suspended` (set when `task-spend-watch` trips the per-task escalate threshold; claim queries skip `=1` rows), `recent_commit_hashes_json` (rolling 5-deep ring of commit tree-hashes consumed by the divergence detector), `parse_failure_count`, `medic_requeue_count`, and `reshard_generation`. The full schema lives in [`schema/schema.sql`](schema/schema.sql).
 
 ### Task Lifecycle
 
@@ -127,6 +132,8 @@ Planned → (force convoy approve) → Pending   [--plan-only flow only]
 **Direct `add-task` tasks** (not in a convoy) skip the Captain and go straight to council.
 
 `Planned` tasks are created when you submit a feature with `--plan-only`. They sit inert until you inspect the plan and run `force convoy approve <id>` to activate them.
+
+**Startup reconciliation.** On every daemon start, before any agent spawns, every non-terminal `BountyBoard` row is reconciled against actual disk and git state via `agents.ReconcileOnStartup`. Five divergence cases each have explicit recovery actions: clean state proceeds, branch-missing-pre-Captain auto-recovers as a re-pend, branch-missing-post-Captain escalates, worktree-missing-or-dirty queues a `WorktreeReset` infra task, and branch-SHA-diverged escalates. A non-nil return is fatal — the daemon refuses to start with an unreliable view of the fleet. See [`internal/agents/reconcile.go`](internal/agents/reconcile.go) and the corresponding section of `CLAUDE.md`.
 
 ---
 
@@ -801,6 +808,8 @@ This starts all agents in the background:
 - 1 Medic (configure with `force config set num_medics 2`)
 - 1 Investigator (configure with `force config set num_investigators 2`)
 - 1 Auditor (configure with `force config set num_auditors 2`)
+- 1 Pilot (configure with `force config set num_pilots 2`)
+- 1 Diplomat (configure with `force config set num_diplomats 2`)
 - 1 Inquisitor
 
 The daemon writes a `fleet.pid` file and logs to `fleet.log`. It handles `SIGINT`/`SIGTERM` with a 30-second graceful drain.
@@ -1039,10 +1048,18 @@ Set with `force config set <key> <value>`.
 | `num_auditors` | `1` | How many Auditor scan agents to run. Takes effect on restart. |
 | `num_librarians` | `1` | How many Librarian memory-curation agents to run. Takes effect on restart. |
 | `num_medics` | `1` | How many Medic failure-triage agents to run. Takes effect on restart. |
+| `num_pilots` | `1` | How many Pilot agents (PR-flow git ops) to run. Takes effect on restart. |
+| `num_diplomats` | `1` | How many Diplomat agents (draft-PR opener + ConvoyReview / PRReviewTriage claimer) to run. Takes effect on restart. |
 | `max_concurrent` | `0` (unlimited) | Maximum tasks running simultaneously fleet-wide. |
 | `spawn_delay_ms` | `0` | Milliseconds to wait between each agent claiming a new task. Smooths thundering-herd on large backlogs. |
 | `batch_size` | `0` (unlimited) | Maximum tasks claimed fleet-wide in a 60-second window. |
 | `max_turns` | `40` | Maximum Claude CLI turns per task. Higher values allow more complex tasks but cost more. |
+| `hourly_spend_cap_usd` | `25` | Soft trailing-hour spend cap. When exceeded, agent claim loops sleep until the trailing-hour spend drops below the cap. |
+| `hourly_spend_estop_usd` | `200` | Hard trailing-hour spend ceiling. The `spend-burn-watch` dog auto-flips e-stop when crossed. |
+| `per_task_spend_alert_usd` | `5` | When a single task's trailing-10-min spend crosses this threshold, the operator is mailed. |
+| `per_task_spend_escalate_usd` | `15` | When a single task's trailing-10-min spend crosses this threshold, the task is escalated and `BountyBoard.spend_suspended` is set to `1` so claim queries skip it. |
+| `agent_max_prompt_bytes_default` | `200000` | Default per-agent prompt-byte cap. Per-agent overrides via `agent_max_prompt_bytes_<agent>`. Overflow invokes `librarian.SummarizeForContextOverflow`; if the summary still exceeds the cap, `ErrContextOverflow` is returned and the caller routes to `handleInfraFailure`. |
+| `bash_guard_curl_hosts` | _(empty)_ | Comma-separated allowlist of hosts the astromech Bash guard permits for `curl` / `wget`. Default empty — operator must populate before astromechs can fetch over the network. |
 
 **Note:** Rate-limit backoff state is tracked automatically under `rl_hits_<agent>` keys. You can inspect these with `force config list` to see if agents are currently throttled.
 
@@ -1054,13 +1071,23 @@ Background maintenance tasks that run on a cooldown managed by the Inquisitor. V
 
 | Dog | Cooldown | What it does |
 |---|---|---|
-| `git-hygiene` | 30 min | Runs `git fetch --prune` and `git gc --auto` in every registered repo |
-| `db-vacuum` | 6 hours | Runs `PRAGMA wal_checkpoint`, `ANALYZE`, and `VACUUM` on holocron.db |
-| `holonet-rotate` | 24 hours | Rotates `holonet.jsonl` when it exceeds 50 MB |
-| `mail-cleanup` | 12 hours | Removes unread task-scoped mail for completed/failed tasks older than 48h; removes read mail older than 30 days |
-| `convoy-review-watch` | 5 min | Re-triggers ConvoyReview for `DraftPROpen` convoys once their fix tasks complete; also catches any convoy that missed the Diplomat fast-path trigger |
+| `spend-burn-watch` | 5 min | Polls trailing-hour fleet spend; auto-flips e-stop if it crosses `hourly_spend_estop_usd`. Runs FIRST in the dog cycle so a tripped halt is visible to every later dog and to the next agent claim loop. |
+| `task-spend-watch` | 1 min | Per-task trailing-10-min spend monitor; emits `[TASK SPEND ANOMALY]` mail at the alert threshold and escalates + sets `BountyBoard.spend_suspended=1` at the escalate threshold. |
+| `git-hygiene` | 30 min | Runs `git fetch --prune` and `git gc --auto` in every registered repo. |
+| `db-vacuum` | 6 hours | Runs `PRAGMA wal_checkpoint`, `ANALYZE`, and `VACUUM` on `holocron.db`. |
+| `holonet-rotate` | 24 hours | Rotates `holonet.jsonl` when it exceeds 50 MB. |
+| `mail-cleanup` | 12 hours | Removes unread task-scoped mail for completed/failed tasks older than 48h; removes read mail older than 30 days. |
+| `memory-hygiene` | 24 hours | Prunes low-value `FleetMemory` entries (duplicates, very short, or never re-retrieved). |
+| `escalation-sweeper` | 10 min | Auto-closes `Open` escalations whose underlying task has reached `Completed`/`Cancelled` or whose sub-PR has merged. One-shot per row (`auto_resolve_count` cap). |
+| `convoy-review-watch` | 5 min | Re-triggers `ConvoyReview` for `DraftPROpen` convoys once their fix tasks complete; also catches any convoy that missed the Diplomat fast-path trigger. |
+| `main-drift-watch` | 15 min | Cheap `git ls-remote` check; rebases ask-branches onto `main` only when `main` actually moved. |
+| `draft-pr-watch` | 5 min | Polls open draft PRs into `main` for state changes (rebase needed, ready-to-ship, merged). |
+| `sub-pr-ci-watch` | 5 min | Polls Jenkins CI on the per-task sub-PRs against the ask-branch; routes failures to Medic-CI. |
+| `pr-review-poll` | 5 min | Reads bot + human review comments on the draft PR into `PRReviewComments`; queues `PRReviewTriage` per thread. |
+| `ship-it-nag` | 24 hours | Reminds the operator if a draft PR has sat unshipped for 24h / 72h / 1 week. |
+| `quarantined-repo-watch` | 1 hour | Alerts the operator while any `Repositories.mode='quarantined'` row remains; surfaces the persistent dashboard banner. |
 
-If any dog fails, the operator receives an alert mail.
+If any dog fails, the operator receives an alert mail. All dogs short-circuit at the top when e-stop is active so an emergency halt actually halts.
 
 ---
 
