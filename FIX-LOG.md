@@ -2034,7 +2034,7 @@ the Chancellor SEQUENCE/MERGE empty-subfield fail-open path.
 - `go test -tags sqlite_fts5 -race -count=5 ./...` green after the
   logger-test softening.
 - `make smoke` / `make fuzz` / `make test-audit` all green.
-- FIX-8D-CLOSURE.md at repo root has the full verification paste.
+- `docs/closures/FIX-8D-CLOSURE.md` has the full verification paste.
 
 **What to watch for next.**
 
@@ -2060,7 +2060,7 @@ the Chancellor SEQUENCE/MERGE empty-subfield fail-open path.
   revert or match `CreateEscalation`'s DO UPDATE pattern.
 
 **Restart gate met.** All 13 verification steps green; allowlist empty;
-closure report filed at FIX-8D-CLOSURE.md.
+closure report filed at `docs/closures/FIX-8D-CLOSURE.md`.
 
 ## Fix #8e — Daemon-ctx threading + rows.Err() exhaustive sweep + P11 tightening
 
