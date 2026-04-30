@@ -259,11 +259,11 @@ func WriteRenderedPerDomainDocs(ctx context.Context, db *sql.DB, repoRoot string
 // rendered bytes. Used by `force render-rules --check` and the
 // pre-commit hook to refuse hand-edits to auto-generated files.
 //
-// FIX-LOG.md is excluded — Phase 1's audit only covers ~5 fix
-// narratives; including the file in the drift check would always trip
-// against the 140 KB historical record. Re-enable once the audit
-// covers every fix narrative (operator-discretion item flagged in the
-// D3-P1 closure note).
+// D3-P1 follow-up C: FIX-LOG.md is included by default. Phase 1's
+// initial audit only covered ~5 fix narratives so the file was
+// excluded behind a flag; the audit now owns every narrative
+// (verified by the bootstrap parity tests), so drift detection is
+// safe and operator-friendly.
 func CheckRenderDrift(ctx context.Context, db *sql.DB, repoRoot string) ([]string, error) {
 	var diverged []string
 
@@ -273,6 +273,14 @@ func CheckRenderDrift(ctx context.Context, db *sql.DB, repoRoot string) ([]strin
 	}
 	if existing, _ := os.ReadFile(repoRoot + "/CLAUDE.md"); !sameContent(existing, claudeMd) {
 		diverged = append(diverged, "CLAUDE.md")
+	}
+
+	fixLog, err := RenderFixLog(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if existing, _ := os.ReadFile(repoRoot + "/FIX-LOG.md"); !sameContent(existing, fixLog) {
+		diverged = append(diverged, "FIX-LOG.md")
 	}
 
 	docs, err := RenderPerDomainDocs(ctx, db)

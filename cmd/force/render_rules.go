@@ -26,27 +26,32 @@ import (
 // auto-generated files.
 func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	check := false
-	includeFixLog := false
+	// D3-P1 follow-up C: FIX-LOG.md is now rendered + drift-checked by
+	// default. The audit covers every ## Fix #N narrative; the legacy
+	// `--include-fix-log` flag is retained as a no-op for ergonomic
+	// continuity (operators / scripts that pass it still work). The
+	// new `--skip-fix-log` flag is the escape hatch if a future
+	// situation calls for a partial render.
+	includeFixLog := true
 	for _, a := range args {
 		switch a {
 		case "--check":
 			check = true
 		case "--include-fix-log":
-			// FIX-LOG.md is a 140 KB historical record. The Phase 1 audit
-			// only migrated ~5 fix narratives into FleetRules; rendering
-			// would shrink the file to ~4 KB, dropping content. Behind
-			// this flag until the migration is complete.
+			// Now the default. Kept as a no-op so older invocations
+			// don't trip on "unknown flag".
 			includeFixLog = true
+		case "--skip-fix-log":
+			includeFixLog = false
 		case "-h", "--help":
-			fmt.Println("Usage: force render-rules [--check] [--include-fix-log]")
-			fmt.Println("  Without flags     : bootstraps FleetRules + renders CLAUDE.md + docs/* from the audit.")
-			fmt.Println("  --check           : renders to memory and exits 1 if any on-disk file disagrees (drift detector).")
-			fmt.Println("  --include-fix-log : ALSO render FIX-LOG.md. Off by default — Phase 1's audit covers")
-			fmt.Println("                      ~5 fix narratives; rendering would shrink the existing 140 KB")
-			fmt.Println("                      historical record. Use only after the audit covers every entry.")
+			fmt.Println("Usage: force render-rules [--check] [--skip-fix-log]")
+			fmt.Println("  Without flags    : bootstraps FleetRules + renders CLAUDE.md + FIX-LOG.md + docs/* from the audit.")
+			fmt.Println("  --check          : renders to memory and exits 1 if any on-disk file disagrees (drift detector).")
+			fmt.Println("  --skip-fix-log   : skip FIX-LOG.md rendering on this invocation (useful for partial renders).")
+			fmt.Println("  --include-fix-log: legacy no-op (now the default; flag retained for back-compat).")
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "render-rules: unknown flag %q\nUsage: force render-rules [--check] [--include-fix-log]\n", a)
+			fmt.Fprintf(os.Stderr, "render-rules: unknown flag %q\nUsage: force render-rules [--check] [--skip-fix-log]\n", a)
 			os.Exit(2)
 		}
 	}
@@ -94,7 +99,8 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	}
 	report("CLAUDE.md", n, changed)
 
-	// FIX-LOG.md — opt-in.
+	// FIX-LOG.md — included by default (D3-P1 follow-up C). Operators
+	// who want a partial render can pass --skip-fix-log.
 	if includeFixLog {
 		n, changed, err = agents.WriteRenderedFixLog(ctx, db, filepath.Join(repoRoot, "FIX-LOG.md"))
 		if err != nil {
@@ -103,7 +109,7 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 		}
 		report("FIX-LOG.md", n, changed)
 	} else {
-		fmt.Println("  skip    FIX-LOG.md (use --include-fix-log to render; 140 KB historical content preserved)")
+		fmt.Println("  skip    FIX-LOG.md (--skip-fix-log requested)")
 	}
 
 	// Per-domain docs

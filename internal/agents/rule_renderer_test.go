@@ -3,6 +3,8 @@ package agents
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -157,6 +159,70 @@ func TestRenderClaudeMdFile_ExcludesRetiredRules(t *testing.T) {
 	}
 	if strings.Contains(string(body), "RETIRED_BODY") {
 		t.Errorf("renderer included retired rule")
+	}
+}
+
+// TestCheckRenderDrift_IncludesFixLog asserts that the drift check
+// detects hand-edits to FIX-LOG.md by default (D3-P1 follow-up C).
+// Phase 1 had FIX-LOG.md gated behind --include-fix-log because the
+// initial audit only covered ~5 narratives; the audit now owns every
+// narrative so drift detection is on by default.
+func TestCheckRenderDrift_IncludesFixLog(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	ctx := context.Background()
+
+	mustInsertRule(t, db, "drift-fixlog", "all", "fix-log", "FIXLOG_RENDERED_BODY")
+
+	dir := t.TempDir()
+
+	// Write CLAUDE.md / docs/* matching the in-memory render so they
+	// don't confound the drift check.
+	claudeMd, err := RenderClaudeMdFile(ctx, db)
+	if err != nil {
+		t.Fatalf("render claude-md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), claudeMd, 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// Write FIX-LOG.md with a hand-edited (deliberately stale) body.
+	if err := os.WriteFile(filepath.Join(dir, "FIX-LOG.md"), []byte("hand-edited drift content\n"), 0o644); err != nil {
+		t.Fatalf("write FIX-LOG.md: %v", err)
+	}
+
+	diverged, err := CheckRenderDrift(ctx, db, dir)
+	if err != nil {
+		t.Fatalf("CheckRenderDrift: %v", err)
+	}
+
+	foundFixLog := false
+	for _, p := range diverged {
+		if p == "FIX-LOG.md" {
+			foundFixLog = true
+			break
+		}
+	}
+	if !foundFixLog {
+		t.Errorf("CheckRenderDrift did not detect drift on FIX-LOG.md; got %v — drift check is silently skipping the file", diverged)
+	}
+
+	// Sanity: write the rendered FIX-LOG.md back; drift should clear.
+	fixLog, err := RenderFixLog(ctx, db)
+	if err != nil {
+		t.Fatalf("render fix-log: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "FIX-LOG.md"), fixLog, 0o644); err != nil {
+		t.Fatalf("write FIX-LOG.md: %v", err)
+	}
+	diverged2, err := CheckRenderDrift(ctx, db, dir)
+	if err != nil {
+		t.Fatalf("CheckRenderDrift (post-write): %v", err)
+	}
+	for _, p := range diverged2 {
+		if p == "FIX-LOG.md" {
+			t.Errorf("CheckRenderDrift reports drift on FIX-LOG.md after writing the rendered bytes back: %v", diverged2)
+		}
 	}
 }
 
