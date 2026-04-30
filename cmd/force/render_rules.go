@@ -13,19 +13,29 @@ import (
 	"force-orchestrator/internal/store"
 )
 
-// cmdRenderRules implements `force render-rules [--check]`.
+// cmdRenderRules implements `force render-rules [--check] [--use-runtime-db]`.
 //
 // Without --check: bootstrap-then-render. Reads the in-process
 // FleetRules audit, ensures the FleetRules table is populated
-// (idempotent), then writes CLAUDE.md / FIX-LOG.md / per-domain docs
+// (convergent), then writes CLAUDE.md / FIX-LOG.md / per-domain docs
 // to disk. No-op when nothing changed.
 //
 // With --check: render every target in memory and compare to disk.
 // Exit code 0 = no drift; exit code 1 = drift detected (lists the
 // drifted paths). Used by the pre-commit hook to refuse hand-edits to
 // auto-generated files.
+//
+// The CLI's job is "render the audit slice." It must not depend on
+// operator-side persistent DB state — every invocation should produce
+// deterministic output regardless of any local holocron.db drift. So
+// the default opens a fresh :memory: SQLite, runs schema migrations,
+// runs (convergent) BootstrapFleetRules, then renders. The passed-in
+// `db` (the daemon-shared persistent holocron.db) is used only when
+// the operator explicitly asks via --use-runtime-db — typically to
+// inspect renders that include operator-direct-write rules.
 func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	check := false
+	useRuntimeDB := false
 	// D3-P1 follow-up C: FIX-LOG.md is now rendered + drift-checked by
 	// default. The audit covers every ## Fix #N narrative; the legacy
 	// `--include-fix-log` flag is retained as a no-op for ergonomic
@@ -37,6 +47,8 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 		switch a {
 		case "--check":
 			check = true
+		case "--use-runtime-db":
+			useRuntimeDB = true
 		case "--include-fix-log":
 			// Now the default. Kept as a no-op so older invocations
 			// don't trip on "unknown flag".
@@ -44,33 +56,48 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 		case "--skip-fix-log":
 			includeFixLog = false
 		case "-h", "--help":
-			fmt.Println("Usage: force render-rules [--check] [--skip-fix-log]")
-			fmt.Println("  Without flags    : bootstraps FleetRules + renders CLAUDE.md + FIX-LOG.md + docs/* from the audit.")
+			fmt.Println("Usage: force render-rules [--check] [--use-runtime-db] [--skip-fix-log]")
+			fmt.Println("  Without flags    : bootstraps FleetRules into a fresh in-memory DB + renders CLAUDE.md + FIX-LOG.md + docs/* from the audit.")
 			fmt.Println("  --check          : renders to memory and exits 1 if any on-disk file disagrees (drift detector).")
+			fmt.Println("  --use-runtime-db : use the persistent holocron.db instead of fresh in-memory (lets you see renders that include operator-direct-write rules).")
 			fmt.Println("  --skip-fix-log   : skip FIX-LOG.md rendering on this invocation (useful for partial renders).")
 			fmt.Println("  --include-fix-log: legacy no-op (now the default; flag retained for back-compat).")
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "render-rules: unknown flag %q\nUsage: force render-rules [--check] [--skip-fix-log]\n", a)
+			fmt.Fprintf(os.Stderr, "render-rules: unknown flag %q\nUsage: force render-rules [--check] [--use-runtime-db] [--skip-fix-log]\n", a)
 			os.Exit(2)
 		}
 	}
 
 	repoRoot := findRepoRoot()
 
-	// Bootstrap is idempotent — safe to run on every render. Pass empty
+	// DB selection. Default: fresh :memory: — deterministic output,
+	// independent of operator-side DB state. Opt-in: the persistent
+	// holocron.db wired by main(). The fresh-DB path is the same code
+	// path TestPattern_P18_RenderCoherence uses, just behind a CLI
+	// entry point; convergent BootstrapFleetRules is what makes the
+	// fresh-DB render produce identical output to the runtime DB on
+	// subsequent invocations.
+	renderDB := db
+	if !useRuntimeDB {
+		fresh := store.InitHolocronDSN(":memory:")
+		defer fresh.Close()
+		renderDB = fresh
+	}
+
+	// Bootstrap is convergent — safe to run on every render. Pass empty
 	// path to skip the all-sections-covered check; that guard is a
 	// dev-time regression captured by the test suite, not a runtime
 	// invariant. After Phase 3 renders CLAUDE.md, the on-disk file's
 	// H2 headings are category labels, not the audit's original section
 	// names — running the check at runtime would always trip.
-	if _, err := store.BootstrapFleetRules(ctx, db, ""); err != nil {
+	if _, err := store.BootstrapFleetRules(ctx, renderDB, ""); err != nil {
 		fmt.Fprintf(os.Stderr, "render-rules: bootstrap: %v\n", err)
 		os.Exit(1)
 	}
 
 	if check {
-		diverged, err := agents.CheckRenderDrift(ctx, db, repoRoot)
+		diverged, err := agents.CheckRenderDrift(ctx, renderDB, repoRoot)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "render-rules --check: %v\n", err)
 			os.Exit(1)
@@ -92,7 +119,7 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	}
 
 	// CLAUDE.md
-	n, changed, err := agents.WriteRenderedClaudeMd(ctx, db, filepath.Join(repoRoot, "CLAUDE.md"))
+	n, changed, err := agents.WriteRenderedClaudeMd(ctx, renderDB, filepath.Join(repoRoot, "CLAUDE.md"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "render-rules: CLAUDE.md: %v\n", err)
 		os.Exit(1)
@@ -102,7 +129,7 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	// FIX-LOG.md — included by default (D3-P1 follow-up C). Operators
 	// who want a partial render can pass --skip-fix-log.
 	if includeFixLog {
-		n, changed, err = agents.WriteRenderedFixLog(ctx, db, filepath.Join(repoRoot, "FIX-LOG.md"))
+		n, changed, err = agents.WriteRenderedFixLog(ctx, renderDB, filepath.Join(repoRoot, "FIX-LOG.md"))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "render-rules: FIX-LOG.md: %v\n", err)
 			os.Exit(1)
@@ -113,7 +140,7 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 	}
 
 	// Per-domain docs
-	sizes, changedPaths, err := agents.WriteRenderedPerDomainDocs(ctx, db, repoRoot)
+	sizes, changedPaths, err := agents.WriteRenderedPerDomainDocs(ctx, renderDB, repoRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "render-rules: per-domain: %v\n", err)
 		os.Exit(1)

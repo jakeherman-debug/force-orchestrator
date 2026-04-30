@@ -27,14 +27,21 @@ type FleetRuleSeed struct {
 }
 
 // BootstrapFleetRules inserts the audited FleetRules seeds into the
-// database. Idempotent: a second invocation finds the (rule_key, version=1)
-// rows already present and skips without changing them.
+// database. Convergent on content: a second invocation against a clean
+// DB no-ops; against a DB whose bootstrap-managed rows have drifted
+// from the audit slice (stale content / hash) it REFRESHES those rows
+// to match the current audit. Operator-direct-write rows
+// (created_by != 'bootstrap') are never touched — the convergence
+// scope is bootstrap-managed rows only.
 //
 // claudeMdPath is read for the all-sections-covered safety check —
 // every H2 in the file MUST appear in at least one seed's Section field
 // or the bootstrap returns an error rather than silently dropping
 // content. Pass an empty string to skip the check (useful in tests
 // that want to operate against a synthetic seed list).
+//
+// Returned int is the number of rows touched (fresh INSERT or
+// content-hash mismatch UPDATE). Idempotent re-runs return 0.
 func BootstrapFleetRules(ctx context.Context, db *sql.DB, claudeMdPath string) (int, error) {
 	if claudeMdPath != "" {
 		if err := assertAllSectionsCovered(claudeMdPath, bootstrapAudit); err != nil {
@@ -45,19 +52,35 @@ func BootstrapFleetRules(ctx context.Context, db *sql.DB, claudeMdPath string) (
 		return 0, err
 	}
 
-	inserted := 0
+	touched := 0
 	for _, seed := range bootstrapAudit {
 		hash := sha256Hex(seed.Content)
-		// (rule_key, version) UNIQUE means a second run with the same key
-		// at version=1 conflicts and silently no-ops. The RETURNING id
-		// shape lets us count actual inserts vs no-ops.
+		// Convergent UPSERT.
+		//   - Fresh row → INSERT → RETURNING fires → counted.
+		//   - Conflict, bootstrap-managed, hash differs → UPDATE → RETURNING fires → counted.
+		//   - Conflict, bootstrap-managed, hash matches → WHERE false → no-op (created_at preserved).
+		//   - Conflict, operator-direct-write → WHERE false → no-op (operator row preserved).
+		// The content_hash predicate is load-bearing: without it,
+		// idempotent re-runs would UPDATE every row and break
+		// TestBootstrapFleetRules_Idempotent. The created_by predicate
+		// is load-bearing: without it, bootstrap could clobber
+		// operator-routed rules (per docs/paired-runs.md § Direct-write
+		// rules).
 		var id int
 		err := db.QueryRowContext(ctx, `
 			INSERT INTO FleetRules (
 				rule_key, category, agent_scope, render_to, enforced_by,
 				content, content_hash, version, active_from, created_by
 			) VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), 'bootstrap')
-			ON CONFLICT(rule_key, version) DO NOTHING
+			ON CONFLICT(rule_key, version) DO UPDATE SET
+				category     = excluded.category,
+				agent_scope  = excluded.agent_scope,
+				render_to    = excluded.render_to,
+				enforced_by  = excluded.enforced_by,
+				content      = excluded.content,
+				content_hash = excluded.content_hash
+			WHERE FleetRules.created_by = 'bootstrap'
+			  AND FleetRules.content_hash != excluded.content_hash
 			RETURNING id
 		`,
 			seed.RuleKey, seed.Category, seed.AgentScope, seed.RenderTo, seed.EnforcedBy,
@@ -65,14 +88,16 @@ func BootstrapFleetRules(ctx context.Context, db *sql.DB, claudeMdPath string) (
 		).Scan(&id)
 		switch {
 		case err == sql.ErrNoRows:
-			// Already present; idempotent no-op.
+			// Either (a) hash matched on a bootstrap row (idempotent
+			// no-op), or (b) operator-direct-write row preserved.
+			// Both are intended outcomes.
 		case err != nil:
-			return inserted, fmt.Errorf("bootstrap rule %q: %w", seed.RuleKey, err)
+			return touched, fmt.Errorf("bootstrap rule %q: %w", seed.RuleKey, err)
 		default:
-			inserted++
+			touched++
 		}
 	}
-	return inserted, nil
+	return touched, nil
 }
 
 // BootstrapAudit returns the in-memory seed list — exposed for tests.
