@@ -1707,7 +1707,7 @@ If all 17 steps pass, Phase 6 is operator-ready.
 
 ## Closure-report appendix
 
-The closure report `DELIVERABLE-3-CLOSURE.md` (already specified in roadmap.md) gets a new section "Dashboard implementation" listing every task above with:
+The closure report `docs/closures/DELIVERABLE-3-CLOSURE.md` (already specified in roadmap.md) gets a new section "Dashboard implementation" listing every task above with:
 - Track ID
 - PR number
 - Date merged

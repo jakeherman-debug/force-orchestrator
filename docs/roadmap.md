@@ -27,7 +27,7 @@ Each deliverable section is self-contained. To hand off a deliverable:
 3. Have the agent read every document in the "Required reading" list.
 4. The agent executes work tracks per the section's Merge order table. Tracks marked as parallel-eligible may be handed to different agents working in separate worktrees; tracks with a blocking predecessor wait for that predecessor's merge to main.
 5. The agent runs the verification procedure before declaring done.
-6. The agent files the closure-report artifact (name specified per deliverable) at the repo root.
+6. The agent files the closure-report artifact (name specified per deliverable) under `docs/closures/`.
 
 The operator ships the deliverable only when the verification procedure passes cleanly AND the closure report is filed AND every track in the deliverable is merged to main.
 
@@ -350,7 +350,7 @@ make smoke && make fuzz && make test-audit  # all green
 
 ### Closure report
 
-Produce `DELIVERABLE-0-CLOSURE.md` at the repo root with:
+Produce `docs/closures/DELIVERABLE-0-CLOSURE.md` with:
 
 - Per-track summary (D0-A, D0-B, D0-C, D0-D) with commit SHAs.
 - Pre-migration call-site survey (the grep output of every direct Librarian call before D0-B).
@@ -672,7 +672,7 @@ Merge order within T0-2: Part A first (redact layer catches secrets regardless o
 
 1. `grep -rn 't\.Skip(.AUDIT-' --include="*.go"` → 0 hits.
 2. `internal/audittools/audittools_test.go` `remainingAuditSkips` is empty.
-3. `FIX-8D-CLOSURE.md` filed and reviewed (T0-3).
+3. `docs/closures/FIX-8D-CLOSURE.md` filed and reviewed (T0-3).
 4. `go test -tags sqlite_fts5 -race -count=5 ./...` green, no flakes.
 5. **T0-1 capability profiles:** every Spawn'd agent has a YAML profile in `agents/capabilities/`; `agents/capabilities/REGISTRY.yaml` and `agents/capabilities/.forceblocklist.yaml` exist; `internal/agents/capabilities/loader.go` loads, validates, and serves profiles; every `AskClaudeCLI` / `RunCLIStreamingContext` production call site sources its tool args from `capabilities.LoadProfile(...).AllowedToolsArg()` + `.DisallowedToolsArg()` + `.MCPConfigArg()` — no hardcoded tool literals. Pattern test `TestPattern_P13_CapabilityProfiles` passes (every call-site sourced from loader; every agent has a profile; every profile validates against registry; no profile grants a blocklisted tool).
 6. **T0-1 empirical restriction check:** for at least one read-only-profile agent (e.g., Captain), confirm via a runtime test that attempting to invoke a tool not in the agent's profile (e.g., `Bash`) results in the tool being absent from Claude's catalog (Claude reports it isn't available). The test uses a seeded prompt asking the agent to attempt the disallowed tool and asserts the agent reports the tool as absent — not "denied," but not present at all.
@@ -697,7 +697,7 @@ Merge order within T0-2: Part A first (redact layer catches secrets regardless o
 # T0-3 (Fix #8d)
 grep -rn 't\.Skip(.AUDIT-' --include="*.go" internal/ cmd/ schema/  # expect 0
 cat internal/audittools/audittools_test.go | grep -A2 remainingAuditSkips  # expect empty map
-ls FIX-8D-CLOSURE.md  # expect file present
+ls docs/closures/FIX-8D-CLOSURE.md  # expect file present
 
 # T0-1 capability profiles
 ls agents/capabilities/*.yaml  # expect ~16+ files (one per agent + REGISTRY + .forceblocklist)
@@ -723,7 +723,7 @@ make test-audit  # expect green
 
 ### Closure report
 
-Produce `DELIVERABLE-1-CLOSURE.md` at the repo root with:
+Produce `docs/closures/DELIVERABLE-1-CLOSURE.md` with:
 
 - Per-track summary (T0-1, T0-2, T0-3) with commit SHAs.
 - Verification output pasted verbatim for every check above.
@@ -750,11 +750,11 @@ Risk closure — operational.
 2. `/Users/jake.herman/code/force-orchestrator/internal/agents/spend_cap.go` + `/Users/jake.herman/code/force-orchestrator/internal/agents/estop.go`.
 3. `/Users/jake.herman/code/force-orchestrator/internal/store/schema.go` — `BountyBoard`, `TaskHistory`, `Repositories` tables.
 4. `/Users/jake.herman/code/force-orchestrator/internal/agents/astromech.go` lines 481 and 936 (current Bash invocation).
-5. `/Users/jake.herman/code/force-orchestrator/DELIVERABLE-1-CLOSURE.md` (for context on what D1 already changed).
+5. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-1-CLOSURE.md` (for context on what D1 already changed).
 
 ### Prerequisites
 
-D1 complete: all three tracks merged to main AND `DELIVERABLE-1-CLOSURE.md` filed.
+D1 complete: all three tracks merged to main AND `docs/closures/DELIVERABLE-1-CLOSURE.md` filed.
 
 ### Merge order within D2
 
@@ -949,7 +949,7 @@ make smoke && make fuzz && make test-audit  # all green
 
 ### Closure report
 
-`DELIVERABLE-2-CLOSURE.md` with:
+`docs/closures/DELIVERABLE-2-CLOSURE.md` with:
 
 - Per-track summary + commit SHAs.
 - Schema diff showing added columns.
@@ -977,7 +977,7 @@ This deliverable's spec is `docs/paired-runs.md` (1040 lines) and `docs/next-gen
 
 ### Prerequisites
 
-D1 AND D2 complete: every track of both deliverables merged to main AND `DELIVERABLE-1-CLOSURE.md` + `DELIVERABLE-2-CLOSURE.md` both filed. D1's `ScrubInbound` must be in place (experiments invoke LLMs; same scrubbing applies) and D2's per-task cost tracking must be in place (experiment cost accounting uses the same columns).
+D1 AND D2 complete: every track of both deliverables merged to main AND `docs/closures/DELIVERABLE-1-CLOSURE.md` + `docs/closures/DELIVERABLE-2-CLOSURE.md` both filed. D1's `ScrubInbound` must be in place (experiments invoke LLMs; same scrubbing applies) and D2's per-task cost tracking must be in place (experiment cost accounting uses the same columns).
 
 ### Merge order within D3
 
@@ -1335,7 +1335,7 @@ go test -tags sqlite_fts5 -race -count=5 ./...  # green no flakes
 
 ### Closure report
 
-`DELIVERABLE-3-CLOSURE.md` with:
+`docs/closures/DELIVERABLE-3-CLOSURE.md` with:
 
 - Per-phase sign-off log.
 - Shakedown experiment full trace (copy from `PAIRED-RUNS-ROLLOUT.md`): which treatment, which metric, what the outcome was, what rule promoted.
@@ -1360,12 +1360,12 @@ Risk mitigation — continuous.
 
 1. `/Users/jake.herman/code/force-orchestrator/docs/next-gen-agents.md` — full. This is the authoritative spec for BoS, ISB, and Senate.
 2. `/Users/jake.herman/code/force-orchestrator/docs/paired-runs.md` — §"Rule Registry" and §"Engineering Corps" sections.
-3. `/Users/jake.herman/code/force-orchestrator/DELIVERABLE-3-CLOSURE.md` — for the current state of FleetRules, rule-renderer, etc.
+3. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-3-CLOSURE.md` — for the current state of FleetRules, rule-renderer, etc.
 4. `/Users/jake.herman/code/force-orchestrator/CLAUDE.md` — every invariant section becomes at least one BoS rule.
 
 ### Prerequisites
 
-D3 complete: every phase merged to main AND `DELIVERABLE-3-CLOSURE.md` filed. FleetRules + rule-renderer + promotion pipeline + Engineering Corps + global holdout must all be live.
+D3 complete: every phase merged to main AND `docs/closures/DELIVERABLE-3-CLOSURE.md` filed. FleetRules + rule-renderer + promotion pipeline + Engineering Corps + global holdout must all be live.
 
 ### Merge order within D4
 
@@ -1455,7 +1455,7 @@ make smoke && make fuzz && make test-audit
 
 ### Closure report
 
-`DELIVERABLE-4-CLOSURE.md` with:
+`docs/closures/DELIVERABLE-4-CLOSURE.md` with:
 
 - Per-rule status: ID, severity (advise/block), FleetRules row id, first-30-firings precision where applicable.
 - Initial Senator onboarded (force-orchestrator) + SENATE.md rendered content.
@@ -1479,12 +1479,12 @@ Risk closure, implemented as an ISB rule pack.
 ### Required reading
 
 1. `/Users/jake.herman/code/force-orchestrator/docs/next-gen-agents.md` — §"Imperial Security Bureau" + §"Rules at launch."
-2. `/Users/jake.herman/code/force-orchestrator/DELIVERABLE-4-CLOSURE.md` — for ISB state.
+2. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-4-CLOSURE.md` — for ISB state.
 3. `https://github.com/google/osv-scanner` — OSV-scanner as the vuln-check mechanism.
 
 ### Prerequisites
 
-D4 complete: all three tracks merged to main AND `DELIVERABLE-4-CLOSURE.md` filed. ISB live with its initial rule set.
+D4 complete: all three tracks merged to main AND `docs/closures/DELIVERABLE-4-CLOSURE.md` filed. ISB live with its initial rule set.
 
 ### Merge order within D5
 
@@ -1574,7 +1574,7 @@ go test -tags sqlite_fts5 -race -count=5 ./...  # full suite green
 
 ### Closure report
 
-`DELIVERABLE-5-CLOSURE.md` with:
+`docs/closures/DELIVERABLE-5-CLOSURE.md` with:
 
 - Five rule-IDs with FleetRules row-ids.
 - Registry endpoints used + caching policy.
@@ -1602,7 +1602,7 @@ Feature (operator UX).
 
 ### Prerequisites
 
-D5 complete: supply-chain ISB rules merged to main AND `DELIVERABLE-5-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D4 is structurally required.) Senator bootstrap pipeline from D4 present and reusable.
+D5 complete: supply-chain ISB rules merged to main AND `docs/closures/DELIVERABLE-5-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D4 is structurally required.) Senator bootstrap pipeline from D4 present and reusable.
 
 ### Merge order within D6
 
@@ -1658,7 +1658,7 @@ force onboard force-orchestrator  # produces ONBOARDING.md; operator reviews
 
 ### Closure report
 
-`DELIVERABLE-6-CLOSURE.md` with CLI help-text pasted, sample `ONBOARDING.md` content, reuse-verification evidence, anti-cheat self-check.
+`docs/closures/DELIVERABLE-6-CLOSURE.md` with CLI help-text pasted, sample `ONBOARDING.md` content, reuse-verification evidence, anti-cheat self-check.
 
 ---
 
@@ -1675,11 +1675,11 @@ Feature (cost reduction).
 ### Required reading
 
 1. `/Users/jake.herman/code/force-orchestrator/docs/paired-runs.md` — §"Primitive", §"Scoring and Significance", §"Engineering Corps."
-2. `/Users/jake.herman/code/force-orchestrator/DELIVERABLE-3-CLOSURE.md` + `DELIVERABLE-4-CLOSURE.md`.
+2. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-3-CLOSURE.md` + `docs/closures/DELIVERABLE-4-CLOSURE.md`.
 
 ### Prerequisites
 
-D6 complete: onboarding CLI merged to main AND `DELIVERABLE-6-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D3 is structurally required for the experiment harness.)
+D6 complete: onboarding CLI merged to main AND `docs/closures/DELIVERABLE-6-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D3 is structurally required for the experiment harness.)
 
 ### Merge order within D7
 
@@ -1726,7 +1726,7 @@ Per experiment: Engineering Corps authors the YAML from this brief; operator rat
 1. Eight experiments terminated (either promoted with evidence or declared null/inconclusive with evidence preserved).
 2. For promoted agents: post-ship 30-day monitoring shows no regression. Retention metric visible on dashboard.
 3. Aggregate fleet cost per convoy, measured against the `baseline-2026` holdout at T+30 days post-last-ship, shows measurable delta visible on fleet-progress dashboard.
-4. `DELIVERABLE-7-CLOSURE.md` contains the evidence trail for each of the 8 experiments (terminated-reason, cell means, posterior, confirm-phase outcome, promoted/not-promoted).
+4. `docs/closures/DELIVERABLE-7-CLOSURE.md` contains the evidence trail for each of the 8 experiments (terminated-reason, cell means, posterior, confirm-phase outcome, promoted/not-promoted).
 
 ### Anti-cheat directives
 
@@ -1751,7 +1751,7 @@ force fleet-progress --metric fleet_cost_per_convoy --compare holdout --window 3
 
 ### Closure report
 
-`DELIVERABLE-7-CLOSURE.md` with per-experiment outcome, promoted-agents list, aggregate cost delta, 30-day retention graph, anti-cheat self-check.
+`docs/closures/DELIVERABLE-7-CLOSURE.md` with per-experiment outcome, promoted-agents list, aggregate cost delta, 30-day retention graph, anti-cheat self-check.
 
 ---
 
@@ -1773,7 +1773,7 @@ Feature (proactive blast radius).
 
 ### Prerequisites
 
-D7 complete: all eight model-downgrade experiments terminated AND their ship-PRs either merged (winners) or their Outcomes recorded (nulls/inconclusive) AND `DELIVERABLE-7-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D4 is structurally required — Senate consumes the graph.)
+D7 complete: all eight model-downgrade experiments terminated AND their ship-PRs either merged (winners) or their Outcomes recorded (nulls/inconclusive) AND `docs/closures/DELIVERABLE-7-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D4 is structurally required — Senate consumes the graph.)
 
 ### Merge order within D8
 
@@ -1901,7 +1901,7 @@ sqlite3 holocron.db "SELECT MAX(last_scanned_at) FROM CrossRepoSymbols"  # withi
 
 ### Closure report
 
-`DELIVERABLE-8-CLOSURE.md` with schema snapshot, integration test results, sample blast-radius JSON, graph freshness SLO evidence, anti-cheat self-check.
+`docs/closures/DELIVERABLE-8-CLOSURE.md` with schema snapshot, integration test results, sample blast-radius JSON, graph freshness SLO evidence, anti-cheat self-check.
 
 ---
 
@@ -1919,11 +1919,11 @@ Feature (proactive debt + longitudinal visibility).
 
 1. `/Users/jake.herman/code/force-orchestrator/docs/paired-runs.md` — §"Primitive" for how controlled migrations run as experiments.
 2. `/Users/jake.herman/code/force-orchestrator/docs/next-gen-agents.md` — §"Bureau of Standards" for the rules the health report consumes.
-3. `/Users/jake.herman/code/force-orchestrator/DELIVERABLE-4-CLOSURE.md` + `DELIVERABLE-8-CLOSURE.md`.
+3. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-4-CLOSURE.md` + `docs/closures/DELIVERABLE-8-CLOSURE.md`.
 
 ### Prerequisites
 
-D8 complete: all three tracks merged to main AND `DELIVERABLE-8-CLOSURE.md` filed. Both D4 (BoS rules — the health report runs them) and D8 (cross-repo graph — Archaeologist uses it for cross-repo pattern sweeps) are structurally required.
+D8 complete: all three tracks merged to main AND `docs/closures/DELIVERABLE-8-CLOSURE.md` filed. Both D4 (BoS rules — the health report runs them) and D8 (cross-repo graph — Archaeologist uses it for cross-repo pattern sweeps) are structurally required.
 
 ### Merge order within D9
 
@@ -1989,7 +1989,7 @@ ls reports/architecture-health-*.md  # expect at least one
 
 ### Closure report
 
-`DELIVERABLE-9-CLOSURE.md` with per-pattern sweep results, shakedown migration trace, first health report pasted, anti-cheat self-check.
+`docs/closures/DELIVERABLE-9-CLOSURE.md` with per-pattern sweep results, shakedown migration trace, first health report pasted, anti-cheat self-check.
 
 ---
 
@@ -2009,7 +2009,7 @@ Feature (human-review UX).
 
 ### Prerequisites
 
-D9 complete: both tracks merged to main AND `DELIVERABLE-9-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D3 is structurally required — to measure handoff-doc impact via paired-runs.)
+D9 complete: both tracks merged to main AND `docs/closures/DELIVERABLE-9-CLOSURE.md` filed. (Operator-decreed strict sequential ordering; technically only D3 is structurally required — to measure handoff-doc impact via paired-runs.)
 
 ### Merge order within D10
 
@@ -2061,16 +2061,16 @@ force experiment show D10-handoff-docs
 
 | # | Deliverable | Classification | Items | Prereqs | Build | Closure artifact |
 |---|---|---|---|---|---|---|
-| **0** | **Interface Layer Foundation** | **Architectural foundation** | **D0-A interfaces + CLAUDE.md, D0-B Librarian migration, D0-C future-service stubs, D0-D Pattern P16** | **—** | **~hours autonomous** | **DELIVERABLE-0-CLOSURE.md** |
-| 1 | Pre-Restart Security Closure | Risk closure — blocking | T0-1, T0-2, T0-3 | D0 | ~hours autonomous | DELIVERABLE-1-CLOSURE.md |
-| 2 | Operational Risk Hardening | Risk closure — operational | T1-0, T1-1, T1-2, T1-3, T1-3.5, T1-4 | D1 | ~hours autonomous | DELIVERABLE-2-CLOSURE.md |
-| 3 | Paired Runs + EC + Holdout + Verification Specs + Trust Layers + CLAUDE.md Refactor | Measurement substrate + bundled additions from concerns #1–#5 | T2-1, T3-1, T3-2 + spec/proposal/trust/UX/sleep additions | D1, D2 | ~1 wk autonomous | DELIVERABLE-3-CLOSURE.md |
-| 4 | BoS + ISB + Senate | Risk mitigation — continuous | T2-4 + BOS-011 graduation | D3 | ~hours autonomous | DELIVERABLE-4-CLOSURE.md |
-| 5 | Supply Chain Hygiene | Risk closure (ISB rules) | T1-5 | D4 | ~hours autonomous | DELIVERABLE-5-CLOSURE.md |
-| 6 | Synthetic Onboarding CLI | Feature — UX | T2-5 | D4 | ~hours autonomous | DELIVERABLE-6-CLOSURE.md |
-| 7 | Model-Tier Optimization | Feature — cost | T2-2 | D3 | ~weeks (experiment runtime) | DELIVERABLE-7-CLOSURE.md |
-| 8 | Cross-Repo Dependency Graph | Feature — blast radius | T2-3 + D8-IntegTest | D4 | ~hours autonomous | DELIVERABLE-8-CLOSURE.md |
-| 9 | Archaeologist + Arch Health | Feature — debt + visibility | T3-3, T3-4 | D4, D8 | ~hours autonomous | DELIVERABLE-9-CLOSURE.md |
+| **0** | **Interface Layer Foundation** | **Architectural foundation** | **D0-A interfaces + CLAUDE.md, D0-B Librarian migration, D0-C future-service stubs, D0-D Pattern P16** | **—** | **~hours autonomous** | **docs/closures/DELIVERABLE-0-CLOSURE.md** |
+| 1 | Pre-Restart Security Closure | Risk closure — blocking | T0-1, T0-2, T0-3 | D0 | ~hours autonomous | docs/closures/DELIVERABLE-1-CLOSURE.md |
+| 2 | Operational Risk Hardening | Risk closure — operational | T1-0, T1-1, T1-2, T1-3, T1-3.5, T1-4 | D1 | ~hours autonomous | docs/closures/DELIVERABLE-2-CLOSURE.md |
+| 3 | Paired Runs + EC + Holdout + Verification Specs + Trust Layers + CLAUDE.md Refactor | Measurement substrate + bundled additions from concerns #1–#5 | T2-1, T3-1, T3-2 + spec/proposal/trust/UX/sleep additions | D1, D2 | ~1 wk autonomous | docs/closures/DELIVERABLE-3-CLOSURE.md |
+| 4 | BoS + ISB + Senate | Risk mitigation — continuous | T2-4 + BOS-011 graduation | D3 | ~hours autonomous | docs/closures/DELIVERABLE-4-CLOSURE.md |
+| 5 | Supply Chain Hygiene | Risk closure (ISB rules) | T1-5 | D4 | ~hours autonomous | docs/closures/DELIVERABLE-5-CLOSURE.md |
+| 6 | Synthetic Onboarding CLI | Feature — UX | T2-5 | D4 | ~hours autonomous | docs/closures/DELIVERABLE-6-CLOSURE.md |
+| 7 | Model-Tier Optimization | Feature — cost | T2-2 | D3 | ~weeks (experiment runtime) | docs/closures/DELIVERABLE-7-CLOSURE.md |
+| 8 | Cross-Repo Dependency Graph | Feature — blast radius | T2-3 + D8-IntegTest | D4 | ~hours autonomous | docs/closures/DELIVERABLE-8-CLOSURE.md |
+| 9 | Archaeologist + Arch Health | Feature — debt + visibility | T3-3, T3-4 | D4, D8 | ~hours autonomous | docs/closures/DELIVERABLE-9-CLOSURE.md |
 | 10 | Synthetic Handoff Docs | Feature — review UX | T3-5 | D3 | ~hours autonomous | DELIVERABLE-10-CLOSURE.md |
 
 ## Roadmap-level risks
@@ -2089,7 +2089,7 @@ These are plan-level risks, not product-level risks. Surface here so they're tra
 
 ## Tracking
 
-Each deliverable produces a closure report at the repo root. Operator signs off by acknowledging the report. Dashboard "Roadmap" tab ships with D3 and tracks progress from there forward.
+Each deliverable produces a closure report under `docs/closures/`. Operator signs off by acknowledging the report. Dashboard "Roadmap" tab ships with D3 and tracks progress from there forward.
 
 ---
 
@@ -2104,19 +2104,19 @@ Authoritative ordered sequence of every track-level merge to main across the ent
 | 0b | Merge D0-B | `deliverable/0/B` | Step 0c | Librarian interface + in-process implementation + call-site migration. |
 | 0c | Merge D0-C | `deliverable/0/C` | Step 0b | Future-service interface stubs (capabilities, experiments, rules, metrics, graph). |
 | 0d | Merge D0-D | `deliverable/0/D` | — | Pattern P16 enforcement test (lands last; needs every interface present to validate). |
-| 0e | ⟨GATE⟩ | `DELIVERABLE-0-CLOSURE.md` | — | Architectural foundation set; D1 builds against it. |
+| 0e | ⟨GATE⟩ | `docs/closures/DELIVERABLE-0-CLOSURE.md` | — | Architectural foundation set; D1 builds against it. |
 | **D1 — Pre-Restart Security Closure** |
 | 1 | Merge T0-3 | `deliverable/1/T0-3` | — | Fix #8d / Code Red closure (already shipped). |
 | 2 | Merge T0-1 | `deliverable/1/T0-1` | Step 3 | Per-agent capability profiles. Builds against the `capabilities.Client` interface defined in D0-C. |
 | 3 | Merge T0-2 | `deliverable/1/T0-2` | Step 2 | Inbound secret scrubbing. May develop in parallel with Step 2. |
-| 4 | ⟨GATE⟩ | `DELIVERABLE-1-CLOSURE.md` | — | Operator signs off; daemon restart-safe. |
+| 4 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-1-CLOSURE.md` | — | Operator signs off; daemon restart-safe. |
 | 5 | Merge T1-0 | `deliverable/2/T1-0` | — | Startup reconciliation sweep. |
 | 6 | Merge T1-1 | `deliverable/2/T1-1` | Steps 7, 8 | Per-task cost tracking. |
 | 7 | Merge T1-2 | `deliverable/2/T1-2` | Steps 6, 8 | Per-agent context size + byte attribution. |
 | 8 | Merge T1-4 | `deliverable/2/T1-4` | Steps 6, 7 | Repo mode column. |
 | 9 | Merge T1-3.5 | `deliverable/2/T1-3.5` | — | Divergence detector (depends on T1-1 hooks). |
 | 10 | Merge T1-3 | `deliverable/2/T1-3` | — | Bash allowlist wrapper (largest; merges last in D2). |
-| 11 | ⟨GATE⟩ | `DELIVERABLE-2-CLOSURE.md` | — | Operational hardening complete. |
+| 11 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-2-CLOSURE.md` | — | Operational hardening complete. |
 | 12 | Merge D3 Phase 1 | `deliverable/3/phase-1` | — | Paired-runs foundations: schema, log-only `treatments.Apply`, FleetRules bootstrap, rule-renderer, metric registry. |
 | 13 | Merge D3 Phase 2 | `deliverable/3/phase-2` | — | Holdout + single-treatment experiments; `treatments.Apply` goes live. |
 | 14 | Merge D3 Phase 3 | `deliverable/3/phase-3` | — | Engineering Corps claim loop + ratification flow. |
@@ -2124,15 +2124,15 @@ Authoritative ordered sequence of every track-level merge to main across the ent
 | 16 | Merge D3 Phase 5 | `deliverable/3/phase-5` | — | Level-3 paired shadow (gh proxy, shadow worktrees, CI suppression). |
 | 17 | Merge D3 Phase 6A | `deliverable/3/phase-6a` (15 sub-tracks) | — | Dashboard scaffolding + Pulse + Briefing surfaces; Pattern tests P25–P30 green. See `docs/dashboard-implementation.md` for sub-track briefs. |
 | 17b | Merge D3 Phase 6B | `deliverable/3/phase-6b` (13 dashboard sub-tracks + concern bundles) | — | Reflection + Drill + verification spec consumption + concerns #1, #4, #6–#10 acceptance + end-to-end shakedown; Pattern tests P31, P32, replay-no-mutation green. |
-| 18 | ⟨GATE⟩ | `DELIVERABLE-3-CLOSURE.md` | — | Measurement substrate live. |
+| 18 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-3-CLOSURE.md` | — | Measurement substrate live. |
 | 19 | Merge D4-BoS | `deliverable/4/bos` | — | Bureau of Standards. |
 | 20 | Merge D4-ISB | `deliverable/4/isb` | — | Imperial Security Bureau (shares SecurityFindings with BoS). |
 | 21 | Merge D4-Senate | `deliverable/4/senate` | — | Senate + first Senator onboarded + promotion-via-experiment shakedown. |
-| 22 | ⟨GATE⟩ | `DELIVERABLE-4-CLOSURE.md` | — | Review-layer agents live. |
+| 22 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-4-CLOSURE.md` | — | Review-layer agents live. |
 | 23 | Merge D5-SupplyRules | `deliverable/5/supply-rules` | — | Five SUPPLY-* ISB rules (hallucinated package, typosquat, stale, license, CVE). |
-| 24 | ⟨GATE⟩ | `DELIVERABLE-5-CLOSURE.md` | — | Supply chain hygiene. |
+| 24 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-5-CLOSURE.md` | — | Supply chain hygiene. |
 | 25 | Merge D6-OnboardCLI | `deliverable/6/onboard-cli` | — | `force onboard <repo>` CLI. |
-| 26 | ⟨GATE⟩ | `DELIVERABLE-6-CLOSURE.md` | — | Synthetic onboarding. |
+| 26 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-6-CLOSURE.md` | — | Synthetic onboarding. |
 | 27 | Merge E7-1 ship-PR | `deliverable/7/ship-boot-haiku` | Steps 28–34 (experiments run concurrently; ship-PRs merge one at a time) | Boot → Haiku (if winner). |
 | 28 | Merge E7-2 ship-PR | `deliverable/7/ship-rerank-haiku` | Steps 27, 29–34 | memory_rerank → Haiku (if winner). |
 | 29 | Merge E7-3 ship-PR | `deliverable/7/ship-prtriage-haiku` | Steps 27–28, 30–34 | PR-review-triage → Haiku (if winner). |
@@ -2141,14 +2141,14 @@ Authoritative ordered sequence of every track-level merge to main across the ent
 | 32 | Merge E7-6 ship-PR | `deliverable/7/ship-medic-haiku` | Steps 27–31, 33–34 | Medic classification → Haiku (if winner). |
 | 33 | Merge E7-7 ship-PR | `deliverable/7/ship-commander-haiku` | Steps 27–32, 34 | Commander → Haiku (if winner). |
 | 34 | Merge E7-8 ship-PR | `deliverable/7/ship-chancellor-haiku` | Steps 27–33 | Chancellor → Haiku (if winner). |
-| 35 | ⟨GATE⟩ | `DELIVERABLE-7-CLOSURE.md` | — | Includes 30-day post-ship monitoring clearance for every shipped PR. |
+| 35 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-7-CLOSURE.md` | — | Includes 30-day post-ship monitoring clearance for every shipped PR. |
 | 36 | Merge D8-Graph | `deliverable/8/graph` | — | CrossRepoSymbols + dogRepoGraphScan. |
 | 37 | Merge D8-Chancellor | `deliverable/8/chancellor-integration` | — | blast_radius_json population in Chancellor decomposition. |
 | 38 | Merge D8-IntegTest | `deliverable/8/integtest` | — | ConsumerIntegrationCheck task type + consumer test suite runs. |
-| 39 | ⟨GATE⟩ | `DELIVERABLE-8-CLOSURE.md` | — | Cross-repo graph + integration checks live. |
+| 39 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-8-CLOSURE.md` | — | Cross-repo graph + integration checks live. |
 | 40 | Merge D9-Archaeologist | `deliverable/9/archaeologist` | Step 41 | Archaeologist agent + pattern registry. Develops in parallel with Step 41. |
 | 41 | Merge D9-ArchHealth | `deliverable/9/arch-health` | Step 40 | Monthly architecture-health report dog. |
-| 42 | ⟨GATE⟩ | `DELIVERABLE-9-CLOSURE.md` | — | Proactive debt detection + longitudinal visibility. |
+| 42 | ⟨GATE⟩ | `docs/closures/DELIVERABLE-9-CLOSURE.md` | — | Proactive debt detection + longitudinal visibility. |
 | 43 | Merge D10-HandoffDocs | `deliverable/10/handoff-docs` | — | PRHandoffSynthesis Diplomat task type + ARCHITECTURE.md auto-render. |
 | 44 | ⟨GATE⟩ | `DELIVERABLE-10-CLOSURE.md` | — | Handoff documentation experiment outcome recorded. |
 

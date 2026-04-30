@@ -9,7 +9,7 @@ Design sketch for four agents not yet built. Three are review layers at distinct
 | **Bureau of Standards (BoS)** | Commit-time | CLAUDE.md invariant enforcement | After astromech commit, before Captain |
 | **Engineering Corps** | Experimentation-axis | Authors / monitors / promotes experiments | Librarian hypothesis arrival + dog cadence |
 
-Each is motivated by a concrete failure class surfaced in the Code Red audit (AUDIT.md) and its fix campaign. The pipeline position, scope, and cost model of each is chosen so they're additive to existing review gates, not duplicative.
+Each is motivated by a concrete failure class surfaced in the Code Red audit (docs/operator-archives/AUDIT.md) and its fix campaign. The pipeline position, scope, and cost model of each is chosen so they're additive to existing review gates, not duplicative.
 
 **Companion doc.** Engineering Corps and the mechanisms it operates (experiments, holdout, metric/rule registries, three-layer versioning) are specified in detail in [paired-runs.md](./paired-runs.md). This doc covers the agent's role and boundaries; paired-runs covers the full experimentation primitive.
 
