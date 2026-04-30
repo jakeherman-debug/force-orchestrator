@@ -674,7 +674,7 @@ Do not re-do work that is already correctly committed.`
 	if shimEnv, shimErr := setupBashGuardShim(worktreeDir); shimErr != nil {
 		logger.Printf("Task %d: bash-guard shim setup failed (%v) — astromech proceeds without bash gating", bounty.ID, shimErr)
 	} else {
-		bashGuardEnv = []string{shimEnv}
+		bashGuardEnv = shimEnv
 	}
 
 	rawOut, err := claude.RunCLIStreamingContext(claudeCtx, fullPrompt,

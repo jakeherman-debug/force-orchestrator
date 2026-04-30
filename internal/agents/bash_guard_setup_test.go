@@ -27,15 +27,36 @@ func TestSetupBashGuardShim_WritesExecutableShim(t *testing.T) {
 	stubBashGuardBinary(t)
 	worktree := t.TempDir()
 
-	envEntry, err := setupBashGuardShim(worktree)
+	envEntries, err := setupBashGuardShim(worktree)
 	if err != nil {
 		t.Fatalf("setupBashGuardShim: %v", err)
 	}
-	if !strings.HasPrefix(envEntry, "PATH=") {
-		t.Fatalf("env entry = %q, want PATH= prefix", envEntry)
+	if len(envEntries) != 2 {
+		t.Fatalf("expected 2 env entries (PATH + SHELL), got %d: %v", len(envEntries), envEntries)
 	}
-	if !strings.Contains(envEntry, bashGuardShimDirName) {
-		t.Errorf("env entry %q does not contain shim dir name", envEntry)
+	var pathEntry, shellEntry string
+	for _, e := range envEntries {
+		switch {
+		case strings.HasPrefix(e, "PATH="):
+			pathEntry = e
+		case strings.HasPrefix(e, "SHELL="):
+			shellEntry = e
+		}
+	}
+	if pathEntry == "" {
+		t.Errorf("missing PATH= entry in %v", envEntries)
+	}
+	if shellEntry == "" {
+		t.Errorf("missing SHELL= entry in %v", envEntries)
+	}
+	if !strings.Contains(pathEntry, bashGuardShimDirName) {
+		t.Errorf("PATH entry %q does not contain shim dir name", pathEntry)
+	}
+	if !strings.Contains(shellEntry, bashGuardShimDirName) {
+		t.Errorf("SHELL entry %q does not contain shim dir name", shellEntry)
+	}
+	if !strings.HasSuffix(shellEntry, "/bash") {
+		t.Errorf("SHELL entry %q does not point at the shim's bash file", shellEntry)
 	}
 
 	shim := filepath.Join(worktree, bashGuardShimDirName, "bash")
@@ -70,8 +91,13 @@ func TestSetupBashGuardShim_IsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second setup: %v", err)
 	}
-	if first != second {
-		t.Errorf("env entry changed across calls: %q vs %q", first, second)
+	if len(first) != len(second) {
+		t.Fatalf("env entry count changed across calls: %d vs %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("env entry %d changed across calls: %q vs %q", i, first[i], second[i])
+		}
 	}
 }
 

@@ -52,29 +52,37 @@ func resolveBashGuardBinary() string {
 }
 
 // setupBashGuardShim writes the per-worktree bash shim and returns the
-// "PATH=<shim>:<inherited>" env entry that the caller should pass into
-// claude.RunCLIStreamingContext via extraEnv. On error, the function
-// returns ("", err) — the caller logs the error and proceeds without
-// wiring. The shim is written each call (idempotent: same contents on
-// repeat) so a manually deleted shim self-heals on the next astromech
-// session.
+// env entries the caller should pass into claude.RunCLIStreamingContext
+// via extraEnv. Two entries are returned, in this order:
+//
+//  1. PATH=<shimDir>:<inherited PATH> — covers any subprocess that
+//     resolves `bash` via PATH lookup.
+//  2. SHELL=<shimDir>/bash — covers Claude CLI's Bash tool, which
+//     resolves the shell via $SHELL as an absolute path rather than
+//     PATH. Without this entry the shim is unreachable for the only
+//     invocation that matters (empirical investigation 2026-04-29).
+//
+// On error, the function returns (nil, err) — the caller logs the
+// error and proceeds without wiring. The shim is written each call
+// (idempotent: same contents on repeat) so a manually deleted shim
+// self-heals on the next astromech session.
 //
 // D2 T1-3 / Path B per docs/roadmap.md §D2: PATH-based wrapping. Claude
-// CLI's Bash tool launches `bash -c <cmd>`; with our shim resolved
-// first via PATH, that bash invocation becomes our gatekeeper. The
-// shim parses the `-c <cmd>` form, calls force-bash-guard, and on
+// CLI's Bash tool launches `bash -c <cmd>` via $SHELL; with our shim
+// pointed-at by SHELL, that bash invocation becomes our gatekeeper.
+// The shim parses the `-c <cmd>` form, calls force-bash-guard, and on
 // approval exec's /bin/bash.
-func setupBashGuardShim(worktreeDir string) (string, error) {
+func setupBashGuardShim(worktreeDir string) ([]string, error) {
 	if worktreeDir == "" {
-		return "", fmt.Errorf("setupBashGuardShim: empty worktreeDir")
+		return nil, fmt.Errorf("setupBashGuardShim: empty worktreeDir")
 	}
 	bin := resolveBashGuardBinary()
 	if bin == "" {
-		return "", fmt.Errorf("setupBashGuardShim: %s binary not found (build with `make build-bash-guard` or set FORCE_BASH_GUARD_BIN)", BashGuardBinaryName)
+		return nil, fmt.Errorf("setupBashGuardShim: %s binary not found (build with `make build-bash-guard` or set FORCE_BASH_GUARD_BIN)", BashGuardBinaryName)
 	}
 	shimDir := filepath.Join(worktreeDir, bashGuardShimDirName)
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
-		return "", fmt.Errorf("setupBashGuardShim: mkdir %s: %w", shimDir, err)
+		return nil, fmt.Errorf("setupBashGuardShim: mkdir %s: %w", shimDir, err)
 	}
 	shimPath := filepath.Join(shimDir, "bash")
 	contents := bashShimSource(bin)
@@ -83,15 +91,16 @@ func setupBashGuardShim(worktreeDir string) (string, error) {
 	// astromech start-up.
 	tmp := shimPath + ".tmp"
 	if err := os.WriteFile(tmp, []byte(contents), 0o755); err != nil {
-		return "", fmt.Errorf("setupBashGuardShim: write tmp shim: %w", err)
+		return nil, fmt.Errorf("setupBashGuardShim: write tmp shim: %w", err)
 	}
 	if err := os.Rename(tmp, shimPath); err != nil {
 		_ = os.Remove(tmp)
-		return "", fmt.Errorf("setupBashGuardShim: rename tmp shim: %w", err)
+		return nil, fmt.Errorf("setupBashGuardShim: rename tmp shim: %w", err)
 	}
 	pathEntry := fmt.Sprintf("PATH=%s%s%s",
 		shimDir, string(os.PathListSeparator), os.Getenv("PATH"))
-	return pathEntry, nil
+	shellEntry := fmt.Sprintf("SHELL=%s", shimPath)
+	return []string{pathEntry, shellEntry}, nil
 }
 
 // bashShimSource returns the contents of the per-worktree bash shim.
