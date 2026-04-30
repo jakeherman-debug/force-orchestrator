@@ -551,3 +551,39 @@ plus `force render-rules` operating against a fresh in-memory DB by
 default) is the systemic fix that makes the dev-DB-staleness signal
 stop being mistaken for source-level drift. It's small and lands on
 its own branch ahead of D3 Phase 3.
+
+---
+
+### 2026-04-30 — repo-layout reorg
+
+Closure documents moved from repo root to `docs/closures/`;
+audit/historical artifacts moved from repo root to
+`docs/operator-archives/`. Repo root post-move contains only
+`README.md`, `CLAUDE.md`, `FIX-LOG.md`. Cross-references in
+`docs/*.md`, `README.md`, and the embedded fixlog content
+(`internal/store/fixlog/fix8d.md`) were all updated; CLAUDE.md
+was byte-identical post-rerender (no audit-slice references
+touched); FIX-LOG.md regenerated cleanly. `./force render-rules
+--check` exits 0 post-merge.
+
+**Operator-discretion:** future closure documents (D4–D10) ship
+into `docs/closures/`, not the root. README.md gained a "Repo
+layout" section memorialising this so the convention survives the
+next contributor.
+
+**Files moved (11):**
+
+| From | To |
+|---|---|
+| `DELIVERABLE-{0,1,2,3}-CLOSURE.md` | `docs/closures/` |
+| `FIX-{8D,8E,8F}-CLOSURE.md` | `docs/closures/` |
+| `AUDIT.md`, `AUDIT-VERIFICATION.md`, `AUDIT-TEST-MANIFEST.md`, `FINAL-STATUS.md` | `docs/operator-archives/` |
+
+**Files modified for cross-references (6):** `docs/roadmap.md`
+(47 hits + 4 prose contradictions), `docs/dashboard-implementation.md`
+(1), `docs/next-gen-agents.md` (1), `README.md` (1 reference + new
+Repo layout section), `internal/store/fixlog/fix8d.md` (2),
+`FIX-LOG.md` (regenerated).
+
+No deliverable-status change; D3 remains 🟡 PARTIAL (Phases 1–2
+closed). This addendum records operational hygiene only.
