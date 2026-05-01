@@ -1,0 +1,17 @@
+agent: ask
+description: |
+  Ask `/` shortcut handler (D3 P6B.10). Free-form operator question
+  → structured answer with cite links. Pattern P-AskNoWriteTools
+  forbids any reach into a store mutator from this agent — the tool
+  surface is empty; routing happens via Go-side read-only helpers.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic routing in Go (askConvoy,
+  askTask, askSearch). D3 polish-pass iteration 2 wires the live
+  Haiku path through claude.CallWithTranscript with this profile,
+  gated by LIVE_HAIKU_DISABLED env flag. The routing helpers stay
+  the SAME — only the answer-prose synthesis migrates from
+  deterministic format strings to a Haiku call. No write tools
+  granted: Pattern P-AskNoWriteTools holds at the capability layer
+  AND at the audit layer.

@@ -16,9 +16,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"force-orchestrator/internal/agents/briefing_prompts"
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -64,11 +66,13 @@ func RenderBriefing(ctx context.Context, db *sql.DB, decisionKind string, decisi
 	}
 	priorJSON, _ := json.Marshal(prior)
 
-	// Build briefing text. Production wires through Haiku via the
-	// claude package; for 6A we synthesise a structured summary that
-	// only references real IDs (Pattern P29 contract). The synthesis
-	// is non-LLM and bounded to the input, so by construction every
-	// ID it mentions came from the DB.
+	// Build briefing text. Default deterministic synth shape preserves
+	// Pattern P29 (every ID mentioned came from the DB-sourced input).
+	// Live Haiku path (D3 polish-pass iteration 2): when
+	// LIVE_HAIKU_DISABLED is unset, route through CallWithTranscript.
+	// Pattern P29 still holds because the prior_similar list is
+	// computed from the DB BEFORE Haiku sees the prompt — the model
+	// can only reference IDs we hand it.
 	text := synthesiseBriefingText(decisionKind, decisionID, prior)
 
 	// Daily cost cap.
@@ -77,6 +81,12 @@ func RenderBriefing(ctx context.Context, db *sql.DB, decisionKind string, decisi
 	if overCap {
 		text = briefing_prompts.FallbackBriefing
 		costUSD = 0
+	} else if !liveHaikuDisabled() {
+		if live, err := callBriefingHaiku(ctx, decisionKind, decisionID, prior); err == nil && strings.TrimSpace(live) != "" {
+			text = live
+		} else if err != nil {
+			log.Printf("[BRIEFING-RENDER] live Haiku failed, falling back to deterministic: %v", err)
+		}
 	}
 
 	res, err := db.ExecContext(ctx, `INSERT INTO BriefingRenders
@@ -119,6 +129,33 @@ func latestBriefingRender(ctx context.Context, db *sql.DB, kind string, id int64
 		&b.CounterProposalKind, &b.CounterProposalText, &b.CounterProposalRoutedID,
 	)
 	return b, err
+}
+
+// callBriefingHaiku is the live Haiku path. Builds the prompt by
+// substituting {decision_json} + {prior_similar_json} into the
+// briefing prompt template, then routes through CallWithTranscript
+// so the call is recorded in LLMCallTranscripts (Pattern P31).
+// Pattern P29 holds because every ID in `prior` came from the DB
+// query — the model can only reference what we hand it.
+func callBriefingHaiku(ctx context.Context, kind string, id int64, prior []PriorSimilarDecision) (string, error) {
+	prof, err := loadRendererProfile("briefing-renderer")
+	if err != nil {
+		return "", fmt.Errorf("load profile: %w", err)
+	}
+	decisionJSON, _ := json.Marshal(map[string]any{"kind": kind, "id": id})
+	priorJSON, _ := json.Marshal(prior)
+	userPrompt := briefing_prompts.PromptTemplate
+	userPrompt = strings.Replace(userPrompt, "{decision_json}", string(decisionJSON), 1)
+	userPrompt = strings.Replace(userPrompt, "{prior_similar_json}", string(priorJSON), 1)
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "briefing-renderer",
+		PromptVersion: briefing_prompts.PromptVersion,
+	}, "", userPrompt,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if err != nil {
+		return "", fmt.Errorf("CallWithTranscript: %w", err)
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // synthesiseBriefingText produces a structured, hallucination-free

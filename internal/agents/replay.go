@@ -21,8 +21,12 @@ package agents
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log"
+	"strings"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -101,15 +105,24 @@ func ReplayDecision(ctx context.Context, db *sql.DB, eventKind string, eventID i
 		originalPV = "v0"
 	}
 
-	// Synthesise a "replayed" response. Deterministic shape: the
-	// response carries a tag derived from the input + current
-	// prompt version. The decision_changed bit fires when the tag
-	// changes versus the original. Live-Haiku swap is mechanical:
-	// replace this with a CallWithTranscript call in the wrapper
-	// that records the replay's own transcript row.
-	replayedResp := synthesiseReplayResponse(originalUsr, currentPromptVersion)
-	decisionChanged := !equalishHead(originalResp, replayedResp, 80)
+	// Replayed response. Deterministic synth in env-flagged mode;
+	// live Haiku call otherwise. The live path returns structured
+	// JSON ({"decision":"approve|reject|defer", "rationale":"..."})
+	// so the decision_changed comparison can do a key-by-key diff
+	// (C2). Deterministic mode keeps equalishHead(80) as the fallback
+	// because the synth output is plain text.
 	cost := 0.0
+	replayedResp := synthesiseReplayResponse(originalUsr, currentPromptVersion)
+	usingLive := false
+	if !liveHaikuDisabled() {
+		if live, err := callReplayHaiku(ctx, agent, originalSys, originalUsr, currentPromptVersion); err == nil && strings.TrimSpace(live) != "" {
+			replayedResp = live
+			usingLive = true
+		} else if err != nil {
+			log.Printf("[REPLAY] live Haiku failed, falling back to deterministic: %v", err)
+		}
+	}
+	decisionChanged := compareReplayResponses(originalResp, replayedResp, usingLive)
 
 	// Write the replay's audit row + own transcript row. NO other
 	// writes — this is the entire enforced surface for replay.
@@ -190,6 +203,101 @@ func LoadReplayResult(ctx context.Context, db *sql.DB, id int64) (ReplayResult, 
 		).Scan(&r.OriginalResponse)
 	}
 	return r, nil
+}
+
+// callReplayHaiku is the live Haiku path. Re-runs the original
+// decision under the current prompt version. The system prompt /
+// user prompt are the original transcript's prompts so the live
+// model sees the SAME inputs as the historical call (per the
+// replay contract). Returns the structured JSON response.
+func callReplayHaiku(ctx context.Context, agent, originalSys, originalUsr, currentPromptVersion string) (string, error) {
+	prof, err := loadRendererProfile("replay")
+	if err != nil {
+		return "", fmt.Errorf("load profile: %w", err)
+	}
+	// The replay call instructs the model to return a structured
+	// JSON object so the C2 decision-changed diff is mechanical.
+	systemPrompt := originalSys
+	if systemPrompt != "" {
+		systemPrompt += "\n\n"
+	}
+	systemPrompt += `When you respond, return a SINGLE JSON object on the LAST line of your output:
+  {"decision": "<approve|reject|defer>", "rationale": "<short reason>"}
+Do not wrap in code fences. The decision field MUST be one of: approve, reject, defer.`
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         agent + "-replay",
+		PromptVersion: currentPromptVersion,
+	}, systemPrompt, originalUsr,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if err != nil {
+		return "", fmt.Errorf("CallWithTranscript: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// compareReplayResponses returns the decision_changed bit. On the
+// live path (usingLive=true), parse the trailing JSON object out of
+// each response and key-by-key diff: a change in decision OR
+// rationale counts as changed (per the C2 brief). Falls back to
+// equalishHead(80) when JSON parsing fails OR on the deterministic
+// path where the responses are not JSON.
+func compareReplayResponses(original, replayed string, usingLive bool) bool {
+	if !usingLive {
+		// Deterministic synth path: equalishHead(80) is the
+		// stable comparator from iter1.
+		return !equalishHead(original, replayed, 80)
+	}
+	origParsed, origOK := parseReplayDecisionJSON(original)
+	replParsed, replOK := parseReplayDecisionJSON(replayed)
+	if !origOK || !replOK {
+		// JSON-parse failure on either side falls back to equalishHead.
+		// The historical original-response side was sometimes plain
+		// text (pre-replay-structured-output rows) so this fallback
+		// keeps the comparator useful for those rows too.
+		return !equalishHead(original, replayed, 80)
+	}
+	// Key-by-key diff: a change in decision OR rationale fires.
+	if origParsed["decision"] != replParsed["decision"] {
+		return true
+	}
+	if origParsed["rationale"] != replParsed["rationale"] {
+		return true
+	}
+	return false
+}
+
+// parseReplayDecisionJSON extracts the trailing JSON object from a
+// model response. Returns the parsed map + ok=true on success;
+// (nil, false) on any failure (no JSON found, malformed, missing
+// expected keys). The model is instructed to put the JSON on the
+// LAST line, but tolerant to fences / extra trailing whitespace.
+func parseReplayDecisionJSON(s string) (map[string]string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	// Find the last '{' / '}' pair — the response may include
+	// reasoning text BEFORE the JSON object.
+	open := strings.LastIndex(s, "{")
+	close := strings.LastIndex(s, "}")
+	if open < 0 || close < 0 || close < open {
+		return nil, false
+	}
+	candidate := s[open : close+1]
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(candidate), &raw); err != nil {
+		return nil, false
+	}
+	out := map[string]string{}
+	for k, v := range raw {
+		if str, ok := v.(string); ok {
+			out[k] = str
+		}
+	}
+	if _, ok := out["decision"]; !ok {
+		return nil, false
+	}
+	return out, true
 }
 
 // synthesiseReplayResponse is the deterministic-prose stand-in for the

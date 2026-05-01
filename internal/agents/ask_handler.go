@@ -23,9 +23,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -86,18 +88,69 @@ func AskHandle(ctx context.Context, db *sql.DB, question string) (AskAnswer, err
 
 	// Read-only tool routing — derive answer from query string.
 	// Each branch uses ONLY read helpers (search, load, list).
-	// Live-Haiku swap replaces this routing with a tool-equipped
-	// CallWithTranscript call; the underlying read helpers stay
-	// the same.
+	// The cite list is computed BEFORE the optional Haiku call so
+	// even on the live path the IDs surfaced to the operator are
+	// the IDs we found in the DB (Pattern P-AskNoWriteTools /
+	// no-hallucinated-IDs contract).
 	answer, cites := routeAsk(ctx, db, q)
+	costUSD := 0.0
+
+	// Live Haiku path (D3 polish-pass iteration 2): when the
+	// LIVE_HAIKU_DISABLED env flag is unset, hand the structured
+	// (question, evidence-summary, cites) tuple to Haiku for a
+	// friendlier prose answer. The cite list is unchanged — the
+	// live path only re-renders the prose.
+	if !liveHaikuDisabled() {
+		if live, livecost, err := callAskHaiku(ctx, q, answer, cites); err == nil && strings.TrimSpace(live) != "" {
+			answer = live
+			costUSD = livecost
+		} else if err != nil {
+			log.Printf("[ASK] live Haiku failed, falling back to deterministic routed answer: %v", err)
+		}
+	}
 
 	return AskAnswer{
-		Question:  q,
-		Answer:    answer,
-		CiteLinks: cites,
-		CostUSD:   0, // deterministic synth path
+		Question:   q,
+		Answer:     answer,
+		CiteLinks:  cites,
+		CostUSD:    costUSD,
 		AnsweredAt: store.NowSQLite(),
 	}, nil
+}
+
+// callAskHaiku is the live Haiku path. The structured evidence (the
+// deterministic-routed answer + cite list) is inlined in the user
+// prompt so the model can ONLY reference IDs we found in the DB.
+// Pattern P-AskNoWriteTools holds at the capability layer (the
+// `ask` profile grants no tools); this wrapper provides additional
+// defense by NOT giving the model tool access at the wrapper layer.
+func callAskHaiku(ctx context.Context, question, evidence string, cites []AskCite) (string, float64, error) {
+	prof, err := loadRendererProfile("ask")
+	if err != nil {
+		return "", 0, fmt.Errorf("load profile: %w", err)
+	}
+	citesJSON, _ := json.Marshal(cites)
+	userPrompt := fmt.Sprintf(`The operator asked: %q
+
+A read-only DB lookup produced this evidence summary:
+%s
+
+Cite refs (use these verbatim if you mention them; do NOT invent IDs):
+%s
+
+Render a 1-3 sentence conversational answer. Cite specific IDs from
+the cite refs above when relevant. Do NOT invent IDs not in the cite
+refs. If the evidence is empty, say "No matches found" succinctly.`,
+		question, evidence, string(citesJSON))
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "ask",
+		PromptVersion: "ask-v1",
+	}, "", userPrompt,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if err != nil {
+		return "", 0, fmt.Errorf("CallWithTranscript: %w", err)
+	}
+	return strings.TrimSpace(out), 0.001, nil
 }
 
 // routeAsk inspects the question for keyword patterns and returns a

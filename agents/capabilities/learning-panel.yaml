@@ -1,0 +1,15 @@
+agent: learning-panel
+description: |
+  Fleet learning panel renderer (D3 P6B.12). Weekly auto-rendered
+  prose summary of how the fleet itself is changing — promotion
+  proposals, proposed features, convoy review activity, spec
+  amendments. Pure-reasoning over a structured stats snapshot.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic SynthesiseLearningPanelProse stub.
+  D3 polish-pass iteration 2 wires the live Haiku path through
+  claude.CallWithTranscript with this profile, gated by
+  LIVE_HAIKU_DISABLED env flag. The Sources field carries DB-sourced
+  refs (PromotionProposals/<id>, ProposedFeatures/<id>) so the live
+  path's citations remain anchored to real rows.

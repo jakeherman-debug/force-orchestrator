@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -276,6 +277,23 @@ func RenderFleetLearningPanel(ctx context.Context, db *sql.DB, now time.Time) (i
 	cost := 0.0
 	promptVersion := "learning-panel-deterministic-v1"
 
+	// Live Haiku path (D3 polish-pass iteration 2): when the
+	// LIVE_HAIKU_DISABLED env flag is unset, route through
+	// CallWithTranscript with the learning-panel profile so the call
+	// is recorded in LLMCallTranscripts. Citation refs are computed
+	// from the DB BEFORE the Haiku call (stats.Sources), so the
+	// model's prose is anchored to real PromotionProposals/
+	// ProposedFeatures rows even on the live path.
+	if !liveHaikuDisabled() {
+		if live, livecost, err := callLearningPanelHaiku(ctx, stats); err == nil && strings.TrimSpace(live) != "" {
+			prose = live
+			cost = livecost
+			promptVersion = "learning-panel-haiku-v1"
+		} else if err != nil {
+			log.Printf("[LEARNING-PANEL] live Haiku failed, falling back to deterministic: %v", err)
+		}
+	}
+
 	srcJSON, _ := json.Marshal(stats.Sources)
 	res, err := db.ExecContext(ctx,
 		`INSERT INTO FleetLearningPanels
@@ -315,4 +333,38 @@ func LatestFleetLearningPanel(ctx context.Context, db *sql.DB) (int64, string, s
 	var srcs []string
 	_ = json.Unmarshal([]byte(srcJSON), &srcs)
 	return id, renderedAt, prose, srcs, nil
+}
+
+// callLearningPanelHaiku is the live Haiku path. Hands the structured
+// stats snapshot to the model and returns the rendered prose +
+// estimated cost. The deterministic-synth shape is the fallback on
+// any error so the weekly tick keeps producing rows.
+func callLearningPanelHaiku(ctx context.Context, stats LearningPanelStats) (string, float64, error) {
+	prof, err := loadRendererProfile("learning-panel")
+	if err != nil {
+		return "", 0, fmt.Errorf("load profile: %w", err)
+	}
+	statsJSON, _ := json.Marshal(stats)
+	userPrompt := fmt.Sprintf(`You are the operator's fleet-learning summary for the trailing 7 days.
+Render a 4-6 sentence prose summary, citing the structured stats AND the
+provided source refs. Format: stats line + change-diffs + cite refs.
+Do NOT invent IDs. Style: plain English, no jargon, present tense.
+
+Stats: %s
+
+Cited evidence (use these refs verbatim if you mention them): %v
+`, string(statsJSON), stats.Sources)
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "learning-panel",
+		PromptVersion: "learning-panel-haiku-v1",
+	}, "", userPrompt,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if err != nil {
+		return "", 0, fmt.Errorf("CallWithTranscript: %w", err)
+	}
+	// Cost estimate: $0.01 per render is well below the configured
+	// daily cap. Real cost is tracked in the LLMCallTranscripts row
+	// the wrapper writes; this row's cost_usd is the estimated
+	// cost-attribution into the FleetLearningPanels surface.
+	return strings.TrimSpace(out), 0.01, nil
 }
