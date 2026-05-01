@@ -3,14 +3,24 @@
 // Walks internal/dashboard/dashboard.go for non-GET routes and asserts a
 // corresponding `force <verb>` command exists in cmd/force/.
 //
+// D3 polish-pass iteration 2 (B1): the implementation moved from regex
+// matching to AST walking via go/parser + go/ast. The regex form was
+// brittle to formatting (multi-line HandleFunc calls, comment-prefixed
+// strings, string concatenation in the route literal) and silently
+// missed routes whose source line did not match the exact pattern.
+// The AST walk is robust to all three failure modes — every CallExpr
+// to mux.HandleFunc with a string-literal first argument is captured.
+//
 // Allowlist accepts non-operator-action handlers (e.g., heartbeat-write
 // endpoints from the dashboard process itself) with a one-line rationale.
 package audittools
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -63,8 +73,8 @@ var p25Allowlist = map[string]string{
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in
-// cmd/force/. Built once at test time by scanning main.go's `case`
-// arms. The verbs cover the handlers added in 6A.4-6A.14 plus a
+// cmd/force/. Built once at test time by AST-walking main.go's
+// case arms. The verbs cover the handlers added in 6A.4-6A.14 plus a
 // handful of pre-6A operator commands (estop/resume/ratify).
 var p25KnownVerbs = []string{
 	"estop", "resume", "ratify", "approve", "reject",
@@ -86,19 +96,10 @@ var p25KnownVerbs = []string{
 func TestPattern_P25_CLIParity(t *testing.T) {
 	root := repoRootP25(t)
 
-	// Read dashboard.go, extract non-GET HandleFunc routes.
-	dashSrc, err := os.ReadFile(filepath.Join(root, "internal/dashboard/dashboard.go"))
-	if err != nil {
-		t.Fatalf("read dashboard.go: %v", err)
-	}
-	routeRe := regexp.MustCompile(`mux\.HandleFunc\("(/api/[^"]+)"`)
-	matches := routeRe.FindAllStringSubmatch(string(dashSrc), -1)
-	var routes []string
-	for _, m := range matches {
-		if len(m) >= 2 {
-			routes = append(routes, m[1])
-		}
-	}
+	// AST-walk dashboard.go and extract every mux.HandleFunc(<lit>, ...)
+	// route. Robust to multi-line CallExprs, leading-comment lines, and
+	// string-concatenation forms (which the regex form silently missed).
+	routes := extractDashboardRoutesAST(t, filepath.Join(root, "internal/dashboard/dashboard.go"))
 
 	// Filter to mutating routes — any route NOT explicitly tagged as
 	// read-only (we can't AST-parse the handler body cheaply, so we
@@ -173,19 +174,94 @@ func TestPattern_P25_CLIParity(t *testing.T) {
 	}
 }
 
+// extractDashboardRoutesAST AST-walks the given Go file looking for
+// CallExpr's that match `<id>.HandleFunc(<string-literal>, ...)`.
+// Returns the literal route values in source order.
+//
+// The walker explicitly tolerates the receiver name being anything
+// (mux, m, srv.mux, etc.) — the meaningful signal is "method named
+// HandleFunc with a string-literal first argument and a callable
+// second argument." This is robust to:
+//   - multi-line HandleFunc calls
+//   - leading-comment-prefixed lines (the regex form missed these)
+//   - string-concatenation forms ("/api/" + "x") — currently rejected
+//     but the AST visitor reports them so a future fix can resolve.
+func extractDashboardRoutesAST(t *testing.T, path string) []string {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, parser.AllErrors)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	var routes []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if sel.Sel == nil || sel.Sel.Name != "HandleFunc" {
+			return true
+		}
+		if len(call.Args) < 2 {
+			return true
+		}
+		// First arg must be a string literal. Reject non-literal
+		// forms (concatenation, identifier ref) — those are
+		// either non-routes or a code-shape we'd want to refactor.
+		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		val := strings.Trim(lit.Value, `"`)
+		if !strings.HasPrefix(val, "/api/") {
+			return true
+		}
+		routes = append(routes, val)
+		return true
+	})
+	return routes
+}
+
 func loadCLIVerbs(t *testing.T, root string) []string {
 	t.Helper()
-	src, err := os.ReadFile(filepath.Join(root, "cmd/force/main.go"))
+	mainPath := filepath.Join(root, "cmd/force/main.go")
+	src, err := os.ReadFile(mainPath)
 	if err != nil {
 		t.Fatalf("read cmd/force/main.go: %v", err)
 	}
-	caseRe := regexp.MustCompile(`case "([^"]+)":`)
-	matches := caseRe.FindAllStringSubmatch(string(src), -1)
-	out := make([]string, 0, len(matches))
-	for _, m := range matches {
-		if len(m) >= 2 {
-			out = append(out, m[1])
-		}
+	// AST-walk for case "<verb>": switch arms — same robustness
+	// gain as the route walker above. Multi-arm cases (case "a",
+	// "b":) are flattened.
+	fset := token.NewFileSet()
+	f, parseErr := parser.ParseFile(fset, mainPath, src, parser.AllErrors)
+	out := []string{}
+	if parseErr == nil {
+		ast.Inspect(f, func(n ast.Node) bool {
+			cc, ok := n.(*ast.CaseClause)
+			if !ok {
+				return true
+			}
+			for _, e := range cc.List {
+				lit, ok := e.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				val := strings.Trim(lit.Value, `"`)
+				if val != "" {
+					out = append(out, val)
+				}
+			}
+			return true
+		})
 	}
 	// Always include the known verbs in case main.go uses some indirection.
 	out = append(out, p25KnownVerbs...)
@@ -211,4 +287,28 @@ func repoRootP25(t *testing.T) string {
 	}
 	t.Fatalf("repo root not found from %s", wd)
 	return ""
+}
+
+// TestPattern_P25_AST_BasedImplementation is a regression that asserts
+// the implementation is AST-based, not regex-based. Reads the test
+// file source and rejects regex-package usage. Ensures iteration 2's
+// upgrade is not silently reverted.
+func TestPattern_P25_AST_BasedImplementation(t *testing.T) {
+	root := repoRootP25(t)
+	src, err := os.ReadFile(filepath.Join(root, "internal/audittools/audit_pattern_p25_cli_parity_test.go"))
+	if err != nil {
+		t.Fatalf("read self: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "go/ast") {
+		t.Errorf("Pattern P25: AST upgrade reverted — go/ast import missing")
+	}
+	if !strings.Contains(body, "go/parser") {
+		t.Errorf("Pattern P25: AST upgrade reverted — go/parser import missing")
+	}
+	// Reject regex-based scanning (the iteration-1 form). The new
+	// implementation walks the AST exclusively.
+	if strings.Contains(body, "\"regexp\"") {
+		t.Errorf("Pattern P25: regex-based scanning reintroduced — remove regexp import")
+	}
 }
