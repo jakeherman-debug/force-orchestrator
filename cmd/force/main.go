@@ -414,6 +414,11 @@ func main() {
 	case "costs":
 		cmdCosts(db)
 
+	case "notifications":
+		// D3 P6A.4 — `force notifications budget ...` parity with PUT
+		// /api/notifications/budgets/:source/:channel.
+		os.Exit(cmdNotifications(db, os.Args[2:]))
+
 	case "dashboard":
 		port := 8080
 		if len(os.Args) >= 4 && os.Args[2] == "--port" {

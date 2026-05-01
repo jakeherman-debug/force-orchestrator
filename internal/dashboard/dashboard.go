@@ -78,6 +78,10 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/disagreement-rates", handleDisagreementRates(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
+	// ── D3 P6A.4 — Operator notification budget config endpoints.
+	mux.HandleFunc("/api/notifications/budgets", handleNotificationBudgets(db))
+	mux.HandleFunc("/api/notifications/budgets/", handleNotificationBudgetUpsert(db))
+
 	// ── D3 P6A.1 — Three-surface IA. Top-level navigation is capped at three
 	// surfaces forever: Pulse / Briefing / Reflection. Each handler emits a
 	// thin HTML shell that loads the SPA at the matching hash fragment.
