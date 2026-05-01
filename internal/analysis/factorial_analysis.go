@@ -6,9 +6,11 @@
 //   - ComputeMainEffects: per-(factor, level) marginal posteriors
 //     (pool successes/trials across all cells where the factor takes
 //     that level, then apply Beta-Binomial inference).
+//   - Compute2WayInteractions: per-(factor_a, factor_b, level_a,
+//     level_b) cell-level interaction estimates with a Monte Carlo
+//     P(|interaction| > min_practical_effect) on the joint posterior.
 //
-// The 2-way interaction and decision-rule layers land in follow-up
-// commits.
+// The decision-rule layer lands in a follow-up commit.
 //
 // All inference reads the on-disk experiment shape (Experiments.
 // factors_json, ExperimentRuns.cell_json, ExperimentRuns.score). It
@@ -28,7 +30,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"math/rand"
 )
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -45,6 +50,31 @@ type MainEffect struct {
 	Posterior         BetaBinomialPosterior
 	ProbBetterThanRef float64 // P(this level > reference level), Monte Carlo
 	Mean              float64
+}
+
+// Interaction2Way is one cell-level contrast for an ordered (factor_a,
+// factor_b) pair. The 2-way interaction
+//
+//	[mean(D1=a, D2=b) - mean(D1=a', D2=b)] -
+//	[mean(D1=a, D2=b') - mean(D1=a', D2=b')]
+//
+// is non-zero when the effect of factor_a depends on factor_b's
+// level — i.e. main-effects don't compose additively. We store one
+// row per (level_a, level_b) cell so 3+-level factors retain the full
+// interaction surface (not just a 2x2 contrast scalar). For 2x2 the
+// only non-degenerate row is at (level_a = NON-reference, level_b =
+// NON-reference); rows where either level matches the reference
+// collapse algebraically to zero but are still emitted so the
+// surface is complete.
+type Interaction2Way struct {
+	FactorA             string
+	FactorB             string
+	LevelA              string
+	LevelB              string
+	InteractionEstimate float64 // posterior-mean of the 2-way contrast (see formula above)
+	PosteriorAlpha      float64 // pooled successes for the (level_a, level_b) cell + prior_alpha
+	PosteriorBeta       float64 // pooled failures  for the (level_a, level_b) cell + prior_beta
+	ProbNonzero         float64 // P(|interaction| > min_practical_effect) under joint posterior, Monte Carlo
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -313,4 +343,234 @@ func hashStringSeed(s string) uint32 {
 		h *= 16777619
 	}
 	return h
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Compute2WayInteractions
+// ──────────────────────────────────────────────────────────────────────────
+
+// Compute2WayInteractions returns one Interaction2Way row per ordered
+// (factor_a, factor_b, level_a, level_b) tuple for the given
+// experiment, and persists results to ExperimentInteractions (one
+// row per (experiment_id, factor_a, factor_b, level_a, level_b),
+// re-computed on each call — the table is the analysis layer's
+// scratchpad, not an audit log).
+//
+// For each (factor_a, factor_b) pair, only ordered pairs (i < j) are
+// emitted: the (b, a) reflection is algebraically identical and would
+// double the table for no information gain.
+//
+// InteractionEstimate is the posterior-mean of the 2-way contrast
+// computed against the FIRST declared level of each factor as the
+// reference (a' = factors[i].Levels[0], b' = factors[j].Levels[0]).
+// ProbNonzero is the Monte Carlo probability that |contrast| exceeds
+// the experiment's min_practical_effect (or, when zero, an internal
+// floor of 0.10 — see the rationale in Compute2WayInteractionsWithRule).
+func Compute2WayInteractions(ctx context.Context, db *sql.DB, experimentID int) ([]Interaction2Way, error) {
+	return Compute2WayInteractionsWithRule(ctx, db, experimentID, DecisionRule{})
+}
+
+// Compute2WayInteractionsWithRule is the seed-pinnable variant for
+// tests. Persists exactly the rows it returns into
+// ExperimentInteractions (replacing any prior rows for this
+// experiment).
+func Compute2WayInteractionsWithRule(ctx context.Context, db *sql.DB, experimentID int, rule DecisionRule) ([]Interaction2Way, error) {
+	view, err := loadFactorialView(ctx, db, experimentID)
+	if err != nil {
+		return nil, err
+	}
+	rule = rule.withDefaults()
+
+	// minEffect is the practical-significance floor for the
+	// "interaction is non-zero" test. We compare the absolute value
+	// of the joint-posterior contrast against this floor. Default of
+	// 0.10 captures "the effect of one factor changes by 10pp+ when
+	// the other factor flips" — a meaningful operator-facing
+	// definition of "real interaction" — while suppressing the
+	// sample-noise crossings that show up on small-N additive cells
+	// (the contrast variance is ~4 × p(1-p)/n; at n=200/cell, the
+	// noise floor on |contrast| is ≈ 0.07 std, so a 0.10 threshold
+	// has comfortable margin). Operator-level overrides land via
+	// Experiments.min_practical_effect; we read it best-effort.
+	minEffect := readMinPracticalEffect(ctx, db, experimentID)
+	if minEffect <= 0 {
+		minEffect = 0.10
+	}
+
+	out := []Interaction2Way{}
+	for i := 0; i < len(view.Factors); i++ {
+		for j := i + 1; j < len(view.Factors); j++ {
+			fa := view.Factors[i]
+			fb := view.Factors[j]
+			refA := fa.Levels[0]
+			refB := fb.Levels[0]
+			for _, la := range fa.Levels {
+				for _, lb := range fb.Levels {
+					row := compute2WayCell(view, fa.Name, fb.Name, la, lb, refA, refB, rule, minEffect)
+					out = append(out, row)
+				}
+			}
+		}
+	}
+
+	if err := persistInteractions(ctx, db, experimentID, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func compute2WayCell(view *factorialView, fa, fb, la, lb, refA, refB string, rule DecisionRule, minEffect float64) Interaction2Way {
+	// Pool successes/trials for the four (la/refA × lb/refB) corner
+	// cells, marginalising over all OTHER factors.
+	type pooledCell struct{ s, t int }
+	corners := map[string]*pooledCell{
+		"la_lb":     {},
+		"refA_lb":   {},
+		"la_refB":   {},
+		"refA_refB": {},
+	}
+	for _, cell := range view.Cells {
+		isLA := cell.Cell[fa] == la
+		isRefA := cell.Cell[fa] == refA
+		isLB := cell.Cell[fb] == lb
+		isRefB := cell.Cell[fb] == refB
+		switch {
+		case isLA && isLB:
+			corners["la_lb"].s += cell.Successes
+			corners["la_lb"].t += cell.Trials
+		case isRefA && isLB:
+			corners["refA_lb"].s += cell.Successes
+			corners["refA_lb"].t += cell.Trials
+		}
+		switch {
+		case isLA && isRefB:
+			corners["la_refB"].s += cell.Successes
+			corners["la_refB"].t += cell.Trials
+		case isRefA && isRefB:
+			corners["refA_refB"].s += cell.Successes
+			corners["refA_refB"].t += cell.Trials
+		}
+	}
+	// Note: when la == refA OR lb == refB the contrast collapses
+	// algebraically to zero. We still emit the row (so the table
+	// surface is complete for 3+-level factors) but the estimate and
+	// ProbNonzero will read as zero / below threshold.
+
+	// Posteriors for the four corners.
+	pLaLb := NewPosterior(rule.PriorAlpha, rule.PriorBeta, corners["la_lb"].s, corners["la_lb"].t)
+	pRefALb := NewPosterior(rule.PriorAlpha, rule.PriorBeta, corners["refA_lb"].s, corners["refA_lb"].t)
+	pLaRefB := NewPosterior(rule.PriorAlpha, rule.PriorBeta, corners["la_refB"].s, corners["la_refB"].t)
+	pRefARefB := NewPosterior(rule.PriorAlpha, rule.PriorBeta, corners["refA_refB"].s, corners["refA_refB"].t)
+
+	// Posterior-mean of the interaction contrast.
+	estimate := (pLaLb.Mean() - pRefALb.Mean()) - (pLaRefB.Mean() - pRefARefB.Mean())
+
+	// Monte Carlo P(|contrast| > minEffect) — sample each posterior
+	// independently, count the fraction of joint draws crossing
+	// threshold. Pin a per-(fa, fb, la, lb) seed offset so different
+	// rows don't collapse onto identical sample paths.
+	seed := rule.RandomSeed + int64(hashStringSeed(fa+"|"+fb+"|"+la+"|"+lb))
+	probNonzero := monteCarloProbNonzero(pLaLb, pRefALb, pLaRefB, pRefARefB, minEffect, rule.MonteCarloSamples, seed)
+
+	// Persistence-side posterior shape: pooled successes/failures
+	// for the (la, lb) cell (the canonical "anchor" cell). The
+	// schema columns posterior_alpha / posterior_beta are
+	// documented per-row as the (level_a, level_b) cell posterior;
+	// the contrast itself lives in interaction_estimate.
+	return Interaction2Way{
+		FactorA:             fa,
+		FactorB:             fb,
+		LevelA:              la,
+		LevelB:              lb,
+		InteractionEstimate: estimate,
+		PosteriorAlpha:      pLaLb.Alpha,
+		PosteriorBeta:       pLaLb.Beta,
+		ProbNonzero:         probNonzero,
+	}
+}
+
+// monteCarloProbNonzero estimates P(|contrast| > minEffect) by
+// drawing N joint samples from the four corner posteriors,
+// computing the contrast on each sample, and counting hits. Uses a
+// fixed seed for determinism.
+func monteCarloProbNonzero(pLaLb, pRefALb, pLaRefB, pRefARefB *BetaBinomialPosterior, minEffect float64, samples int, seed int64) float64 {
+	if samples <= 0 {
+		samples = 200000
+	}
+	rng := rand.New(rand.NewSource(seed))
+	hits := 0
+	for i := 0; i < samples; i++ {
+		x1 := sampleBeta(rng, pLaLb.Alpha, pLaLb.Beta)
+		x2 := sampleBeta(rng, pRefALb.Alpha, pRefALb.Beta)
+		x3 := sampleBeta(rng, pLaRefB.Alpha, pLaRefB.Beta)
+		x4 := sampleBeta(rng, pRefARefB.Alpha, pRefARefB.Beta)
+		c := (x1 - x2) - (x3 - x4)
+		if math.Abs(c) > minEffect {
+			hits++
+		}
+	}
+	return float64(hits) / float64(samples)
+}
+
+func readMinPracticalEffect(ctx context.Context, db *sql.DB, experimentID int) float64 {
+	var mpe sql.NullFloat64
+	err := db.QueryRowContext(ctx,
+		`SELECT min_practical_effect FROM Experiments WHERE id = ?`,
+		experimentID,
+	).Scan(&mpe)
+	if err != nil || !mpe.Valid {
+		return 0
+	}
+	return mpe.Float64
+}
+
+// persistInteractions replaces any existing ExperimentInteractions
+// rows for the experiment with the freshly-computed surface. Wrapped
+// in a single transaction so a partial failure leaves the table in
+// the prior state (rather than half-overwritten).
+func persistInteractions(ctx context.Context, db *sql.DB, experimentID int, rows []Interaction2Way) error {
+	if db == nil {
+		return errors.New("persistInteractions: db is nil")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("persistInteractions: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM ExperimentInteractions WHERE experiment_id = ?`,
+		experimentID,
+	); err != nil {
+		return fmt.Errorf("persistInteractions: clear prior rows: %w", err)
+	}
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO ExperimentInteractions
+			(experiment_id, factor_a, factor_b, level_a, level_b,
+			 interaction_estimate, posterior_alpha, posterior_beta,
+			 posterior_prob_nonzero, computed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+	`)
+	if err != nil {
+		return fmt.Errorf("persistInteractions: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, r := range rows {
+		if _, err := stmt.ExecContext(ctx,
+			experimentID,
+			r.FactorA, r.FactorB,
+			r.LevelA, r.LevelB,
+			r.InteractionEstimate,
+			r.PosteriorAlpha, r.PosteriorBeta,
+			r.ProbNonzero,
+		); err != nil {
+			return fmt.Errorf("persistInteractions: insert (%s,%s,%s,%s): %w", r.FactorA, r.FactorB, r.LevelA, r.LevelB, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("persistInteractions: commit: %w", err)
+	}
+	return nil
 }

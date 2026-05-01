@@ -310,6 +310,202 @@ func TestMainEffects_3x2_KnownFixture(t *testing.T) {
 	}
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// 2-way interactions — known-fixture tests
+// ──────────────────────────────────────────────────────────────────────────
+
+// Test2WayInteractions_NoInteraction seeds cells where the two main
+// effects compose ADDITIVELY: prompt adds 0.10 regardless of rules
+// level, and rules adds 0.20 regardless of prompt level. Interaction
+// estimate should be near zero, and ProbNonzero should NOT cross the
+// WinnerThreshold (0.95 default).
+//
+//	Cells (successes/trials, all n=200):
+//	  (prompt=A, rules=tight) = 140/200 (0.70)
+//	  (prompt=A, rules=loose) = 100/200 (0.50)
+//	  (prompt=B, rules=tight) = 120/200 (0.60)
+//	  (prompt=B, rules=loose) =  80/200 (0.40)
+//
+//	raw interaction = (0.70 − 0.60) − (0.50 − 0.40) = 0.10 − 0.10 = 0.00
+func Test2WayInteractions_NoInteraction(t *testing.T) {
+	db := openMemoryDB(t)
+	factors := []factorSpec{
+		{Name: "prompt", Levels: []string{"A", "B"}},
+		{Name: "rules", Levels: []string{"tight", "loose"}},
+	}
+	expID := seedFactorialExperiment(t, db, factors, map[string]struct{ Successes, Trials int }{
+		"prompt=A,rules=tight": {140, 200},
+		"prompt=A,rules=loose": {100, 200},
+		"prompt=B,rules=tight": {120, 200},
+		"prompt=B,rules=loose": {80, 200},
+	})
+
+	rule := DecisionRule{RandomSeed: 11111}
+	rows, err := Compute2WayInteractionsWithRule(context.Background(), db, expID, rule)
+	if err != nil {
+		t.Fatalf("Compute2WayInteractions: %v", err)
+	}
+	// Locate the canonical (la=B, lb=loose) anchor row — the only row
+	// with a non-degenerate contrast against the references (refA=A,
+	// refB=tight). When level_a == refA OR level_b == refB the
+	// contrast collapses algebraically to zero; those rows still
+	// appear in the surface (so 3+-level factors retain coverage)
+	// but carry no interaction information.
+	var anchor *Interaction2Way
+	for i := range rows {
+		r := rows[i]
+		if r.LevelA != "B" || r.LevelB != "loose" {
+			continue
+		}
+		anchor = &rows[i]
+	}
+	if anchor == nil {
+		t.Fatalf("no anchor row for (B, loose); rows=%+v", rows)
+	}
+	// Hand-computed posterior-mean of the interaction. Beta(1,1)
+	// prior makes the cell-posterior means almost exactly the raw
+	// rates with a tiny shrinkage toward 0.5 — the contrast is the
+	// difference of differences and should be ~0.0 within 0.05.
+	if math.Abs(anchor.InteractionEstimate) >= 0.05 {
+		t.Errorf("|interaction| should be < 0.05 for additive cells; got %v", anchor.InteractionEstimate)
+	}
+	if anchor.ProbNonzero > 0.95 {
+		t.Errorf("ProbNonzero should be ≤ 0.95 for null-interaction fixture; got %v", anchor.ProbNonzero)
+	}
+}
+
+// Test2WayInteractions_StrongInteraction seeds cells where the
+// interaction is large: A and B reverse on the rules dimension.
+//
+//	Cells (successes/trials, all n=200):
+//	  (prompt=A, rules=tight) = 180/200 (0.90)
+//	  (prompt=A, rules=loose) =  60/200 (0.30)
+//	  (prompt=B, rules=tight) =  60/200 (0.30)
+//	  (prompt=B, rules=loose) = 180/200 (0.90)
+//
+//	raw interaction = (0.90 − 0.30) − (0.30 − 0.90) = 0.60 − (−0.60) = 1.20
+//
+// With Beta(1,1) prior and n=200/cell the cell-posterior means
+// shrink toward 0.5 by ~0.005 each, so the contrast is very close
+// to 1.20 (≥ 1.15).
+func Test2WayInteractions_StrongInteraction(t *testing.T) {
+	db := openMemoryDB(t)
+	factors := []factorSpec{
+		{Name: "prompt", Levels: []string{"A", "B"}},
+		{Name: "rules", Levels: []string{"tight", "loose"}},
+	}
+	expID := seedFactorialExperiment(t, db, factors, map[string]struct{ Successes, Trials int }{
+		"prompt=A,rules=tight": {180, 200},
+		"prompt=A,rules=loose": {60, 200},
+		"prompt=B,rules=tight": {60, 200},
+		"prompt=B,rules=loose": {180, 200},
+	})
+
+	rule := DecisionRule{RandomSeed: 22222}
+	rows, err := Compute2WayInteractionsWithRule(context.Background(), db, expID, rule)
+	if err != nil {
+		t.Fatalf("Compute2WayInteractions: %v", err)
+	}
+	// Canonical non-degenerate anchor: (la=B, lb=loose) with
+	// references (refA=A, refB=tight). Contrast =
+	//
+	//   [mean(B,loose) - mean(A,loose)] - [mean(B,tight) - mean(A,tight)]
+	//   raw : (0.90 - 0.30) - (0.30 - 0.90) = 0.60 - (-0.60) = 1.20
+	var anchor *Interaction2Way
+	for i := range rows {
+		r := rows[i]
+		if r.LevelA != "B" || r.LevelB != "loose" {
+			continue
+		}
+		anchor = &rows[i]
+	}
+	if anchor == nil {
+		t.Fatalf("no anchor row for (B, loose); rows=%+v", rows)
+	}
+	if anchor.InteractionEstimate < 1.15 {
+		t.Errorf("interaction estimate should be near 1.20 for crossover fixture; got %v", anchor.InteractionEstimate)
+	}
+	if anchor.ProbNonzero <= 0.95 {
+		t.Errorf("ProbNonzero should be > 0.95 for strong-interaction fixture; got %v", anchor.ProbNonzero)
+	}
+}
+
+// Test2WayInteractions_PersistsToTable verifies that
+// Compute2WayInteractions writes one row per (factor_a, factor_b,
+// level_a, level_b) tuple into ExperimentInteractions, and that
+// re-running the analyzer replaces (not duplicates) the prior rows.
+func Test2WayInteractions_PersistsToTable(t *testing.T) {
+	db := openMemoryDB(t)
+	ctx := context.Background()
+	factors := []factorSpec{
+		{Name: "prompt", Levels: []string{"A", "B"}},
+		{Name: "rules", Levels: []string{"tight", "loose"}},
+	}
+	expID := seedFactorialExperiment(t, db, factors, map[string]struct{ Successes, Trials int }{
+		"prompt=A,rules=tight": {80, 100},
+		"prompt=A,rules=loose": {60, 100},
+		"prompt=B,rules=tight": {70, 100},
+		"prompt=B,rules=loose": {50, 100},
+	})
+	rule := DecisionRule{RandomSeed: 33333}
+	if _, err := Compute2WayInteractionsWithRule(ctx, db, expID, rule); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM ExperimentInteractions WHERE experiment_id = ?`,
+		expID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	// 1 ordered pair × 2 levels × 2 levels = 4 rows.
+	if count != 4 {
+		t.Errorf("row count after first run: got %d, want 4", count)
+	}
+
+	// Re-run — should replace, not duplicate.
+	if _, err := Compute2WayInteractionsWithRule(ctx, db, expID, rule); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM ExperimentInteractions WHERE experiment_id = ?`,
+		expID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 4 {
+		t.Errorf("row count after re-run: got %d, want 4 (idempotent)", count)
+	}
+
+	// Inspect a row's column values — they should match the in-memory
+	// shape exactly.
+	var (
+		fa, fb, la, lb string
+		estimate       float64
+		alpha, beta    float64
+		probNonzero    float64
+	)
+	if err := db.QueryRowContext(ctx, `
+		SELECT factor_a, factor_b, level_a, level_b,
+		       interaction_estimate, posterior_alpha, posterior_beta,
+		       posterior_prob_nonzero
+		FROM ExperimentInteractions
+		WHERE experiment_id = ? AND level_a = 'A' AND level_b = 'tight'
+	`, expID).Scan(&fa, &fb, &la, &lb, &estimate, &alpha, &beta, &probNonzero); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if fa != "prompt" || fb != "rules" {
+		t.Errorf("(factor_a, factor_b): got (%q, %q), want (prompt, rules)", fa, fb)
+	}
+	if alpha != 81 { // 80 successes + Beta(1,1) prior alpha
+		t.Errorf("posterior_alpha: got %v, want 81", alpha)
+	}
+	if beta != 21 { // 20 failures + Beta(1,1) prior beta
+		t.Errorf("posterior_beta: got %v, want 21", beta)
+	}
+}
+
 // TestBetaBinomial_StillPasses asserts that the existing single-
 // treatment tests in bayesian_beta_binomial_test.go still cover the
 // untouched single-treatment path. We re-call the public surface
