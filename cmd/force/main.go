@@ -428,6 +428,9 @@ func main() {
 	case "attention":
 		os.Exit(cmdAttention(db, os.Args[2:]))
 
+	case "cooldown":
+		os.Exit(cmdCooldown(db, os.Args[2:]))
+
 	case "dashboard":
 		// D3 P6A.2 — `force dashboard status` reads the latest heartbeat
 		// row from the DB and exits 0 (fresh) / 1 (stale). The full
