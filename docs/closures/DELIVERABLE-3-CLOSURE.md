@@ -1,13 +1,18 @@
-# DELIVERABLE-3-CLOSURE.md — Paired Runs + Engineering Corps + Global Holdout (🟡 PARTIAL)
+# DELIVERABLE-3-CLOSURE.md — Paired Runs + Engineering Corps + Global Holdout (✅ CLOSED)
 
-**Date:** 2026-04-29
+**Date:** 2026-04-29 (Phase 1) → 2026-04-30 (final close: fix-loop-2)
 **Operator:** jake.herman@upstart.com
-**Net verdict:** 🟡 PARTIAL — Phases 1-5 CLOSED; Phase 6 OPEN
+**Net verdict:** ✅ CLOSED — Phases 1–6B all CLOSED; polish-iter1, polish-iter2,
+fix-loop-1, fix-loop-2 all CLOSED. Strict-verifier round 2 returned GO on
+every blocking exit criterion; both round-2 slice ε and slice ζ closed
+their soft-flag items with empty deferral lists.
 
-D3 uses a partial-closure pattern (per D1's precedent). Phase 1 is the
-first of six D3 phases; this document was created NEW at Phase 1
-closure and the addendum log section accepts Phase 2–6 closure entries
-as they land.
+D3 uses a partial-closure pattern (per D1's precedent). Phase 1 was the
+first of seven D3 phases (1, 2, 3, 4, 5, 6A, 6B); this document was
+created NEW at Phase 1 closure and accumulated per-phase closure entries
+in the addendum log as each phase closed. The polish-pass + fix-loop
+addenda below this header capture the post-phase strict-verifier
+shakeout that landed before the deliverable was sealed.
 
 ---
 
@@ -18,10 +23,14 @@ as they land.
 | 1 | Foundations + Rule Audit | ✅ CLOSED 2026-04-29 | 908c51d → e86a282 (14 commits) |
 | 2 | Holdout + single-treatment experiments | ✅ CLOSED 2026-04-29 | 20e0329 → e1cdc83 (5 commits) |
 | 3 | Engineering Corps + Trust Metrics Infrastructure | ✅ CLOSED 2026-04-30 | 208fafd → 338b144 (22 commits across 5 merge branches) |
-| 4 | Factorial + orthogonal-overlap scheduler | Open | — |
-| 5 | Level-3 paired shadow + Adversarial Pairing + Golden-Set | Open | — |
-| 6A | Dashboard scaffolding + Pulse + Briefing | Open | — |
-| 6B | Reflection + Drill + verification spec consumption + shakedown | Open | — |
+| 4 | Factorial + orthogonal-overlap scheduler | ✅ CLOSED 2026-04-30 | closure addendum at `54e4804`; merge verification at `6ef1aa5` |
+| 5 | Level-3 paired shadow + Adversarial Pairing + Golden-Set | ✅ CLOSED 2026-04-30 | Phase 5 commit train (multi-merge `--no-ff`) |
+| 6A | Dashboard scaffolding + Pulse + Briefing | ✅ CLOSED 2026-04-30 | tier-0 → tier-4-final (11 `--no-ff` merges); ends at `48411d0` |
+| 6B | Reflection + Drill + verification spec consumption + shakedown | ✅ CLOSED 2026-04-30 | tier-1 → tier-5 + shakedown + closure (7+ merges); ends at `aa91eaf` |
+| polish-iter1 | Silent-error + P31/P32 burn-down | ✅ CLOSED 2026-04-30 | `300bd0c`, `d5b8c1a`, `ba737b3`, `3f66abf` |
+| polish-iter2 | Live Haiku + SPA wiring + remaining burn-down | ✅ CLOSED 2026-04-30 | `8012202`, `c5e2ab3`, `cb550a4`, `303a114`, `f3c5564`, `c05b0ab` |
+| fix-loop-1 | Strict-verifier round-1 NO-GO close (α/β/γ/δ) | ✅ CLOSED 2026-04-30 | `8b1e6a0` (α), `c4a486a` (β), `7c6db9c` (γ), `2198e82` (δ) |
+| fix-loop-2 | Strict-verifier round-2 soft-flag close (ε/ζ) | ✅ CLOSED 2026-04-30 | ζ: `95aa175`, `adb5c50`, `d6a98b4`; ε: `7e7ec49` (merge) / `5f56d7b` (impl) |
 
 ---
 
