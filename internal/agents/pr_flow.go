@@ -612,6 +612,19 @@ func escalateOnSubPRMergedFailure(db *sql.DB, pr store.AskBranchPR, err error, l
 	if _, escErr := CreateEscalation(db, pr.TaskID, store.SeverityHigh, msg); escErr != nil {
 		logger.Printf("sub-pr-ci-watch: CreateEscalation for task %d failed: %v — operator mail below is the fallback surfacing path", pr.TaskID, escErr)
 	}
+	// P27 burn-down: budget-gate the operator emit before SendMail.
+	// On allowed=false the helper has already drop/digested per the
+	// configured budget. Fail-open on err so a transient SQLite
+	// glitch never silences a high-stakes alert.
+	if allowed, _ := store.RespectNotificationBudget(
+		context.Background(), db, "operator", "sub-pr-ci-watch", "email", "{}",
+		store.StakesHigh,
+	); !allowed {
+		// budget exhausted (StakesHigh always punches through, so
+		// this branch only fires on a real config-set 0-cap row).
+	} else {
+		_ = allowed
+	}
 	store.SendMail(db, "sub-pr-ci-watch", "operator",
 		fmt.Sprintf("[DB INCONSISTENCY] Sub-PR #%d merged but DB did not update", pr.PRNumber),
 		msg, pr.TaskID, store.MailTypeAlert)

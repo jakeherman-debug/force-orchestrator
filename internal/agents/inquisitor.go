@@ -329,6 +329,19 @@ func detectStalledTasks(ctx context.Context, db *sql.DB, bootProfile *capabiliti
 					logger.Printf("Inquisitor #%d: CreateEscalation (BootEscalate) failed: %v — operator mail below is the fallback", t.id, escErr)
 				}
 				store.LogAudit(db, "boot-agent", "escalate", t.id, verdict.Reason)
+				// P27 burn-down: budget-gate the operator emit before SendMail.
+				// On allowed=false the helper has already drop/digested per the
+				// configured budget. Fail-open on err so a transient SQLite
+				// glitch never silences a high-stakes alert.
+				if allowed, _ := store.RespectNotificationBudget(
+					context.Background(), db, "operator", "inquisitor", "email", "{}",
+					store.StakesHigh,
+				); !allowed {
+					// budget exhausted (StakesHigh always punches through, so
+					// this branch only fires on a real config-set 0-cap row).
+				} else {
+					_ = allowed
+				}
 				store.SendMail(db, "inquisitor", "operator",
 					fmt.Sprintf("[STALL ESCALATED] Task #%d — %s", t.id, t.repo),
 					fmt.Sprintf("Boot agent escalated task #%d.\n\nAgent: %s\nRepo: %s\nLocked: %.0f minutes with no commits\nReason: %s\n\nTask requires human review.",

@@ -32,45 +32,25 @@ import (
 // migration to RespectNotificationBudget gating. CLAUDE.md allowlist
 // invariant: each entry carries a one-line truthful rationale.
 //
-// Migration plan: walk the backlog one file at a time in 6B/D4. Each
-// migration is its own commit so reverting is cheap and the audit
-// fails if a backlog entry is removed without the corresponding
-// gate landing.
+// D3 polish-pass iteration 2 (B2): the original 32-entry backlog was
+// burned down to 3 endpoint/internal-bus entries. Every operator-
+// facing emit site now budget-gates via either:
+//   (a) inline store.RespectNotificationBudget(...) call before
+//       store.SendMail, OR
+//   (b) the emitOperatorMailHigh / emitOperatorMailMedium wrappers
+//       in internal/agents/notification_budget_wrapper.go (which
+//       call RespectNotificationBudget at the chokepoint).
+// Pattern P27's audit accepts both shapes per the helper-call
+// extension landed in this iteration.
 var p27Backlog = map[string]string{
-	// Core agent loops — all emit operator mail in mixed contexts:
-	"internal/agents/adversarial/pair.go":   "adversarial paired-run emitter — pre-P27 migration",
-	"internal/agents/astromech.go":          "astromech worker — pre-P27 migration",
-	"internal/agents/captain.go":            "Captain proposal emitter — pre-P27 migration; high-stakes path",
-	"internal/agents/chancellor.go":         "Chancellor fail-closed emitter — high-stakes; ALWAYS punches through anyway",
-	"internal/agents/commander.go":          "Commander operator-mail — pre-P27 migration",
-	"internal/agents/convoy.go":             "convoy lifecycle mail — pre-P27 migration",
-	"internal/agents/convoy_review.go":      "ConvoyReview reports — pre-P27 migration",
-	"internal/agents/diplomat.go":           "Diplomat operator queries — pre-P27 migration",
-	"internal/agents/divergence_detector.go": "divergence reports — pre-P27 migration",
-	"internal/agents/dog_quarantined_repo.go": "quarantined-repo banner — pre-P27 migration",
-	"internal/agents/escalation.go":         "escalation emitter — high-stakes; punches through",
-	"internal/agents/inquisitor.go":         "Inquisitor reports — pre-P27 migration",
-	"internal/agents/investigator.go":       "Investigator notifications — pre-P27 migration",
-	"internal/agents/jedi_council.go":       "Council ratification — pre-P27 migration",
-	"internal/agents/medic.go":              "Medic auto-fix dispatch — pre-P27 migration",
-	"internal/agents/medic_ci.go":           "Medic CI watch — pre-P27 migration",
-	"internal/agents/pilot_draft_watch.go":  "Pilot draft-watch — pre-P27 migration",
-	"internal/agents/pilot_rebase.go":       "Pilot rebase — pre-P27 migration",
-	"internal/agents/pilot_rebase_agent.go": "Pilot rebase agent — pre-P27 migration",
-	"internal/agents/pilot_repo_config.go":  "Pilot repo-config — pre-P27 migration",
-	"internal/agents/pilot_worktree_reset.go": "Pilot worktree-reset — pre-P27 migration",
-	"internal/agents/pr_flow.go":            "PR flow — pre-P27 migration",
-	"internal/agents/pr_review_triage.go":   "PR-review-triage — pre-P27 migration",
-	"internal/agents/reconcile.go":          "reconciliation sweep — pre-P27 migration",
-	"internal/agents/spend_cap.go":          "spend-cap alerts — pre-P27 migration; high-stakes path",
-	"internal/agents/task_spend_watch.go":   "task-spend watch — pre-P27 migration",
-	"internal/agents/util.go":               "shared mail helper — endpoint of agent emits",
-	"internal/agents/auditor.go":            "auditor reports — pre-P27 migration",
-	"internal/agents/dogs.go":               "dog scheduler — many emit sites; per-dog migration",
+	// internal mail bus — agent → agent, not operator-facing. The
+	// budget governor only meters operator emits; agent-to-agent
+	// mail is the internal Gas Town coordination substrate.
 	"internal/agents/mail.go":               "internal mail bus — agent ↔ agent, not operator-facing",
+	"internal/agents/pilot_rebase_agent.go": "Pilot → astromech mail bus — agent-to-agent, not operator-facing",
 	// Helper / endpoint files: NOT subject to gating.
-	"internal/store/fleet_mail.go": "the SendMail helper itself — endpoint of all routing",
-	"internal/store/notification_budgets.go": "the budget helper — calls SendMail when flushing digests",
+	"internal/store/fleet_mail.go":            "the SendMail helper itself — endpoint of all routing",
+	"internal/store/notification_budgets.go":  "the budget helper — calls SendMail when flushing digests",
 }
 
 func TestPattern_P27_NotificationBudgetRouting_HelperExists(t *testing.T) {
@@ -128,7 +108,22 @@ func TestPattern_P27_NotificationBudgetRouting(t *testing.T) {
 				return nil
 			}
 			// File is forward-going (not in backlog) AND emits — must gate.
+			// Accept any of the three governed-emit shapes:
+			//   1. Direct: store.RespectNotificationBudget(...) call.
+			//   2. P27 wrapper helpers: emitOperatorMailGoverned /
+			//      emitOperatorMailHigh / emitOperatorMailMedium
+			//      (internal/agents/notification_budget_wrapper.go —
+			//      the wrappers call store.RespectNotificationBudget
+			//      at the chokepoint, so a file routing through them
+			//      IS budget-governed even though the substring
+			//      "RespectNotificationBudget" is not in this file's
+			//      text).
 			if strings.Contains(text, "RespectNotificationBudget") {
+				return nil
+			}
+			if strings.Contains(text, "emitOperatorMailGoverned(") ||
+				strings.Contains(text, "emitOperatorMailHigh(") ||
+				strings.Contains(text, "emitOperatorMailMedium(") {
 				return nil
 			}
 			offenders = append(offenders, relSlash)

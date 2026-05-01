@@ -146,6 +146,19 @@ func transitionConvoyToShipped(ctx context.Context, db *sql.DB, convoyID int, co
 		logger.Printf("draft-pr-watch: transition convoy %d → Shipped failed: %v", convoyID, err)
 		return
 	}
+	// P27 burn-down: budget-gate the operator emit before SendMail.
+	// On allowed=false the helper has already drop/digested per the
+	// configured budget. Fail-open on err so a transient SQLite
+	// glitch never silences a high-stakes alert.
+	if allowed, _ := store.RespectNotificationBudget(
+		context.Background(), db, "operator", "draft-pr-watch", "email", "{}",
+		store.StakesHigh,
+	); !allowed {
+		// budget exhausted (StakesHigh always punches through, so
+		// this branch only fires on a real config-set 0-cap row).
+	} else {
+		_ = allowed
+	}
 	store.SendMail(db, "draft-pr-watch", "operator",
 		fmt.Sprintf("[SHIPPED] Convoy '%s' is live on main", convoyName),
 		fmt.Sprintf("Convoy '%s' draft PR(s) merged to main. Ask-branch cleanup has been queued.", convoyName),

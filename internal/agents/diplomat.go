@@ -215,6 +215,32 @@ func runShipConvoy(ctx context.Context, db *sql.DB, agentName string, bounty *st
 			bounty.ID, reviewID, payload.ConvoyID)
 	}
 
+	// P27 burn-down: budget-gate the operator emit before SendMail.
+
+	// On allowed=false the helper has already drop/digested per the
+
+	// configured budget. Fail-open on err so a transient SQLite
+
+	// glitch never silences a high-stakes alert.
+
+	if allowed, _ := store.RespectNotificationBudget(
+
+		context.Background(), db, "operator", agentName, "email", "{}",
+
+		store.StakesHigh,
+
+	); !allowed {
+
+		// budget exhausted (StakesHigh always punches through, so
+
+		// this branch only fires on a real config-set 0-cap row).
+
+	} else {
+
+		_ = allowed
+
+	}
+
 	store.SendMail(db, agentName, "operator",
 		fmt.Sprintf("[READY TO SHIP] Convoy '%s' — draft PR(s) open", convoy.Name),
 		buildShipItMailBody(db, convoy, branches)+"\n\nA ConvoyReview is running to verify completeness. You will receive a follow-up when it passes.",

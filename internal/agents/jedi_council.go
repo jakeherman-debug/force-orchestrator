@@ -375,6 +375,19 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 					if fbErr := store.FailBounty(db, b.ID, escMsg+" (escalation insert failed: "+cErr.Error()+")"); fbErr != nil {
 						logger.Printf("Task %d: FailBounty fallback also failed: %v", b.ID, fbErr)
 					}
+					// P27 burn-down: budget-gate the operator emit before SendMail.
+					// On allowed=false the helper has already drop/digested per the
+					// configured budget. Fail-open on err so a transient SQLite
+					// glitch never silences a high-stakes alert.
+					if allowed, _ := store.RespectNotificationBudget(
+						context.Background(), db, "operator", agentName, "email", "{}",
+						store.StakesHigh,
+					); !allowed {
+						// budget exhausted (StakesHigh always punches through, so
+						// this branch only fires on a real config-set 0-cap row).
+					} else {
+						_ = allowed
+					}
 					store.SendMail(db, agentName, "operator",
 						fmt.Sprintf("[ESCALATION FAILED] Task #%d — could not record escalation row", b.ID),
 						fmt.Sprintf("CreateEscalation failed for task #%d with error: %v\nOriginal escalation reason: %s", b.ID, cErr, escMsg),

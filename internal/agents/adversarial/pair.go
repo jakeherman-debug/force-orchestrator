@@ -168,6 +168,16 @@ func SurfaceDisagreementToOperatorWith(ctx context.Context, db *sql.DB, pairID i
 		agentName, promptPrimary, promptCritic, decisionID,
 		truncate(primaryOutcome, 2000), truncate(criticOutcome, 2000), pairID,
 	)
+	// P27 burn-down: budget-gate the operator emit before SendMail.
+	// Adversarial-pair surfacing is a high-stakes operator-action
+	// signal — StakesHigh always punches through, so the gate's
+	// allowed=false branch only fires on a real config-set 0-cap row.
+	if allowed, _ := store.RespectNotificationBudget(
+		ctx, db, "operator", "adversarial-pairing", "email", "{}",
+		store.StakesHigh,
+	); !allowed {
+		return fmt.Errorf("adversarial.SurfaceDisagreementToOperator: budget governor refused emit for pair %d", pairID)
+	}
 	mailID := store.SendMail(db, "adversarial-pairing", operatorAgent, subject, body, int(decisionID), store.MailTypeAlert)
 	if mailID <= 0 {
 		return fmt.Errorf("adversarial.SurfaceDisagreementToOperator: SendMail returned mailID=%d", mailID)

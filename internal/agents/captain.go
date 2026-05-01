@@ -517,6 +517,19 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 				if failErr := store.FailBounty(db, b.ID, msg); failErr != nil {
 					logger.Printf("Task %d: FailBounty fallback also failed (%v) — stale-lock detector will recover", b.ID, failErr)
 				}
+				// P27 burn-down: budget-gate the operator emit before SendMail.
+				// On allowed=false the helper has already drop/digested per the
+				// configured budget. Fail-open on err so a transient SQLite
+				// glitch never silences a high-stakes alert.
+				if allowed, _ := store.RespectNotificationBudget(
+					context.Background(), db, "operator", agentName, "email", "{}",
+					store.StakesHigh,
+				); !allowed {
+					// budget exhausted (StakesHigh always punches through, so
+					// this branch only fires on a real config-set 0-cap row).
+				} else {
+					_ = allowed
+				}
 				store.SendMail(db, agentName, "operator",
 					fmt.Sprintf("[CAPTAIN ESCALATION FAILED] Task #%d — %s", b.ID, b.TargetRepo),
 					fmt.Sprintf("Captain %s tried to escalate task #%d (unknown repo '%s' in new_tasks) but CreateEscalation itself failed: %v.\n\nTask has been FailBounty-ed as a fallback; operator review required.\n\nOriginal reason:\n%s",

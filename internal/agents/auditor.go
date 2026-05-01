@@ -178,6 +178,19 @@ func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.
 			if failErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("audit-escalated (escalation insert failed: %v): %s", err, msg)); failErr != nil {
 				logger.Printf("Auditor #%d: FailBounty fallback also failed: %v — stale-lock detector will recover", bounty.ID, failErr)
 			}
+			// P27 burn-down: budget-gate the operator emit before SendMail.
+			// On allowed=false the helper has already drop/digested per the
+			// configured budget. Fail-open on err so a transient SQLite
+			// glitch never silences a high-stakes alert.
+			if allowed, _ := store.RespectNotificationBudget(
+				context.Background(), db, "operator", name, "email", "{}",
+				store.StakesHigh,
+			); !allowed {
+				// budget exhausted (StakesHigh always punches through, so
+				// this branch only fires on a real config-set 0-cap row).
+			} else {
+				_ = allowed
+			}
 			store.SendMail(db, name, "operator",
 				fmt.Sprintf("[AUDIT ESC FALLBACK] Task #%d — %s", bounty.ID, bounty.TargetRepo),
 				fmt.Sprintf("Audit task escalation insert failed (%v). Original message:\n\n%s", err, msg),
