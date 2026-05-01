@@ -80,22 +80,22 @@ type p22CanonicalInput struct {
 	FleetRuleRefs  []string
 }
 
-// p22Helper returns the production fingerprint helper if slice β
-// has shipped it, or nil if not. The test logs "scaffold pending"
-// when nil; once slice β lands, the test enforces determinism.
+// p22Helper is wired to the production fingerprint helper
+// (store.Fingerprint at internal/store/proposed_features.go:142) by
+// audit_pattern_p22_helper_wiring_test.go's init(). The dedicated
+// wiring file exists so that:
 //
-// Implementation note: the helper resolution is delegated to a
-// Go-level "available helper" hook so slice β can wire the helper
-// into the test layer with a single import-injection point. The
-// hook is set in a `+build slice_b` file that slice β authors;
-// without that file the hook is nil.
+//   - The audit lives in `package audittools` (test scope), keeping
+//     production code free of any p22-specific glue.
+//   - A future deletion of either side (the helper OR the canonical
+//     input shape) surfaces as a compile error in the wiring file
+//     before this determinism check can silently regress to a
+//     "scaffold pending" no-op.
 //
-// Today (no slice β file): the hook returns nil → test passes
-// with "scaffold pending" log line.
-//
-// After slice β: the hook returns the production helper → test
-// asserts determinism.
-var p22Helper p22FingerprintHelper // nil until slice β wires it in
+// D3 fix-loop iter 2 (slice ζ): the prior "scaffold pending" early
+// return has been removed; the test now actively enforces the
+// determinism / sorting / sensitivity contract on every run.
+var p22Helper p22FingerprintHelper // wired by init() in audit_pattern_p22_helper_wiring_test.go
 
 // TestPattern_P22_FingerprintDeterminism is the D3 anti-cheat
 // regression for "No non-deterministic ProposedFeatures
@@ -105,10 +105,13 @@ var p22Helper p22FingerprintHelper // nil until slice β wires it in
 // byte-different output.
 func TestPattern_P22_FingerprintDeterminism(t *testing.T) {
 	if p22Helper == nil {
-		t.Logf("Pattern P22 (D3 anti-cheat): scaffold present — slice β has not yet wired the production fingerprint helper. " +
-			"Test will activate once `store.FingerprintProposedFeature` (or equivalent) is reachable. " +
-			"This is the declared coordination point: slice α authors the test, slice β ships the helper, the test then enforces.")
-		return
+		// Hook is wired by audit_pattern_p22_helper_wiring_test.go's
+		// init(); a nil here means that file was deleted or
+		// renamed without a replacement. Hard-fail rather than
+		// silently no-op (the prior "scaffold pending" early-return
+		// path was removed in D3 fix-loop iter 2).
+		t.Fatal("Pattern P22: p22Helper is nil — wire-up file (audit_pattern_p22_helper_wiring_test.go) appears to be missing. " +
+			"The hook MUST be set so this audit actively enforces fingerprint determinism.")
 	}
 
 	// Determinism — same input twice, same output.
