@@ -88,6 +88,13 @@ var dogCooldowns = map[string]time.Duration{
 	// (maxArchivesPerRun=1000); rows >30d OR for closed convoys >7d
 	// get summarised + offloaded to ~/.force/transcripts/.
 	"transcript-archive": 24 * time.Hour,
+	// D3 fix-loop-1 (slice δ) — model-availability watch. Probes
+	// distinct model_identifier values from TreatmentSpecs and
+	// upserts ModelAvailability rows. 30-min cadence matches the
+	// holdout-monitor's deferral note: "full availability watch
+	// deferred to Phase 5/6". Default mode is record-only;
+	// LIVE_HAIKU_DISABLED keeps tests deterministic.
+	"model-availability-watch": 30 * time.Minute,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -115,6 +122,8 @@ var dogOrder = []string{
 	"learning-panel-render",
 	// D3 P6B.9 — daily transcript archival.
 	"transcript-archive",
+	// D3 fix-loop-1 (slice δ) — model-availability watch.
+	"model-availability-watch",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -281,6 +290,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogLearningPanelRender(ctx, db, logger)
 	case "transcript-archive":
 		return dogTranscriptArchive(ctx, db, logger)
+	case "model-availability-watch":
+		return dogModelAvailabilityWatch(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

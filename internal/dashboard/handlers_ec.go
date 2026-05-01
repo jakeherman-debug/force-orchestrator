@@ -34,6 +34,7 @@ package dashboard
 // when rejection_action is anything other than 'leave_as_is'.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -69,12 +70,24 @@ type ecProposalSummary struct {
 
 // validRejectionActions enumerates the concern #7 set
 // (paired-runs.md § PromotionProposals revert handling).
+//
+// D3 fix-loop-1 (slice δ) adds two extension actions for exit
+// criterion 14b end-to-end coverage:
+//   - defer_revert: operator agrees a revert is needed but wants to
+//     batch it with the next deploy window. Sets BountyBoard.deferred_revert
+//     on the underlying landed task so the operator dashboard surfaces
+//     the queue.
+//   - refile:       the proposal's underlying need is real but the rule
+//     content was wrong — open a fresh ProposedFeatures row pointing
+//     back at this proposal as evidence, leaving the rule rejected.
 var validRejectionActions = map[string]bool{
 	"leave_as_is":     true,
 	"clean_revert":    true,
 	"cascade_revert":  true,
 	"surgical_revert": true,
 	"escalate":        true,
+	"defer_revert":    true,
+	"refile":          true,
 }
 
 // minRejectionRationaleLen is the schema-encoded floor (concern #7)
@@ -321,7 +334,7 @@ func handleECProposalReject(db *sql.DB, id int) func(w http.ResponseWriter, r *h
 		}
 		if !validRejectionActions[action] {
 			http.Error(w,
-				`{"error":"rejection_action must be one of leave_as_is|clean_revert|cascade_revert|surgical_revert|escalate"}`,
+				`{"error":"rejection_action must be one of leave_as_is|clean_revert|cascade_revert|surgical_revert|escalate|defer_revert|refile"}`,
 				http.StatusBadRequest)
 			return
 		}
@@ -379,9 +392,204 @@ func handleECProposalReject(db *sql.DB, id int) func(w http.ResponseWriter, r *h
 		}
 		store.LogAudit(db, operator, "ec.reject", id,
 			fmt.Sprintf("Rejected PromotionProposal %d action=%s reason=%s", id, action, reason))
+
+		// D3 fix-loop-1 (slice δ): apply per-action side effects so
+		// the rejection actually does something downstream — not just
+		// stamp columns. Errors here log + continue (the rejection
+		// itself succeeded; the side effect is best-effort and the
+		// operator can re-trigger it).
+		applyRejectionSideEffects(r.Context(), db, id, action, rationale, operator)
+
 		_, _ = fmt.Fprintf(w, `{"ok":true,"id":%d,"rejected_by":%q,"action":%q}`,
 			id, operator, action)
 	}
+}
+
+// applyRejectionSideEffects dispatches action-specific downstream
+// behaviour that the rejected proposal's columns alone don't trigger.
+//
+// The handler completes the rejection (column UPDATE + AuditLog) BEFORE
+// calling this; on any side-effect failure we log + continue so the
+// rejection is durable. Re-running by the operator is possible — the
+// inserts/updates here are idempotent on the (proposal_id, action)
+// pair.
+//
+// Action map:
+//
+//   - leave_as_is — no side effect (operator chose to merely note the
+//     rejection; nothing to undo).
+//   - clean_revert / cascade_revert / surgical_revert — spawn a
+//     RevertTask BountyBoard row pointing at the proposal; ConvoyReview
+//     re-trigger lands automatically when the revert task completes
+//     (downstream of revert_target_task_id wiring).
+//   - escalate — write an Escalation row so the operator inbox shows
+//     a hard-block needing attention.
+//   - defer_revert — flag the underlying landed task with
+//     BountyBoard.deferred_revert=1 so the operator dashboard's
+//     "deferred reverts" queue picks it up later.
+//   - refile — open a fresh ProposedFeatures row referencing this
+//     proposal as evidence; the rule content was wrong but the
+//     underlying need was real.
+func applyRejectionSideEffects(ctx context.Context, db *sql.DB, proposalID int, action, rationale, operator string) {
+	switch action {
+	case "leave_as_is":
+		return
+	case "clean_revert", "cascade_revert", "surgical_revert":
+		spawnRevertTaskForProposal(ctx, db, proposalID, action, rationale, operator)
+	case "escalate":
+		spawnEscalationForProposal(ctx, db, proposalID, rationale)
+	case "defer_revert":
+		flagDeferredRevertForProposal(ctx, db, proposalID, rationale)
+	case "refile":
+		refileProposalAsFeature(ctx, db, proposalID, rationale, operator)
+	}
+}
+
+// spawnRevertTaskForProposal inserts a BountyBoard row of type
+// 'RevertTask' targeting the proposal's experiment. revert_task_id on
+// the proposal is updated to point at the new BountyBoard row so the
+// audit chain is queryable: PromotionProposals → BountyBoard.
+//
+// Idempotent: if a RevertTask for this proposal already exists, we
+// don't spawn a second one. The check is by revert_task_id != 0.
+func spawnRevertTaskForProposal(ctx context.Context, db *sql.DB, proposalID int, action, rationale, operator string) {
+	// Idempotence check.
+	var existing int
+	_ = db.QueryRowContext(ctx,
+		`SELECT IFNULL(revert_task_id, 0) FROM PromotionProposals WHERE id = ?`,
+		proposalID).Scan(&existing)
+	if existing != 0 {
+		log.Printf("applyRejectionSideEffects: proposal %d already has revert_task_id=%d; skipping respawn", proposalID, existing)
+		return
+	}
+
+	payload := fmt.Sprintf(
+		"Revert PromotionProposal %d (%s) — operator=%s rationale=%s",
+		proposalID, action, operator, rationale)
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO BountyBoard (type, status, payload, parent_id, priority, created_at)
+		 VALUES ('RevertTask', 'Pending', ?, 0, 2, datetime('now'))`,
+		payload)
+	if err != nil {
+		log.Printf("applyRejectionSideEffects: spawn RevertTask for proposal %d: %v", proposalID, err)
+		return
+	}
+	revertID, err := res.LastInsertId()
+	if err != nil {
+		log.Printf("applyRejectionSideEffects: LastInsertId for proposal %d revert: %v", proposalID, err)
+		return
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE PromotionProposals SET revert_task_id = ? WHERE id = ?`,
+		revertID, proposalID); err != nil {
+		log.Printf("applyRejectionSideEffects: link revert_task_id %d on proposal %d: %v", revertID, proposalID, err)
+	}
+	store.LogAudit(db, operator, "ec.reject.revert-spawned", proposalID,
+		fmt.Sprintf("Spawned RevertTask #%d for proposal %d (action=%s)", revertID, proposalID, action))
+}
+
+// spawnEscalationForProposal writes an Escalation row so the operator
+// inbox surfaces this proposal as a hard-block needing attention.
+//
+// Idempotent: a second call against the same proposal is a no-op
+// (one Open Escalation per proposal is the contract).
+func spawnEscalationForProposal(ctx context.Context, db *sql.DB, proposalID int, rationale string) {
+	var existing int
+	_ = db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM Escalations WHERE task_id = ? AND status = 'Open' AND IFNULL(severity,'') != ''`,
+		proposalID).Scan(&existing)
+	if existing > 0 {
+		return
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO Escalations (task_id, severity, message, status, created_at)
+		 VALUES (?, 'medium', ?, 'Open', datetime('now'))`,
+		proposalID,
+		fmt.Sprintf("PromotionProposal %d rejected with action=escalate; rationale=%s", proposalID, rationale),
+	); err != nil {
+		log.Printf("applyRejectionSideEffects: insert Escalation for proposal %d: %v", proposalID, err)
+	}
+}
+
+// flagDeferredRevertForProposal marks the proposal's revert_task_id
+// as the placeholder "deferred" sentinel by setting deferred_revert=1
+// on a stub BountyBoard row. The operator dashboard's deferred-revert
+// queue reads BountyBoard.deferred_revert=1 to surface these.
+//
+// We do NOT spawn an executable RevertTask here — defer_revert is the
+// "agree this should revert, but not now" signal. When the operator
+// flips the row from deferred to ready, that's a separate UI action
+// that promotes the deferred row into a real RevertTask.
+func flagDeferredRevertForProposal(ctx context.Context, db *sql.DB, proposalID int, rationale string) {
+	var existing int
+	_ = db.QueryRowContext(ctx,
+		`SELECT IFNULL(revert_task_id, 0) FROM PromotionProposals WHERE id = ?`,
+		proposalID).Scan(&existing)
+	if existing != 0 {
+		return
+	}
+	payload := fmt.Sprintf("Deferred revert for PromotionProposal %d — rationale=%s", proposalID, rationale)
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO BountyBoard (type, status, payload, parent_id, priority, deferred_revert, created_at)
+		 VALUES ('RevertTask', 'Pending', ?, 0, 0, 1, datetime('now'))`,
+		payload)
+	if err != nil {
+		log.Printf("applyRejectionSideEffects: spawn deferred RevertTask for proposal %d: %v", proposalID, err)
+		return
+	}
+	revertID, err := res.LastInsertId()
+	if err != nil {
+		log.Printf("applyRejectionSideEffects: LastInsertId for proposal %d deferred revert: %v", proposalID, err)
+		return
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE PromotionProposals SET revert_task_id = ? WHERE id = ?`,
+		revertID, proposalID); err != nil {
+		log.Printf("applyRejectionSideEffects: link deferred revert_task_id %d on proposal %d: %v", revertID, proposalID, err)
+	}
+}
+
+// refileProposalAsFeature opens a fresh ProposedFeatures row pointing
+// back at this proposal as evidence. The proposal's
+// refiled_feature_id is updated to the new feature row so the
+// dashboard can chain "this proposal was rejected → led to this
+// feature → which was promoted/rejected/etc."
+//
+// Idempotent: if the proposal already has refiled_feature_id != 0, we
+// don't double-file.
+func refileProposalAsFeature(ctx context.Context, db *sql.DB, proposalID int, rationale, operator string) {
+	var existing int
+	_ = db.QueryRowContext(ctx,
+		`SELECT IFNULL(refiled_feature_id, 0) FROM PromotionProposals WHERE id = ?`,
+		proposalID).Scan(&existing)
+	if existing != 0 {
+		return
+	}
+	summary := fmt.Sprintf("Refiled from rejected PromotionProposal %d — %s", proposalID, rationale)
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO ProposedFeatures
+		    (observation_summary, category, source, fingerprint, scored_by, status)
+		 VALUES (?, 'rule-promotion-refile', ?, ?, ?, 'pending')`,
+		summary,
+		fmt.Sprintf("ec-rejection-%d", proposalID),
+		fmt.Sprintf("ec-rejection-%d", proposalID),
+		operator)
+	if err != nil {
+		log.Printf("applyRejectionSideEffects: insert ProposedFeatures for proposal %d: %v", proposalID, err)
+		return
+	}
+	featureID, err := res.LastInsertId()
+	if err != nil {
+		log.Printf("applyRejectionSideEffects: LastInsertId for proposal %d refile: %v", proposalID, err)
+		return
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE PromotionProposals SET refiled_feature_id = ? WHERE id = ?`,
+		featureID, proposalID); err != nil {
+		log.Printf("applyRejectionSideEffects: link refiled_feature_id %d on proposal %d: %v", featureID, proposalID, err)
+	}
+	store.LogAudit(db, operator, "ec.reject.refile", proposalID,
+		fmt.Sprintf("Refiled proposal %d as ProposedFeatures #%d", proposalID, featureID))
 }
 
 // handleECProposalsSubroutes dispatches /api/ec/proposals/{id}[/action].

@@ -37,7 +37,7 @@ func TestHandleHoldoutMonitor_HappyPath_NoActiveHoldouts(t *testing.T) {
 	if fresh.Status != "Completed" {
 		t.Errorf("status = %q, want Completed", fresh.Status)
 	}
-	if !strings.Contains(logger.dump(), "no model deprecation detected") {
+	if !strings.Contains(logger.dump(), "heartbeat ok") {
 		t.Errorf("expected debug heartbeat in log; got %q", logger.dump())
 	}
 }

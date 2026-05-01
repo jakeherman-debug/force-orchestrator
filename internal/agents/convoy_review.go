@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"force-orchestrator/internal/agents/adversarial"
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	igit "force-orchestrator/internal/git"
@@ -394,6 +395,21 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 			return
 		}
 	}
+
+	// D3 fix-loop-1 (slice δ) — adversarial pair sampling.
+	// Exit criterion 10: surface ConvoyReview-vs-critic disagreements
+	// against a sampled fraction of decisions. Non-blocking; the
+	// review flow continues and processes the primary findings while
+	// the pair runs in the background.
+	primaryOutcomeBytes, _ := json.Marshal(result)
+	reasoning := fmt.Sprintf("status=%s findings=%d", result.Status, len(result.Findings))
+	WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
+		DecisionID:    int64(bounty.ID),
+		Agent:         adversarial.AgentConvoyReview,
+		Outcome:       string(primaryOutcomeBytes),
+		Reasoning:     reasoning,
+		PromptVersion: "convoy-review-v1",
+	}, logger)
 
 	if result.Status == "clean" || len(result.Findings) == 0 {
 		logger.Printf("ConvoyReview #%d: convoy %d passed — no findings (pass %d)",

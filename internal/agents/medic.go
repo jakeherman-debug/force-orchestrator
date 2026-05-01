@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/adversarial"
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
@@ -256,6 +257,20 @@ func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *sto
 	}
 
 	logger.Printf("Medic #%d: decision=%s reason=%s", bounty.ID, decision.Decision, decision.Reason)
+
+	// D3 fix-loop-1 (slice δ) — adversarial pair sampling.
+	// Exit criterion 10: surface Medic-vs-critic disagreements
+	// against a sampled fraction of decisions. Non-blocking; the
+	// Medic flow continues and applies the primary decision while
+	// the pair runs in the background.
+	primaryOutcome, _ := json.Marshal(decision)
+	WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
+		DecisionID:    int64(bounty.ID),
+		Agent:         adversarial.AgentMedic,
+		Outcome:       string(primaryOutcome),
+		Reasoning:     decision.Reason,
+		PromptVersion: "medic-v1",
+	}, logger)
 
 	switch decision.Decision {
 	case "requeue":
