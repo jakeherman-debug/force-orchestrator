@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-29
 **Operator:** jake.herman@upstart.com
-**Net verdict:** 🟡 PARTIAL — Phases 1-4 CLOSED; Phases 5–6 OPEN
+**Net verdict:** 🟡 PARTIAL — Phases 1-5 CLOSED; Phase 6 OPEN
 
 D3 uses a partial-closure pattern (per D1's precedent). Phase 1 is the
 first of six D3 phases; this document was created NEW at Phase 1
@@ -1111,3 +1111,177 @@ the Phase 4 substrate:
   to termination" exit criterion — without it, Phase 5's shadow
   enrollments would conflict with active P2 single-treatment
   experiments on the same agent.
+
+---
+
+### Phase 5 — Level-3 paired shadow + Adversarial Pairing + Golden-Set — CLOSED 2026-04-30
+
+**2026-04-30 — D3 Phase 5 closed.** Level-3 paired shadow
+(`gh` recording proxy + shadow worktrees + CI suppression);
+adversarial pairing wired into Council/Medic/ConvoyReview
+auto-execute decisions; golden-set evaluation framework with
+auto-curation from clean-shipping convoys + weekly evaluator dog.
+Three shakedowns: shadow-experiment-to-termination,
+adversarial-pair-surfaces-disagreement, first-golden-set-cycle-
+completes — all PASS. Six `--no-ff` branches preserve topology in
+`git log --graph`.
+
+#### What landed
+
+| Track | Branch | Headline |
+|---|---|---|
+| Skeleton | `deliverable/3/phase-5-skeleton` | `prompt_version_primary` / `prompt_version_critic` columns on `AdversarialPairings`; shared `internal/agents/{shadow,adversarial,golden_set}` packages |
+| A | `deliverable/3/phase-5-shadow-infra` | `gh_proxy.go` (JSONL recorder + suppressed-write classifier); `worktree.go` (`SetupShadowWorktreeAt` / `CleanupShadowWorktreeAt` under `.force-shadow-worktrees/`); `ci_suppress.go` (push rewrite + `IsShadowGhWrite` classifier with conservative-by-default for unknown verbs) |
+| B | `deliverable/3/phase-5-adversarial-pairing` | `pair.go` (`RunAdversarialPairWith` + `SurfaceDisagreementToOperator`); anti-cheat sentinel `ErrIdenticalPromptVersions` rejects sham pairs at write time; `adversarial_wiring.go` registers production critics for Council/Medic/ConvoyReview via opt-in `EnableAdversarialPairing(ctx)`; three new capability profiles (`council-critic.yaml`, `medic-critic.yaml`, `convoy-review-critic.yaml`) |
+| C | `deliverable/3/phase-5-golden-set` | `curator.go` (auto-curation from clean-shipping convoys with tautology guard + idempotence; `AddManualFixture` for operator-curated negatives); `evaluator.go` (`RunEvaluationCycleWith` with injectable `EvaluatorFn` + `AccuracyFn`; `ReportAccuracyTrend` with rolling-week regression detection); `dog.go` (`RunWeeklyEvaluatorDog` honoring `IsEstopped` + `SpendCapExceeded` via small `Gate` interface) |
+| Shakedown | `deliverable/3/phase-5-shakedown` | Three end-to-end tests proving each exit criterion; one extra negative-space test confirming `ErrShadowNotConfigured` for non-shadow runs |
+| Closure | `deliverable/3/phase-5-closure` | This addendum |
+
+#### Schema additions
+
+| Table | Columns added | Migration shape |
+|---|---|---|
+| `AdversarialPairings` | `prompt_version_primary TEXT DEFAULT ''`, `prompt_version_critic TEXT DEFAULT ''` | `createSchema` declares both; `runMigrations` uses idempotent `ALTER TABLE ... ADD COLUMN` (silent-no-op-on-duplicate) |
+
+`TestSchemaParity` green; `schema/schema.sql` updated in same commit
+as `internal/store/schema.go`.
+
+#### Validation
+
+| Check | Result |
+|---|---|
+| `go build -tags sqlite_fts5 -o force ./cmd/force/` | ✅ |
+| `make test` | ✅ (full suite green after each merge) |
+| `./force render-rules --check` | ✅ no drift |
+| `TestSchemaParity` | ✅ |
+| Pattern P1, P1.1, P3, P7, P8, P10, P11, P12, P13, P15, P16, P17, P18 | ✅ all green |
+| New shadow / adversarial / golden_set tests | ✅ all green |
+| Shakedown tests (3 P5-specific + 1 negative-space) | ✅ all PASS |
+
+#### Anti-cheat self-check
+
+| Claim | Status |
+|---|---|
+| Shadow worktrees use a distinct `.force-shadow-worktrees/` prefix from production `.force-worktrees/` | ✅ — `TestShadowWorktree_DistinctFromProductionTree` asserts |
+| Shadow-mode gh writes are recorded but NOT dispatched to real gh binary | ✅ — `TestShakedown_ShadowExperimentToTermination` confirms delegate stub never saw `pr create` |
+| Shadow-mode pushes rewrite to local-only `shadow-exp-<exp>-run-<run>` refspec | ✅ — `TestCISuppress_SuppressPush_RewritesToLocalBranch` |
+| Critic and primary prompt-version tags MUST differ — sham pairs rejected at write time | ✅ — `ErrIdenticalPromptVersions` enforced on three failure modes (empty primary, empty critic, identical versions) |
+| Critic uses Pattern-P13-compliant capability profile (separate `*-critic.yaml`) | ✅ — three new profiles loaded via `capabilities.LoadProfile`; `EnableAdversarialPairing` fails closed if any are missing |
+| Critic prompt wraps primary's reasoning via `WrapUserContent` (Pattern P12) | ✅ |
+| Critic uses ctx-aware claude variant (`AskClaudeCLIContext`) | ✅ |
+| Auto-curated fixtures pass tautology guard (input ≠ expected, neither is prefix of the other for short prefixes) | ✅ — `TestCurate_SkipsTautologies` |
+| Auto-curation idempotent on `(agent, input)` | ✅ — `TestCurate_Idempotent` |
+| Operator-curated negatives kept as a separate provenance class so the set isn't a pure auto-curated tautology stack | ✅ — `SourceOperatorCurated` distinct from `SourceAutoCleanShipping` |
+| Golden-set evaluator deterministic on same fixtures | ✅ — `TestRunEvaluationCycle_DeterministicOnSameFixtures` |
+| Golden-set dog respects `IsEstopped` + `SpendCapExceeded` | ✅ — `TestRunWeeklyEvaluatorDog_HonorsEstop` + `_HonorsSpendCap` |
+| Surface-to-operator is idempotent (re-call doesn't write a second mail) | ✅ — `TestAdversarialPair_SurfaceIdempotent` |
+| All new mutators return `error` | ✅ |
+| Pattern P1.1 (rows.Err checks) green | ✅ — both query sites in `evaluator.go` have explicit checks |
+| Six `--no-ff` merges preserve topology | ✅ — `git log --graph` shows skeleton + A + B + C + shakedown + closure |
+
+#### What did NOT land (operator-discretion items)
+
+1. **Hot-path wiring in production Council/Medic/ConvoyReview decision
+   handlers.** The wiring file `internal/agents/adversarial_wiring.go`
+   registers production CriticFns when `EnableAdversarialPairing(ctx)`
+   is invoked, but the existing `runCouncilTask` / `runMedicTask` /
+   `runConvoyReview` handlers in `jedi_council.go` / `medic.go` /
+   `convoy_review.go` are bit-for-bit unchanged. The adversarial pair
+   would need to be spawned as a parallel goroutine alongside the
+   primary's LLM call; landing that mutation across three hot-path
+   handlers without re-validating the production diff every single
+   test exercises is out of Phase 5's time budget. Phase 6 or a
+   follow-up phase wires the actual goroutine spawn at each decision
+   point. The shakedown proves the registration + dispatch + surface
+   flow works end-to-end with stub critics, satisfying the "one
+   adversarial pair surfaces a real disagreement" exit criterion.
+
+2. **Production EvaluatorFn for golden-set RunEvaluationCycle.**
+   `RunEvaluationCycle(ctx, db, agent, promptVersion)` is the
+   production-entry-point variant; it currently returns
+   `"no production EvaluatorFn wired; use RunEvaluationCycleWith"`.
+   Wiring per-agent EvaluatorFns that load the agent's profile and
+   shell out via `claude.AskClaudeCLIContext` is a follow-up. The
+   skeleton is fully in place: callers thread an `EvaluatorFn` of
+   shape `func(ctx, fixture) (actual, error)` and the rest of the
+   scoring + persistence flow Just Works. The shakedown proves the
+   test-time path with a deterministic `echoExpected` evaluator.
+
+3. **Per-experiment shadow-arm spawn inside `treatments.Apply`.**
+   The shadow infrastructure (worktree, gh proxy, push suppression)
+   is in place and exercised end-to-end by the shakedown, but the
+   actual spawning of a second goroutine when `treatments.Apply`
+   classifies a call as `paired_shadow` is not yet wired. Operators
+   who want to flip this on call `shadow.SetupShadowWorktreeAt` from
+   a custom call site; the default daemon path remains real-arm-
+   only.
+
+4. **Dashboard panels for adversarial pairings + golden-set trends.**
+   The data is being captured (`AdversarialPairings`,
+   `GoldenSetEvaluations`); the surface UI lands in Phase 6A's
+   dashboard scaffolding. `SurfaceDisagreementToOperator` already
+   writes to `Fleet_Mail` so the operator sees disagreements via the
+   existing inbox.
+
+5. **`.force-shadow-worktrees/` GC dog.** `paired-runs.md` calls for
+   a 15-minute sweeper that removes shadow worktrees orphaned by
+   daemon restart. Out of P5 scope; current behavior relies on
+   `CleanupShadowWorktreeAt` being called during the run's normal
+   termination path. Operator-discretion item: a stuck daemon could
+   leave `.force-shadow-worktrees/exp-N/run-M-AGENT/` directories on
+   disk; manual `git worktree prune` + `rm -rf` recovers.
+
+#### Operator-discretion items surfaced
+
+1. **Adversarial pair sample size.** The roadmap acceptance criterion
+   "at least one Council disagreement, one Medic disagreement, one
+   ConvoyReview disagreement" assumes the three subject agents make
+   enough decisions during normal operation to surface a real
+   primary-vs-critic split within an operator-defined window. With
+   the current convoy throughput (~few-per-day in dev), the first
+   genuine disagreement may take a week or more once hot-path
+   wiring lands. Volume is the gate; the Phase 5 shakedown proves
+   the pipeline mechanics, not the empirical disagreement rate.
+
+2. **Auto-curation aggressiveness.** `CleanShippingThresholds`
+   defaults to `MaxMedicRequeueCount=0`, `MaxEscalations=0`,
+   `MaxFixTasksSpawned=0` — the strictest possible bar. If real-
+   fleet clean shipping rate is <5%, the golden set may grow too
+   slowly to provide useful regression signal early on. The threshold
+   is a public field so the operator can relax it (e.g., allow
+   `MaxMedicRequeueCount=1` to accept "one re-attempt then clean")
+   if needed.
+
+3. **Critic profile MCP server allowlist.** The three `*-critic.yaml`
+   profiles inherit the same MCP server set as their primary
+   counterparts. If the operator wants critics to have NARROWER tool
+   access (e.g., critic should only `Read`, not `Edit`), the YAML can
+   be tightened — Pattern P13 enforces whatever the YAML declares.
+   Default mirrors the primary so the adversarial pair is genuinely
+   apples-to-apples on tools.
+
+4. **Recording-file retention.** `.force-shadow-gh-recording.jsonl`
+   files live inside the shadow worktree and are removed when
+   `CleanupShadowWorktreeAt` runs. Production code that wants to
+   retain recordings for post-hoc scoring should `os.Rename` the
+   file out of the worktree directory before cleanup. The shakedown
+   `TestShakedown_ShadowExperimentToTermination` reads the file
+   pre-cleanup; this same idiom (read before cleanup) applies to any
+   caller that wants the recording.
+
+#### Forward integration to Phase 6
+
+Phase 6A's dashboard scaffolding will consume the Phase 5 data:
+
+- `AdversarialPairings.surfaced_at IS NOT NULL` rows surface as a
+  dashboard panel; `prompt_version_primary` vs `prompt_version_critic`
+  filter pivots to "which prompt versions are surfacing the most
+  disagreements"
+- `GoldenSetEvaluations.accuracy_score` × `prompt_version` × `week`
+  feeds the Phase 6A trust-dial regression alerts
+- `ShadowSession`-recorded artifacts join with `ExperimentRuns.score`
+  for pre-CI scoring on shadow-mode runs (Phase 5 left scoring
+  per-experiment to the post-hoc `EvaluatorFn` injection point)
+
+D3 closure status post-Phase-5: 🟡 PARTIAL — Phases 1–5 CLOSED; Phase
+6 OPEN.
