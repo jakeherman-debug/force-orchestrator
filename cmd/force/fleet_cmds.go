@@ -242,6 +242,12 @@ func cmdDaemon(db *sql.DB) {
 	// recorded as a backlog in Pattern P31's allowlist.
 	claude.SetTranscriptDB(db)
 
+	// D3 P6B.2 — wire GitOperationLog capture. Every git/gh op routed
+	// through internal/git's helpers (runGitCtx, runGitCtxOutput,
+	// bestEffortRun) now records a redacted row in GitOperationLog
+	// for Drill's git-op timeline + free-text search.
+	igit.SetOpLogDB(db)
+
 	// D3 Phase 1 — install the log-only treatments.Apply hook.
 	// Every Claude CLI invocation now records to TreatmentApplyLog
 	// (mode='log_only'). Phase 2 of D3 swaps this for live pass-through.

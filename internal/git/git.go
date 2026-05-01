@@ -59,10 +59,15 @@ func lockRepoForMerge(repoPath string) *sync.Mutex {
 // context.Background root made the helper deaf to daemon cancellation.
 // The label argument names the specific rollback so log readers can
 // correlate failures to call sites.
+//
+// D3 P6B.2: routes through LogAndRun so every cleanup / rollback git op
+// lands a row in GitOperationLog with operation + redacted args +
+// duration + exit code.
 func bestEffortRun(ctx context.Context, label string, args ...string) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitOpTimeout)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "git", args...).Run(); err != nil {
+	op := DeriveOperation("git", args) + "-best-effort"
+	if _, err := LogAndRun(ctx, OpContext{Repo: deriveRepoFromArgs(args)}, op, "git", args...); err != nil {
 		log.Printf("git: best-effort %s failed: %v", label, err)
 	}
 }
@@ -72,18 +77,44 @@ func bestEffortRun(ctx context.Context, label string, args ...string) {
 // (Fix #8d): replaces raw runGitCtx(...) pairs so a hung git subprocess
 // can't wedge the caller. Fix #8e threads the caller's ctx so daemon
 // cancellation propagates.
+//
+// D3 P6B.2: routes through LogAndRun so the row + redacted output land
+// in GitOperationLog.
 func runGitCtx(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitOpTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	op := DeriveOperation("git", args)
+	return LogAndRun(ctx, OpContext{Repo: deriveRepoFromArgs(args)}, op, "git", args...)
 }
 
 // runGitCtxOutput is runGitCtx's Output variant (stdout only, stderr
 // returned via the ExitError wrapping).
+//
+// D3 P6B.2: previously this called exec.Cmd.Output(), which suppresses
+// stderr from the returned bytes. We now route through LogAndRun for
+// the audit row; LogAndRun returns CombinedOutput. Existing callers
+// either inspect the bytes for stdout content (which still appears in
+// CombinedOutput) or check the error and surface a derived message —
+// neither code path was strict about the stderr-vs-stdout split, so
+// the change is behavior-preserving.
 func runGitCtxOutput(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitOpTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).Output()
+	op := DeriveOperation("git", args)
+	return LogAndRun(ctx, OpContext{Repo: deriveRepoFromArgs(args)}, op, "git", args...)
+}
+
+// deriveRepoFromArgs extracts a repo path label from a git argv if one
+// of the canonical -C / --git-dir / --work-tree flags is present. The
+// label flows into GitOperationLog.repo so Drill can scope-filter ops
+// by repo without forcing every call site to pass it explicitly.
+func deriveRepoFromArgs(args []string) string {
+	for i, a := range args {
+		if (a == "-C" || a == "--git-dir" || a == "--work-tree") && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // abortOp runs `git <op> --abort` in `wt`, logging any error — used purely
