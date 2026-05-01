@@ -740,5 +740,46 @@ Dashboard:
 System integration:
   install-sleep-hook [--check | --uninstall | --force]
                                  Install ~/.sleep + ~/.wakeup scripts (darwin / sleepwatcher).
-                                 Idempotent; --check reports state without modifying files.`)
+                                 Idempotent; --check reports state without modifying files.
+
+Paired Runs / Engineering Corps (D3):
+  experiment author <yaml>       Author a new experiment (state='authored')
+  experiment ratify <id>         Operator-ratify (flips 'authored' → 'running'; AuditLog'd)
+  experiment terminate <id>      Terminate a running experiment + emit outcome
+  ec author-experiment           Engineering Corps task-author wrappers (one per EC task type)
+  ec author-promotion / author-demotion / monitor / holdout-monitor
+  proposed-features list         Browse the ProposedFeatures triage queue
+  proposed-features show <id>    Show one ProposedFeatures row + evidence history
+  proposed-features promote <id> Promote a proposal (modal: deadline + active interest)
+  proposed-features archive <id> Soft-archive a proposal
+  proposed-features suppress <fingerprint> --rationale "..." [--until <date>]
+  render-rules [--check]         Regenerate CLAUDE.md / FIX-LOG.md / docs/* from FleetRules
+
+Operator decision surfaces (Phase 6 — Pulse / Briefing / Reflection / Ask):
+  decide <decision-id> approve|reject
+                                 CLI parity for dashboard Briefing approve/reject (P25)
+  briefing-reject <decision-id>  High-tier rejection with mandatory counter-proposal
+  cooldown list / pause <id> / resume <id> / cancel <id>
+                                 Inspect / mutate CooldownPauses (P30)
+  trust list                     Per-agent trust-dial values
+  trust set <agent> <value> [--rationale ...]
+  attention list                 Per-target attention tags (following / normal / muted)
+  attention set <kind> <id> <level>
+  notifications budgets          Inspect operator notification budgets
+  notifications digest           Inspect flushed digest queue
+  session show / clear           Inspect / clear OperatorSessionState
+  annotate <kind> <ref> <flag> <text>
+                                 Operator-only annotation (problem / interesting / follow_up)
+  replay <kind> <id>             Side-by-side replay of Captain/Council/ConvoyReview/Medic
+                                 decisions against current prompt (purely diagnostic)
+  ask <question>                 Read-only Ask handler — '/' shortcut equivalent
+  retro generate                 Generate Friday 5-min retro draft
+  retro save                     Save retro markdown to docs/retros/<date>.md
+  learning refresh               Refresh fleet learning panel synthesis
+  learning show                  Show latest fleet learning panel
+  leaderboard                    Per-agent decision distribution + calibration scoreboard
+  task <id>                      Drill view for a single task (events + transcripts + git ops)
+  tail [--source fleet|holonet] [--filter ...]
+                                 Combined live tail
+  bounty <id>                    Raw BountyBoard row JSON (scripting-stable shape)`)
 }

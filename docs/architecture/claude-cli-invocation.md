@@ -3,9 +3,13 @@
 This document is the durable reference for how Force agents invoke
 `claude -p`, what working directory each invocation runs from, what
 `CLAUDE.md` files Claude Code auto-loads as a result, and where the
-fleet's coordination invariants reach the model. It covers the
-state of the world today (post-D1 T0-1) and how that state changes
-once D3 Phase 1 ships FleetRules + per-agent rule injection.
+fleet's coordination invariants reach the model. It reflects the
+post-D3 state of the world: D3 Phase 1 (FleetRules bootstrap,
+`render_to`-categorised rule registry, per-agent rule injection,
+auto-rendered ≤ 20 KB CLAUDE.md) is shipped; D3 Phase 6B added
+the `claude.CallWithTranscript*` capture wrapper layered on top of
+`AskClaudeCLI` / `RunCLI*` so every LLM call lands a
+`LLMCallTranscripts` row (Pattern P31).
 
 ## The two invocation patterns
 
@@ -39,25 +43,49 @@ Reference call sites:
 
 | Agent | Entry point | `dir` arg | Effective CWD when claude runs |
 |---|---|---|---|
-| Astromech | `RunCLIStreamingContext` | `worktreeDir` | target-repo worktree (`.force-worktrees/<repo>/<agent>/`) |
+| Astromech | `CallWithTranscriptStreaming` (→ `RunCLIStreamingContext`) | `worktreeDir` | target-repo worktree (`.force-worktrees/<repo>/<agent>/`) |
 | Astromech (foreground) | direct `exec.CommandContext` with `cmd.Dir = worktreeDir` | — | target-repo worktree |
-| Captain | `AskClaudeCLI` | `""` | force-orchestrator/ (daemon CWD) |
-| Jedi Council | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| Medic | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| Medic-CI | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| Chancellor | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| ConvoyReview | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| Diplomat | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| PR-review-triage | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| Commander | `RunCLIStreaming` (no ctx) | `""` (unset) | force-orchestrator/ |
-| Investigator | `RunCLI` | `""` | force-orchestrator/ |
-| Auditor | `RunCLI` | `""` | force-orchestrator/ |
-| Boot | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| Librarian | `AskClaudeCLI` | `""` | force-orchestrator/ |
-| Memory rerank | `AskClaudeCLI` | `""` | force-orchestrator/ |
+| Captain | `CallWithTranscript` | `""` | force-orchestrator/ (daemon CWD) |
+| Captain proposal judge | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Jedi Council | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Council critic (adversarial) | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Medic | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Medic-CI | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Medic critic (adversarial) | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Chancellor | `CallWithTranscript` | `""` | force-orchestrator/ |
+| ConvoyReview | `CallWithTranscript` | `""` | force-orchestrator/ |
+| ConvoyReview critic (adversarial) | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Diplomat | `CallWithTranscript` | `""` | force-orchestrator/ |
+| PR-review-triage | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Commander | `CallWithTranscriptStreaming` | `""` | force-orchestrator/ |
+| Investigator | `CallWithTranscriptOneShot` | `""` | force-orchestrator/ |
+| Auditor | `CallWithTranscriptOneShot` | `""` | force-orchestrator/ |
+| Boot | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Librarian | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Memory rerank | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Engineering Corps (experiment_author / metric_author / promotion_author / demotion_author / experiment_monitor / holdout_monitor) | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Pilot (FindPRTemplate only) | `CallWithTranscript` | `""` | force-orchestrator/ |
+| Narrative renderer (Phase 6A.7) | `CallWithTranscript` (Haiku) | `""` | force-orchestrator/ |
+| Briefing renderer (Phase 6A.10) | `CallWithTranscript` (Haiku) | `""` | force-orchestrator/ |
+| Learning panel renderer (Phase 6B.12) | `CallWithTranscript` (Haiku) | `""` | force-orchestrator/ |
+| Replay (Phase 6B.7) | `CallWithTranscript` (Haiku) | `""` | force-orchestrator/ |
+| Ask handler (Phase 6B.10) | `CallWithTranscript` (Haiku, read-only tools) | `""` | force-orchestrator/ |
+| Retro generator (Phase 6B.13) | `CallWithTranscript` (Haiku) | `""` | force-orchestrator/ |
+| Transcript archive (Phase 6B.3) | `CallWithTranscript` (optional Haiku summarisation) | `""` | force-orchestrator/ |
+| Model-availability dog (D3 fix-loop-2 ε.4) | `CallWithTranscript` (one-shot ping) | `""` | force-orchestrator/ |
 
 The split is binary: only Astromech runs inside a target-repo worktree.
 Every other agent inherits the daemon's CWD.
+
+**Live Haiku gating.** Every Phase-6 renderer (narrative / briefing /
+learning-panel / replay / ask / retro / transcript-archive) plus the
+model-availability dog gates its live `CallWithTranscript` invocation
+behind `liveHaikuDisabled()` (env flag `LIVE_HAIKU_DISABLED`).
+Production daemons leave the flag unset; tests pin to `"1"` via the
+package-level `TestMain` so the deterministic synth fallback runs
+instead of burning real Haiku tokens. The model-availability dog
+additionally honours `FORCE_MODEL_AVAILABILITY_LIVE_PROBE=0` as a
+per-dog operator kill-switch (e.g. during a known Anthropic outage).
 
 ## What CLAUDE.md files Claude auto-loads
 
@@ -82,34 +110,46 @@ For astromechs (CWD = target-repo worktree):
 
 ## Where Force's coordination invariants reach the agent
 
-**Today (post-D1 T0-1):**
-- Review agents: invariants reach them via auto-loaded
-  `force-orchestrator/CLAUDE.md`. No `--append-system-prompt` is in
-  use.
-- Astromechs: invariants reach them via in-process system-prompt
-  composition (`AstromechSystemPrompt` const + per-task context blocks
-  in `runAstromechTask`). Astromechs do **not** see
-  `force-orchestrator/CLAUDE.md` content, so any rule that lives
-  exclusively there is invisible to them.
-
-This asymmetry is load-bearing: review agents pay the
-`force-orchestrator/CLAUDE.md` token cost on every call (currently
-~46 KB), while astromechs do not.
-
-**After D3 Phase 1:**
+**Current state (post-D3, fix-loop-2 closed):**
 - All agents (astromechs included) receive fleet rules via a
-  FleetRules-rendered `--append-system-prompt` content block
-  scoped to that agent (`agent_scope='all' OR agent_scope='<agent>'`).
-  See `docs/roadmap.md` § "Phase 1 — Foundations + Rule Audit" for
-  the full design.
-- `force-orchestrator/CLAUDE.md` shrinks to ≤ 20 KB and changes
-  meaning: it becomes the doc that applies when an *agent operates on
-  Force itself* (build/maintenance work in this repo), not the
-  authoritative source of fleet-coordination rules.
+  FleetRules-rendered `--append-system-prompt` content block scoped
+  to that agent (`agent_scope='all' OR agent_scope='<agent>'`).
+  Wiring lives in `internal/store/fleet_rules.go` (`AppendFleetRulesToPrompt`,
+  `InjectFleetRulesAgentPrompt`); call-site fan-out covers Captain,
+  Council, Medic, Chancellor, ConvoyReview, PR-review-triage,
+  Astromech, Pilot, Engineering Corps. Fail-open: a missing
+  FleetRules table or query error logs but does not stop agent
+  startup.
+- `force-orchestrator/CLAUDE.md` is **auto-rendered** from FleetRules
+  rows where `render_to='claude-md-file'` (currently 11 rows; 6,616
+  bytes rendered, well under the 20 KB hard cap enforced by Pattern
+  P17 + the pre-commit hook). It changes meaning: it is now the doc
+  that applies when an *agent operates on Force itself* — review
+  agents auto-load it from their CWD; astromechs do not (their CWD
+  is a target-repo worktree).
+- Review agents still pay the `force-orchestrator/CLAUDE.md` token
+  cost on every call (now ~6.6 KB, down from the pre-D3 ~46 KB);
+  astromechs receive the same FleetRules content via the
+  `--append-system-prompt` injection path, so coordination rules
+  reach them without auto-load.
 - Astromechs continue to auto-load target-repo `CLAUDE.md` from their
   worktree CWD as developer guidance. The asymmetry on the
   *target-repo* surface is preserved by design — Force does not
   publish rules into target repos.
+
+**Pattern enforcement layer (D3 Phase 6B + polish-iter2):**
+- `TestPattern_P31_AllLLMCallsCaptured` (audit) walks every Claude
+  CLI call site and rejects un-wrapped `AskClaudeCLI` /
+  `RunCLIStreamingContext` invocations — every prod LLM call MUST
+  route through one of the `CallWithTranscript*` helpers in
+  `internal/claude/transcript.go`, which writes a redacted
+  `LLMCallTranscripts` row at write time.
+- `TestPattern_P13_CapabilityProfiles` (AST) rejects hardcoded tool
+  literals at any call site — every site sources `--allowedTools` /
+  `--disallowedTools` / MCP config from
+  `capabilities.LoadProfile(agentName)`. Pattern P13 was extended
+  during fix-loop-2 to also cover the model-availability dog and
+  the seven Phase-6 renderers.
 
 ## Security implication: target-repo CLAUDE.md is a prompt-injection surface
 

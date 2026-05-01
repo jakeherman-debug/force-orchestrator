@@ -261,7 +261,7 @@ Each row shows the repo, originating task (linked), outcome, memory summary, and
 
 #### Experiments
 
-The paired-runs lifecycle surface (D3 Phase 2). Lists every authored / running / terminated experiment with the per-arm enrollment, observed-rate per arm, and outcome (when terminated). The header strip shows the global `baseline-2026` holdout — its current ramp/plateau/fade phase, the fraction of natural units enrolled, and rolling 24h / 7d / 30d holdout-vs-current metric snapshots. Operator mutations (author, ratify, terminate) flow through `force experiment …` on the CLI for now; D3 Phase 6 rebuilds this tab around Pulse / Briefing / Reflection. Full mechanics in [`docs/paired-runs.md`](docs/paired-runs.md).
+The paired-runs lifecycle surface (D3 Phase 2). Lists every authored / running / terminated experiment with the per-arm enrollment, observed-rate per arm, and outcome (when terminated). The header strip shows the global `baseline-2026` holdout — its current ramp/plateau/fade phase, the fraction of natural units enrolled, and rolling 24h / 7d / 30d holdout-vs-current metric snapshots. Operator mutations (author, ratify, terminate) flow through `force experiment …` on the CLI; D3 Phase 6A/6B replaced the legacy three-tab IA with Pulse / Briefing / Reflection (the Experiments lifecycle data feeds into Reflection's calibration scoreboard + the fleet learning panel). Full mechanics in [`docs/paired-runs.md`](docs/paired-runs.md).
 
 #### Logs
 
@@ -724,19 +724,40 @@ What this does NOT cover: structured log analysis. Force ships the signals; the 
 
 ### Pattern-test enforcement layer
 
-Force ships ~14 grep / AST-based pattern tests that fail CI if specific invariants regress. They convert architectural rules from prose-in-`CLAUDE.md` to mechanical enforcement:
+Force ships 30 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P13, P15–P18, P20–P32) that fail CI if specific invariants regress. They convert architectural rules from prose-in-`CLAUDE.md` to mechanical enforcement:
 
 | Pattern | What it enforces |
 |---|---|
 | `TestPattern_P1_RowsScanErrorsChecked` | Every `rows.Scan(...)` in production checks the error |
 | `TestPattern_P1_1_RowsErrCheckedAfterIteration` | Every `for <iter>.Next()` loop has a `<iter>.Err()` check |
+| `TestPattern_P2_*` | Idempotency-key UNIQUE coverage; race-safe insert paths |
 | `TestPattern_P3_*` | Convoy-scoped queries use the structured `convoy_id` column, not `payload LIKE '%"convoy_id":N%'` |
+| `TestPattern_P4_*` | Hot-table indexes present; claim queries use `idx_bounty_*` |
+| `TestPattern_P6_*` | `Escalations.status` only takes documented values (no `'Resolved'` regression) |
 | `TestPattern_P7_*` | State transitions that depend on prior status use `UpdateBountyStatusFrom`; `ResetTask` refuses to resurrect terminal rows |
+| `TestPattern_P8_*` | Dashboard binds 127.0.0.1 only; no wildcard CORS regression |
+| `TestPattern_P9_*` | No secret literals leak into outbound channels (mail, telemetry, gh stderr) |
+| `TestPattern_P10_*` | Branch validators present; `git --` separator on every ref-shaped arg |
 | `TestPattern_P11_ExecCommandsUseContext` | Long-running `exec.Command` migrated to `exec.CommandContext(ctx, …)`; cheat shapes (`WithTimeout(Background, …)`, `Background()` direct) rejected per-site |
 | `TestPattern_P12_PromptInjectionSurface` | LLM prompts wrap attacker-controllable inputs in `<user_content>` and call `strictJSONUnmarshal` on responses |
 | `TestPattern_P13_CapabilityProfiles` | Every Claude call site sources tool args from `capabilities.LoadProfile(agentName)` — no hardcoded literals |
 | `TestPattern_P15_BashGuardIntegrity` + `_BashGuardEnvWiring` | Bash-guard wiring code present AND `setupBashGuardShim` returns both `PATH=` and `SHELL=` entries |
 | `TestPattern_P16_ClientsInterfaces` | Agent code never imports a concrete client struct; goes through the `Client` interface + `NewInProcess` / `NewMock` factories |
+| `TestPattern_P17_ClaudeMdSize` | Rendered `CLAUDE.md` ≤ 20 KB hard cap (D3 Phase 1) |
+| `TestPattern_P18_RenderCoherence` | FleetRules → CLAUDE.md / FIX-LOG.md / per-domain-doc render output is byte-stable + drift-detected |
+| `TestPattern_P20_ATIdScopeIntegrity` | AT-id resolution uses compound `(convoy_id, at_id)` key; bare `WHERE at_id = ?` rejected (D3 concern #8) |
+| `TestPattern_P21_ATRemovalIsOperatorOnly` | LLM proposal schemas (Captain, ConvoyReview, EC) cannot carry "remove"/"deprecate" intent on AT references (D3 concern #9) |
+| `TestPattern_P22_FingerprintDeterminism` | `store.Fingerprint(source, topic, code_paths, at_refs, fleetrule_refs)` is byte-deterministic + sort-order-invariant (D3 concern #10) |
+| `TestPattern_P23_ProposerWriteDiscipline` | Proposer code paths (Investigator, Captain, EC, ConvoyReview) cannot mutate archive / suppression state |
+| `TestPattern_P24_ScoreDistributionMonitor` | Per-source value-score distribution is not bimodal-toward-high (>70% single-bucket triggers warning) |
+| `TestPattern_P25_CLIParity` (AST-based) | Every mutating dashboard handler has a `force <verb>` CLI equivalent |
+| `TestPattern_P26_KeyboardShortcutConsistency` | Every documented shortcut in `?` overlay binds to a real action; every binding is documented |
+| `TestPattern_P27_NotificationBudgetRouting` | Operator-mail / banner / modal emit sites route through `RespectNotificationBudget` first |
+| `TestPattern_P28_NarrativeIsGenerated` | `NarrativeRenders.prose` produced ONLY by `internal/agents/narrative_renderer.go`; prompt template lives in code, version-stamped |
+| `TestPattern_P29_BriefingCitesRealEvidence` + `_PromptInCode` | `BriefingRenders.briefing_text` references resolve to real BountyBoard / PromotionProposals / ConvoyReviewCycles rows |
+| `TestPattern_P30_HighStakesCooldown_HelperExists` | Every high-stakes auto-execute decision routes through `CooldownPauses` |
+| `TestPattern_P31_AllLLMCallsCaptured` | Every Claude CLI call site routes through `claude.CallWithTranscript*` (writes `LLMCallTranscripts`) |
+| `TestPattern_P32_GitOpsLogged` | Every `exec.CommandContext(ctx, "git", …)` / `"gh"` routes through `internal/git` helpers (writes `GitOperationLog`) |
 
 Pattern tests are not "nice-to-have." Each regression they catch is documented with an AUDIT ID in `FIX-LOG.md` describing the original bug. CI failure here means the production code has drifted off an invariant the project earned the hard way.
 
@@ -1168,6 +1189,34 @@ force mail send astromech --task 42 --type directive \
 | `force audit [--limit N]` | Show the operator/agent action audit log. |
 | `force dogs` | Show watchdog status and next scheduled run. |
 | `force dashboard [--port N]` | Start the Fleet Command Center web UI at `localhost:8080` (default). The primary interface — see [The Dashboard](#the-dashboard--primary-interface) for full documentation. |
+
+### Paired Runs & Operator Surfaces (D3)
+
+| Command | Description |
+|---|---|
+| `force experiment author <yaml>` / `ratify <id>` / `terminate <id>` | Author / pre-approve / terminate paired-runs experiments. Operator-routed; ratification is the only path to `'running'`. |
+| `force ec author-experiment` / `author-promotion` / `author-demotion` / `monitor` / `holdout-monitor` | Engineering-Corps task-author convenience wrappers (one per EC task type). |
+| `force proposed-features list` / `show <id>` / `promote <id>` / `archive <id>` / `suppress <fingerprint>` | ProposedFeatures triage queue (Investigator → Captain → ConvoyReview cross-emit aggregation, value/complexity scored). |
+| `force annotate <kind> <ref> <flag> <text>` | Operator-only event annotation (flag taxonomy: `problem` / `interesting` / `follow_up`). Writes `OperatorEventAnnotations`. |
+| `force replay <kind> <id>` | Replay a Captain / Council / ConvoyReview / Medic decision against the current prompt version side-by-side. Purely diagnostic — no live state mutation. |
+| `force ask <question>` | Read-only `/`-shortcut equivalent: routes through `internal/agents/ask_handler.go` with read-only DB-query tools only. |
+| `force retro generate` / `save` | Friday 5-min retro generator; markdown draft to `docs/retros/<date>.md`. |
+| `force learning refresh` / `show` | Fleet's weekly learning panel — synthesises PromotionProposals + spec amendments + ProposedFeatures activity + prompt-version-shift outcomes. |
+| `force decide <decision-id> approve|reject` | CLI-parity equivalent of the dashboard Briefing approve/reject (P25 invariant). |
+| `force briefing-reject <decision-id>` | High-tier rejection with mandatory counter-proposal (Phase 6A.11 forcing flow). |
+| `force cooldown list` / `pause <id>` / `resume <id>` / `cancel <id>` | Inspect / mutate `CooldownPauses` for high-stakes auto-execute decisions (Pattern P30). |
+| `force trust list` / `set <agent> <value> [--rationale ...]` | Per-operator-per-agent trust dial (`OperatorTrustDials`); shifts Briefing friction tier. |
+| `force attention list` / `set <kind> <id> <level>` | Per-target attention tags (`following` / `normal` / `muted`) for convoy/feature/agent/rule_key. |
+| `force notifications budgets` / `digest` | Inspect operator notification budgets + flushed digest queue (Phase 6A.4). |
+| `force session show` / `clear` | Inspect / clear `OperatorSessionState` (resume-where-you-left-off scaffold). |
+| `force task <id>` | Drill view (event timeline + LLM transcripts + git ops + cost rollup) for a single task. |
+| `force tail [--source fleet\|holonet] [--filter ...]` | Combined live tail across fleet.log + holonet events. |
+| `force leaderboard` | Per-agent decision-distribution + calibration scoreboard summary. |
+| `force render-rules [--check]` | Regenerate (or drift-check) `CLAUDE.md` / `FIX-LOG.md` / `docs/*.md` from `FleetRules`. Same code path as `make render-rules` / `make render-rules-check`. |
+| `force install-sleep-hook [--check\|--uninstall\|--force]` | Install `~/.sleep` + `~/.wakeup` hooks (darwin / sleepwatcher integration). Idempotent; preserves operator-authored scripts unless `--force`. |
+| `force bounty <id>` | Raw `BountyBoard` row inspector — stable JSON shape for scripting. |
+
+The dashboard's three primary surfaces (Pulse / Briefing / Reflection plus the `/` Ask shortcut) provide the same surface area through the SPA; CLI parity is enforced by Pattern P25.
 
 ### Maintenance
 
