@@ -2095,43 +2095,12 @@ switchTab = function(name) {
   }
 };
 
-// Cmd-1 / Cmd-2 / Cmd-3 keymap stub (full keymap arrives in 6A.3).
-// The full 6A.3 keymap will replace this listener; for 6A.1 we only need
-// the surface-switch bindings to land. Browser already reserves Cmd-1/2/3
-// for tab navigation in some cases; we use ctrl/cmd-Alt-1/2/3 as well to
-// avoid clobbering native browser behaviour. The brief specifies Cmd-1/2/3,
-// which on macOS Safari/Chrome do switch browser tabs — but in dashboard
-// context (focus inside our document) we still receive the keydown first
-// and can preventDefault.
-document.addEventListener('keydown', e => {
-  // Skip if the user is typing into an input / textarea / contenteditable.
-  const tag = (e.target && e.target.tagName) || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
-  const cmd = e.metaKey || e.ctrlKey;
-  if (!cmd) return;
-  if (e.key === '1') {
-    e.preventDefault();
-    navigateToSurface('pulse');
-  } else if (e.key === '2') {
-    e.preventDefault();
-    navigateToSurface('briefing');
-  } else if (e.key === '3') {
-    e.preventDefault();
-    navigateToSurface('reflection');
-  }
-});
-
-// `/` focuses the always-mounted search input. Full keymap (6A.3) extends
-// this with Esc / j / k / ? / etc.
-document.addEventListener('keydown', e => {
-  const tag = (e.target && e.target.tagName) || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
-  if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-    e.preventDefault();
-    const inp = document.getElementById('surface-search');
-    if (inp) inp.focus();
-  }
-});
+// Keyboard shortcuts (Cmd-1/2/3, /, ?, Esc, j/k, etc.) are dispatched
+// from keymap.js (D3 P6A.3). The 6A.1 stub listener was removed when
+// 6A.3 landed. navigateToSurface is exported on window so the keymap
+// can call it.
+window.navigateToSurface = navigateToSurface;
+window.currentSurfaceFromHash = currentSurfaceFromHash;
 
 // Boot: route to the surface from the URL (default pulse).
 showSurface(currentSurfaceFromHash());

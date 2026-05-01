@@ -1213,3 +1213,89 @@ select option { background: var(--bg2); color: var(--text); }
 .health-banner.hidden { display: none; }
 .health-banner-icon { font-size: 14px; }
 .health-banner-msg { flex: 1; color: var(--text); font-weight: 400; }
+
+/* ── D3 P6A.3 — Help overlay ──────────────────────────────────────────── */
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+.help-overlay.hidden { display: none !important; }
+.help-overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+.help-overlay-modal {
+  position: relative;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 540px;
+  max-width: 92vw;
+  max-height: 80vh;
+  overflow: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  z-index: 1;
+}
+.help-overlay-header {
+  display: flex;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.help-overlay-header h2 {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+.help-overlay-close {
+  font-size: 22px;
+  cursor: pointer;
+  color: var(--text2);
+  user-select: none;
+}
+.help-overlay-close:hover { color: var(--text); }
+.help-overlay-body { padding: 14px 18px; }
+.help-overlay-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.help-overlay-table th,
+.help-overlay-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.help-overlay-table th {
+  font-weight: 600;
+  color: var(--text2);
+  width: 90px;
+}
+.help-overlay-table kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+.help-overlay-footer {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+#help-btn {
+  font-weight: 700;
+  font-family: var(--font-mono);
+}

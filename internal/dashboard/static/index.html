@@ -38,6 +38,8 @@
   <button id="estop-btn"  class="hdr-btn estop-btn"  onclick="triggerEstop()">E-Stop</button>
   <button id="resume-btn" class="hdr-btn resume-btn" onclick="triggerResume()" style="display:none">Resume</button>
   <button class="hdr-btn primary" onclick="showAddModal()">+ Queue Task</button>
+  <!-- D3 P6A.3 — Help overlay button. Same as pressing `?`. -->
+  <button id="help-btn" class="hdr-btn" title="Keyboard shortcuts (?)" aria-label="Show keyboard shortcuts (?)" onclick="window.toggleHelpOverlay && window.toggleHelpOverlay()">?</button>
 </header>
 
 <!-- ── D3 P6A.1 — Pulse / Briefing / Reflection placeholder panes ───────────
@@ -539,11 +541,20 @@
   </div>
 </div>
 
+<!-- ── D3 P6A.3 — Keyboard shortcut help overlay mount ─────────────────────
+     The overlay HTML lives in help-overlay.html and is fetched on first
+     `?` press. Pattern P26 enforces the key set in keymap.js matches the
+     table in help-overlay.html. -->
+<div id="help-overlay" class="help-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="help-overlay-title">
+  <div id="help-overlay-mount"></div>
+</div>
+
 <!-- AUDIT-002 / AUDIT-003 (Fix #2): marked.js removed entirely.
      The mail-body modal now renders m.body via .textContent, which is the
      safer default: no HTML parsing means no XSS sink to sanitize around.
      If rich rendering is ever needed back, bundle marked locally under
      static/ with DOMPurify, do not reinstate the CDN. -->
 <script src="app.js"></script>
+<script src="keymap.js"></script>
 </body>
 </html>
