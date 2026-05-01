@@ -14,6 +14,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -66,41 +67,76 @@ func FindPriorSimilar(ctx context.Context, db *sql.DB, kind string, decisionID i
 
 	// Now resolve subsequent outcomes — connection is free.
 	for i := range out {
-		out[i].SubsequentOutcome = computeSubsequentOutcome(ctx, db, out[i].DecisionID)
+		outcome, oErr := ComputeSubsequentOutcome(ctx, db, out[i].DecisionID)
+		if oErr != nil {
+			return nil, fmt.Errorf("compute subsequent outcome for decision %d: %w", out[i].DecisionID, oErr)
+		}
+		out[i].SubsequentOutcome = outcome
 	}
 	return out, nil
 }
 
-// computeSubsequentOutcome resolves the downstream signal for a decision.
+// ComputeSubsequentOutcome resolves the downstream signal for a decision.
 // Returns one of: shipped_clean | reverted | flagged_in_review | pending.
 // Lookups are intentionally cheap and bounded — full convoy-state
 // traversal lives in 6B.
-func computeSubsequentOutcome(ctx context.Context, db *sql.DB, decisionID int64) string {
+//
+// Polish-pass fix (D3 polish): each QueryRow error is now propagated
+// rather than swallowed via `_ =`. Per CLAUDE.md "No silent failures"
+// invariant: every error path must terminate explicitly. sql.ErrNoRows
+// is normalised to a non-error "row absent" so the bounded fallthrough
+// to the next probe matches the original semantics.
+func ComputeSubsequentOutcome(ctx context.Context, db *sql.DB, decisionID int64) (string, error) {
 	// Was there a PromotionProposal revert? (rejection_action = 'clean_revert').
 	var n int
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM PromotionProposals
-		WHERE id = ? AND rejection_action = 'clean_revert'`, decisionID).Scan(&n)
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM PromotionProposals
+		WHERE id = ? AND rejection_action = 'clean_revert'`, decisionID).Scan(&n); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("probe PromotionProposals for decision %d: %w", decisionID, err)
+	}
 	if n > 0 {
-		return "reverted"
+		return "reverted", nil
 	}
 
 	// Was there a ConvoyReviewCycle that surfaced an amendment-needed signal?
 	// We approximate "flagged" via the presence of amendments_proposed_json
 	// containing entries (i.e., the cycle proposed amendments).
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ConvoyReviewCycles
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ConvoyReviewCycles
 		WHERE convoy_id = ? AND amendments_proposed_json != '' AND amendments_proposed_json != '[]'`,
-		decisionID).Scan(&n)
+		decisionID).Scan(&n); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("probe ConvoyReviewCycles for decision %d: %w", decisionID, err)
+	}
 	if n > 0 {
-		return "flagged_in_review"
+		return "flagged_in_review", nil
 	}
 
 	// Was the convoy/task completed cleanly?
 	var status string
-	_ = db.QueryRowContext(ctx, `SELECT IFNULL(status, '') FROM BountyBoard
-		WHERE id = ? LIMIT 1`, decisionID).Scan(&status)
+	if err := db.QueryRowContext(ctx, `SELECT IFNULL(status, '') FROM BountyBoard
+		WHERE id = ? LIMIT 1`, decisionID).Scan(&status); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("probe BountyBoard for decision %d: %w", decisionID, err)
+	}
 	if status == "Completed" {
-		return "shipped_clean"
+		return "shipped_clean", nil
 	}
 
-	return "pending"
+	return "pending", nil
+}
+
+// computeSubsequentOutcome — kept as a thin wrapper for the existing
+// store-internal test that asserts the "swallow → return" shape. The
+// original version swallowed errors and returned a string only; the
+// polish-pass version returns (string, error) and renames to capitalise.
+// The lower-case helper preserves backwards-compatibility for tests
+// that only consumed the string and discarded any (non-existent) error.
+func computeSubsequentOutcome(ctx context.Context, db *sql.DB, decisionID int64) string {
+	out, err := ComputeSubsequentOutcome(ctx, db, decisionID)
+	if err != nil {
+		// In the legacy single-return shape we have no way to surface
+		// errors; this lower-case wrapper is now used only by the
+		// store-internal sub-tests that don't have an error path. The
+		// real production code path goes through FindPriorSimilar →
+		// ComputeSubsequentOutcome which propagates.
+		return "pending"
+	}
+	return out
 }

@@ -125,5 +125,65 @@ func TestCalibrationQueries(t *testing.T) {
 		if sb.SampleStats.Total != 0 {
 			t.Errorf("expected zero samples")
 		}
+		if len(sb.SampleStatsByBucket) != 0 {
+			t.Errorf("expected empty per-bucket: %+v", sb.SampleStatsByBucket)
+		}
+	})
+
+	// D3 polish-pass A3: per-bucket breakout. Verify random vs
+	// adversarial vs high-confidence each surface their own row with
+	// independent accuracy_pct.
+	t.Run("per_bucket_breakout_distinguishes_buckets", func(t *testing.T) {
+		db := InitHolocronDSN(":memory:")
+		defer db.Close()
+		// random: 4 confirms, 1 override (80% accuracy)
+		for i := 0; i < 4; i++ {
+			_, _ = db.Exec(`INSERT INTO CalibrationAuditSamples
+				(sample_week, proposal_id, selection_bucket, operator_action, surfaced_at)
+				VALUES ('2026-W17', ?, 'random', 'confirm', datetime('now'))`, i+1)
+		}
+		_, _ = db.Exec(`INSERT INTO CalibrationAuditSamples
+			(sample_week, proposal_id, selection_bucket, operator_action, surfaced_at)
+			VALUES ('2026-W17', 5, 'random', 'override', datetime('now'))`)
+		// fast_high_stakes: 1 confirm, 3 overrides (25% accuracy)
+		_, _ = db.Exec(`INSERT INTO CalibrationAuditSamples
+			(sample_week, proposal_id, selection_bucket, operator_action, surfaced_at)
+			VALUES ('2026-W17', 6, 'fast_high_stakes', 'confirm', datetime('now'))`)
+		for i := 0; i < 3; i++ {
+			_, _ = db.Exec(`INSERT INTO CalibrationAuditSamples
+				(sample_week, proposal_id, selection_bucket, operator_action, surfaced_at)
+				VALUES ('2026-W17', ?, 'fast_high_stakes', 'override', datetime('now'))`, 7+i)
+		}
+		// high_approve_rate: 5 confirms (100%)
+		for i := 0; i < 5; i++ {
+			_, _ = db.Exec(`INSERT INTO CalibrationAuditSamples
+				(sample_week, proposal_id, selection_bucket, operator_action, surfaced_at)
+				VALUES ('2026-W17', ?, 'high_approve_rate', 'confirm', datetime('now'))`, 100+i)
+		}
+
+		sb, err := LoadCalibrationScoreboard(context.Background(), db)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if len(sb.SampleStatsByBucket) != 3 {
+			t.Fatalf("expected 3 bucket rows, got %d: %+v", len(sb.SampleStatsByBucket), sb.SampleStatsByBucket)
+		}
+		seen := map[string]BucketSampleStats{}
+		for _, b := range sb.SampleStatsByBucket {
+			seen[b.Bucket] = b
+		}
+		if r := seen["random"]; r.Total != 5 || r.ConfirmedCount != 4 || r.AccuracyPct != 80 {
+			t.Errorf("random bucket wrong: %+v", r)
+		}
+		if r := seen["fast_high_stakes"]; r.Total != 4 || r.ConfirmedCount != 1 || r.AccuracyPct != 25 {
+			t.Errorf("fast_high_stakes bucket wrong: %+v", r)
+		}
+		if r := seen["high_approve_rate"]; r.Total != 5 || r.ConfirmedCount != 5 || r.AccuracyPct != 100 {
+			t.Errorf("high_approve_rate bucket wrong: %+v", r)
+		}
+		// And the rolling 30d aggregate stays a single number across all buckets.
+		if sb.SampleStats.Total != 14 {
+			t.Errorf("aggregate total: got %d, want 14", sb.SampleStats.Total)
+		}
 	})
 }

@@ -254,6 +254,15 @@ func TestShakedown_P6B(t *testing.T) {
 		_, _ = db.Exec(`INSERT INTO BriefingRenders
 			(decision_id, decision_kind, briefing_text, operator_decision, decision_time_seconds, rendered_at)
 			VALUES (1, 'captain_ruling', 'b', 'approve', 25, datetime('now'))`)
+		// D3 polish-pass A3: seed two distinct buckets so the per-bucket
+		// breakout has rows to surface.
+		_, _ = db.Exec(`INSERT INTO CalibrationAuditSamples
+			(sample_week, proposal_id, selection_bucket, operator_action, surfaced_at)
+			VALUES ('2026-W17', 1, 'random', 'confirm', datetime('now'))`)
+		_, _ = db.Exec(`INSERT INTO CalibrationAuditSamples
+			(sample_week, proposal_id, selection_bucket, operator_action, surfaced_at)
+			VALUES ('2026-W17', 2, 'fast_high_stakes', 'override', datetime('now'))`)
+
 		req := httptest.NewRequest(http.MethodGet, "/api/reflection/calibration", nil)
 		rr := httptest.NewRecorder()
 		handleCalibration(db)(rr, req)
@@ -264,6 +273,15 @@ func TestShakedown_P6B(t *testing.T) {
 		json.Unmarshal(rr.Body.Bytes(), &sb)
 		if len(sb.DecisionTimes) == 0 {
 			t.Errorf("expected ≥1 agent-decision-time row")
+		}
+		// Per-bucket breakout must surface both seeded buckets.
+		if len(sb.SampleStatsByBucket) != 2 {
+			t.Errorf("expected 2 bucket rows in JSON, got %d: %+v", len(sb.SampleStatsByBucket), sb.SampleStatsByBucket)
+		}
+		// JSON shape: confirm the field key is present in the raw body
+		// so SPA renderers can rely on it.
+		if !strings.Contains(rr.Body.String(), `"sample_stats_by_bucket"`) {
+			t.Errorf("expected sample_stats_by_bucket in JSON body; got %s", rr.Body.String())
 		}
 	})
 
