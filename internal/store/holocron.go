@@ -34,6 +34,16 @@ func InitHolocronDSN(dsn string) *sql.DB {
 	createSchema(db)
 	runMigrations(db)
 
+	// D3 P6B.6 — Drill free-text search via sqlite_fts5. Build the
+	// virtual tables + sync triggers AFTER createSchema and
+	// runMigrations so the source tables already exist. Best-effort
+	// — a build failure (e.g. SQLite without sqlite_fts5 compiled
+	// in) leaves the DB usable; only the /api/drill/search endpoint
+	// degrades.
+	if err := EnsureDrillFTS5(db); err != nil {
+		log.Printf("InitHolocronDSN: EnsureDrillFTS5 failed (drill search degraded): %v", err)
+	}
+
 	// Enable foreign-key enforcement AFTER migrations run so the TaskNotes table
 	// rebuild (AUDIT-079 companion) can drop and recreate without tripping FK
 	// checks on its own placeholder rows. From this point on, the

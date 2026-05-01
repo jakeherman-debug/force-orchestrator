@@ -40,6 +40,7 @@ var p25Allowlist = map[string]string{
 	"/api/drill/convoy/": "read-only Drill diagnostic surface (6B.3); GET-only",
 	"/api/drill/task/":   "read-only Drill diagnostic surface (6B.4); GET-only",
 	"/api/drill/event/":  "read-only Drill diagnostic surface (6B.5); GET-only",
+	"/api/drill/search":  "read-only Drill free-text search (6B.6); GET-only",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in
