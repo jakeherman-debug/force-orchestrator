@@ -1,0 +1,48 @@
+<!--
+D3 P6A.3 — Keyboard shortcut help overlay.
+
+Pattern P26 contract: every row in this table MUST appear in keymap.js
+as a `bind('<key>', ...)` call, and vice-versa. The audit test parses
+both files and asserts the sets match exactly. Edit one without the
+other and CI will fail.
+
+The overlay is fetched at first `?` press and inserted into
+#help-overlay-mount. Dismissed by `Esc`, by clicking the backdrop, or
+by pressing `?` again.
+-->
+<div id="help-overlay-backdrop" class="help-overlay-backdrop"></div>
+<div id="help-overlay-modal" class="help-overlay-modal">
+  <div class="help-overlay-header">
+    <h2>Keyboard shortcuts</h2>
+    <span class="help-overlay-close" id="help-overlay-btn">&times;</span>
+  </div>
+  <div class="help-overlay-body">
+    <table class="help-overlay-table" data-keymap-table="1">
+      <thead>
+        <tr><th>Key</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd data-help-key="Cmd-1">Cmd-1</kbd></td><td>Switch to Pulse</td></tr>
+        <tr><td><kbd data-help-key="Cmd-2">Cmd-2</kbd></td><td>Switch to Briefing</td></tr>
+        <tr><td><kbd data-help-key="Cmd-3">Cmd-3</kbd></td><td>Switch to Reflection</td></tr>
+        <tr><td><kbd data-help-key="g p">g p</kbd></td><td>Goto Pulse (vim-style)</td></tr>
+        <tr><td><kbd data-help-key="g b">g b</kbd></td><td>Goto Briefing (vim-style)</td></tr>
+        <tr><td><kbd data-help-key="g r">g r</kbd></td><td>Goto Reflection (vim-style)</td></tr>
+        <tr><td><kbd data-help-key="/">/</kbd></td><td>Focus search / Ask Force</td></tr>
+        <tr><td><kbd data-help-key="?">?</kbd></td><td>Toggle help overlay</td></tr>
+        <tr><td><kbd data-help-key="Esc">Esc</kbd></td><td>Close overlay or focus mode</td></tr>
+        <tr><td><kbd data-help-key="j">j</kbd></td><td>Next row (Briefing list / Reflection lists)</td></tr>
+        <tr><td><kbd data-help-key="k">k</kbd></td><td>Previous row (Briefing list / Reflection lists)</td></tr>
+        <tr><td><kbd data-help-key="Enter">Enter</kbd></td><td>Open focused row (Briefing)</td></tr>
+        <tr><td><kbd data-help-key="a">a</kbd></td><td>Approve focused decision (Briefing focus mode)</td></tr>
+        <tr><td><kbd data-help-key="r">r</kbd></td><td>Reject focused decision (Briefing focus mode)</td></tr>
+        <tr><td><kbd data-help-key="D">D</kbd></td><td>Drill — open drill view of focused row</td></tr>
+      </tbody>
+    </table>
+    <p class="help-overlay-footer">
+      Pattern P26: every binding here is enforced live in
+      <code>keymap.js</code>. Add or remove a binding and the audit test
+      fails until this table is updated to match.
+    </p>
+  </div>
+</div>
