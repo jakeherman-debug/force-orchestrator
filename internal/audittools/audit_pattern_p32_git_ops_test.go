@@ -46,15 +46,17 @@ var p32Allowlist = map[string]string{
 	// with igit.LogAndRun(ctx, OpContext{TaskID: t.ID, Repo: r.Name},
 	// op, "git", args...). Most call sites already have task + repo
 	// in scope.
-	"internal/agents/astromech.go":            "Astromech runs `git` against the per-task worktree from many helpers (runShortGit, combinedShortGit, …). Migration: thread OpContext{TaskID: bounty.ID, Repo: repo.Name} through each helper. Migration target: 6B follow-up train.",
-	"internal/agents/divergence_detector.go":  "Divergence detector — pre-6B direct rev-parse; migration: igit.LogAndRun with OpContext{Repo: repo.Name}. Migration target: 6B follow-up train.",
-	"internal/agents/dogs.go":                 "Dog git-hygiene cleanup — pre-6B direct exec (rev-parse / checkout / branch -D); migration: route through internal/git/runGitCtx (which already logs). Migration target: 6B follow-up train.",
-	"internal/agents/pilot_preflight.go":      "Pilot preflight — pre-6B direct ls-remote; migration: igit.LogAndRun. Migration target: 6B follow-up train.",
-	"internal/agents/pilot_repo_config.go":    "Pilot repo-config probe — ls-remote ping; migration: igit.LogAndRun. Migration target: 6B follow-up train.",
-	"internal/agents/pilot_worktree_reset.go": "Pilot worktree-reset — multi-step (rebase --abort / merge --abort / reset --hard / clean -fdx); migration: each step routes through igit.LogAndRun. Migration target: 6B follow-up train.",
-	"internal/agents/pr_flow.go":              "Pilot PR-flow — push + ask-branch tip lookups; migration: igit.LogAndRun with OpContext{Repo: repo.Name, ConvoyID: convoyID}. Migration target: 6B follow-up train.",
-	"internal/agents/reconcile.go":            "Reconciler — branch-existence rev-parse; migration: igit.LogAndRun. Migration target: 6B follow-up train.",
-	"internal/agents/shadow/worktree.go":      "Shadow worktree manager — git -C <wt> ops; migration: igit.LogAndRun. Migration target: 6B follow-up train.",
+	// D3 polish-pass B4 (2026-04-30): the following files migrated to
+	// igit.LogAndRun and were removed from this backlog:
+	//   - internal/agents/divergence_detector.go (1 site)
+	//   - internal/agents/reconcile.go (2 sites)
+	//   - internal/agents/pilot_preflight.go (3 sites)
+	//   - internal/agents/pilot_repo_config.go (1 site)
+	//   - internal/agents/pilot_worktree_reset.go (5 sites)
+	//   - internal/agents/pr_flow.go (3 sites)
+	"internal/agents/astromech.go":            "Astromech runs `git` against the per-task worktree from many helpers (runShortGit, combinedShortGit, …). Migration: thread OpContext{TaskID: bounty.ID, Repo: repo.Name} through each helper. Migration target: D4 — astromech helpers are tightly coupled and a complete migration requires reshaping the runShortGit/combinedShortGit interface.",
+	"internal/agents/dogs.go":                 "Dog git-hygiene cleanup — pre-6B direct exec (rev-parse / checkout / branch -D); migration: route through internal/git/runGitCtx (which already logs). Migration target: D4.",
+	"internal/agents/shadow/worktree.go":      "Shadow worktree manager — git -C <wt> ops; migration: igit.LogAndRun. Migration target: D4.",
 
 	// cmd/force — CLI entry points whose git ops run in the user's
 	// terminal session, often before a daemon DB is attached. The

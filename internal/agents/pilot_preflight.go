@@ -1,12 +1,13 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"force-orchestrator/internal/gh"
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
 
@@ -44,7 +45,7 @@ type PreflightCheck struct {
 //
 // Tests do not run gh.NewClient() because it would shell out to the real gh
 // binary; use NewClientWithRunner with a stub Runner.
-func PRFlowPreflight(db *sql.DB, ghClient *gh.Client) []PreflightCheck {
+func PRFlowPreflight(ctx context.Context, db *sql.DB, ghClient *gh.Client) []PreflightCheck {
 	var results []PreflightCheck
 
 	// Check 1: gh auth status.
@@ -65,7 +66,7 @@ func PRFlowPreflight(db *sql.DB, ghClient *gh.Client) []PreflightCheck {
 			results = append(results, res)
 			continue
 		}
-		remote, err := repoRemoteURL(repo.LocalPath)
+		remote, err := repoRemoteURL(ctx, repo.LocalPath)
 		if err != nil {
 			res.Passed = false
 			res.Detail = fmt.Sprintf("git remote get-url origin: %v", err)
@@ -86,7 +87,7 @@ func PRFlowPreflight(db *sql.DB, ghClient *gh.Client) []PreflightCheck {
 // to the legacy path — the daemon doesn't refuse to start over a missing repo.
 //
 // Returns a human-readable summary for logging.
-func BackfillRepoRemoteInfo(db *sql.DB) string {
+func BackfillRepoRemoteInfo(ctx context.Context, db *sql.DB) string {
 	var (
 		populated, disabled int
 		disabledNames       []string
@@ -102,7 +103,7 @@ func BackfillRepoRemoteInfo(db *sql.DB) string {
 			disabledNames = append(disabledNames, repo.Name+" (no local_path)")
 			continue
 		}
-		remote, rErr := repoRemoteURL(repo.LocalPath)
+		remote, rErr := repoRemoteURL(ctx, repo.LocalPath)
 		if rErr != nil {
 			// deferral-comment(Fix #8b): propagate error — daemon-startup backfill has no logger; next RevalidateRepoConfig dog tick re-runs the check and re-disables on failure
 			_ = store.SetRepoPRFlowEnabled(db, repo.Name, false)
@@ -110,7 +111,7 @@ func BackfillRepoRemoteInfo(db *sql.DB) string {
 			disabledNames = append(disabledNames, fmt.Sprintf("%s (remote error: %v)", repo.Name, rErr))
 			continue
 		}
-		branch := repoDefaultBranch(repo.LocalPath)
+		branch := repoDefaultBranch(ctx, repo.LocalPath)
 		if branch == "" {
 			// git commands all failed — can't detect default branch. Disable flow.
 			// deferral-comment(Fix #8b): propagate error — daemon-startup backfill has no logger; next RevalidateRepoConfig dog tick re-runs the check and re-disables on failure
@@ -175,9 +176,14 @@ func EnqueueMissingFindPRTemplate(db *sql.DB) (queued, skipped int) {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 // repoRemoteURL returns the origin URL of a local repo, or error.
-func repoRemoteURL(localPath string) (string, error) {
-	cmd := exec.Command("git", "-C", localPath, "remote", "get-url", "origin")
-	out, err := cmd.CombinedOutput()
+//
+// D3 polish-pass B4: routes through igit.LogAndRun so the GitOperationLog
+// row records this preflight probe. ctx threads from the caller (Spawn
+// entry-point or daemon-ctx wrapper) per CLAUDE.md "Daemon context
+// threading" + Pattern P11.
+func repoRemoteURL(ctx context.Context, localPath string) (string, error) {
+	out, err := igit.LogAndRun(ctx, igit.OpContext{},
+		"remote-get-url", "git", "-C", localPath, "remote", "get-url", "origin")
 	if err != nil {
 		return "", fmt.Errorf("%s", strings.TrimSpace(string(out)))
 	}
@@ -191,15 +197,17 @@ func repoRemoteURL(localPath string) (string, error) {
 // repoDefaultBranch returns the default branch name, or "" if undetectable.
 // Mirrors internal/git.GetDefaultBranch but does NOT fall back to "main" so
 // callers can tell genuine detection failure from a real "main" result.
-func repoDefaultBranch(localPath string) string {
-	if out, err := exec.Command("git", "-C", localPath, "symbolic-ref", "refs/remotes/origin/HEAD", "--short").CombinedOutput(); err == nil {
+func repoDefaultBranch(ctx context.Context, localPath string) string {
+	if out, err := igit.LogAndRun(ctx, igit.OpContext{},
+		"symbolic-ref", "git", "-C", localPath, "symbolic-ref", "refs/remotes/origin/HEAD", "--short"); err == nil {
 		parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
 		if len(parts) == 2 && parts[1] != "" {
 			return parts[1]
 		}
 	}
 	for _, branch := range []string{"main", "master", "develop"} {
-		if exec.Command("git", "-C", localPath, "rev-parse", "--verify", branch).Run() == nil {
+		if _, err := igit.LogAndRun(ctx, igit.OpContext{Branch: branch},
+			"rev-parse", "git", "-C", localPath, "rev-parse", "--verify", branch); err == nil {
 			return branch
 		}
 	}

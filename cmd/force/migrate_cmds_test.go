@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -109,7 +110,7 @@ func TestRunPRFlowStartup_AbortsOnFatalPreflight(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 
-	_ = runPRFlowStartup(db) // may return an error in CI if gh is not installed — we don't assert on it
+	_ = runPRFlowStartup(context.Background(), db) // may return an error in CI if gh is not installed — we don't assert on it
 
 	w.Close()
 	captured, _ := io.ReadAll(r)

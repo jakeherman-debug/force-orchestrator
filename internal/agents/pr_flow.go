@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -69,8 +68,10 @@ func openSubPRForApprovedTask(ctx context.Context, db *sql.DB, bounty *store.Bou
 	// Pre-fix this site sat on the Pattern P11 allowlist labelled "short
 	// (rev-parse)" — but the call is `git push`, a network op. Now it
 	// inherits the council claim ctx so SIGINT cancels it cleanly.
-	pushOut, pushErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "push",
-		"--force-with-lease", "-u", "origin", branchName).CombinedOutput()
+	pushOut, pushErr := igit.LogAndRun(ctx,
+		igit.OpContext{Repo: repo.Name, TaskID: int(bounty.ID), Branch: branchName},
+		"force-push", "git", "-C", repo.LocalPath, "push",
+		"--force-with-lease", "-u", "origin", branchName)
 	if pushErr != nil {
 		msg := strings.TrimSpace(string(pushOut))
 		cls := gh.ClassifyError(msg)
@@ -201,8 +202,10 @@ func completeAskBranchResolution(ctx context.Context, db *sql.DB, bounty *store.
 	// Force-push the ask-branch with lease so a concurrent rewrite can't be
 	// silently clobbered.
 	// Fix #8e: ctx-bounded so daemon shutdown cancels this network push.
-	pushOut, pushErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "push",
-		"--force-with-lease", "origin", ab.AskBranch).CombinedOutput()
+	pushOut, pushErr := igit.LogAndRun(ctx,
+		igit.OpContext{Repo: repo.Name, TaskID: int(bounty.ID), Branch: ab.AskBranch},
+		"force-push", "git", "-C", repo.LocalPath, "push",
+		"--force-with-lease", "origin", ab.AskBranch)
 	if pushErr != nil {
 		msg := strings.TrimSpace(string(pushOut))
 		cls := gh.ClassifyError(msg)
@@ -213,7 +216,9 @@ func completeAskBranchResolution(ctx context.Context, db *sql.DB, bounty *store.
 	// Capture the new tip SHA. The new tip is the local HEAD of the ask-branch
 	// after astromech committed. Short rev-parse stays unbounded — sub-second
 	// expected and the repo is local-only.
-	tipOut, tipErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "rev-parse", ab.AskBranch).CombinedOutput()
+	tipOut, tipErr := igit.LogAndRun(ctx,
+		igit.OpContext{Repo: repo.Name, TaskID: int(bounty.ID), Branch: ab.AskBranch},
+		"rev-parse", "git", "-C", repo.LocalPath, "rev-parse", ab.AskBranch)
 	if tipErr != nil {
 		return gh.ErrClassPermanent, fmt.Errorf("rev-parse %s: %s", ab.AskBranch, strings.TrimSpace(string(tipOut)))
 	}

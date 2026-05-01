@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,7 +58,7 @@ func (s ghStub) Run(cwd string, args []string, stdin []byte) ([]byte, []byte, er
 func TestPRFlowPreflight_AuthFatalOnFailure(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	checks := PRFlowPreflight(db, stubGH(false))
+	checks := PRFlowPreflight(context.Background(), db, stubGH(false))
 	var authCheck *PreflightCheck
 	for i, c := range checks {
 		if c.Name == "gh-auth" {
@@ -92,7 +93,7 @@ func TestPRFlowPreflight_PerRepoOriginChecks(t *testing.T) {
 	// Repo C: no local_path at all (stored empty).
 	store.AddRepo(db, "c", "", "")
 
-	checks := PRFlowPreflight(db, stubGH(true))
+	checks := PRFlowPreflight(context.Background(), db, stubGH(true))
 
 	var aRes, bRes, cRes *PreflightCheck
 	for i, c := range checks {
@@ -132,7 +133,7 @@ func TestBackfillRepoRemoteInfo_PopulatesFields(t *testing.T) {
 	makeGitRepo(t, dir, "git@github.com:acme/api.git")
 	store.AddRepo(db, "api", dir, "")
 
-	summary := BackfillRepoRemoteInfo(db)
+	summary := BackfillRepoRemoteInfo(context.Background(), db)
 	if !strings.Contains(summary, "backfilled 1") {
 		t.Errorf("summary: %q", summary)
 	}
@@ -156,7 +157,7 @@ func TestBackfillRepoRemoteInfo_DisablesPRFlowWhenOriginMissing(t *testing.T) {
 	makeGitRepo(t, dir, "") // no origin
 	store.AddRepo(db, "broken", dir, "")
 
-	summary := BackfillRepoRemoteInfo(db)
+	summary := BackfillRepoRemoteInfo(context.Background(), db)
 	if !strings.Contains(summary, "disabled pr_flow for 1") {
 		t.Errorf("summary should mention disabled: %q", summary)
 	}
@@ -176,7 +177,7 @@ func TestBackfillRepoRemoteInfo_SkipsAlreadyPopulated(t *testing.T) {
 	store.AddRepo(db, "prepop", "/ignored", "")
 	_ = store.SetRepoRemoteInfo(db, "prepop", "git@existing.com:x/y.git", "main")
 
-	summary := BackfillRepoRemoteInfo(db)
+	summary := BackfillRepoRemoteInfo(context.Background(), db)
 	if !strings.Contains(summary, "backfilled 0") {
 		t.Errorf("already-populated repo should be skipped: %q", summary)
 	}

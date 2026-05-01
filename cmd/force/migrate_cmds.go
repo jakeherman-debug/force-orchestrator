@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -29,14 +30,14 @@ import (
 const prFlowSnapshotPrefix = "holocron.db.pre-pr-flow."
 
 // cmdMigrate dispatches `force migrate <subcommand>`.
-func cmdMigrate(db *sql.DB, args []string) {
+func cmdMigrate(ctx context.Context, db *sql.DB, args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: force migrate pr-flow [--dry-run] [--rollback --confirm]")
 		os.Exit(1)
 	}
 	switch args[0] {
 	case "pr-flow":
-		cmdMigratePRFlow(db, args[1:])
+		cmdMigratePRFlow(ctx, db, args[1:])
 	default:
 		fmt.Printf("Unknown migration: %s\n", args[0])
 		fmt.Println("Usage: force migrate pr-flow [--dry-run] [--rollback --confirm]")
@@ -44,7 +45,7 @@ func cmdMigrate(db *sql.DB, args []string) {
 	}
 }
 
-func cmdMigratePRFlow(db *sql.DB, args []string) {
+func cmdMigratePRFlow(ctx context.Context, db *sql.DB, args []string) {
 	var dryRun, rollback, confirm bool
 	for _, a := range args {
 		switch a {
@@ -84,11 +85,11 @@ func cmdMigratePRFlow(db *sql.DB, args []string) {
 	}
 
 	if dryRun {
-		runPRFlowDryRun(db)
+		runPRFlowDryRun(ctx, db)
 		return
 	}
 
-	runPRFlowMigrate(db)
+	runPRFlowMigrate(ctx, db)
 }
 
 // runPRFlowStartup is the hook called from cmdDaemon before any agents spawn.
@@ -97,9 +98,9 @@ func cmdMigratePRFlow(db *sql.DB, args []string) {
 // enqueues FindPRTemplate for repos that still need it. Returns an error only
 // when a FATAL preflight fails — per-repo issues disable pr_flow for that repo
 // and log a warning but do not abort startup.
-func runPRFlowStartup(db *sql.DB) error {
+func runPRFlowStartup(ctx context.Context, db *sql.DB) error {
 	ghClient := gh.NewClient()
-	checks := agents.PRFlowPreflight(db, ghClient)
+	checks := agents.PRFlowPreflight(ctx, db, ghClient)
 
 	var fatalFailures []string
 	var perRepoFailures []string
@@ -124,7 +125,7 @@ func runPRFlowStartup(db *sql.DB) error {
 		return fmt.Errorf("fatal preflight failures:\n  - %s", strings.Join(fatalFailures, "\n  - "))
 	}
 
-	if summary := agents.BackfillRepoRemoteInfo(db); summary != "" {
+	if summary := agents.BackfillRepoRemoteInfo(ctx, db); summary != "" {
 		fmt.Printf("[migration] %s\n", summary)
 	}
 	queued, _ := agents.EnqueueMissingFindPRTemplate(db)
@@ -149,7 +150,7 @@ func runPRFlowStartup(db *sql.DB) error {
 	return nil
 }
 
-func runPRFlowDryRun(db *sql.DB) {
+func runPRFlowDryRun(ctx context.Context, db *sql.DB) {
 	fmt.Println("PR-flow migration — dry run")
 	fmt.Println("===========================")
 
@@ -192,7 +193,7 @@ func runPRFlowDryRun(db *sql.DB) {
 	}
 }
 
-func runPRFlowMigrate(db *sql.DB) {
+func runPRFlowMigrate(ctx context.Context, db *sql.DB) {
 	// Take a snapshot before any work. Failing to snapshot aborts — we never
 	// run the backfill without a rollback available.
 	snapshot, err := takePRFlowSnapshot(".")
@@ -205,7 +206,7 @@ func runPRFlowMigrate(db *sql.DB) {
 	// Layer A has already run during InitHolocron (all ALTERs are idempotent).
 	// We just need to do Layer B and report preflight state.
 	ghClient := gh.NewClient()
-	checks := agents.PRFlowPreflight(db, ghClient)
+	checks := agents.PRFlowPreflight(ctx, db, ghClient)
 	fmt.Println("Preflight checks:")
 	for _, c := range checks {
 		mark := "PASS"
@@ -218,7 +219,7 @@ func runPRFlowMigrate(db *sql.DB) {
 			fmt.Printf("  [%s] %s: %s\n", mark, c.Name, c.Detail)
 		}
 	}
-	summary := agents.BackfillRepoRemoteInfo(db)
+	summary := agents.BackfillRepoRemoteInfo(ctx, db)
 	fmt.Printf("Layer B: %s\n", summary)
 
 	queued, skipped := agents.EnqueueMissingFindPRTemplate(db)
@@ -314,9 +315,9 @@ func copyFile(src, dst string) error {
 // but runnable as a one-shot so operators can refresh after adding repos or
 // after a `git remote set-url` change.
 
-func cmdRepoSync(db *sql.DB) {
+func cmdRepoSync(ctx context.Context, db *sql.DB) {
 	ghClient := gh.NewClient()
-	checks := agents.PRFlowPreflight(db, ghClient)
+	checks := agents.PRFlowPreflight(ctx, db, ghClient)
 	fmt.Println("Preflight:")
 	for _, c := range checks {
 		mark := "PASS"
@@ -330,7 +331,7 @@ func cmdRepoSync(db *sql.DB) {
 		}
 	}
 	// Even if gh-auth failed, still run Layer B — it only needs git, not gh.
-	fmt.Printf("\n%s\n", agents.BackfillRepoRemoteInfo(db))
+	fmt.Printf("\n%s\n", agents.BackfillRepoRemoteInfo(ctx, db))
 	queued, skipped := agents.EnqueueMissingFindPRTemplate(db)
 	fmt.Printf("FindPRTemplate: %d queued, %d skipped\n", queued, skipped)
 }
