@@ -25,6 +25,14 @@ var p25Allowlist = map[string]string{
 	"/api/disagreement-rates": "read-only metrics view",
 	"/api/escalations/":      "operator escalation actions exposed via `force escalation ack` (existing)",
 	"/api/proposals/":        "operator ratification exposed via `force ratify` (existing)",
+
+	// D3 P6B.12 — Reflection learning panel handlers; CLI parity
+	// is `force learning refresh` / `force learning show`. The
+	// route prefix is /api/reflection/... so the noun-based mapper
+	// in TestPattern_P25 doesn't auto-resolve; the explicit
+	// allowlist entry keeps the rationale visible.
+	"/api/reflection/learning":  "CLI parity via `force learning refresh|show`",
+	"/api/reflection/learning/": "CLI parity via `force learning refresh|show`",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in
@@ -35,6 +43,9 @@ var p25KnownVerbs = []string{
 	"estop", "resume", "ratify", "approve", "reject",
 	"trust", "session", "notifications", "cooldown", "decide",
 	"attention", "briefing-reject", "dashboard",
+	// D3 P6B.12 — `force learning {refresh,show}` parity for
+	// /api/reflection/learning POST.
+	"learning",
 }
 
 func TestPattern_P25_CLIParity(t *testing.T) {
