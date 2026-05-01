@@ -419,6 +419,9 @@ func main() {
 		// /api/notifications/budgets/:source/:channel.
 		os.Exit(cmdNotifications(db, os.Args[2:]))
 
+	case "session":
+		os.Exit(cmdSession(db, os.Args[2:]))
+
 	case "dashboard":
 		// D3 P6A.2 — `force dashboard status` reads the latest heartbeat
 		// row from the DB and exits 0 (fresh) / 1 (stale). The full
