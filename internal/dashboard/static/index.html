@@ -247,6 +247,39 @@
       <span id="convoy-filter-label"></span>
       <a style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="clearConvoyFilter()">Clear filter</a>
     </div>
+    <!-- ── JIRA-from-UI: queue a Feature from a Jira ticket without
+         dropping to the CLI. Posts to /api/feature/from-jira which
+         calls agents.QueueFeatureFromJira (the reusable core that
+         `force add-jira` also calls). Inline form, no modal — keeps
+         the operator's eyes on the task list. -->
+    <div id="jira-quick-action" style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--surface2);border-bottom:1px solid var(--border);font-size:12px;flex-wrap:wrap">
+      <span style="color:var(--text2);font-weight:600">Queue from Jira:</span>
+      <input id="jira-ticket-id" type="text" placeholder="ABC-123"
+             aria-label="Jira ticket id (e.g. ABC-123)"
+             pattern="^[A-Z]+-\d+$"
+             style="padding:3px 8px;font-size:12px;width:120px"
+             autocomplete="off" spellcheck="false">
+      <label style="display:inline-flex;align-items:center;gap:4px;color:var(--text2)">
+        Priority
+        <select id="jira-priority" class="field-select" style="padding:2px 4px;font-size:12px;width:60px" aria-label="Priority">
+          <option value="0">—</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5" selected>5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+          <option value="9">9</option>
+        </select>
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:4px;color:var(--text2)" title="Stop after Commander emits a plan; operator approves before agents run.">
+        <input id="jira-plan-only" type="checkbox" style="margin:0"> Plan only
+      </label>
+      <button id="jira-submit-btn" onclick="submitJiraFeature()" class="hdr-btn primary" style="font-size:12px;padding:3px 10px">Queue from Jira</button>
+      <span id="jira-result" style="color:var(--text2);font-size:11px;margin-left:auto;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    </div>
     <div id="api-stats-bar">
       <span class="stat-pill pill-yellow"><span class="pill-num" id="pill-pending-count">0</span> Pending</span>
       <span class="stat-pill pill-blue"><span class="pill-num" id="pill-active-count">0</span> Active</span>
