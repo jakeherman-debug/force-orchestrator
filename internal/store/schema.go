@@ -861,16 +861,24 @@ func createSchema(db *sql.DB) {
 	// AdversarialPairings — Council/Medic/ConvoyReview adversarial-pair
 	// results. The primary prompt and a critic prompt run on the same
 	// decision; a disagreement surfaces to the operator.
+	//
+	// prompt_version_primary / prompt_version_critic record which prompt
+	// produced each outcome. D3 P5 anti-cheat invariant: critic must use
+	// a DIFFERENT prompt-version key from primary; identical-prompt pairs
+	// are a sham. Both default to '' so legacy rows (written before D3 P5)
+	// round-trip cleanly through SELECT.
 	db.Exec(`CREATE TABLE IF NOT EXISTS AdversarialPairings (
-		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-		decision_id         INTEGER NOT NULL,
-		agent               TEXT    NOT NULL,
-		primary_outcome     TEXT    NOT NULL,
-		critic_outcome      TEXT    NOT NULL,
-		agreement           INTEGER DEFAULT 0,
-		surfaced_at         TEXT    DEFAULT '',
-		operator_resolution TEXT    DEFAULT '',
-		created_at          TEXT    DEFAULT (datetime('now'))
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id              INTEGER NOT NULL,
+		agent                    TEXT    NOT NULL,
+		primary_outcome          TEXT    NOT NULL,
+		critic_outcome           TEXT    NOT NULL,
+		prompt_version_primary   TEXT    DEFAULT '',
+		prompt_version_critic    TEXT    DEFAULT '',
+		agreement                INTEGER DEFAULT 0,
+		surfaced_at              TEXT    DEFAULT '',
+		operator_resolution      TEXT    DEFAULT '',
+		created_at               TEXT    DEFAULT (datetime('now'))
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_agent ON AdversarialPairings(agent, created_at);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_disagreements
@@ -1912,16 +1920,23 @@ func runMigrations(db *sql.DB) {
 
 	// AdversarialPairings + GoldenSet* + CalibrationAuditSamples (upgrade path).
 	db.Exec(`CREATE TABLE IF NOT EXISTS AdversarialPairings (
-		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-		decision_id         INTEGER NOT NULL,
-		agent               TEXT    NOT NULL,
-		primary_outcome     TEXT    NOT NULL,
-		critic_outcome      TEXT    NOT NULL,
-		agreement           INTEGER DEFAULT 0,
-		surfaced_at         TEXT    DEFAULT '',
-		operator_resolution TEXT    DEFAULT '',
-		created_at          TEXT    DEFAULT (datetime('now'))
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		decision_id              INTEGER NOT NULL,
+		agent                    TEXT    NOT NULL,
+		primary_outcome          TEXT    NOT NULL,
+		critic_outcome           TEXT    NOT NULL,
+		prompt_version_primary   TEXT    DEFAULT '',
+		prompt_version_critic    TEXT    DEFAULT '',
+		agreement                INTEGER DEFAULT 0,
+		surfaced_at              TEXT    DEFAULT '',
+		operator_resolution      TEXT    DEFAULT '',
+		created_at               TEXT    DEFAULT (datetime('now'))
 	)`)
+	// D3 P5 — additive ALTERs for DBs created before prompt_version_*
+	// columns landed. ADD COLUMN is silently a no-op when the column
+	// already exists, so this is idempotent.
+	db.Exec(`ALTER TABLE AdversarialPairings ADD COLUMN prompt_version_primary TEXT DEFAULT ''`)
+	db.Exec(`ALTER TABLE AdversarialPairings ADD COLUMN prompt_version_critic  TEXT DEFAULT ''`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_agent ON AdversarialPairings(agent, created_at)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_adv_pairings_disagreements
 		ON AdversarialPairings(agent) WHERE agreement = 0`)

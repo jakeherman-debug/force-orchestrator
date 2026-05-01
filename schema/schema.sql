@@ -859,15 +859,17 @@ CREATE INDEX IF NOT EXISTS idx_crc_convoy ON ConvoyReviewCycles(convoy_id, cycle
 -- A primary prompt and a critic prompt run on the same decision; a
 -- disagreement surfaces to the operator for resolution.
 CREATE TABLE IF NOT EXISTS AdversarialPairings (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    decision_id         INTEGER NOT NULL,                        -- references the original task/decision
-    agent               TEXT    NOT NULL,                        -- 'council'|'medic'|'convoy_review'
-    primary_outcome     TEXT    NOT NULL,                        -- structured decision from primary prompt
-    critic_outcome      TEXT    NOT NULL,                        -- structured decision from critic prompt
-    agreement           INTEGER DEFAULT 0,                       -- 1 if outcomes match
-    surfaced_at         TEXT    DEFAULT '',                      -- set when surfaced to operator
-    operator_resolution TEXT    DEFAULT '',                      -- what operator decided when surfaced
-    created_at          TEXT    DEFAULT (datetime('now'))
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id              INTEGER NOT NULL,                   -- references the original task/decision
+    agent                    TEXT    NOT NULL,                   -- 'council'|'medic'|'convoy_review'
+    primary_outcome          TEXT    NOT NULL,                   -- structured decision from primary prompt
+    critic_outcome           TEXT    NOT NULL,                   -- structured decision from critic prompt
+    prompt_version_primary   TEXT    DEFAULT '',                 -- D3 P5: prompt version that produced primary_outcome
+    prompt_version_critic    TEXT    DEFAULT '',                 -- D3 P5: prompt version that produced critic_outcome (MUST differ from primary)
+    agreement                INTEGER DEFAULT 0,                  -- 1 if outcomes match
+    surfaced_at              TEXT    DEFAULT '',                 -- set when surfaced to operator
+    operator_resolution      TEXT    DEFAULT '',                 -- what operator decided when surfaced
+    created_at               TEXT    DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_adv_pairings_agent ON AdversarialPairings(agent, created_at);
 CREATE INDEX IF NOT EXISTS idx_adv_pairings_disagreements
