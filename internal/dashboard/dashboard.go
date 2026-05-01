@@ -79,6 +79,11 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/disagreement-rates", handleDisagreementRates(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
+	// ── D3 P6A.10 — Briefing API.
+	mux.HandleFunc("/api/briefing/queue", handleBriefingQueue(db))
+	mux.HandleFunc("/api/briefing/decision/", handleBriefingDecision(db))
+	mux.HandleFunc("/api/briefing/decide", handleBriefingDecide(db))
+
 	// ── D3 P6A.2 — Dashboard heartbeat + health endpoint.
 	// /api/dashboard/health surfaces the most recent heartbeat row so the
 	// SPA can show a yellow banner if the dashboard process has been
