@@ -37,43 +37,60 @@ const shortGitTimeout = 60 * time.Second
 // fabricated context.Background root made the helper deaf to daemon
 // cancellation.
 //
-// D3 polish-pass iteration 2 (B4r): MIGRATION DEFERRED. Routing through
-// igit.LogAndRun broke TestRunShortGit_CtxCancel /
-// TestAstromech_EstopCancelsInFlightGitOp because LogAndRun uses
-// CombinedOutput() which blocks until the subprocess's stdio pipes
-// close — the pre-receive hook's `sleep 30` keeps those pipes open
-// even after exec.CommandContext kills the parent git process. The
-// existing helper uses .Run() (no pipe capture) so the kill propagates
-// within milliseconds. A correct migration requires LogAndRun to grow
-// a `WaitDelay` shape (Go 1.20+ exec.Cmd.WaitDelay) so it sends SIGKILL
-// to the process group and gives up on stdio. Slated for D4.
+// D3 fix-loop iter 2 (slice ζ): MIGRATED to igit.LogAndRun. The prior
+// deferral rationale (B4r) was that LogAndRun's CombinedOutput shape
+// blocked on stdio pipe closure when an intermediate descendant (e.g.
+// pre-receive hook's `sleep 30`) inherited the pipes. LogAndRun now
+// sets `cmd.WaitDelay = 5s`, which forcibly closes inherited pipes
+// once the immediate child has been SIGKILLed, so ctx-cancel
+// propagation completes within the 2 s budget enforced by
+// TestRunShortGit_CtxCancel + TestAstromech_EstopCancelsInFlightGitOp.
+// All astromech git ops now land a row in GitOperationLog (Pattern P32).
 func runShortGit(ctx context.Context, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).Run()
+	op := igit.DeriveOperation("git", args)
+	_, err := igit.LogAndRun(ctx, igit.OpContext{Repo: deriveRepoFromGitArgs(args)}, op, "git", args...)
+	return err
 }
 
 // combinedShortGit runs a git command with a 60s context timeout and
 // returns combined output. Replaces the pre-fix chained-and-CombinedOutput
 // form. AUDIT-158 (Fix #8d). Fix #8e: ctx threads from the caller.
 //
-// D3 polish-pass iteration 2 (B4r): see runShortGit comment for the
-// LogAndRun migration deferral rationale. The helpers stay on raw
-// exec.CommandContext until LogAndRun grows process-group-kill semantics.
+// D3 fix-loop iter 2 (slice ζ): MIGRATED to igit.LogAndRun (see runShortGit
+// for the WaitDelay rationale).
 func combinedShortGit(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	op := igit.DeriveOperation("git", args)
+	return igit.LogAndRun(ctx, igit.OpContext{Repo: deriveRepoFromGitArgs(args)}, op, "git", args...)
 }
 
 // combinedShortGitArgs is identical to combinedShortGit but accepts a
 // pre-built arg slice (for callers assembling positional slots).
-// Fix #8e: ctx threads from the caller. See runShortGit for the B4r
-// LogAndRun deferral.
+// Fix #8e: ctx threads from the caller.
+//
+// D3 fix-loop iter 2 (slice ζ): MIGRATED to igit.LogAndRun.
 func combinedShortGitArgs(ctx context.Context, args []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	op := igit.DeriveOperation("git", args)
+	return igit.LogAndRun(ctx, igit.OpContext{Repo: deriveRepoFromGitArgs(args)}, op, "git", args...)
+}
+
+// deriveRepoFromGitArgs is a local copy of internal/git's
+// deriveRepoFromArgs (which is unexported). Extracts the -C/--git-dir/
+// --work-tree value from a git argv so the GitOperationLog row carries
+// a useful repo label without forcing every astromech call site to
+// build an OpContext explicitly.
+func deriveRepoFromGitArgs(args []string) string {
+	for i, a := range args {
+		if (a == "-C" || a == "--git-dir" || a == "--work-tree") && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // maxOutputBytes is the circuit-breaker threshold for blown-context detection.

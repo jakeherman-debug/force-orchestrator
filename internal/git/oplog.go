@@ -46,6 +46,29 @@ const (
 	stderrMaxBytes = 4 << 10
 )
 
+// logAndRunWaitDelay bounds how long LogAndRun waits for stdio cleanup
+// after ctx-cancel kills the immediate child. When the immediate child
+// (e.g. `git push`) is SIGKILLed, an intermediate descendant (e.g.
+// `git-receive-pack` running a pre-receive hook's `sleep 30`) may
+// inherit the stdout/stderr pipe write-ends and survive — keeping
+// CombinedOutput's read-goroutines blocked. Go 1.20+ exec.Cmd.WaitDelay
+// forcibly closes those pipes after the delay so Wait can return with
+// exec.ErrWaitDelay (ctx cancellation also surfaces an error, so the
+// caller still sees a non-nil error).
+//
+// 1 s is the contracted budget: the regression tests
+// (TestRunShortGit_CtxCancel + TestAstromech_EstopCancelsInFlightGitOp)
+// assert ctx-cancel → return within 2 s wall clock. The parent process
+// is SIGKILLed immediately on cancel; this delay only governs the I/O
+// wait when an intermediate descendant inherited the pipe and is still
+// alive. Happy-path exits never hit this delay (Wait returns as soon
+// as all pipes close naturally).
+//
+// D3 fix-loop iter 2 (slice ζ): introduced so internal/agents/astromech.go
+// can drop its raw exec.CommandContext helpers and route through
+// LogAndRun, closing the last P32 allowlist entry outside internal/git.
+const logAndRunWaitDelay = 1 * time.Second
+
 // oplogDB is the active *sql.DB for GitOperationLog inserts. Tests
 // install via SetOpLogDB; production wires it at daemon startup.
 var (
@@ -95,6 +118,16 @@ func LogAndRun(ctx context.Context, opc OpContext, operation, bin string, args .
 	startTime := time.Now()
 
 	cmd := exec.CommandContext(ctx, bin, args...)
+	// WaitDelay (Go 1.20+) bounds I/O cleanup after ctx-cancel SIGKILLs
+	// the immediate child. Without this, an intermediate descendant
+	// (pre-receive hooks' `sleep N`, git-receive-pack, etc.) that
+	// inherited the merged stdout/stderr pipe keeps CombinedOutput's
+	// read goroutine blocked far beyond the parent's exit. With the
+	// delay set, Go forcibly closes the pipes so Wait returns. See
+	// logAndRunWaitDelay's comment for the budget reasoning. This is
+	// the unblock that lets internal/agents/astromech.go drop its
+	// raw exec.CommandContext helpers (slice ζ, fix-loop iter 2).
+	cmd.WaitDelay = logAndRunWaitDelay
 	out, err := cmd.CombinedOutput()
 	durationMs := int(time.Since(startTime).Milliseconds())
 
