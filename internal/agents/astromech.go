@@ -37,40 +37,43 @@ const shortGitTimeout = 60 * time.Second
 // fabricated context.Background root made the helper deaf to daemon
 // cancellation.
 //
-// D3 polish-pass iteration 2 (B4r): routes through igit.LogAndRun so the
-// op is recorded in GitOperationLog (Pattern P32). The OpContext is left
-// zero — the helper has no task/repo at the call boundary; callers that
-// hold those values use combinedShortGitWithCtx (below) which threads
-// the OpContext through.
+// D3 polish-pass iteration 2 (B4r): MIGRATION DEFERRED. Routing through
+// igit.LogAndRun broke TestRunShortGit_CtxCancel /
+// TestAstromech_EstopCancelsInFlightGitOp because LogAndRun uses
+// CombinedOutput() which blocks until the subprocess's stdio pipes
+// close — the pre-receive hook's `sleep 30` keeps those pipes open
+// even after exec.CommandContext kills the parent git process. The
+// existing helper uses .Run() (no pipe capture) so the kill propagates
+// within milliseconds. A correct migration requires LogAndRun to grow
+// a `WaitDelay` shape (Go 1.20+ exec.Cmd.WaitDelay) so it sends SIGKILL
+// to the process group and gives up on stdio. Slated for D4.
 func runShortGit(ctx context.Context, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	_, err := igit.LogAndRun(ctx, igit.OpContext{}, "astromech-short", "git", args...)
-	return err
+	return exec.CommandContext(ctx, "git", args...).Run()
 }
 
 // combinedShortGit runs a git command with a 60s context timeout and
 // returns combined output. Replaces the pre-fix chained-and-CombinedOutput
 // form. AUDIT-158 (Fix #8d). Fix #8e: ctx threads from the caller.
 //
-// D3 polish-pass iteration 2 (B4r): routes through igit.LogAndRun.
-// LogAndRun returns the redacted-combined-output bytes, which is exactly
-// what the original helper returned — same shape, now logged.
+// D3 polish-pass iteration 2 (B4r): see runShortGit comment for the
+// LogAndRun migration deferral rationale. The helpers stay on raw
+// exec.CommandContext until LogAndRun grows process-group-kill semantics.
 func combinedShortGit(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return igit.LogAndRun(ctx, igit.OpContext{}, "astromech-short", "git", args...)
+	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
 }
 
 // combinedShortGitArgs is identical to combinedShortGit but accepts a
 // pre-built arg slice (for callers assembling positional slots).
-// Fix #8e: ctx threads from the caller.
-//
-// D3 polish-pass iteration 2 (B4r): routes through igit.LogAndRun.
+// Fix #8e: ctx threads from the caller. See runShortGit for the B4r
+// LogAndRun deferral.
 func combinedShortGitArgs(ctx context.Context, args []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return igit.LogAndRun(ctx, igit.OpContext{}, "astromech-short", "git", args...)
+	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
 }
 
 // maxOutputBytes is the circuit-breaker threshold for blown-context detection.

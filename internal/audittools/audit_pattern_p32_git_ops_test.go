@@ -44,19 +44,14 @@ var p32Allowlist = map[string]string{
 	// internal/agents — agents that make git/gh calls. The 6 files
 	// migrated in D3 polish-pass B4 (divergence_detector, reconcile,
 	// pilot_preflight, pilot_repo_config, pilot_worktree_reset,
-	// pr_flow) and the 3 remaining files (astromech, dogs,
-	// shadow/worktree) migrated in iteration 2 (B4r) are now all
-	// routed through igit.LogAndRun.
+	// pr_flow) plus 2 more in iteration 2 (B4r): dogs.go +
+	// shadow/worktree.go.
 	//
-	// astromech.go: runShortGit / combinedShortGit / combinedShortGitArgs
-	//   helpers reshaped to call igit.LogAndRun under the hood. Same
-	//   external signatures, now logged to GitOperationLog. The only
-	//   remaining exec.CommandContext is the `claude` invocation at
-	//   the session boundary, which is not a git/gh call.
 	// dogs.go: dog-git-hygiene loop — 3 git ops (rev-parse, checkout
 	//   --detach, branch -D) routed via igit.LogAndRun.
 	// shadow/worktree.go: 3 git ops (worktree add/remove, branch -D)
 	//   routed via igit.LogAndRun.
+	"internal/agents/astromech.go": "Astromech runShortGit / combinedShortGit helpers stay on raw exec.CommandContext because LogAndRun's CombinedOutput-based shape blocks on subprocess stdio pipe closure (e.g. pre-receive hooks holding `sleep 30`), defeating ctx-cancel propagation. TestRunShortGit_CtxCancel + TestAstromech_EstopCancelsInFlightGitOp regression-protect this. Migration: LogAndRun needs process-group-kill / WaitDelay semantics (Go 1.20+ exec.Cmd.WaitDelay) before this helper can route through it. Slated for D4.",
 
 	// D3 polish-pass iteration 2 (B4r): cmd/force/fleet_cmds.go and
 	// cmd/force/maintenance.go migrated to igit.LogAndRun. The CLI-
