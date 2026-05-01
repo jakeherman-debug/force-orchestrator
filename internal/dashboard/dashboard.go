@@ -96,6 +96,9 @@ func RunDashboard(db *sql.DB, port int) {
 	// internal/agents/narrative_renderer.go and is spawned by the daemon).
 	mux.HandleFunc("/api/pulse/narrative", handlePulseNarrative(db))
 
+	// ── D3 P6A.8 — Pulse fleet panel snapshot.
+	mux.HandleFunc("/api/pulse/snapshot", handlePulseSnapshot(db))
+
 	// ── D3 P6A.2 — Dashboard heartbeat + health endpoint.
 	// /api/dashboard/health surfaces the most recent heartbeat row so the
 	// SPA can show a yellow banner if the dashboard process has been
