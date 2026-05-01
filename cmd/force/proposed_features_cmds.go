@@ -13,6 +13,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -22,9 +23,14 @@ import (
 )
 
 func cmdProposedFeatures(db *sql.DB, args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: force proposed-features <list|suppress|score|promote> [args]")
-		return 1
+	// `--help` / `-h` short-circuit. Pre-fix-loop-2 the dispatcher
+	// treated these as unknown verbs and exited 1, even though the
+	// help text printed sensibly. Mirror sleep_hook_cmd.go's pattern:
+	// print to stdout and exit 0 so tab-completion / man-page tooling
+	// doesn't report a spurious failure.
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		printProposedFeaturesUsage(os.Stdout)
+		return 0
 	}
 	verb := args[0]
 	rest := args[1:]
@@ -41,6 +47,19 @@ func cmdProposedFeatures(db *sql.DB, args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown verb: %s (want list|suppress|score|promote)\n", verb)
 		return 1
 	}
+}
+
+// printProposedFeaturesUsage emits the help banner for the command
+// group. Routed through io.Writer so the test in
+// proposed_features_cmds_help_test.go can capture stdout exactly.
+func printProposedFeaturesUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: force proposed-features <list|suppress|score|promote> [args]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Verbs:")
+	fmt.Fprintln(w, "  list      [--status <pending|promoted|archived|all>]")
+	fmt.Fprintln(w, "  suppress  <id> --rationale <txt> [--operator <email>] [--days <N>]")
+	fmt.Fprintln(w, "  score     <id> --value <low|medium|high> --complexity <low|medium|high> --rationale <txt> [--operator <email>]")
+	fmt.Fprintln(w, "  promote   <id> [--deadline <date>] [--operator <email>]")
 }
 
 func cmdProposedFeaturesList(db *sql.DB, args []string) int {
