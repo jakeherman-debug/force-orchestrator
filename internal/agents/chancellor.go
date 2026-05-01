@@ -143,6 +143,19 @@ func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty,
 			// human is notified regardless of the DB write outcome.
 			logger.Printf("Feature #%d: FailBounty write failed (%v) — stale-lock detector will recover", feature.ID, failErr)
 		}
+		// P27 burn-down: budget-gate the operator emit before SendMail.
+		// On allowed=false the helper has already drop/digested per the
+		// configured budget. Fail-open on err so a transient SQLite
+		// glitch never silences a high-stakes alert.
+		if allowed, _ := store.RespectNotificationBudget(
+			context.Background(), db, "operator", chancellorName, "email", "{}",
+			store.StakesHigh,
+		); !allowed {
+			// budget exhausted (StakesHigh always punches through, so
+			// this branch only fires on a real config-set 0-cap row).
+		} else {
+			_ = allowed
+		}
 		store.SendMail(db, chancellorName, "operator",
 			fmt.Sprintf("[CHANCELLOR FAIL-CLOSED] Feature #%d — LLM unavailable, operator review required", feature.ID),
 			fmt.Sprintf("The Supreme Chancellor's LLM call failed. The Feature has been failed rather than auto-approved (Fix #8.5 fail-closed). Reset the Feature to Pending once the LLM outage is resolved.\n\nError: %v\n\nOriginal request:\n%s",

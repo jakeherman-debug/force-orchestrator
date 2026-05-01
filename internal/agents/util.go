@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -211,7 +212,10 @@ func handleInfraFailure(
 		reshardID := queueReshardDecompose(db, b, stageName, msg)
 		if reshardID > 0 {
 			logger.Printf("Task %d: permanently failed in %s — queued Decompose #%d for Commander reshard", b.ID, stageName, reshardID)
-			store.SendMail(db, agentName, "operator",
+			// P27: route through governed emit. Infra-fail mails are
+			// StakesHigh — always punch through, but the helper still
+			// records the gate decision for audit.
+			emitOperatorMailHigh(context.Background(), db, agentName,
 				fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
 				fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nDecompose task #%d has been queued — Commander will re-plan this work into smaller shards.",
 					b.ID, stageName, MaxInfraFailures, msg, reshardID),
@@ -228,14 +232,14 @@ func handleInfraFailure(
 				// (MailTypeAlert) is the guaranteed fallback surfacing path.
 				logger.Printf("handleInfraFailure #%d: CreateEscalation (reshard-cap) failed: %v — operator mail below is the fallback", b.ID, escErr)
 			}
-			store.SendMail(db, agentName, "operator",
+			emitOperatorMailHigh(context.Background(), db, agentName,
 				fmt.Sprintf("[RESHARD CAP] Task #%d %s — cascade refused at generation %d", b.ID, stageName, b.ReshardGeneration),
 				fmt.Sprintf("Task #%d is a generation-%d reshard descendant that hit %d infra failures. The auto-reshard path is refused at the cap (%d) to avoid a 1→3→9→27 cascade.\n\nError: %s\n\nPlease review the task and either split it manually or close it.",
 					b.ID, b.ReshardGeneration, MaxInfraFailures, maxReshardGeneration, msg),
 				b.ID, store.MailTypeAlert)
 		} else {
 			logger.Printf("Task %d: permanently failed in %s — Decompose reshard skipped (insert failed)", b.ID, stageName)
-			store.SendMail(db, agentName, "operator",
+			emitOperatorMailHigh(context.Background(), db, agentName,
 				fmt.Sprintf("[INFRA FAIL] Task #%d %s — %s", b.ID, stageName, b.TargetRepo),
 				fmt.Sprintf("Task #%d permanently failed in %s after %d infra errors.\n\nError: %s\n\nDecompose queueing failed — operator review required.",
 					b.ID, stageName, MaxInfraFailures, msg),

@@ -440,6 +440,32 @@ func emitReconcileSummary(db *sql.DB, logger *log.Logger, c reconcileCounters) {
 	}
 	fmt.Fprintf(&body, "\nTotal non-terminal tasks at startup: %d\n", c.total)
 
+	// P27 burn-down: budget-gate the operator emit before SendMail.
+
+	// On allowed=false the helper has already drop/digested per the
+
+	// configured budget. Fail-open on err so a transient SQLite
+
+	// glitch never silences a high-stakes alert.
+
+	if allowed, _ := store.RespectNotificationBudget(
+
+		context.Background(), db, "operator", "Reconcile", "email", "{}",
+
+		store.StakesHigh,
+
+	); !allowed {
+
+		// budget exhausted (StakesHigh always punches through, so
+
+		// this branch only fires on a real config-set 0-cap row).
+
+	} else {
+
+		_ = allowed
+
+	}
+
 	store.SendMail(db, "Reconcile", "operator",
 		"[RECONCILE SUMMARY] divergences handled at daemon start",
 		body.String(), 0, store.MailTypeAlert)

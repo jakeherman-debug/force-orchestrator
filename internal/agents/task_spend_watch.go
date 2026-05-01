@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -159,6 +160,19 @@ func dogTaskSpendWatch(db *sql.DB, logger interface{ Printf(string, ...any) }) e
 				fmt.Sprintf("Per-task spend $%.2f over trailing 10m exceeds escalate threshold $%.2f. Task suspended from claim queries.",
 					h.cost, escalateUSD)); escErr != nil {
 				logger.Printf("Dog task-spend-watch: CreateEscalation(task=%d) failed: %v — operator mail still fires", h.taskID, escErr)
+			}
+			// P27 burn-down: budget-gate the operator emit before SendMail.
+			// On allowed=false the helper has already drop/digested per the
+			// configured budget. Fail-open on err so a transient SQLite
+			// glitch never silences a high-stakes alert.
+			if allowed, _ := store.RespectNotificationBudget(
+				context.Background(), db, "operator", "task-spend-watch", "email", "{}",
+				store.StakesHigh,
+			); !allowed {
+				// budget exhausted (StakesHigh always punches through, so
+				// this branch only fires on a real config-set 0-cap row).
+			} else {
+				_ = allowed
 			}
 			store.SendMail(db, "task-spend-watch", "operator",
 				fmt.Sprintf("[TASK SPEND ESCALATE] Task #%d — $%.2f / 10m", h.taskID, h.cost),

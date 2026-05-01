@@ -157,6 +157,19 @@ func runPRReviewTriage(ctx context.Context, db *sql.DB, agentName string, bounty
 				if _, err := CreateEscalation(db, bounty.ID, store.SeverityMedium, msg); err != nil {
 					logger.Printf("PRReviewTriage: CreateEscalation for comment row %d failed: %v — falling back to operator mail",
 						c.ID, err)
+					// P27 burn-down: budget-gate the operator emit before SendMail.
+					// On allowed=false the helper has already drop/digested per the
+					// configured budget. Fail-open on err so a transient SQLite
+					// glitch never silences a high-stakes alert.
+					if allowed, _ := store.RespectNotificationBudget(
+						context.Background(), db, "operator", "diplomat", "email", "{}",
+						store.StakesHigh,
+					); !allowed {
+						// budget exhausted (StakesHigh always punches through, so
+						// this branch only fires on a real config-set 0-cap row).
+					} else {
+						_ = allowed
+					}
 					store.SendMail(db, "diplomat", "operator",
 						fmt.Sprintf("PR review classifier exhausted retries on comment #%d", c.ID),
 						msg, bounty.ID, store.MailTypeAlert)

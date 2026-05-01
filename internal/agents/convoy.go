@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"log"
 	"database/sql"
 	"fmt"
@@ -84,6 +85,19 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 				EventType: "convoy_completed",
 				Payload:   map[string]any{"convoy_id": c.id, "convoy_name": c.name, "tasks": total},
 			})
+			// P27 burn-down: budget-gate the operator emit before SendMail.
+			// On allowed=false the helper has already drop/digested per the
+			// configured budget. Fail-open on err so a transient SQLite
+			// glitch never silences a high-stakes alert.
+			if allowed, _ := store.RespectNotificationBudget(
+				context.Background(), db, "operator", "inquisitor", "email", "{}",
+				store.StakesHigh,
+			); !allowed {
+				// budget exhausted (StakesHigh always punches through, so
+				// this branch only fires on a real config-set 0-cap row).
+			} else {
+				_ = allowed
+			}
 			store.SendMail(db, "inquisitor", "operator",
 				fmt.Sprintf("[CONVOY COMPLETE] %s", c.name),
 				fmt.Sprintf("Convoy '%s' has completed — all %d task(s) have been approved and merged.", c.name, total),

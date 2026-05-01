@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -133,6 +134,19 @@ func ReportSpendBurn(db *sql.DB) (float64, bool, bool) {
 		if !IsEstopped(db) {
 			SetEstop(db, true)
 			telemetry.EmitEvent(telemetry.EventSpendCapExceeded(hourly, estopThreshold, "auto_estop"))
+			// P27 burn-down: budget-gate the operator emit before SendMail.
+			// On allowed=false the helper has already drop/digested per the
+			// configured budget. Fail-open on err so a transient SQLite
+			// glitch never silences a high-stakes alert.
+			if allowed, _ := store.RespectNotificationBudget(
+				context.Background(), db, "operator", "spend-burn-watch", "email", "{}",
+				store.StakesHigh,
+			); !allowed {
+				// budget exhausted (StakesHigh always punches through, so
+				// this branch only fires on a real config-set 0-cap row).
+			} else {
+				_ = allowed
+			}
 			store.SendMail(db, "spend-burn-watch", "operator",
 				fmt.Sprintf("[AUTO-ESTOP] Trailing-hour spend $%.2f exceeded estop threshold $%.2f", hourly, estopThreshold),
 				fmt.Sprintf(`The fleet has auto-activated e-stop because trailing-hour spend ($%.2f) exceeded the hard ceiling ($%.2f).

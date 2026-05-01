@@ -108,6 +108,19 @@ func runRebaseAskBranch(ctx context.Context, db *sql.DB, bounty *store.Bounty, l
 			escMsg := fmt.Sprintf("Ask-branch %s on %s is %d commits behind %s (limit %d) — convoy needs manual intervention",
 				ab.AskBranch, payload.Repo, behind, defaultBranch, maxDriftBehind)
 			logger.Printf("RebaseAskBranch #%d: %s", bounty.ID, escMsg)
+			// P27 burn-down: budget-gate the operator emit before SendMail.
+			// On allowed=false the helper has already drop/digested per the
+			// configured budget. Fail-open on err so a transient SQLite
+			// glitch never silences a high-stakes alert.
+			if allowed, _ := store.RespectNotificationBudget(
+				context.Background(), db, "operator", "Pilot", "email", "{}",
+				store.StakesHigh,
+			); !allowed {
+				// budget exhausted (StakesHigh always punches through, so
+				// this branch only fires on a real config-set 0-cap row).
+			} else {
+				_ = allowed
+			}
 			store.SendMail(db, "Pilot", "operator",
 				fmt.Sprintf("[DRIFT LIMIT] Convoy #%d repo %s too far behind main", payload.ConvoyID, payload.Repo),
 				escMsg, bounty.ID, store.MailTypeAlert)

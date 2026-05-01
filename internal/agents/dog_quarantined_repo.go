@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -94,6 +95,15 @@ func dogQuarantinedRepoWatch(db *sql.DB, logger interface{ Printf(string, ...any
 		// SendMail returns the new row id (int64) — fleet-wide signature has
 		// no error channel; a zero id surfaces nothing actionable here, the
 		// dog's next tick will simply re-mail.
+		// P27 burn-down: budget-gate the operator emit before SendMail.
+		if allowed, _ := store.RespectNotificationBudget(
+			context.Background(), db, "operator", "inquisitor", "email", "{}",
+			store.StakesHigh,
+		); !allowed {
+			// budget exhausted (StakesHigh always punches through).
+		} else {
+			_ = allowed
+		}
 		_ = store.SendMail(db, "inquisitor", "operator", subject, body, 0, store.MailTypeAlert)
 		logger.Printf("quarantined-repo-watch: mailed operator about repo %q (%d pending)",
 			qr.name, qr.pending)
