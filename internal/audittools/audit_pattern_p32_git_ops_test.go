@@ -41,34 +41,33 @@ var p32Allowlist = map[string]string{
 	// OpContext through every call site). Slated for follow-up.
 	"internal/gh/gh.go": "internal/gh: gh CLI shell wrapper — pre-6B direct exec.Command. Migration: replace exec.Command with igit.LogAndRun(ctx, OpContext{}, op, \"gh\", args...). Migration target: 6B follow-up train.",
 
-	// internal/agents — agents that make git/gh calls. Each carries a
-	// migration path. Mechanical sweep: replace exec.CommandContext
-	// with igit.LogAndRun(ctx, OpContext{TaskID: t.ID, Repo: r.Name},
-	// op, "git", args...). Most call sites already have task + repo
-	// in scope.
-	// D3 polish-pass B4 (2026-04-30): the following files migrated to
-	// igit.LogAndRun and were removed from this backlog:
-	//   - internal/agents/divergence_detector.go (1 site)
-	//   - internal/agents/reconcile.go (2 sites)
-	//   - internal/agents/pilot_preflight.go (3 sites)
-	//   - internal/agents/pilot_repo_config.go (1 site)
-	//   - internal/agents/pilot_worktree_reset.go (5 sites)
-	//   - internal/agents/pr_flow.go (3 sites)
-	"internal/agents/astromech.go":            "Astromech runs `git` against the per-task worktree from many helpers (runShortGit, combinedShortGit, …). Migration: thread OpContext{TaskID: bounty.ID, Repo: repo.Name} through each helper. Migration target: D4 — astromech helpers are tightly coupled and a complete migration requires reshaping the runShortGit/combinedShortGit interface.",
-	"internal/agents/dogs.go":                 "Dog git-hygiene cleanup — pre-6B direct exec (rev-parse / checkout / branch -D); migration: route through internal/git/runGitCtx (which already logs). Migration target: D4.",
-	"internal/agents/shadow/worktree.go":      "Shadow worktree manager — git -C <wt> ops; migration: igit.LogAndRun. Migration target: D4.",
+	// internal/agents — agents that make git/gh calls. The 6 files
+	// migrated in D3 polish-pass B4 (divergence_detector, reconcile,
+	// pilot_preflight, pilot_repo_config, pilot_worktree_reset,
+	// pr_flow) plus 2 more in iteration 2 (B4r): dogs.go +
+	// shadow/worktree.go.
+	//
+	// dogs.go: dog-git-hygiene loop — 3 git ops (rev-parse, checkout
+	//   --detach, branch -D) routed via igit.LogAndRun.
+	// shadow/worktree.go: 3 git ops (worktree add/remove, branch -D)
+	//   routed via igit.LogAndRun.
+	"internal/agents/astromech.go": "Astromech runShortGit / combinedShortGit helpers stay on raw exec.CommandContext because LogAndRun's CombinedOutput-based shape blocks on subprocess stdio pipe closure (e.g. pre-receive hooks holding `sleep 30`), defeating ctx-cancel propagation. TestRunShortGit_CtxCancel + TestAstromech_EstopCancelsInFlightGitOp regression-protect this. Migration: LogAndRun needs process-group-kill / WaitDelay semantics (Go 1.20+ exec.Cmd.WaitDelay) before this helper can route through it. Slated for D4.",
 
-	// cmd/force — CLI entry points whose git ops run in the user's
-	// terminal session, often before a daemon DB is attached. The
-	// rows would still be useful when the CLI runs against an
-	// existing holocron, but the migration is non-trivial because
-	// CLI subcommands don't always init holocron. Slated for D4.
-	"cmd/force/fleet_cmds.go":   "CLI fleet-cmds — pre-6B direct exec for one-shot fleet bootstrap ops. Migration: gate on holocron-attached. Migration target: D4.",
-	"cmd/force/maintenance.go":  "CLI maintenance — pre-6B direct exec for repo-level housekeeping. Migration target: D4.",
+	// D3 polish-pass iteration 2 (B4r): cmd/force/fleet_cmds.go and
+	// cmd/force/maintenance.go migrated to igit.LogAndRun. The CLI-
+	// invoked entry points use context.Background() (no daemon ctx
+	// available); LogAndRun degrades gracefully when no DB is attached
+	// (`force add-repo` runs against an existing holocron — the gate
+	// is best-effort logging). Both files no longer call exec.Command
+	// for git/gh; remaining exec.Command sites are for `claude`
+	// (maintenance.go runDoctor's claude --version check), which is
+	// not git/gh and so does not match the audit pattern.
 
-	// internal/store — tasks.go has a startup-time git op for
-	// detecting the orchestrator's own repo. Boot path, no DB yet.
-	"internal/store/tasks.go": "internal/store/tasks.go: rev-parse during DB init detects orchestrator self-repo; runs BEFORE the DB is fully ready. Migration: route once the bootstrap order is restructured. Migration target: D4.",
+	// D3 polish-pass iteration 2 (B4r): internal/store/tasks.go was
+	// previously allowlisted but its only `exec.Command("git", ...)`
+	// is a comment in a docstring (validateRefName documents the
+	// downstream caller). The audit's comment-skipping logic now
+	// correctly excludes it; allowlist entry removed.
 }
 
 // p32CallPattern detects exec.Command(... "git" ...) and
