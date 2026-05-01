@@ -450,6 +450,14 @@ func main() {
 		// D3 P6B.7 — drill replay CLI parity.
 		os.Exit(cmdReplay(db, os.Args[2:]))
 
+	case "ask":
+		// D3 P6B.10 — Ask `/` shortcut CLI parity.
+		os.Exit(cmdAsk(db, os.Args[2:]))
+
+	case "retro":
+		// D3 P6B.13 — 5-min retro CLI parity.
+		os.Exit(cmdRetro(db, os.Args[2:]))
+
 	case "dashboard":
 		// D3 P6A.2 — `force dashboard status` reads the latest heartbeat
 		// row from the DB and exits 0 (fresh) / 1 (stale). The full

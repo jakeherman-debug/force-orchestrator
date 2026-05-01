@@ -146,6 +146,17 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/annotations", handleAnnotationsList(db))
 	mux.HandleFunc("/api/annotations/", handleAnnotationsItem(db))
 
+	// ── D3 P6B.10 — Ask `/` shortcut. POST {question}; the agent
+	// has NO write tools (Pattern P-AskNoWriteTools enforces).
+	mux.HandleFunc("/api/ask", handleAsk(db))
+
+	// ── D3 P6B.11 — Reflection calibration scoreboard.
+	mux.HandleFunc("/api/reflection/calibration", handleCalibration(db))
+
+	// ── D3 P6B.13 — Reflection 5-min retro generator.
+	mux.HandleFunc("/api/reflection/retro/generate", handleRetroGenerate(db))
+	mux.HandleFunc("/api/reflection/retro/save", handleRetroSave(db))
+
 	// ── D3 P6A.1 — Three-surface IA. Top-level navigation is capped at three
 	// surfaces forever: Pulse / Briefing / Reflection. Each handler emits a
 	// thin HTML shell that loads the SPA at the matching hash fragment.
