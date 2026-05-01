@@ -1,16 +1,16 @@
 {
   "permissions": {
     "deny": [
-      "Bash(rm:*holocron*)",
-      "Bash(rm:* holocron*)",
-      "Bash(mv:*holocron*)",
-      "Bash(mv:* holocron*)",
-      "Bash(unlink:*holocron*)",
-      "Bash(unlink:* holocron*)",
-      "Bash(cp:*holocron*)",
-      "Bash(cp:* holocron*)",
-      "Bash(dd:*holocron*)",
-      "Bash(dd:* holocron*)"
+      "Bash(rm *holocron*)",
+      "Bash(rm * holocron*)",
+      "Bash(mv *holocron*)",
+      "Bash(mv * holocron*)",
+      "Bash(unlink *holocron*)",
+      "Bash(unlink * holocron*)",
+      "Bash(cp *holocron*)",
+      "Bash(cp * holocron*)",
+      "Bash(dd *holocron*)",
+      "Bash(dd * holocron*)"
     ]
   }
 }
