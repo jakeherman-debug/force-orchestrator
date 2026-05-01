@@ -735,5 +735,10 @@ Dashboard:
   logs-fleet [--no-follow] [--filter <pattern>] [--agent <name>] [--task <id>] [--convoy <id>]
                                  Tail fleet.log (all agent output)
   holonet [--no-follow] [--filter <event_type>] [--task <id>]
-                                 Tail holonet.jsonl (structured telemetry stream)`)
+                                 Tail holonet.jsonl (structured telemetry stream)
+
+System integration:
+  install-sleep-hook [--check | --uninstall | --force]
+                                 Install ~/.sleep + ~/.wakeup scripts (darwin / sleepwatcher).
+                                 Idempotent; --check reports state without modifying files.`)
 }
