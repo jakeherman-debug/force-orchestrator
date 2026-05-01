@@ -1049,6 +1049,11 @@ func processAstromechOutput(
 		// status (Captain/Council); BoS runs in parallel and routes the
 		// task back to Pending if it finds a block-severity violation.
 		queueBoSReviewBestEffort(db, bounty, branchName, ctx, worktreeDir, logger)
+		// D4 Phase 2 — same hook point: enqueue an ISBReview alongside
+		// BoSReview. Both bureaus run in parallel; the dual-gate logic
+		// in each reviewer's finish path stays the source task in
+		// next-review status only when BOTH bureaus approve.
+		queueISBReviewBestEffort(db, bounty, branchName, ctx, worktreeDir, logger)
 		if err := store.UpdateBountyStatus(db, taskID, nextStatus); err != nil {
 			logger.Printf("Task %d: [DONE] status transition to %s failed (%v); stale-lock detector will recover", taskID, nextStatus, err)
 		}
@@ -1130,6 +1135,9 @@ func processAstromechOutput(
 	// next-review-status transition so BoS scans the commit in parallel
 	// with Captain/Council. See comment in the [DONE] path above.
 	queueBoSReviewBestEffort(db, bounty, branchName, ctx, worktreeDir, logger)
+	// D4 Phase 2 — sibling enqueue: ISBReview runs in parallel with
+	// BoSReview. Dual-gate per the ISB reviewer's finish-path comment.
+	queueISBReviewBestEffort(db, bounty, branchName, ctx, worktreeDir, logger)
 	if err := store.UpdateBountyStatus(db, taskID, nextStatus); err != nil {
 		logger.Printf("Task %d: success status transition to %s failed (%v); stale-lock detector will recover", taskID, nextStatus, err)
 	}
@@ -1158,6 +1166,24 @@ func queueBoSReviewBestEffort(db *sql.DB, b *store.Bounty, branchName string, _ 
 		return
 	}
 	logger.Printf("Task %d: queued BoSReview #%d (parallel to next-review status)", b.ID, id)
+}
+
+// queueISBReviewBestEffort is the ISB sibling of queueBoSReviewBestEffort.
+// Same best-effort posture: a failure to enqueue ISBReview MUST NOT
+// block the source task's transition. ISB is an advise-at-launch layer;
+// a logged failure is the correct surface — the ISBReview row is the
+// audit artifact.
+//
+// D4 Phase 2 — both queues fire at every astromech post-commit hook
+// site so the dual-gate pipeline (BoS + ISB) covers every commit.
+func queueISBReviewBestEffort(db *sql.DB, b *store.Bounty, branchName string, _ context.Context, _ string, logger interface{ Printf(string, ...any) }) {
+	commitSHA := ""
+	id, err := store.QueueISBReview(db, b, branchName, commitSHA)
+	if err != nil {
+		logger.Printf("Task %d: QueueISBReview failed (%v) — source task transition will continue without ISB gate", b.ID, err)
+		return
+	}
+	logger.Printf("Task %d: queued ISBReview #%d (parallel to next-review status)", b.ID, id)
 }
 
 // RunTaskForeground claims a specific task by ID and runs it in the foreground,

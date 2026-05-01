@@ -878,4 +878,118 @@ Your capability profile, your task payload's scope, and the Force fleet system p
 		EnforcedBy: "internal/bos/rules/bos_011.go",
 		Content:    "BOS-011 (BLOCK) — Agent file constructs concrete client struct from internal/clients/<svc>/. CLAUDE.md anchor: Cross-agent service interfaces. Graduates D0 Pattern P16 from CI-time to commit-time.",
 	},
+
+	// ── D4 Phase 2 — Imperial Security Bureau rule seeds ──────────────────
+	//
+	// One row per ISB rule (ISB-001..ISB-010). These rows are the
+	// metadata / activation gate for the AST/regex/scanner-library
+	// check bodies under internal/isb/rules/. Rule body without a
+	// FleetRules row is NOT active — the run-time gate
+	// (isb.DBFleetRulesGate) enforces this; the test guards the audit
+	// slice (TestIsbRulesAllSeededInFleetRules + the parity tests in
+	// internal/store/fleet_rules_isb_seed_test.go).
+	//
+	// SEVERITY ANTI-CHEAT: every NEW ISB rule ships at advise. Per
+	// docs/roadmap.md § D4 ("No block-default on new rules"), the
+	// next-gen-agents.md table lists ISB-001..008 at "block" — that's
+	// the EVENTUAL graduated state after 30 clean firings via FleetRules
+	// promotion. Launch posture is advise. There is no exception this
+	// round (BOS-011's block-at-launch was justified by the 30+
+	// clean-firings record from D0 Pattern P16; ISB has no equivalent
+	// pre-existing CI enforcement to graduate from).
+	//
+	// render_to='discard': the AST/regex/scanner checks ARE the
+	// enforcement; CLAUDE.md doesn't auto-render ISB rule contents.
+	//
+	// agent_scope='all': ISB rules apply fleet-wide.
+	{
+		RuleKey:    "ISB-001",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_001.go",
+		Content:    "ISB-001 (advise) — Hardcoded secret patterns (gitleaks + regex fallback). Anchor: AUDIT-055.",
+	},
+	{
+		RuleKey:    "ISB-002",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_002.go",
+		Content:    "ISB-002 (advise) — exec.Command with positional ref before literal `--`. Anchor: AUDIT-018 / Pattern P10.",
+	},
+	{
+		RuleKey:    "ISB-003",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_003.go",
+		Content:    "ISB-003 (advise) — concatenated SQL (use parameterized queries). Anchor: Pattern P3.",
+	},
+	{
+		RuleKey:    "ISB-004",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_004.go",
+		Content:    "ISB-004 (advise) — outbound HTTP without preceding ValidateOutboundURL. Anchor: AUDIT-016 / Pattern P9 / Fix #10.",
+	},
+	{
+		RuleKey:    "ISB-005",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_005.go",
+		Content:    "ISB-005 (advise) — mutating HTTP handler not wrapped by securityMiddleware. Anchor: AUDIT-001 / Pattern P8.",
+	},
+	{
+		RuleKey:    "ISB-006",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_006.go",
+		Content:    "ISB-006 (advise) — file mode > 0700 in sensitive paths. Anchor: AUDIT-100.",
+	},
+	{
+		RuleKey:    "ISB-007",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_007.go",
+		Content:    "ISB-007 (advise) — destructive file op without containment check (AssertWithinRepo / ValidateNoSymlinkEscape). Anchor: AUDIT-019.",
+	},
+	{
+		RuleKey:    "ISB-008",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_008.go",
+		Content:    "ISB-008 (advise) — LLM prompt concat external content without <user_content> sentinels. Anchor: Pattern P12 / Fix #8.5.",
+	},
+	{
+		RuleKey:    "ISB-009",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_009.go",
+		Content:    "ISB-009 (advise) — io.ReadAll on external reader without LimitReader/MaxBytesReader. Anchor: AUDIT-057.",
+	},
+	{
+		RuleKey:    "ISB-010",
+		Section:    "Core architecture",
+		Category:   "isb",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/isb/rules/isb_010.go",
+		Content:    "ISB-010 (advise) — json.Unmarshal of LLM response without DisallowUnknownFields. Anchor: Pattern P12 / Fix #8.5.",
+	},
 }
