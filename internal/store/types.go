@@ -272,6 +272,30 @@ type FleetMemoryEntry struct {
 	TopicTags    string // comma-separated 3-5 short keywords (e.g. "auth, middleware, jwt")
 	Embedding    []byte // reserved: float32 vector blob for future sqlite-vec upgrade
 	CreatedAt    string
+
+	// D4 Phase 0 — Librarian evolution: quality-scoring fields. These
+	// are populated only by helpers that explicitly SELECT them (the
+	// classic GetFleetMemories paths leave them at zero values for
+	// backwards compatibility).
+	FreshnessScore  float64 // freshness_score column; decays with row age via RecomputeFreshnessScores
+	ValidationScore float64 // validation_score column; adjusted by RecordValidation
+	RetrievalCount  int     // retrieval_count column; bumped by RecordRetrieval
+	LastRetrievedAt string  // last_retrieved_at column ('' if never retrieved)
+	CanonicalID     int     // canonical_id column (0 means "this row IS canonical")
+}
+
+// ConflictTicket is one row in the ConflictTickets table — a pair of
+// FleetMemory rows the librarian-conflict-watch dog flagged as
+// contradictory. Operator-surfaced via /api/conflicts/tickets.
+type ConflictTicket struct {
+	ID             int
+	MemoryAID      int
+	MemoryBID      int
+	Reason         string
+	Status         string // 'open' | 'resolved'
+	CreatedAt      string
+	ResolvedAt     string
+	ResolutionNote string
 }
 
 // ── Task notes ────────────────────────────────────────────────────────────────
