@@ -313,17 +313,23 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 
 	// D3 fix-loop-1 (slice δ) — adversarial pair sampling.
 	// Exit criterion 10: surface Council-vs-critic disagreements
-	// against a sampled fraction of decisions. Non-blocking; the
-	// Council flow continues immediately while the pair runs in the
-	// background and (on disagreement) surfaces a Fleet_Mail row.
+	// against a sampled fraction of decisions. The pair runs in the
+	// background; we capture the join handle so this function can
+	// wait on it before returning. Pre-D4 race baseline fix: the
+	// wait ensures the spawned goroutine doesn't outlive the
+	// Council flow and race a t.Cleanup-installed CLI runner reset
+	// (or, in production, a daemon shutdown that's already torn
+	// down DB / capability resources). Wait is bounded by ctx so
+	// SIGINT short-circuits cleanly via Wait returning ctx.Err().
 	primaryOutcome := fmt.Sprintf(`{"approved":%t,"feedback":%q}`, approved, ruling.Feedback)
-	WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
+	pairHandle, _ := WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
 		DecisionID:    int64(b.ID),
 		Agent:         adversarial.AgentCouncil,
 		Outcome:       primaryOutcome,
 		Reasoning:     ruling.Feedback,
 		PromptVersion: "council-v1",
 	}, logger)
+	defer func() { _ = pairHandle.Wait(ctx) }()
 
 	if approved {
 		// Split on pr_flow_enabled: if the repo is on the PR flow, open a sub-PR

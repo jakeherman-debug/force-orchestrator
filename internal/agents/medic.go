@@ -260,17 +260,20 @@ func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *sto
 
 	// D3 fix-loop-1 (slice δ) — adversarial pair sampling.
 	// Exit criterion 10: surface Medic-vs-critic disagreements
-	// against a sampled fraction of decisions. Non-blocking; the
-	// Medic flow continues and applies the primary decision while
-	// the pair runs in the background.
+	// against a sampled fraction of decisions. The pair runs in
+	// the background; we capture the join handle so this function
+	// can wait on it before returning. Pre-D4 race baseline fix —
+	// see jedi_council.go's matching wiring for the rationale; ctx
+	// bounds the wait so SIGINT short-circuits cleanly.
 	primaryOutcome, _ := json.Marshal(decision)
-	WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
+	pairHandle, _ := WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
 		DecisionID:    int64(bounty.ID),
 		Agent:         adversarial.AgentMedic,
 		Outcome:       string(primaryOutcome),
 		Reasoning:     decision.Reason,
 		PromptVersion: "medic-v1",
 	}, logger)
+	defer func() { _ = pairHandle.Wait(ctx) }()
 
 	switch decision.Decision {
 	case "requeue":

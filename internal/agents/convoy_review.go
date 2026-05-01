@@ -485,20 +485,23 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 
 	// D3 fix-loop-1 (slice δ) — adversarial pair sampling.
 	// Exit criterion 10: surface ConvoyReview-vs-critic disagreements
-	// against a sampled fraction of decisions. Non-blocking; the
-	// review flow continues and processes the primary findings while
-	// the pair runs in the background. Runs AFTER γ2's spec-findings
+	// against a sampled fraction of decisions. The pair runs in
+	// the background; we capture the join handle so this function
+	// can wait on it before returning. Runs AFTER γ2's spec-findings
 	// merge so the critic evaluates the same final result the
-	// downstream branches act on.
+	// downstream branches act on. Pre-D4 race baseline fix — see
+	// jedi_council.go's matching wiring for the rationale; ctx
+	// bounds the wait so SIGINT short-circuits cleanly.
 	primaryOutcomeBytes, _ := json.Marshal(result)
 	reasoning := fmt.Sprintf("status=%s findings=%d", result.Status, len(result.Findings))
-	WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
+	pairHandle, _ := WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
 		DecisionID:    int64(bounty.ID),
 		Agent:         adversarial.AgentConvoyReview,
 		Outcome:       string(primaryOutcomeBytes),
 		Reasoning:     reasoning,
 		PromptVersion: "convoy-review-v1",
 	}, logger)
+	defer func() { _ = pairHandle.Wait(ctx) }()
 
 	if result.Status == "clean" || len(result.Findings) == 0 {
 		logger.Printf("ConvoyReview #%d: convoy %d passed — no findings (pass %d)",

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -222,12 +223,55 @@ func AstromechTimeoutForAttempt(infraFailures int) time.Duration {
 // partial).
 type CLIRunner func(ctx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error)
 
-// cliRunner is the active runner used by all agents. Override in tests to inject a stub.
-var cliRunner CLIRunner = defaultCLIRunner
+// cliRunnerSlot holds the active runner used by all agents. Override in
+// tests via SetCLIRunner. atomic.Pointer guards concurrent
+// reads (every AskClaudeCLI / RunCLI call site) against the writers
+// (SetCLIRunner / ResetCLIRunner from t.Cleanup). Without this, a
+// background goroutine spawned by the adversarial-pair hot path that
+// outlives its triggering test would race the test's t.Cleanup
+// reset — observed in the pre-D4 -race baseline as a data race
+// between AskClaudeCLIContext's runner read and ResetCLIRunner's
+// write. The pointer indirection is required because Go's atomic
+// package can't store function values directly; the wrapper struct
+// trick (one *CLIRunner per slot value) gives us a single 8-byte
+// atomic pointer load on the hot path.
+//
+// Default value is set in init().
+var cliRunnerSlot atomic.Pointer[CLIRunner]
 
-// cliRunnerIsDefault tracks whether cliRunner is the real default or a test stub.
-// RunCLIStreaming uses this to decide whether to stream or fall back to buffered output.
-var cliRunnerIsDefault = true
+// cliRunnerIsDefaultFlag mirrors cliRunnerSlot's "is the default
+// runner installed" bit. Stored as int32 (0/1) so it can ride the
+// same atomic discipline as the runner slot. RunCLIStreaming reads
+// this to decide whether to stream-spawn a real subprocess (default
+// installed) or call the stub directly (test override installed).
+var cliRunnerIsDefaultFlag atomic.Int32
+
+func init() {
+	r := CLIRunner(defaultCLIRunner)
+	cliRunnerSlot.Store(&r)
+	cliRunnerIsDefaultFlag.Store(1)
+}
+
+// loadCLIRunner returns the currently-installed runner. Callers MUST
+// route through this helper rather than reading cliRunnerSlot directly
+// so the dereference is centralised in one place.
+func loadCLIRunner() CLIRunner {
+	p := cliRunnerSlot.Load()
+	if p == nil {
+		// Defensive: should be unreachable since init() always seeds
+		// the slot. Fall back to the default rather than panic so a
+		// programmer error in some future refactor doesn't take down
+		// the daemon.
+		return defaultCLIRunner
+	}
+	return *p
+}
+
+// cliRunnerIsDefault returns whether the default runner is currently
+// installed. Replaces the bare bool var so the read is atomic.
+func cliRunnerIsDefault() bool {
+	return cliRunnerIsDefaultFlag.Load() == 1
+}
 
 func defaultCLIRunner(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 	// Fix #8e: derive the bounded ctx from the caller's parentCtx so daemon
@@ -265,16 +309,34 @@ func defaultCLIRunner(parentCtx context.Context, prompt, allowedTools, disallowe
 	return text, nil
 }
 
-// SetCLIRunner replaces the active CLI runner. Used by tests to inject stubs.
+// SetCLIRunner replaces the active CLI runner. Used by tests to inject
+// stubs. Atomic-guarded (Pre-D4 race fix): writes propagate to the
+// hot-path readers without a race even when an adversarial-pair
+// background goroutine outlives the test that triggered it.
 func SetCLIRunner(r CLIRunner) {
-	cliRunner = r
-	cliRunnerIsDefault = (r == nil) // nil resets to false; tests pass non-nil stubs
+	if r == nil {
+		// Preserve the historical "nil resets the is-default flag to
+		// false" semantic from the bare-var implementation. The slot
+		// itself keeps the previous value so a subsequent read
+		// dereferences something sane; tests that pass nil are a
+		// minor odd-case the original impl tolerated.
+		cliRunnerIsDefaultFlag.Store(0)
+		return
+	}
+	cliRunnerSlot.Store(&r)
+	// A non-nil stub installed by a test → not the default.
+	cliRunnerIsDefaultFlag.Store(0)
 }
 
 // ResetCLIRunner restores the default runner. Called by test cleanup.
+// Atomic-guarded (Pre-D4 race fix): the runner reset can happen
+// concurrently with a hot-path read from a still-draining adversarial-
+// pair goroutine; both sides go through atomic.Pointer to keep the
+// race detector quiet.
 func ResetCLIRunner() {
-	cliRunner = defaultCLIRunner
-	cliRunnerIsDefault = true
+	r := CLIRunner(defaultCLIRunner)
+	cliRunnerSlot.Store(&r)
+	cliRunnerIsDefaultFlag.Store(1)
 }
 
 // DefaultCLIRunner is the real CLI runner; exposed for test cleanup.
@@ -291,7 +353,7 @@ var DefaultCLIRunner CLIRunner = defaultCLIRunner
 func RunCLI(ctx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 	scrubbed, n := ScrubInbound(prompt)
 	observeInboundRedact("RunCLI", 0, n)
-	return cliRunner(ctx, scrubbed, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
+	return loadCLIRunner()(ctx, scrubbed, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 }
 
 // RunCLIStreaming is like RunCLI but also writes Claude's live output to w as
@@ -356,9 +418,9 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, dis
 	}
 	prompt = revised
 
-	if !cliRunnerIsDefault {
+	if !cliRunnerIsDefault() {
 		// Stub installed — call it and write its output to w for consistency.
-		out, err := cliRunner(parentCtx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
+		out, err := loadCLIRunner()(parentCtx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 		if w != nil && out != "" {
 			w.Write([]byte(out)) //nolint:errcheck
 		}
@@ -536,7 +598,7 @@ func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, allowedT
 	}
 	scrubbed = revised
 
-	out, err := cliRunner(ctx, scrubbed, allowedTools, disallowedTools, mcpConfig, "", maxTurns, claudeCLITimeout)
+	out, err := loadCLIRunner()(ctx, scrubbed, allowedTools, disallowedTools, mcpConfig, "", maxTurns, claudeCLITimeout)
 	if err != nil {
 		return "", err
 	}
