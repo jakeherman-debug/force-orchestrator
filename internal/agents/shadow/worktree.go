@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	igit "force-orchestrator/internal/git"
 )
 
 // ShadowWorktreeRoot is the on-disk root for shadow worktrees.
@@ -83,10 +84,16 @@ func SetupShadowWorktreeAt(ctx context.Context, db *sql.DB, runID int64, opts Se
 	// Use git worktree add. The branch name is shadow-exp-<exp>-run-<run>
 	// per the paired-runs spec; this lets later push-suppression trivially
 	// recognize shadow branches.
+	//
+	// D3 polish-pass iteration 2 (B4r): route through igit.LogAndRun so
+	// the shadow worktree setup is recorded in GitOperationLog (Pattern P32).
 	branch := fmt.Sprintf("shadow-exp-%d-run-%d", experimentID, runID)
-	cmd := exec.CommandContext(ctx, "git", "-C", opts.RepoPath,
-		"worktree", "add", "-b", branch, root, baseRef)
-	if out, gitErr := cmd.CombinedOutput(); gitErr != nil {
+	if out, gitErr := igit.LogAndRun(ctx,
+		igit.OpContext{Repo: opts.RepoPath},
+		"shadow-worktree-add",
+		"git", "-C", opts.RepoPath,
+		"worktree", "add", "-b", branch, root, baseRef,
+	); gitErr != nil {
 		return nil, fmt.Errorf("shadow.SetupShadowWorktreeAt: git worktree add: %s: %w",
 			strings.TrimSpace(string(out)), gitErr)
 	}
@@ -130,13 +137,22 @@ func CleanupShadowWorktreeAt(ctx context.Context, repoPath string, sess *ShadowS
 	// `git worktree remove` only succeeds if the worktree directory
 	// still exists; if it was already nuked, fall through to branch
 	// cleanup.
+	//
+	// D3 polish-pass iteration 2 (B4r): route through igit.LogAndRun.
 	if _, err := os.Stat(sess.WorktreePath); err == nil {
-		_ = exec.CommandContext(ctx, "git", "-C", repoPath,
-			"worktree", "remove", "--force", sess.WorktreePath).Run()
+		_, _ = igit.LogAndRun(ctx,
+			igit.OpContext{Repo: repoPath},
+			"shadow-worktree-remove",
+			"git", "-C", repoPath, "worktree", "remove", "--force", sess.WorktreePath,
+		)
 	}
 
 	branch := fmt.Sprintf("shadow-exp-%d-run-%d", sess.ExperimentID, sess.RunID)
-	_ = exec.CommandContext(ctx, "git", "-C", repoPath, "branch", "-D", branch).Run()
+	_, _ = igit.LogAndRun(ctx,
+		igit.OpContext{Repo: repoPath},
+		"shadow-branch-D",
+		"git", "-C", repoPath, "branch", "-D", branch,
+	)
 
 	// Drop the worktree dir if `git worktree remove` left anything
 	// behind.

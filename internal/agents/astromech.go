@@ -36,28 +36,41 @@ const shortGitTimeout = 60 * time.Second
 // so daemon shutdown / e-stop cancels in-flight subprocesses; the prior
 // fabricated context.Background root made the helper deaf to daemon
 // cancellation.
+//
+// D3 polish-pass iteration 2 (B4r): routes through igit.LogAndRun so the
+// op is recorded in GitOperationLog (Pattern P32). The OpContext is left
+// zero — the helper has no task/repo at the call boundary; callers that
+// hold those values use combinedShortGitWithCtx (below) which threads
+// the OpContext through.
 func runShortGit(ctx context.Context, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).Run()
+	_, err := igit.LogAndRun(ctx, igit.OpContext{}, "astromech-short", "git", args...)
+	return err
 }
 
 // combinedShortGit runs a git command with a 60s context timeout and
 // returns combined output. Replaces the pre-fix chained-and-CombinedOutput
 // form. AUDIT-158 (Fix #8d). Fix #8e: ctx threads from the caller.
+//
+// D3 polish-pass iteration 2 (B4r): routes through igit.LogAndRun.
+// LogAndRun returns the redacted-combined-output bytes, which is exactly
+// what the original helper returned — same shape, now logged.
 func combinedShortGit(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	return igit.LogAndRun(ctx, igit.OpContext{}, "astromech-short", "git", args...)
 }
 
 // combinedShortGitArgs is identical to combinedShortGit but accepts a
 // pre-built arg slice (for callers assembling positional slots).
 // Fix #8e: ctx threads from the caller.
+//
+// D3 polish-pass iteration 2 (B4r): routes through igit.LogAndRun.
 func combinedShortGitArgs(ctx context.Context, args []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortGitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	return igit.LogAndRun(ctx, igit.OpContext{}, "astromech-short", "git", args...)
 }
 
 // maxOutputBytes is the circuit-breaker threshold for blown-context detection.

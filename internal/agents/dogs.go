@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -357,7 +356,12 @@ func dogGitHygiene(ctx context.Context, db *sql.DB, logger interface{ Printf(str
 		if _, statErr := os.Stat(a.path); statErr != nil {
 			continue
 		}
-		out, gitErr := exec.Command("git", "-C", a.path, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		// D3 polish-pass iteration 2 (B4r): route through igit.LogAndRun
+		// so the dog's git-hygiene ops are recorded in GitOperationLog
+		// (Pattern P32). The OpContext carries the repo path; task id
+		// is 0 because this is fleet-wide hygiene, not task-scoped.
+		out, gitErr := igit.LogAndRun(ctx, igit.OpContext{Repo: a.repo}, "dog-git-hygiene-rev-parse",
+			"git", "-C", a.path, "rev-parse", "--abbrev-ref", "HEAD")
 		if gitErr != nil {
 			continue
 		}
@@ -372,8 +376,10 @@ func dogGitHygiene(ctx context.Context, db *sql.DB, logger interface{ Printf(str
 		if count > 0 {
 			continue
 		}
-		exec.Command("git", "-C", a.path, "checkout", "--detach", "HEAD").Run()
-		exec.Command("git", "-C", a.repo, "branch", "-D", branch).Run()
+		_, _ = igit.LogAndRun(ctx, igit.OpContext{Repo: a.repo}, "dog-git-hygiene-detach",
+			"git", "-C", a.path, "checkout", "--detach", "HEAD")
+		_, _ = igit.LogAndRun(ctx, igit.OpContext{Repo: a.repo}, "dog-git-hygiene-branch-D",
+			"git", "-C", a.repo, "branch", "-D", branch)
 		detached++
 		logger.Printf("Dog git-hygiene: detached worktree %s from orphaned branch %s", a.name, branch)
 	}

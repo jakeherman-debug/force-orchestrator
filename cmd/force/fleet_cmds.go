@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -698,6 +697,10 @@ func cmdRepos(db *sql.DB, args []string) {
 }
 
 func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
+	// D3 polish-pass iteration 2 (B4r): operator-invoked CLI subcommand.
+	// The git probes here run BEFORE the daemon's holocron is wired,
+	// but igit.LogAndRun degrades gracefully when no DB is attached.
+	ctx := context.Background()
 	// Fix #9: validate the path BEFORE any shell call. Leading `-` / `..` /
 	// NUL / newline / non-absolute paths all fail here. Absolute form is
 	// resolved via filepath.Abs so a caller that passes a relative path
@@ -718,7 +721,11 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 	}
 	// Trailing `--` keeps the arg positional (Fix #9 defence-in-depth;
 	// absPath already passed the validator so this is belt-and-suspenders).
-	if out, gitErr := exec.Command("git", "-C", absPath, "rev-parse", "--git-dir", "--").CombinedOutput(); gitErr != nil {
+	if out, gitErr := igit.LogAndRun(ctx,
+		igit.OpContext{Repo: absPath},
+		"add-repo-rev-parse",
+		"git", "-C", absPath, "rev-parse", "--git-dir", "--",
+	); gitErr != nil {
 		fmt.Printf("'%s' does not appear to be a git repository: %s\n", absPath, strings.TrimSpace(string(out)))
 		os.Exit(1)
 	}
@@ -731,7 +738,11 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 	// every add. A failure here is non-fatal — the repo is still registered,
 	// and the daemon's startup Layer B will retry on next boot.
 	if _, statErr := os.Stat(absPath); statErr == nil {
-		remote, rErr := exec.Command("git", "-C", absPath, "remote", "get-url", "origin").CombinedOutput()
+		remote, rErr := igit.LogAndRun(ctx,
+			igit.OpContext{Repo: absPath},
+			"add-repo-remote-get-url",
+			"git", "-C", absPath, "remote", "get-url", "origin",
+		)
 		remoteURL := strings.TrimSpace(string(remote))
 		// Fix #9: validate the URL from `git remote get-url origin` BEFORE
 		// persisting. An attacker-crafted remote URL with embedded
@@ -750,7 +761,11 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 		} else {
 			// Detect default branch via symbolic-ref, fall back to common names.
 			var defaultBranch string
-			if out, symErr := exec.Command("git", "-C", absPath, "symbolic-ref", "--short", "--", "refs/remotes/origin/HEAD").CombinedOutput(); symErr == nil {
+			if out, symErr := igit.LogAndRun(ctx,
+				igit.OpContext{Repo: absPath},
+				"add-repo-symbolic-ref",
+				"git", "-C", absPath, "symbolic-ref", "--short", "--", "refs/remotes/origin/HEAD",
+			); symErr == nil {
 				parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
 				if len(parts) == 2 {
 					defaultBranch = parts[1]
@@ -758,7 +773,11 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 			}
 			if defaultBranch == "" {
 				for _, b := range []string{"main", "master", "develop"} {
-					if exec.Command("git", "-C", absPath, "rev-parse", "--verify", b, "--").Run() == nil {
+					if _, vErr := igit.LogAndRun(ctx,
+						igit.OpContext{Repo: absPath},
+						"add-repo-verify-branch",
+						"git", "-C", absPath, "rev-parse", "--verify", b, "--",
+					); vErr == nil {
 						defaultBranch = b
 						break
 					}

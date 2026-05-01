@@ -72,6 +72,12 @@ func runCleanup(ctx context.Context, db *sql.DB) {
 }
 
 func runDoctor(db *sql.DB, clean bool) {
+	// D3 polish-pass iteration 2 (B4r): operator-invoked CLI subcommand,
+	// no daemon ctx to thread. context.Background() is the canonical
+	// shape for one-shot CLI ops; igit.LogAndRun records the op when
+	// the holocron is wired (`force doctor` runs against an existing
+	// DB) and silently degrades when not.
+	ctx := context.Background()
 	pass := 0
 	warn := 0
 	fail := 0
@@ -102,7 +108,7 @@ func runDoctor(db *sql.DB, clean bool) {
 	fmt.Println("Binaries:")
 
 	// git
-	gitOut, gitErr := exec.Command("git", "--version").Output()
+	gitOut, gitErr := igit.LogAndRun(ctx, igit.OpContext{}, "doctor-git-version", "git", "--version")
 	check("git binary", strings.TrimSpace(string(gitOut)), gitErr == nil)
 
 	// claude CLI
@@ -146,8 +152,11 @@ func runDoctor(db *sql.DB, clean bool) {
 				check(name, path+" — not a directory", false)
 				continue
 			}
-			// Check it's a git repo
-			_, gitRepoErr := exec.Command("git", "-C", path, "rev-parse", "--git-dir").Output()
+			// Check it's a git repo. Route through igit.LogAndRun (B4r).
+			_, gitRepoErr := igit.LogAndRun(ctx,
+				igit.OpContext{Repo: path},
+				"doctor-rev-parse",
+				"git", "-C", path, "rev-parse", "--git-dir")
 			if gitRepoErr != nil {
 				check(name, path+" — not a git repo", false)
 			} else {
@@ -635,9 +644,14 @@ func purgeFilesystem(ctx context.Context, db *sql.DB) {
 				os.Remove(worktreeBase)
 			}
 
-			// Delete all agent/* branches
-			branchOut, branchErr := exec.Command("git", "-C", r.path, "for-each-ref",
-				"--format=%(refname:short)", "refs/heads/agent/").Output()
+			// Delete all agent/* branches.
+			// D3 polish-pass iteration 2 (B4r): route through igit.LogAndRun
+			// so the purge ops are recorded in GitOperationLog (Pattern P32).
+			branchOut, branchErr := igit.LogAndRun(ctx,
+				igit.OpContext{Repo: r.path},
+				"maintenance-purge-list-branches",
+				"git", "-C", r.path, "for-each-ref",
+				"--format=%(refname:short)", "refs/heads/agent/")
 			if branchErr == nil {
 				deleted := 0
 				for _, branch := range strings.Split(strings.TrimSpace(string(branchOut)), "\n") {
@@ -645,7 +659,10 @@ func purgeFilesystem(ctx context.Context, db *sql.DB) {
 					if branch == "" {
 						continue
 					}
-					if _, delErr := exec.Command("git", "-C", r.path, "branch", "-D", branch).Output(); delErr == nil {
+					if _, delErr := igit.LogAndRun(ctx,
+						igit.OpContext{Repo: r.path},
+						"maintenance-purge-branch-D",
+						"git", "-C", r.path, "branch", "-D", branch); delErr == nil {
 						deleted++
 					}
 				}
