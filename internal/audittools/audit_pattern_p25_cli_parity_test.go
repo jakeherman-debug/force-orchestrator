@@ -50,6 +50,16 @@ var p25Allowlist = map[string]string{
 	// allowlist entry too.
 	"/api/annotations":  "CLI parity via `force annotate` (6B.8)",
 	"/api/annotations/": "CLI parity via `force annotate` (6B.8)",
+
+	// D3 P6B.10 — Ask `/` shortcut. CLI parity via `force ask`.
+	"/api/ask": "CLI parity via `force ask <question>` (6B.10)",
+	// D3 P6B.11 — Reflection calibration scoreboard (read-only;
+	// suggestions are advisory, mutations route through the
+	// existing trust-dial endpoint with set_by='operator').
+	"/api/reflection/calibration": "read-only Reflection calibration scoreboard (6B.11); GET-only",
+	// D3 P6B.13 — Retro generator. CLI parity via `force retro`.
+	"/api/reflection/retro/generate": "CLI parity via `force retro generate` (6B.13)",
+	"/api/reflection/retro/save":     "CLI parity via `force retro save` (6B.13)",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in
@@ -69,6 +79,8 @@ var p25KnownVerbs = []string{
 	// D3 P6B.8 — `force annotate <kind> <ref> <flag> <text>` parity
 	// for /api/annotations POST + /api/annotations/<id> PUT/DELETE.
 	"annotate", "annotations",
+	// D3 P6B.10 / 6B.13 — Ask + retro CLI parity.
+	"ask", "retro",
 }
 
 func TestPattern_P25_CLIParity(t *testing.T) {
