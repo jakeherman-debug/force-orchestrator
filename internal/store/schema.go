@@ -1189,6 +1189,39 @@ func createSchema(db *sql.DB) {
 		prompt_version         TEXT    NOT NULL DEFAULT '',
 		source_event_refs_json TEXT    DEFAULT '[]'
 	);`)
+
+	// D4 Phase 1 — SecurityFindings. Shared between Bureau of Standards (BoS,
+	// commit-time AST review) and Imperial Security Bureau (ISB, Phase 2,
+	// security review). Each row records one finding from one rule against
+	// one task's diff. The disposition column captures override flow:
+	//   ''           : finding active / unresolved (default)
+	//   'overridden' : a // BOS-BYPASS / ISB-BYPASS comment downgraded the
+	//                   finding from block→advisory; bypass_audit_id +
+	//                   bypass_reason capture the audit trail.
+	//   'resolved'   : the violating code was removed in a follow-up commit.
+	//   'suppressed' : operator-level mute (rare; future workflow).
+	//   'closed'     : sweeper-closed terminal state.
+	// The (rule_id, severity, disposition) index is the dashboard-view path
+	// — "show me all open block-severity BOS-001 findings" runs on it.
+	db.Exec(`CREATE TABLE IF NOT EXISTS SecurityFindings (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id         INTEGER NOT NULL DEFAULT 0,
+		bureau          TEXT    NOT NULL DEFAULT 'BoS',
+		rule_id         TEXT    NOT NULL,
+		severity        TEXT    NOT NULL DEFAULT 'advise',
+		file_path       TEXT    NOT NULL DEFAULT '',
+		line_number     INTEGER NOT NULL DEFAULT 0,
+		message         TEXT    NOT NULL DEFAULT '',
+		commit_sha      TEXT    NOT NULL DEFAULT '',
+		disposition     TEXT    NOT NULL DEFAULT '',
+		bypass_audit_id TEXT    NOT NULL DEFAULT '',
+		bypass_reason   TEXT    NOT NULL DEFAULT '',
+		created_at      TEXT    DEFAULT (datetime('now')),
+		resolved_at     TEXT    NOT NULL DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sec_findings_task     ON SecurityFindings(task_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sec_findings_rule     ON SecurityFindings(rule_id, created_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sec_findings_dashboard ON SecurityFindings(rule_id, severity, disposition);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -2257,4 +2290,29 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE Experiments ADD COLUMN kind         TEXT    NOT NULL DEFAULT 'single'`)
 	db.Exec(`ALTER TABLE Experiments ADD COLUMN factors_json TEXT             DEFAULT '[]'`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_kind_status ON Experiments (kind, status)`)
+
+	// ── D4 Phase 1: SecurityFindings (upgrade path) ──────────────────────────
+	// Shared between BoS (Phase 1) and ISB (Phase 2). Idempotent
+	// CREATE TABLE IF NOT EXISTS so a fresh DB skips this block (table
+	// already created in createSchema) and an upgraded DB lands the new
+	// table on the next runMigrations sweep.
+	db.Exec(`CREATE TABLE IF NOT EXISTS SecurityFindings (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id         INTEGER NOT NULL DEFAULT 0,
+		bureau          TEXT    NOT NULL DEFAULT 'BoS',
+		rule_id         TEXT    NOT NULL,
+		severity        TEXT    NOT NULL DEFAULT 'advise',
+		file_path       TEXT    NOT NULL DEFAULT '',
+		line_number     INTEGER NOT NULL DEFAULT 0,
+		message         TEXT    NOT NULL DEFAULT '',
+		commit_sha      TEXT    NOT NULL DEFAULT '',
+		disposition     TEXT    NOT NULL DEFAULT '',
+		bypass_audit_id TEXT    NOT NULL DEFAULT '',
+		bypass_reason   TEXT    NOT NULL DEFAULT '',
+		created_at      TEXT    DEFAULT (datetime('now')),
+		resolved_at     TEXT    NOT NULL DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sec_findings_task     ON SecurityFindings(task_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sec_findings_rule     ON SecurityFindings(rule_id, created_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sec_findings_dashboard ON SecurityFindings(rule_id, severity, disposition)`)
 }

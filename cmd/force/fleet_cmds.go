@@ -139,6 +139,18 @@ func cmdDaemon(db *sql.DB) {
 	}
 	diplomatRoster := []string{"Leia-Organa", "Padme-Amidala", "Bail-Organa"}
 
+	// D4 Phase 1 — Bureau of Standards. One agent is sufficient
+	// (BoS is pure Go AST analysis, near-zero per-task wall time).
+	// Operators can scale up via num_bos config.
+	numBoS := 1
+	if n := store.GetConfig(db, "num_bos", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numBoS)
+	}
+	if numBoS < 1 {
+		numBoS = 1
+	}
+	bosRoster := []string{"BoS-Phasma", "BoS-Pyre", "BoS-Cardinal"}
+
 	// Recover any Failed convoys whose tasks were manually reset (e.g. via `force reset` or
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
@@ -341,6 +353,14 @@ func cmdDaemon(db *sql.DB) {
 			name = diplomatRoster[i]
 		}
 		go agents.SpawnDiplomat(ctx, db, name)
+	}
+	// D4 Phase 1 — Bureau of Standards.
+	for i := 0; i < numBoS; i++ {
+		name := fmt.Sprintf("BoS-%d", i+1)
+		if i < len(bosRoster) {
+			name = bosRoster[i]
+		}
+		go agents.SpawnBoS(ctx, db, name)
 	}
 	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient})
 

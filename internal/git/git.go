@@ -522,6 +522,38 @@ func CommitsAhead(ctx context.Context, repoPath string, branchName string) strin
 	return strings.TrimSpace(string(out))
 }
 
+// ChangedGoFilesFromBase returns the list of `.go` files changed
+// between baseRef and branch (three-dot range). Used by Bureau of
+// Standards (D4 Phase 1) to enumerate which Go source files to AST-
+// scan. Filters to .go files at the helper layer so callers don't have
+// to repeat the suffix check. Returns an empty slice on git errors —
+// the BoS reviewer treats "no files" as "nothing to review."
+//
+// Fix #9 considerations: baseRef and branch are validated at the
+// caller site (BoS task payload deserializer) before reaching this
+// helper.
+func ChangedGoFilesFromBase(ctx context.Context, repoPath, baseRef, branch string) []string {
+	if baseRef == "" || branch == "" || repoPath == "" {
+		return nil
+	}
+	out, err := runGitCtx(ctx, "-C", repoPath, "diff", "--name-only", baseRef+"..."+branch, "--")
+	if err != nil {
+		return nil
+	}
+	var goFiles []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasSuffix(line, ".go") {
+			continue
+		}
+		goFiles = append(goFiles, line)
+	}
+	return goFiles
+}
+
 // MergeAndCleanup merges the branch into the default branch of the repo, then resets
 // the agent worktree to detached HEAD. Serialized with a mutex to prevent concurrent
 // council members from racing on the same main worktree. Returns error if merge fails.
