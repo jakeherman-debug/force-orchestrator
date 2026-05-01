@@ -94,7 +94,7 @@ func TestAttentionTags_List(t *testing.T) {
 			TargetKind:     t2.kind,
 			TargetID:       t2.id,
 			AttentionLevel: t2.level,
-			Rationale:      "test",
+			Rationale:      "valid rationale text",
 		})
 	}
 	tags, err := ListAttentionTags(ctx, db, "op@example.com")
