@@ -137,6 +137,8 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/drill/task/", handleDrillTask(db))
 	// ── D3 P6B.5 — Drill event view: full body for one event by kind+id.
 	mux.HandleFunc("/api/drill/event/", handleDrillEvent(db))
+	// ── D3 P6B.6 — Drill free-text search via sqlite_fts5.
+	mux.HandleFunc("/api/drill/search", handleDrillSearch(db))
 
 	// ── D3 P6A.1 — Three-surface IA. Top-level navigation is capped at three
 	// surfaces forever: Pulse / Briefing / Reflection. Each handler emits a
