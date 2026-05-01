@@ -1,0 +1,13 @@
+agent: medic-critic
+description: |
+  Adversarial critic for Medic triage decisions (D3 Phase 5). Given a
+  Medic decision (requeue / shard / cleanup / escalate), the critic
+  re-evaluates whether the routing is correct under an opposite
+  framing: "is this really the smallest right action, or is the
+  primary too eager to escalate / too slow to escalate?" Disagreements
+  surface to the operator.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Same toolset as primary medic. Anti-cheat enforced at the
+  pair-runner write boundary.

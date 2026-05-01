@@ -1,0 +1,18 @@
+agent: council-critic
+description: |
+  Adversarial critic for Council decisions (D3 Phase 5). Runs the
+  opposite-framing prompt: given a diff that the production Council
+  approved, the critic looks for quality issues, scope violations,
+  hidden coupling, missing tests. A disagreement (critic rejects what
+  the primary approved, or vice versa) surfaces to the operator
+  instead of auto-merging.
+builtin_tools: []
+mcp_servers:
+  - mcp:atlassian-read
+  - mcp:glean-read
+  - mcp:sonar-read
+notes: |
+  Same toolset as primary council; the divergence axis is the prompt,
+  not the capability set. Anti-cheat: critic's prompt-version key MUST
+  differ from the primary's; pair runner rejects identical-version
+  pairs at write time.

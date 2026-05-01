@@ -56,9 +56,13 @@ func TestRunAdversarialPair_Stub_ReturnsErrIdenticalPromptVersions(t *testing.T)
 	}
 }
 
-func TestSurfaceDisagreementToOperator_Stub_NoOp(t *testing.T) {
-	if err := SurfaceDisagreementToOperator(context.Background(), nil, 1); err != nil {
-		t.Fatalf("SurfaceDisagreementToOperator stub: want nil, got %v", err)
+func TestSurfaceDisagreementToOperator_FailsClosedOnNilDB(t *testing.T) {
+	// Production-shape: SurfaceDisagreementToOperator validates inputs;
+	// nil db must error out. Tests that exercise the surface path use
+	// a real :memory: DB (see TestAdversarial_DisagreementSurfaces in
+	// pair_test.go).
+	if err := SurfaceDisagreementToOperator(context.Background(), nil, 1); err == nil {
+		t.Fatalf("SurfaceDisagreementToOperator: want error on nil db, got nil")
 	}
 }
 
