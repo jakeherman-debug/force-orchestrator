@@ -235,6 +235,13 @@ func cmdDaemon(db *sql.DB) {
 	claude.SetContextSizeDB(db)
 	claude.SetSummarizer(libClient.SummarizeForContextOverflow)
 
+	// D3 P6B.1 — wire LLMCallTranscripts capture. Every Claude CLI
+	// invocation routed through claude.CallWithTranscript* now records
+	// a redacted row into LLMCallTranscripts. Forward-going code uses
+	// the wrapper; the migration of pre-6B direct call sites is
+	// recorded as a backlog in Pattern P31's allowlist.
+	claude.SetTranscriptDB(db)
+
 	// D3 Phase 1 — install the log-only treatments.Apply hook.
 	// Every Claude CLI invocation now records to TreatmentApplyLog
 	// (mode='log_only'). Phase 2 of D3 swaps this for live pass-through.
