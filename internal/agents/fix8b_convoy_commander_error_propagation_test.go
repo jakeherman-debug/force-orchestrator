@@ -129,7 +129,7 @@ func TestFix8B_Commander_FailBountyErrorSurfacesToLogger(t *testing.T) {
 
 	buf, logger := bufferLogger()
 
-	runCommanderTask(db, "Commander-test", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-test", b, mustLoadCapProfile(t, "commander"), logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "FailBounty(repo-context load) failed") {

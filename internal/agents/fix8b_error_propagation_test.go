@@ -241,7 +241,7 @@ func TestFix8B_Librarian_InvalidPayload_FailsTask(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	runLibrarianTask(db, "librarian-1", bounty, mustLoadCapProfile(t, "librarian"), logger)
+	runLibrarianTask(context.Background(), db, "librarian-1", bounty, mustLoadCapProfile(t, "librarian"), logger)
 
 	b, _ := store.GetBounty(db, int(id))
 	if b.Status != "Failed" {
@@ -289,7 +289,7 @@ func TestFix8B_Librarian_UpdateBountyStatusError_Logged(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	runLibrarianTask(db, "librarian-1", bounty, mustLoadCapProfile(t, "librarian"), logger)
+	runLibrarianTask(context.Background(), db, "librarian-1", bounty, mustLoadCapProfile(t, "librarian"), logger)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "Completed status update failed") || !strings.Contains(logs, "stale-lock detector will recover") {

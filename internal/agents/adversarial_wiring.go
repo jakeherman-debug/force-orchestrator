@@ -98,7 +98,10 @@ when the Council's decision is genuinely correct.`
 		)
 
 		mcpConfig, _ := profile.MCPConfigArg()
-		response, err := claude.AskClaudeCLIContext(ctx, systemPrompt, userPrompt,
+		response, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+			Agent:         "council-critic",
+			PromptVersion: councilCriticPromptVersion,
+		}, systemPrompt, userPrompt,
 			profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 		if err != nil {
 			return adversarial.CriticOutcome{}, fmt.Errorf("council-critic: %w", err)
@@ -139,7 +142,10 @@ The "decision" field is REQUIRED.`
 		)
 
 		mcpConfig, _ := profile.MCPConfigArg()
-		response, err := claude.AskClaudeCLIContext(ctx, systemPrompt, userPrompt,
+		response, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+			Agent:         "medic-critic",
+			PromptVersion: medicCriticPromptVersion,
+		}, systemPrompt, userPrompt,
 			profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 		if err != nil {
 			return adversarial.CriticOutcome{}, fmt.Errorf("medic-critic: %w", err)
@@ -177,7 +183,10 @@ explicit field "would_close_gap": bool indicating your verdict.`
 		)
 
 		mcpConfig, _ := profile.MCPConfigArg()
-		response, err := claude.AskClaudeCLIContext(ctx, systemPrompt, userPrompt,
+		response, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+			Agent:         "convoy-review-critic",
+			PromptVersion: convoyReviewCriticPromptVersion,
+		}, systemPrompt, userPrompt,
 			profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 		if err != nil {
 			return adversarial.CriticOutcome{}, fmt.Errorf("convoy-review-critic: %w", err)

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -82,6 +83,7 @@ type rerankResponse struct {
 // missing profile degrades gracefully rather than blocking memory
 // retrieval.
 func RerankFleetMemories(
+	ctx context.Context,
 	db *sql.DB,
 	taskPayload string,
 	candidates []store.FleetMemoryEntry,
@@ -113,7 +115,10 @@ func RerankFleetMemories(
 
 	// Low max-turns so we don't pay for extended reasoning.
 	mcpConfig, _ := profile.MCPConfigArg()
-	raw, err := claude.AskClaudeCLI(rerankSystemPrompt, userPrompt,
+	raw, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "memory-rerank",
+		PromptVersion: "memory-rerank-v1",
+	}, rerankSystemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 2)
 	if err != nil {
 		logger.Printf("memory-rerank: Claude failed (%v) — falling back to FTS order", err)

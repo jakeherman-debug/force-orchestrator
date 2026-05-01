@@ -80,11 +80,11 @@ func SpawnLibrarian(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runLibrarianTask(db, name, bounty, profile, logger)
+		runLibrarianTask(ctx, db, name, bounty, profile, logger)
 	}
 }
 
-func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
+func runLibrarianTask(ctx context.Context, db *sql.DB, name string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	logger.Printf("Librarian claimed WriteMemory #%d", bounty.ID)
 
 	// Parse the structured payload from jedi_council.
@@ -125,7 +125,11 @@ func runLibrarianTask(db *sql.DB, name string, bounty *store.Bounty, profile *ca
 	}
 
 	mcpConfig, _ := profile.MCPConfigArg()
-	rawOut, err := claude.AskClaudeCLI(librarianSystemPrompt, userPrompt,
+	rawOut, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "librarian",
+		TaskID:        int(bounty.ID),
+		PromptVersion: "librarian-v1",
+	}, librarianSystemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	var summary, tags string
 	if err != nil {

@@ -253,7 +253,11 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 	}
 	// D3 P1: append every active FleetRules row scoped to 'council'.
 	systemPrompt = AppendFleetRulesToPrompt(ctx, db, "council", systemPrompt, logger)
-	response, err := claude.AskClaudeCLI(systemPrompt, reviewPrompt,
+	response, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "council",
+		TaskID:        int(b.ID),
+		PromptVersion: "council-v1",
+	}, systemPrompt, reviewPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if err != nil {
 		msg := fmt.Sprintf("Claude CLI Err: %v", err)

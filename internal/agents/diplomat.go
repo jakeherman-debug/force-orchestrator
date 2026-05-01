@@ -365,7 +365,11 @@ func generatePRBody(ctx context.Context, db *sql.DB, convoy *store.Convoy, ab st
 	if mcpErr != nil {
 		logger.Printf("ShipConvoy: diplomat MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
 	}
-	raw, err := claude.AskClaudeCLI(diplomatSystemPrompt, userPrompt,
+	raw, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "diplomat",
+		TaskID:        int(convoy.ID),
+		PromptVersion: "diplomat-v1",
+	}, diplomatSystemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 2)
 	if err != nil {
 		// AUDIT-095 (Fix #8d): classify the error. Transient / rate-limit
@@ -416,7 +420,11 @@ func generatePRBodyWithCritic(ctx context.Context, db *sql.DB, convoy *store.Con
 	if mcpErr != nil {
 		logger.Printf("ShipConvoy: diplomat-critic MCP config write failed (%v) — proceeding without --mcp-config", mcpErr)
 	}
-	raw, err := claude.AskClaudeCLI(diplomatSystemPrompt, userPrompt,
+	raw, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "diplomat-critic",
+		TaskID:        int(convoy.ID),
+		PromptVersion: "diplomat-critic-v1",
+	}, diplomatSystemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 2)
 	if err != nil {
 		return "", err
@@ -475,7 +483,7 @@ func buildDiplomatConvoyContext(ctx context.Context, db *sql.DB, convoy *store.C
 	// FTS order via RerankFleetMemories' nil-profile branch — graceful
 	// fallback rather than blocking the PR-body assembly.
 	librarianProfile, _ := capabilities.LoadProfile("librarian")
-	memories := RerankFleetMemories(db, convoy.Name, candidates, 3, librarianProfile, log.New(io.Discard, "", 0))
+	memories := RerankFleetMemories(ctx, db, convoy.Name, candidates, 3, librarianProfile, log.New(io.Discard, "", 0))
 	if len(memories) > 0 {
 		sb.WriteString("\nRelated memory entries:\n")
 		for _, m := range memories {

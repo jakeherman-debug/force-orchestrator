@@ -154,8 +154,13 @@ func handleMetricAuthor(
 			agentName, bounty.ID, mcpErr)
 	}
 
-	raw, err := claude.AskClaudeCLIContext(
+	raw, err := claude.CallWithTranscript(
 		ctx,
+		claude.CallDescriptor{
+			Agent:         "ec-metric-author",
+			TaskID:        int(bounty.ID),
+			PromptVersion: "ec-metric-author-v1",
+		},
 		metricAuthorSystemPrompt,
 		userPrompt,
 		profile.AllowedToolsArg(),

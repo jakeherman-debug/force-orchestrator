@@ -284,7 +284,7 @@ func SpawnCommander(ctx context.Context, db *sql.DB, name string) {
 			continue
 		}
 
-		runCommanderTask(db, agentName, bounty, profile, logger)
+		runCommanderTask(ctx, db, agentName, bounty, profile, logger)
 	}
 }
 
@@ -360,7 +360,7 @@ func autoInsertReshardTasks(db *sql.DB, bounty, parent *store.Bounty, tasks []st
 }
 
 // runCommanderTask decomposes a single Feature or Decompose bounty into CodeEdit subtasks.
-func runCommanderTask(db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
+func runCommanderTask(ctx context.Context, db *sql.DB, agentName string, bounty *store.Bounty, profile *capabilities.Profile, logger *log.Logger) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Claimed task %d (%s): %s", sessionID, bounty.ID, bounty.Type, util.TruncateStr(bounty.Payload, 80))
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
@@ -447,7 +447,11 @@ EXAMPLE:
 	if mcpErr != nil {
 		logger.Printf("Task %d: commander MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
 	}
-	rawOut, err := claude.RunCLIStreaming(fullPrompt,
+	rawOut, err := claude.CallWithTranscriptStreaming(ctx, claude.CallDescriptor{
+		Agent:         "commander",
+		TaskID:        int(bounty.ID),
+		PromptVersion: "commander-v1",
+	}, fullPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
 		"", 10, cmdTimeout, taskWriter)
 

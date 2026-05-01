@@ -185,8 +185,13 @@ func handleExperimentAuthor(
 			agentName, bounty.ID, mcpErr)
 	}
 
-	raw, err := claude.AskClaudeCLIContext(
+	raw, err := claude.CallWithTranscript(
 		ctx,
+		claude.CallDescriptor{
+			Agent:         "ec-experiment-author",
+			TaskID:        int(bounty.ID),
+			PromptVersion: "ec-experiment-author-v1",
+		},
 		experimentAuthorSystemPrompt,
 		userPrompt,
 		profile.AllowedToolsArg(),

@@ -563,7 +563,10 @@ func runConvoyReviewLLM(ctx context.Context, db *sql.DB, userPrompt string, prof
 	// The interface{Printf} logger doesn't satisfy *log.Logger so pass nil
 	// — the inject helper falls back to silent fail-open.
 	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "convoy-review", convoyReviewSystemPrompt, nil)
-	raw, err := claude.AskClaudeCLI(systemPrompt, userPrompt,
+	raw, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "convoy-review",
+		PromptVersion: "convoy-review-v1",
+	}, systemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		return convoyReviewResult{}, fmt.Errorf("claude CLI: %w", err)

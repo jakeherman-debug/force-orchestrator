@@ -49,31 +49,30 @@ var p31Allowlist = map[string]string{
 	// whole point of the wrapper.
 	"internal/claude/transcript.go": "this file IS the wrapper; its calls to AskClaudeCLIContext / RunCLIStreamingContext / RunCLI are the wrapper's downward edge into the real CLI helpers",
 
-	// Pre-P6B.1 call sites — migration backlog (sweep target for the
-	// 6B follow-up commit train). Each rationale names the agent +
-	// the migration path. The migration is mechanical: replace the
-	// direct call with claude.CallWithTranscript(ctx, descriptor,
-	// systemPrompt, userPrompt, ...), where descriptor is built from
-	// (agent name, task id, prompt version) at the call site.
-	"internal/agents/captain.go":              "Captain ruling — pre-6B direct AskClaudeCLIContext at line ~439; migration: pass desc.Agent='captain' / desc.TaskID=task.ID / desc.PromptVersion=captainPromptVersion. Migration target: 6B follow-up train.",
-	"internal/agents/medic.go":                "Medic decision — pre-6B direct AskClaudeCLI; migration: route via CallWithTranscript with desc.Agent='medic'. Migration target: 6B follow-up train.",
-	"internal/agents/medic_ci.go":             "Medic CI decision — pre-6B direct AskClaudeCLI; migration as for medic.go. Migration target: 6B follow-up train.",
-	"internal/agents/jedi_council.go":         "Council ruling — pre-6B direct AskClaudeCLI; migration: desc.Agent='council'. Migration target: 6B follow-up train.",
-	"internal/agents/convoy_review.go":        "ConvoyReview synthesis — pre-6B direct AskClaudeCLI; migration: desc.Agent='convoy-review'. Migration target: 6B follow-up train.",
-	"internal/agents/pr_review_triage.go":     "PR review triage — pre-6B direct AskClaudeCLI; migration: desc.Agent='pr-review-triage'. Migration target: 6B follow-up train.",
-	"internal/agents/chancellor.go":           "Chancellor merge synth — pre-6B direct AskClaudeCLIContext; migration: desc.Agent='chancellor'. Migration target: 6B follow-up train.",
-	"internal/agents/astromech.go":            "Astromech streaming — pre-6B direct RunCLIStreamingContext; migration: route via CallWithTranscriptStreaming with desc.Agent='astromech'. Migration target: 6B follow-up train.",
-	"internal/agents/auditor.go":              "Auditor RunCLI — pre-6B direct RunCLI; migration: CallWithTranscriptOneShot with desc.Agent='auditor'. Migration target: 6B follow-up train.",
-	"internal/agents/investigator.go":         "Investigator RunCLI — pre-6B direct RunCLI; migration as auditor. Migration target: 6B follow-up train.",
-	"internal/agents/commander.go":            "Commander streaming — pre-6B direct RunCLIStreaming; migration: CallWithTranscriptStreaming with desc.Agent='commander'. Migration target: 6B follow-up train.",
-	"internal/agents/diplomat.go":             "Diplomat — pre-6B direct AskClaudeCLI; migration: desc.Agent='diplomat'. Migration target: 6B follow-up train.",
-	"internal/agents/librarian.go":            "Librarian — pre-6B direct AskClaudeCLI; migration: desc.Agent='librarian'. Migration target: 6B follow-up train.",
-	"internal/agents/pilot.go":                "Pilot — pre-6B direct AskClaudeCLI inside ClassifyTaskType-style helper; migration: desc.Agent='pilot'. Migration target: 6B follow-up train.",
-	"internal/agents/boot.go":                 "Boot — pre-6B direct AskClaudeCLI on daemon startup; transient, low-volume; migration optional but slated. Migration target: 6B follow-up train.",
-	"internal/agents/memory_rerank.go":        "Memory re-rank — pre-6B direct AskClaudeCLI; migration: desc.Agent='memory-rerank'. Migration target: 6B follow-up train.",
-	"internal/agents/adversarial_wiring.go":   "Adversarial wiring (3 sites) — pre-6B direct AskClaudeCLIContext; migration: desc.Agent='adversarial-{discover,critique,tournament}'. Migration target: 6B follow-up train.",
-	"internal/agents/engineering_corps/metric_author.go":     "EC metric author — pre-6B direct AskClaudeCLIContext; migration: desc.Agent='ec-metric-author'. Migration target: 6B follow-up train.",
-	"internal/agents/engineering_corps/experiment_author.go": "EC experiment author — pre-6B direct AskClaudeCLIContext; migration: desc.Agent='ec-experiment-author'. Migration target: 6B follow-up train.",
+	// D3 polish-pass B3 (2026-04-30): the 19-entry migration backlog
+	// landed. Every production-code direct claude CLI call now routes
+	// through one of the CallWithTranscript* helpers in
+	// internal/claude/transcript.go. Migrations applied:
+	//   - Captain (captain.go:439): CallWithTranscript desc.Agent='captain'
+	//   - Medic (medic.go:200): CallWithTranscript desc.Agent='medic'
+	//   - Medic CI (medic_ci.go:195): CallWithTranscript desc.Agent='medic-ci'
+	//   - Council (jedi_council.go:256): CallWithTranscript desc.Agent='council'
+	//   - ConvoyReview (convoy_review.go:566): CallWithTranscript desc.Agent='convoy-review'
+	//   - PRReviewTriage (pr_review_triage.go:210): CallWithTranscript desc.Agent='pr-review-triage'
+	//   - Chancellor (chancellor.go:124, 647): CallWithTranscript desc.Agent='chancellor[-merge]'
+	//   - Astromech (astromech.go:661): CallWithTranscriptStreaming desc.Agent='astromech'
+	//   - Auditor (auditor.go:156): CallWithTranscriptOneShot desc.Agent='auditor'
+	//   - Investigator (investigator.go:120): CallWithTranscriptOneShot desc.Agent='investigator'
+	//   - Commander (commander.go:450): CallWithTranscriptStreaming desc.Agent='commander' (ctx threaded through runCommanderTask)
+	//   - Diplomat (diplomat.go:368, 419): CallWithTranscript desc.Agent='diplomat[-critic]'
+	//   - Librarian (librarian.go:128): CallWithTranscript desc.Agent='librarian' (ctx threaded through runLibrarianTask)
+	//   - Pilot (pilot.go:398): CallWithTranscript desc.Agent='pilot'
+	//   - Boot (boot.go:57): CallWithTranscript desc.Agent='boot' (ctx threaded through BootTriage + buildAstromechContext)
+	//   - MemoryRerank (memory_rerank.go:116): CallWithTranscript desc.Agent='memory-rerank' (ctx threaded through RerankFleetMemories)
+	//   - Adversarial (adversarial_wiring.go × 3): CallWithTranscript desc.Agent='council|medic|convoy-review-critic'
+	//   - EC metric_author (metric_author.go:157): CallWithTranscript desc.Agent='ec-metric-author'
+	//   - EC experiment_author (experiment_author.go:188): CallWithTranscript desc.Agent='ec-experiment-author'
+	// The two wrapper-self entries above are structurally permanent.
 }
 
 // p31CallPattern detects call expressions to any of the canonical

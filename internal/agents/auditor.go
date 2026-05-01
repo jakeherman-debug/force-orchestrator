@@ -153,7 +153,11 @@ func runAuditorTask(ctx context.Context, db *sql.DB, name string, bounty *store.
 	if mcpErr != nil {
 		logger.Printf("Task %d: auditor MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
 	}
-	rawOut, err := claude.RunCLI(ctx, fullPrompt,
+	rawOut, err := claude.CallWithTranscriptOneShot(ctx, claude.CallDescriptor{
+		Agent:         "auditor",
+		TaskID:        int(bounty.ID),
+		PromptVersion: "auditor-v1",
+	}, fullPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
 		runDir, 40, auditorTimeout)
 	outputStr := strings.TrimSpace(rawOut)
