@@ -2288,3 +2288,36 @@ deploys couldn't actually detect deprecations.
 **EMPTY.** Every slice ζ item closed; no sub-item deferred.
 
 ---
+
+## D4 strict-verifier prep — pre-D4 race-baseline closure
+
+Two pre-D4 race-baseline findings landed under the
+`fix/pre-d4-race-baseline` branch (merged into `main` ahead of D4
+final verifier dispatch):
+
+1. **`internal/claude` runner global** is now atomic-guarded
+   (`atomic.Pointer[CLIRunner]` + `atomic.Int32` for the is-default
+   flag). Pre-fix, `AskClaudeCLIContext`'s read of `cliRunner` raced
+   `ResetCLIRunner`'s write under `t.Cleanup` when an
+   adversarial-pair hot-path goroutine outlived its triggering test.
+2. **`WrapHotPathAdversarialPair`** now returns a
+   `*HotPathPairHandle` join handle. Council, Medic, and
+   ConvoyReview each `defer pairHandle.Wait(ctx)` so the spawned
+   goroutine drains before the synchronous primary path returns;
+   tests that exercise these paths inherit the same drain
+   discipline transparently. ctx-cancel propagates via the handle's
+   own derived ctx so SIGINT short-circuits cleanly.
+
+**D4 final verifier `-timeout` requirement.** The D4 final
+verifier's `-race -count=5` shard MUST invoke `go test` with
+`-timeout 30m` (or longer) on the `internal/agents` package.
+Empirical measurement: a single `-race -count=1` run of
+`internal/agents` is ~5 min after the race fix; `-count=5` is
+therefore ~25 min, exceeding Go's default 10-minute per-package
+timeout. The pre-D4 baseline run hit this exact failure shape (the
+test binary panicked mid-run with a "test timed out" SIGQUIT). Bake
+the `-timeout 30m` flag into the verifier prompt template before
+dispatch — this is a configuration change at the verifier, not a
+code change.
+
+---

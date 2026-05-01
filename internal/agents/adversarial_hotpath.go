@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"force-orchestrator/internal/agents/adversarial"
 	"force-orchestrator/internal/store"
@@ -47,6 +48,19 @@ import (
 // uniform random in [0, 1). Tests overwrite via the helper at the
 // bottom of this file.
 var adversarialDiceRoll = func() float64 { return rand.Float64() }
+
+// adversarialPairingRateOverride is an OPTIONAL package-level test
+// seam that, when non-nil, takes precedence over the DB-resolved
+// rate. TestMain pins it to 0 across the unit-test binary so the
+// default 10% ramp doesn't introduce non-determinism into tests
+// that read stub prompts (the pair's critic call would otherwise
+// land in the stub's prompts buffer ~10% of the time, depending on
+// dice). Tests that specifically want to exercise the rate logic
+// unset the override via the helper at the bottom of this file.
+//
+// Production code never sets this — it stays nil and the DB-backed
+// adversarialPairingRate path runs unchanged.
+var adversarialPairingRateOverride atomic.Pointer[float64]
 
 // adversarialPairingRateKey is the SystemConfig key the operator
 // twiddles to flip pair sampling on/off. Parse errors and out-of-
@@ -71,7 +85,15 @@ const adversarialPairingRateDefault = 0.1
 // to sample some traffic so AdversarialPairings rows accumulate per
 // exit criterion 10. Returns 0.0 on parse / range error so a
 // malformed config row never accidentally turns the spigot on.
+//
+// Test-only seam: if adversarialPairingRateOverride is non-nil
+// (set by TestMain or per-test helpers), the override takes
+// precedence so tests that don't care about pairing get
+// deterministic rate=0 behaviour.
 func adversarialPairingRate(db *sql.DB) float64 {
+	if p := adversarialPairingRateOverride.Load(); p != nil {
+		return *p
+	}
 	// Distinguish "key absent" (fall back to default) from "key set to
 	// empty string" (operator-authored silence): GetConfig returns the
 	// passed default-string only on the absent path. We pin a sentinel
@@ -96,48 +118,109 @@ func adversarialPairingRate(db *sql.DB) float64 {
 	return f
 }
 
+// HotPathPairHandle is a join handle returned by
+// WrapHotPathAdversarialPair when a pair is scheduled. Callers (the
+// production wiring sites in Council, Medic, ConvoyReview) and tests
+// use it to wait for the background goroutine to drain before
+// tearing down resources the goroutine still depends on. Without the
+// handle, a goroutine spawned by a test that exits while the
+// goroutine is still inside claude.AskClaudeCLIContext races the
+// test's ResetCLIRunner cleanup — the pre-D4 -race baseline finding
+// surfaced exactly that shape with TestRunCouncilTask_Rejected_MaxRetries.
+//
+// The handle is intentionally minimal: Wait(ctx) blocks until the
+// goroutine exits or the supplied ctx is cancelled. Cancel() asks
+// the goroutine to stop early via its derived ctx — the underlying
+// claude exec is already ctx-aware, so cancelling the pair ctx kills
+// any in-flight Claude subprocess. Both methods are safe to call
+// zero-or-more times and on a nil receiver.
+type HotPathPairHandle struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+}
+
+// Wait blocks until the background pair goroutine finishes or the
+// supplied ctx is cancelled. Returns nil when the goroutine drained
+// cleanly; returns ctx.Err() if the ctx was cancelled first. A nil
+// handle is a no-op (returns nil immediately) so callers don't need
+// to nil-check.
+func (h *HotPathPairHandle) Wait(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	select {
+	case <-h.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Cancel asks the background goroutine to stop early via its derived
+// ctx. The goroutine still writes its done signal once it returns,
+// so a subsequent Wait still functions normally.
+func (h *HotPathPairHandle) Cancel() {
+	if h == nil || h.cancel == nil {
+		return
+	}
+	h.cancel()
+}
+
 // WrapHotPathAdversarialPair is the hot-path helper Council, Medic,
 // and ConvoyReview each call right after their primary decision is
 // formed. It does NOT block — when it decides to run the pair, the
 // pair is dispatched on a goroutine and the helper returns
-// immediately. The bool return indicates whether a pair was scheduled
-// (true) so callers can log the sampling event for telemetry.
+// immediately with a join handle the caller can Wait on at an
+// appropriate teardown / cleanup point. handle is nil when no pair
+// was scheduled.
 //
 // On scheduling: the helper takes its OWN cancellable derived ctx
 // (with a generous 5-minute timeout) so a daemon SIGINT cancels the
 // pair's LLM call cleanly even though the primary's flow has already
 // exited.
 //
+// Pre-D4 race baseline fix: the join handle replaces the prior
+// fire-and-forget shape so callers (and tests via t.Cleanup) can
+// wait for the goroutine to drain before tearing down the CLI
+// runner stub. Without the handle, a goroutine spawned by a test
+// that exits while the goroutine is still in claude.AskClaudeCLIContext
+// races the test's ResetCLIRunner cleanup.
+//
 // Honest caveat: when adversarial_pairing_rate is 0 (default), this
-// is a no-op fast path — one DB read, no goroutine. The cost of
-// having Council/Medic/ConvoyReview call this on every decision is
-// effectively zero until the operator opts in.
+// is a no-op fast path — one DB read, no goroutine, nil handle. The
+// cost of having Council/Medic/ConvoyReview call this on every
+// decision is effectively zero until the operator opts in.
 func WrapHotPathAdversarialPair(
 	parentCtx context.Context,
 	db *sql.DB,
 	primary adversarial.PrimaryDecision,
 	logger interface{ Printf(string, ...any) },
-) (scheduled bool) {
+) (handle *HotPathPairHandle, scheduled bool) {
 	if db == nil {
-		return false
+		return nil, false
 	}
 	rate := adversarialPairingRate(db)
 	if rate <= 0 {
-		return false
+		return nil, false
 	}
 	if adversarialDiceRoll() >= rate {
-		return false
+		return nil, false
 	}
 
 	// Sampled. Dispatch the pair on a goroutine so the primary's
 	// flow returns to its caller immediately. The goroutine takes a
-	// derived ctx so SIGINT propagates.
+	// derived ctx so SIGINT (and explicit handle.Cancel) propagates.
 	pairCtx, cancel := contextDerivedForBackground(parentCtx)
+	h := &HotPathPairHandle{
+		done:   make(chan struct{}),
+		cancel: cancel,
+	}
 	go func() {
+		defer close(h.done)
 		defer cancel()
 		runHotPathPair(pairCtx, db, primary, logger)
 	}()
-	return true
+	return h, true
 }
 
 // contextDerivedForBackground returns a new ctx that inherits
@@ -218,5 +301,34 @@ func setAdversarialDiceRollForTest(v float64) func() {
 	return func() {
 		adversarialDiceRoll = prior
 		hotPathPairTestHookMu.Unlock()
+	}
+}
+
+// setAdversarialPairingRateOverrideForTest pins the package-level
+// rate override to v and returns a restore func. Used by TestMain
+// to default tests to rate=0 (no pairing) so tests reading stub
+// prompts get deterministic results, and by individual hot-path
+// tests that want to clear the override and exercise the real
+// DB-backed rate-resolution path.
+func setAdversarialPairingRateOverrideForTest(v float64) func() {
+	prior := adversarialPairingRateOverride.Load()
+	cp := v
+	adversarialPairingRateOverride.Store(&cp)
+	return func() {
+		adversarialPairingRateOverride.Store(prior)
+	}
+}
+
+// clearAdversarialPairingRateOverrideForTest removes the override
+// so the DB-backed adversarialPairingRate path runs. Used by the
+// hot-path tests that explicitly exercise rate-resolution
+// (TestHotPathAdversarialPair_DefaultRampWhenKeyAbsent etc.).
+// Returns a restore func so the test can re-pin the override on
+// teardown.
+func clearAdversarialPairingRateOverrideForTest() func() {
+	prior := adversarialPairingRateOverride.Load()
+	adversarialPairingRateOverride.Store(nil)
+	return func() {
+		adversarialPairingRateOverride.Store(prior)
 	}
 }

@@ -116,9 +116,9 @@ func TestDefaultCLIRunner_Success(t *testing.T) {
 		"CLAUDE_STUB_EXIT":   "0",
 	})
 
-	orig := cliRunner
-	cliRunner = defaultCLIRunner
-	t.Cleanup(func() { cliRunner = orig })
+	orig := loadCLIRunner()
+	SetCLIRunner(defaultCLIRunner)
+	t.Cleanup(func() { SetCLIRunner(orig) })
 
 	out, err := defaultCLIRunner(context.Background(), "test prompt", "", "", "", "", 5, 10*time.Second)
 	if err != nil {
@@ -178,11 +178,11 @@ func TestDefaultCLIRunner_Timeout(t *testing.T) {
 }
 
 func TestAskClaudeCLI_UsesRunner(t *testing.T) {
-	orig := cliRunner
-	cliRunner = func(_ context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
+	orig := loadCLIRunner()
+	SetCLIRunner(func(_ context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration) (string, error) {
 		return `{"approved":true,"feedback":""}`, nil
-	}
-	t.Cleanup(func() { cliRunner = orig })
+	})
+	t.Cleanup(func() { SetCLIRunner(orig) })
 
 	out, err := AskClaudeCLI("sys", "usr", "", "", "", 1)
 	if err != nil {
