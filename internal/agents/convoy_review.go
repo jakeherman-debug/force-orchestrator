@@ -286,12 +286,60 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		return
 	}
 
+	// γ1 — atomic cycle snapshot (concern #6, exit criterion 14a).
+	//
+	// Begin the cycle BEFORE building the diff so the spec is frozen at
+	// the moment we start the pass — operator-ratified amendments that
+	// land while we're computing the diff are deferred to the NEXT
+	// cycle. The frozenSpec is the only spec the cycle ever evaluates
+	// against; do NOT re-read Convoys.verification_spec_json mid-cycle.
+	cycleID, frozenSpec, cycleErr := store.BeginConvoyReviewCycle(db, payload.ConvoyID)
+	if cycleErr != nil {
+		// A cycle row failure should not block the LLM-side review — log
+		// and continue with cycleID=0 so we still complete the bounty.
+		// The conflicted-loop / drift gates downstream still operate
+		// on BountyBoard rows, so safety-net behaviour is preserved.
+		logger.Printf("ConvoyReview #%d: BeginConvoyReviewCycle(convoy %d) failed (%v); continuing without cycle row",
+			bounty.ID, payload.ConvoyID, cycleErr)
+		cycleID = 0
+		frozenSpec = ""
+	} else {
+		logger.Printf("ConvoyReview #%d: cycle #%d begun for convoy %d (frozen spec %d bytes)",
+			bounty.ID, cycleID, payload.ConvoyID, len(frozenSpec))
+	}
+
+	// completeCycle is the single sink for stamping cycle_completed_at +
+	// outcomes_json + fix_tasks_spawned_json. Called from each exit path.
+	// Idempotent: a no-op when cycleID==0 (the begin-failed branch above).
+	// CompleteConvoyReviewCycle itself rejects double-completion, so a
+	// path that calls this twice silently logs the second attempt.
+	cycleCompleted := false
+	completeCycle := func(verdict, outcomesJSON string, fixTaskIDs []int) {
+		if cycleID == 0 || cycleCompleted {
+			return
+		}
+		cycleCompleted = true
+		if err := store.CompleteConvoyReviewCycle(db, cycleID, verdict, outcomesJSON, fixTaskIDs); err != nil {
+			logger.Printf("ConvoyReview #%d: CompleteConvoyReviewCycle(cycle %d, verdict %s) failed (%v)",
+				bounty.ID, cycleID, verdict, err)
+		}
+	}
+	// Final-resort completion: any return path that forgot to call
+	// completeCycle gets stamped with verdict="incomplete" so the cycle
+	// row is never left with cycle_completed_at='' indefinitely.
+	defer func() {
+		if cycleID > 0 && !cycleCompleted {
+			completeCycle("incomplete", `{}`, nil)
+		}
+	}()
+
 	// Build the diff for each ask-branch repo. Truncate to avoid overwhelming the LLM.
 	diffCapBytes := getIntConfig(db, "convoy_review_diff_cap", 80*1024)
 	branches := store.ListConvoyAskBranches(db, payload.ConvoyID)
 	if len(branches) == 0 {
 		logger.Printf("ConvoyReview #%d: convoy %d has no ask-branches — completing as clean",
 			bounty.ID, payload.ConvoyID)
+		completeCycle("clean", `{"reason":"no_ask_branches"}`, nil)
 		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
 			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, no ask-branches) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
 		}
@@ -326,6 +374,34 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		}
 		fmt.Fprintf(&diffBlocks, "=== %s/%s (vs base %s) ===\n%s\n",
 			ab.Repo, ab.AskBranch, util.TruncateStr(base, 12), diff)
+	}
+
+	// γ2 — verification_spec_json consumer (concern #6, exit criterion 6).
+	//
+	// Evaluate the frozen spec's ATs against the assembled diff text.
+	// Failures merge with the LLM-review findings into a unified list and
+	// flow through the existing fix-task spawn path. ParseVerificationSpec
+	// silently accepts an empty/missing spec — convoys without a declared
+	// spec just see specFindings=nil and behave exactly as before.
+	//
+	// Pattern P20 (slice α — AT-id scope integrity): the EvaluateConvoySpec
+	// call passes payload.ConvoyID into ATResultsToFindings, which prefixes
+	// every finding with "Convoy #N / AT-X" (UI labeling discipline).
+	// Lookups inside the helpers are scoped by spec object — never bare
+	// at_id queries — preserving the (convoy_id, at_id) compound-key
+	// invariant.
+	specObj, atResults, specFindings, specErr := EvaluateConvoySpec(ctx, db, payload.ConvoyID, frozenSpec, diffBlocks.String(), logger)
+	if specErr != nil {
+		logger.Printf("ConvoyReview #%d: spec parse failed (%v) — proceeding with LLM-only review",
+			bounty.ID, specErr)
+		atResults = nil
+		specFindings = nil
+		specObj = nil
+	}
+	_ = specObj // reserved for Captain re-justification path; not yet wired
+	if len(specFindings) > 0 {
+		logger.Printf("ConvoyReview #%d: spec evaluation produced %d AT failure(s) for convoy %d",
+			bounty.ID, len(specFindings), payload.ConvoyID)
 	}
 
 	convoyTasks := summarizeConvoyTasks(db, payload.ConvoyID)
@@ -365,6 +441,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("[CONVOY REVIEW PARSE FAILURE] Convoy #%d", payload.ConvoyID),
 				escMsg, bounty.ID, store.MailTypeAlert)
+			completeCycle("escalated", `{"reason":"parse_failure_cap"}`, nil)
 			if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
 				logger.Printf("ConvoyReview #%d: FailBounty(parse-fail cap) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
 			}
@@ -388,10 +465,20 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 			store.SendMail(db, agentName, "operator",
 				fmt.Sprintf("[CONVOY REVIEW PARSE FAILURE] Convoy #%d", payload.ConvoyID),
 				escMsg, bounty.ID, store.MailTypeAlert)
+			completeCycle("escalated", `{"reason":"parse_failure_retry"}`, nil)
 			if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
 				logger.Printf("ConvoyReview #%d: FailBounty(parse-fail retry) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
 			}
 			return
+		}
+	}
+
+	// γ2 — merge spec AT failures into the LLM finding set BEFORE the
+	// "clean pass" check. A clean LLM pass with failing ATs is NOT clean.
+	if len(specFindings) > 0 {
+		result.Findings = append(result.Findings, specFindings...)
+		if result.Status == "clean" {
+			result.Status = "needs_work"
 		}
 	}
 
@@ -402,6 +489,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		// marker so hasPriorCleanPass can distinguish a true clean pass from a
 		// deferred-completion row (active tasks / ask-branch conflict gates).
 		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, convoyReviewCleanMarker, bounty.ID)
+		completeCycle("clean", SerializeATResults(atResults), nil)
 		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
 			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, clean pass) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
 		}
@@ -439,6 +527,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		// Persist the fingerprint so a future pass can also detect the
 		// identity and short-circuit without another LLM call.
 		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
+		completeCycle("loop", SerializeATResults(atResults), nil)
 		if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
 			logger.Printf("ConvoyReview #%d: FailBounty(conflicted_loop) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
 		}
@@ -466,6 +555,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 				convoy.Name, payload.ConvoyID),
 			escMsg, bounty.ID, store.MailTypeAlert)
 		db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
+		completeCycle("escalated", `{"reason":"post_clean_drift"}`, nil)
 		if ferr := store.FailBounty(db, bounty.ID, escMsg); ferr != nil {
 			logger.Printf("ConvoyReview #%d: FailBounty(post-clean drift) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
 		}
@@ -485,6 +575,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	if activeConvoyTasks > 0 {
 		logger.Printf("ConvoyReview #%d: %d active task(s) in convoy %d — completing without spawning (diff still moving)",
 			bounty.ID, activeConvoyTasks, payload.ConvoyID)
+		completeCycle("deferred", `{"reason":"active_convoy_tasks"}`, nil)
 		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
 			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, active-tasks defer) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
 		}
@@ -499,6 +590,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	if store.HasActiveAskBranchConflict(db, payload.ConvoyID) {
 		logger.Printf("ConvoyReview #%d: convoy %d has an unresolved ask-branch REBASE_CONFLICT — deferring fix-task spawn",
 			bounty.ID, payload.ConvoyID)
+		completeCycle("deferred", `{"reason":"ask_branch_conflict"}`, nil)
 		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
 			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, ask-branch conflict defer) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
 		}
@@ -519,6 +611,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	}
 
 	spawned := 0
+	spawnedTaskIDs := make([]int, 0, len(findings))
 	for _, f := range findings {
 		// Validate repo: must be one of the convoy's repos.
 		repo := f.Repo
@@ -554,6 +647,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		logger.Printf("ConvoyReview #%d: spawned fix task #%d (%s) — %s",
 			bounty.ID, taskID, f.Type, util.TruncateStr(f.Description, 80))
 		spawned++
+		spawnedTaskIDs = append(spawnedTaskIDs, taskID)
 	}
 
 	logger.Printf("ConvoyReview #%d: convoy %d — %d finding(s), %d fix task(s) spawned",
@@ -562,6 +656,7 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	// pass can short-circuit on an identical set (same fix tasks didn't
 	// resolve the issues → conflicted_loop instead of another spawn).
 	db.Exec(`UPDATE BountyBoard SET last_findings_fingerprint = ? WHERE id = ?`, currFP, bounty.ID)
+	completeCycle("needs_work", SerializeATResults(atResults), spawnedTaskIDs)
 	if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
 		logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, %d fix tasks spawned) failed (%v); convoy-review-watch will retry", bounty.ID, spawned, uerr)
 	}
