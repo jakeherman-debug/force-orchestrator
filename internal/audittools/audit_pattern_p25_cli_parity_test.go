@@ -41,6 +41,15 @@ var p25Allowlist = map[string]string{
 	"/api/drill/task/":   "read-only Drill diagnostic surface (6B.4); GET-only",
 	"/api/drill/event/":  "read-only Drill diagnostic surface (6B.5); GET-only",
 	"/api/drill/search":  "read-only Drill free-text search (6B.6); GET-only",
+	"/api/drill/replay/": "CLI parity via `force replay` (6B.7); replay is read-only on live state — only ReplayResults + replay's own LLMCallTranscripts row",
+
+	// D3 P6B.8 — operator-event-annotations CRUD; CLI parity is
+	// `force annotate <kind> <ref> <flag> <text>`. Mappable via
+	// the `annotate`/`annotations` verbs in p25KnownVerbs but the
+	// route prefix is /api/annotations so we keep an explicit
+	// allowlist entry too.
+	"/api/annotations":  "CLI parity via `force annotate` (6B.8)",
+	"/api/annotations/": "CLI parity via `force annotate` (6B.8)",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in
@@ -54,6 +63,12 @@ var p25KnownVerbs = []string{
 	// D3 P6B.12 — `force learning {refresh,show}` parity for
 	// /api/reflection/learning POST.
 	"learning",
+	// D3 P6B.7 — `force replay <kind> <id>` parity for
+	// /api/drill/replay/<kind>/<id> POST.
+	"replay",
+	// D3 P6B.8 — `force annotate <kind> <ref> <flag> <text>` parity
+	// for /api/annotations POST + /api/annotations/<id> PUT/DELETE.
+	"annotate", "annotations",
 }
 
 func TestPattern_P25_CLIParity(t *testing.T) {
