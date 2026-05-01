@@ -17,11 +17,51 @@
   <div id="header-title">Fleet <span>Command Center</span></div>
   <span id="daemon-badge" class="badge badge-idle">&#9679; Daemon</span>
   <span id="estop-badge" class="badge" style="display:none">&#9888; E-STOP</span>
-  <div style="flex:1"></div>
+
+  <!-- D3 P6A.1 — Three-surface IA. The top-level nav is capped at three
+       surfaces forever: Pulse / Briefing / Reflection. Existing legacy
+       widgets are folded under the Legacy umbrella accessible via
+       #/legacy/<name>. Phase 6A.3 wires Cmd-1/2/3 keymap. -->
+  <nav id="surface-nav" aria-label="Top-level surfaces">
+    <a id="surface-pulse"      class="surface-link"      data-surface="pulse"      href="#/pulse"      title="Pulse — ambient fleet view (Cmd-1)">Pulse</a>
+    <a id="surface-briefing"   class="surface-link"      data-surface="briefing"   href="#/briefing"   title="Briefing — decision queue (Cmd-2)">Briefing</a>
+    <a id="surface-reflection" class="surface-link"      data-surface="reflection" href="#/reflection" title="Reflection — calibration + learning (Cmd-3)">Reflection</a>
+    <a id="surface-legacy"     class="surface-link surface-link-legacy" data-surface="legacy"     href="#/legacy/tasks"  title="Legacy widgets">Legacy</a>
+  </nav>
+
+  <input id="surface-search" type="search"
+         placeholder="Search / Ask Force… (press /)"
+         aria-label="Search across surfaces — press / to focus"
+         autocomplete="off"
+         spellcheck="false">
+
   <button id="estop-btn"  class="hdr-btn estop-btn"  onclick="triggerEstop()">E-Stop</button>
   <button id="resume-btn" class="hdr-btn resume-btn" onclick="triggerResume()" style="display:none">Resume</button>
   <button class="hdr-btn primary" onclick="showAddModal()">+ Queue Task</button>
 </header>
+
+<!-- ── D3 P6A.1 — Pulse / Briefing / Reflection placeholder panes ───────────
+     These three surfaces fill in across 6A.7–6A.14. For now they display
+     a "coming-online" placeholder so the operator sees the new IA without
+     losing access to the existing widgets (folded under Legacy below). -->
+<div id="surface-pulse-pane" class="surface-pane" hidden>
+  <div class="surface-placeholder">
+    <h2>Pulse</h2>
+    <p>Ambient fleet view. Live narrative panel + fleet vital signs land in 6A.7 / 6A.8.</p>
+  </div>
+</div>
+<div id="surface-briefing-pane" class="surface-pane" hidden>
+  <div class="surface-placeholder">
+    <h2>Briefing</h2>
+    <p>Decision queue + conversational triage. Conversational briefings land in 6A.10.</p>
+  </div>
+</div>
+<div id="surface-reflection-pane" class="surface-pane" hidden>
+  <div class="surface-placeholder">
+    <h2>Reflection</h2>
+    <p>Calibration + learning. Full Reflection lands in Phase 6B.</p>
+  </div>
+</div>
 
 <!-- ── Stats bar ────────────────────────────────────────────────────────────── -->
 <div id="stats-bar">
@@ -91,6 +131,12 @@
   <span class="ship-banner-msg"><span id="ship-banner-count">0</span> convoy(s) ready to ship &mdash; click to review</span>
   <span class="ship-banner-cta">Go to Convoys &rarr;</span>
 </div>
+
+<!-- ── Legacy surface pane (D3 P6A.1) ───────────────────────────────────────
+     The existing tab bar and per-tab panes live under the Legacy surface
+     so the operator's daily workflow keeps working during the rebuild.
+     Each legacy tab is reachable via #/legacy/<name>. -->
+<div id="surface-legacy-pane" class="surface-pane">
 
 <!-- ── Tab bar ──────────────────────────────────────────────────────────────── -->
 <nav id="tab-bar">
@@ -329,6 +375,8 @@
   </div>
 
 </div><!-- #main -->
+
+</div><!-- #surface-legacy-pane (D3 P6A.1) -->
 
 <!-- ── Add task modal ────────────────────────────────────────────────────────── -->
 <div class="modal-backdrop hidden" id="add-modal">

@@ -1098,3 +1098,102 @@ select option { background: var(--bg2); color: var(--text); }
   padding: 6px 8px;
   border-left: 2px solid var(--bg3);
 }
+
+/* ── D3 P6A.1 — Three-surface IA + nav rebuild ────────────────────────────
+   Top-level surfaces: Pulse / Briefing / Reflection / Legacy.
+   The brief calls for distinct colour treatment per tab — Pulse=blue,
+   Briefing=amber, Reflection=teal — so the operator can tell at a
+   glance which surface they are on.
+*/
+#surface-nav {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: 12px;
+}
+#surface-nav .surface-link {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text2);
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background-color 0.12s, color 0.12s, border-color 0.12s;
+}
+#surface-nav .surface-link:hover {
+  color: var(--text);
+  background: var(--bg3);
+}
+#surface-nav .surface-link-active { color: var(--text); }
+#surface-nav .surface-link[data-surface="pulse"].surface-link-active {
+  background: rgba(88, 166, 255, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#surface-nav .surface-link[data-surface="briefing"].surface-link-active {
+  background: rgba(227, 101, 42, 0.15);
+  border-color: var(--orange);
+  color: var(--orange);
+}
+#surface-nav .surface-link[data-surface="reflection"].surface-link-active {
+  background: rgba(57, 197, 207, 0.15);
+  border-color: var(--teal);
+  color: var(--teal);
+}
+#surface-nav .surface-link[data-surface="legacy"] {
+  font-size: 11px;
+  opacity: 0.7;
+}
+#surface-nav .surface-link[data-surface="legacy"].surface-link-active {
+  background: var(--bg3);
+  border-color: var(--border);
+  color: var(--text);
+  opacity: 1;
+}
+
+#surface-search {
+  flex-shrink: 0;
+  width: 280px;
+  padding: 5px 10px;
+  margin-left: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  outline: none;
+}
+#surface-search:focus {
+  border-color: var(--accent);
+}
+
+.surface-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.surface-pane[hidden] { display: none !important; }
+
+.surface-placeholder {
+  margin: 24px;
+  padding: 24px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text2);
+  text-align: center;
+}
+.surface-placeholder h2 {
+  margin-bottom: 8px;
+  font-size: 20px;
+  color: var(--text);
+}
+.surface-placeholder p {
+  font-size: 13px;
+  line-height: 1.5;
+}

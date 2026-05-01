@@ -2008,3 +2008,134 @@ initFromURL();
 startPolling();
 switchTab(S.activeTab);
 renderSortHeaders();
+
+// ── D3 P6A.1 — Three-surface IA + nav rebuild ──────────────────────────────
+//
+// Top-level surfaces: pulse | briefing | reflection | legacy.
+// Default landing is pulse. Hash fragments drive routing:
+//   #/pulse                  → Pulse surface
+//   #/briefing               → Briefing surface
+//   #/briefing/decision/<id> → Briefing focus mode (subroute, 6A.10)
+//   #/reflection             → Reflection surface
+//   #/legacy/<tab>           → existing tab UI (tasks/escalations/...)
+//
+// Subsequent tasks (6A.7–6A.14) fill in the surface-specific rendering;
+// 6A.3 adds the keymap (Cmd-1/2/3, j/k, ?, etc.). The Cmd-1/2/3 stub
+// below is the keymap-stub-only contract for 6A.1.
+const SURFACE_NAMES = ['pulse', 'briefing', 'reflection', 'legacy'];
+const SURFACE_DEFAULT = 'pulse';
+
+function currentSurfaceFromHash() {
+  const h = (window.location.hash || '').replace(/^#/, '');
+  if (!h) return SURFACE_DEFAULT;
+  // #/pulse | #/legacy/tasks | #/briefing/decision/123 → "pulse" / "legacy" / "briefing"
+  const m = h.match(/^\/?(\w+)/);
+  if (!m) return SURFACE_DEFAULT;
+  const name = m[1];
+  return SURFACE_NAMES.includes(name) ? name : SURFACE_DEFAULT;
+}
+
+function legacyTabFromHash() {
+  // For #/legacy/<tab>, return <tab>; else return null.
+  const h = (window.location.hash || '').replace(/^#/, '');
+  const m = h.match(/^\/?legacy\/(\w+)/);
+  return m ? m[1] : null;
+}
+
+function showSurface(name) {
+  if (!SURFACE_NAMES.includes(name)) name = SURFACE_DEFAULT;
+
+  // Toggle pane visibility — only the active surface's pane is shown.
+  document.querySelectorAll('.surface-pane').forEach(p => {
+    p.hidden = (p.id !== 'surface-' + name + '-pane');
+  });
+
+  // Toggle nav-link active state.
+  document.querySelectorAll('.surface-link').forEach(a => {
+    a.classList.toggle('surface-link-active', a.dataset.surface === name);
+  });
+
+  // For legacy, honour the sub-tab if the fragment carries one;
+  // else default to whatever tab the SPA is on.
+  if (name === 'legacy') {
+    const sub = legacyTabFromHash();
+    if (sub && sub !== S.activeTab) {
+      switchTab(sub);
+    }
+  }
+}
+
+function navigateToSurface(name, opts) {
+  opts = opts || {};
+  const fragment = name === 'legacy'
+    ? '#/legacy/' + (opts.legacyTab || S.activeTab || 'tasks')
+    : '#/' + name;
+  if (window.location.hash !== fragment) {
+    window.location.hash = fragment;
+  } else {
+    showSurface(name);
+  }
+}
+
+// Hash-change routing — browser back/forward respects surface changes.
+window.addEventListener('hashchange', () => showSurface(currentSurfaceFromHash()));
+
+// Also bind the legacy tab click flow so navigating tabs updates the
+// fragment (preserves "URL is the source of truth" for legacy too).
+const _origSwitchTab = switchTab;
+switchTab = function(name) {
+  _origSwitchTab(name);
+  // If we're on the legacy surface, mirror the active tab into the fragment.
+  if (currentSurfaceFromHash() === 'legacy') {
+    const desired = '#/legacy/' + name;
+    if (window.location.hash !== desired) {
+      // Avoid clobbering history if the only change is sub-tab (replace, not push).
+      try { history.replaceState(null, '', desired); } catch (_) {}
+    }
+  }
+};
+
+// Cmd-1 / Cmd-2 / Cmd-3 keymap stub (full keymap arrives in 6A.3).
+// The full 6A.3 keymap will replace this listener; for 6A.1 we only need
+// the surface-switch bindings to land. Browser already reserves Cmd-1/2/3
+// for tab navigation in some cases; we use ctrl/cmd-Alt-1/2/3 as well to
+// avoid clobbering native browser behaviour. The brief specifies Cmd-1/2/3,
+// which on macOS Safari/Chrome do switch browser tabs — but in dashboard
+// context (focus inside our document) we still receive the keydown first
+// and can preventDefault.
+document.addEventListener('keydown', e => {
+  // Skip if the user is typing into an input / textarea / contenteditable.
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
+  const cmd = e.metaKey || e.ctrlKey;
+  if (!cmd) return;
+  if (e.key === '1') {
+    e.preventDefault();
+    navigateToSurface('pulse');
+  } else if (e.key === '2') {
+    e.preventDefault();
+    navigateToSurface('briefing');
+  } else if (e.key === '3') {
+    e.preventDefault();
+    navigateToSurface('reflection');
+  }
+});
+
+// `/` focuses the always-mounted search input. Full keymap (6A.3) extends
+// this with Esc / j / k / ? / etc.
+document.addEventListener('keydown', e => {
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
+  if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    const inp = document.getElementById('surface-search');
+    if (inp) inp.focus();
+  }
+});
+
+// Boot: route to the surface from the URL (default pulse).
+showSurface(currentSurfaceFromHash());
+// If the URL has no fragment, set it to #/pulse so reload/back works.
+if (!window.location.hash) {
+  try { history.replaceState(null, '', '#/pulse'); } catch (_) {}
+}
