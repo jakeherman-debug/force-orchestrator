@@ -33,6 +33,13 @@ var p25Allowlist = map[string]string{
 	// allowlist entry keeps the rationale visible.
 	"/api/reflection/learning":  "CLI parity via `force learning refresh|show`",
 	"/api/reflection/learning/": "CLI parity via `force learning refresh|show`",
+
+	// D3 P6B.3-6B.5 — Drill diagnostic surface is GET-only; no
+	// mutation, no operator-action semantic. Same shape as the
+	// existing /api/disagreement-rates exemption.
+	"/api/drill/convoy/": "read-only Drill diagnostic surface (6B.3); GET-only",
+	"/api/drill/task/":   "read-only Drill diagnostic surface (6B.4); GET-only",
+	"/api/drill/event/":  "read-only Drill diagnostic surface (6B.5); GET-only",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in

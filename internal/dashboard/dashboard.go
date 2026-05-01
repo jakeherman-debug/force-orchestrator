@@ -129,6 +129,15 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/reflection/learning", handleReflectionLearning(db))
 	mux.HandleFunc("/api/reflection/learning/", handleReflectionLearning(db))
 
+	// ── D3 P6B.3 — Drill convoy view: unified event timeline + per-task
+	// spend rollup. /api/drill/convoy/<id> for events;
+	// /api/drill/convoy/<id>/spend for the cost breakdown.
+	mux.HandleFunc("/api/drill/convoy/", handleDrillConvoy(db))
+	// ── D3 P6B.4 — Drill task view: same shape, scoped to one task.
+	mux.HandleFunc("/api/drill/task/", handleDrillTask(db))
+	// ── D3 P6B.5 — Drill event view: full body for one event by kind+id.
+	mux.HandleFunc("/api/drill/event/", handleDrillEvent(db))
+
 	// ── D3 P6A.1 — Three-surface IA. Top-level navigation is capped at three
 	// surfaces forever: Pulse / Briefing / Reflection. Each handler emits a
 	// thin HTML shell that loads the SPA at the matching hash fragment.
