@@ -442,6 +442,14 @@ func main() {
 		// (refresh / show) for /api/reflection/learning.
 		os.Exit(cmdLearning(db, os.Args[2:]))
 
+	case "annotate":
+		// D3 P6B.8 — operator annotation CLI parity.
+		os.Exit(cmdAnnotate(db, os.Args[2:]))
+
+	case "replay":
+		// D3 P6B.7 — drill replay CLI parity.
+		os.Exit(cmdReplay(db, os.Args[2:]))
+
 	case "dashboard":
 		// D3 P6A.2 — `force dashboard status` reads the latest heartbeat
 		// row from the DB and exits 0 (fresh) / 1 (stale). The full
