@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-29
 **Operator:** jake.herman@upstart.com
-**Net verdict:** 🟡 PARTIAL — Phases 1-3 CLOSED; Phases 4–6 OPEN
+**Net verdict:** 🟡 PARTIAL — Phases 1-4 CLOSED; Phases 5–6 OPEN
 
 D3 uses a partial-closure pattern (per D1's precedent). Phase 1 is the
 first of six D3 phases; this document was created NEW at Phase 1
@@ -872,3 +872,242 @@ Phase 5's golden-set evaluation framework consumes — accuracy
 regression alerts join `TaskHistory.prompt_version` with the
 fixture-evaluation outcomes via the same `MetricByPromptVersion`
 shape.
+
+### Phase 4 — Factorial + orthogonal-overlap scheduler — CLOSED 2026-04-30
+
+Phase 4 ships the multi-arm × multi-factor experimentation surface.
+Authoring extends from single-treatment manifests to factorial cell
+catalogues; the analysis layer adds main-effects + 2-way
+interactions on top of Phase 2's Bayesian Beta-Binomial framework;
+`treatments.Apply` now routes through an orthogonal-overlap
+scheduler so concurrent experiments touching disjoint factor sets
+can run on the same call without confounding, and conflicting
+experiments are resolved by a deterministic greedy id-order picker.
+
+Phase 4 closed via the orchestrator + 3 parallel sub-agents pattern
+(skeleton, then A/B/C worktrees, then sequential merge-back, then
+end-to-end shakedown, then closure). Six `--no-ff` merges preserve
+the topology in `git log`.
+
+#### What landed
+
+**Schema additions (D3-P4 skeleton):**
+- `Experiments.kind` — `'single' | 'factorial'` with CHECK on fresh
+  DBs; application-layer validator enforces the same set on upgraded
+  DBs (SQLite ALTER TABLE cannot retro-fit CHECK).
+- `Experiments.factors_json` — factor catalogue, e.g.
+  `[{"name":"prompt","levels":["A","B"]},{"name":"rules","levels":["tight","loose"]}]`.
+- New table `ExperimentInteractions` — per-(factor pair, level pair)
+  interaction estimate + posterior + P(non-zero). Single-treatment
+  experiments never write rows here.
+- Schema parity (`createSchema` ↔ `schema/schema.sql`) green;
+  `runMigrations` ALTERs land the columns on upgraded DBs.
+- `idx_experiments_kind_status` index for the scheduler's load path.
+
+**Factorial manifest parser (skeleton):**
+- `Manifest.Kind` + `Manifest.Factors` + `ManifestTreatment.Cell`
+  YAML fields, all optional (single-treatment manifests
+  byte-identical to Phase 2 surface).
+- `validateFactors` + `validateFactorialTreatments` enforce ≥2
+  factors, ≥2 levels per factor, no duplicate factor names or
+  levels, every treatment cell references declared factors and
+  levels, full-factorial coverage with exactly one arm per cell.
+- `canonicalCellJSON` orders keys by factor declaration so two
+  equivalent cells round-trip to the same string.
+- Sample 2x2 manifest at
+  `experiments/2026-04-30-factorial-test/manifest.yaml` exercised by
+  `TestAuthorFromYAML_FactorialFromFile`.
+
+**Factorial authoring + enrollment (sub-agent A):**
+- `AuthorFactorialFromYAML` + `AuthorFactorialFromBytes` — typed
+  entry points that gate on `manifest.kind == 'factorial'` before
+  delegating to the shared `AuthorFromManifest`.
+- `EnrollFactorialUnit` — deterministic per-cell assignment hashed
+  by `(experiment_id, unit_kind, unit_id)`, salted by experiment_id
+  so the same unit lands in different cells across experiments.
+  Idempotent on `(experiment, kind, unit)`.
+- `TerminateFactorial` — CAS on `running|confirming` → `terminated`,
+  computes per-cell means and writes `ExperimentOutcomes` keyed by
+  canonical cell key. Defers main-effects / interactions to the
+  analyzer.
+- `ErrNotFactorial` sentinel for misrouted calls.
+- 11 tests covering happy paths, all rejection modes, idempotence,
+  CAS, and the cross-experiment salt determinism contract.
+- Spread-across-cells determinism observed at 1000 units: each cell
+  within 200..300 (the picker is uniform-deterministic, not
+  randomly balanced).
+
+**Main-effects + 2-way interactions analysis (sub-agent B):**
+- `MainEffect` / `Interaction2Way` / `FactorialDecision` types.
+- `ComputeMainEffects` — per-(factor, level) marginal posterior
+  pooled across all cells where that factor takes that level.
+- `Compute2WayInteractions` — per-ordered-(factor_a, factor_b,
+  level_a, level_b) interaction estimate + posterior + Monte-Carlo
+  `ProbNonzero`, persisted into `ExperimentInteractions`.
+- `DecideFactorialOutcome` — terminal verdict combining main
+  effects + interactions: `declared_winner` (best cell with
+  posterior > rule.WinnerThreshold), `significant_interaction`
+  (any interaction crosses threshold; operator handles), or
+  `inconclusive`. Default rule mirrors `DecideOutcome`'s medium
+  tier.
+- New analyzer registration:
+  `BayesianBetaBinomialFactorialName = "bayesian-beta-binomial-factorial"`,
+  version `"2026-04-30"`. Sibling `AnalysisFrameworks` row with
+  `decomposition: main_effects_plus_2way` (not a re-publish of the
+  single-treatment row — frameworks are immutable by contract).
+- Math fixtures hand-computed against analytic ground truth (Beta(1,1)
+  prior, posterior mean = `(1+s)/(2+n)`, raw interaction contrast
+  `(D1=a,D2=b) - (D1=a',D2=b) - (D1=a,D2=b') + (D1=a',D2=b')`); each
+  Monte-Carlo path seeded with a deterministic offset off
+  `DecisionRule.RandomSeed` so two reads of the same table state
+  produce identical decisions.
+- Single-treatment Bayesian path UNCHANGED: existing
+  `TestBetaBinomial_*` and `TestRegisterBayesianBetaBinomial_*` all
+  still pass.
+
+**Orthogonal-overlap scheduler (sub-agent C):**
+- `ConflictsWith` — predicate union: shared factor name in
+  `factors_json` (canonical factorial rule), shared subject_agent +
+  shared `prompt_template_ref` via any treatment (single-treatment
+  fallback), shared primary `metric_name` (scoring-channel overlap).
+- `SelectOrthogonalEnrollments` — greedy id-order picker, returns
+  the maximal non-conflicting subset, deterministic per
+  `(unit, candidate-set)`.
+- `loadExperimentDescriptors` — replaces the old
+  `loadActiveExperiments`, hydrating descriptors with factors,
+  prompt-template-refs, and primary metric in one query. The naive
+  "enroll in every match" path is removed (no parallel old/new
+  behavior).
+- `treatments.Apply` now routes ALL enrollment through the
+  scheduler — single-experiment behavior preserved bit-for-bit
+  (single experiment with no conflicts still enrolls once),
+  multi-experiment behavior gains the orthogonality invariant.
+
+**End-to-end shakedowns (orchestrator):**
+- `TestShakedown_FactorialEndToEnd` — author 2x2 → ratify →
+  enroll 1200 synthetic units across 4 cells (each cell ≥200) →
+  stamp deterministic per-cell scores (cell_B_tight winning at 0.85)
+  → terminate → ComputeMainEffects + Compute2WayInteractions both
+  fire → ExperimentInteractions populated → DecideFactorialOutcome
+  declares cell_B_tight the winner with posterior > 0.95.
+- `TestShakedown_OrthogonalOverlap` — 50 units flow through
+  treatments.Apply twice with a 3-experiment conflict matrix
+  (A:{prompt}, B:{prompt}, C:{rules}); every unit enrols in
+  EXACTLY 2 experiments (A + C, never B), and the second pass
+  returns the same enrollment set per unit (sticky-assignment).
+
+#### Heavy validation (closure-time)
+
+```
+make test                       # 26 packages green
+go test -tags sqlite_fts5 -run \
+  "TestSchemaParity|TestFactorialManifest|TestAuthorFactorial|\
+   TestEnrollFactorialUnit|TestMainEffects|Test2WayInteractions|\
+   TestConflictsWith|TestSelectOrthogonal|TestShakedown_Factorial|\
+   TestShakedown_OrthogonalOverlap" ./...                      # green
+go test -tags sqlite_fts5 -run \
+  "TestPattern_P1\b|TestPattern_P11|TestPattern_P12|TestPattern_P13|\
+   TestPattern_P15|TestPattern_P16|TestPattern_P17|TestPattern_P18" \
+  ./...                                                        # green
+./force render-rules --check                                   # OK (no drift)
+```
+
+Six `--no-ff` merge commits (skeleton, A, B, C, shakedown, closure)
+preserve the parallel-track topology in `git log --graph`.
+
+#### What did NOT land (deferred)
+
+1. **CLI changes.** `cmd/force/experiment.go` was deliberately left
+   untouched. `force experiment author <manifest.yaml>` continues to
+   route via `AuthorFromYAML`; the Phase 1 skeleton's manifest
+   validator handles factorial manifests through that path.
+   Operators don't need a `--kind=factorial` flag — the manifest's
+   own `kind: factorial` field is the discriminator.
+
+2. **Stratified randomization for cell balancing.** Roadmap §
+   Phase 4 names this as in-scope; the deterministic hash-bucket
+   picker (`pickFactorialCell`) achieves uniform balance at scale
+   (each cell ≥200 of ~300 in the 1200-unit shakedown), but a true
+   stratified randomizer that re-balances across cohorts is
+   deferred to a future phase if observed imbalance exceeds the
+   `warn_on_imbalance_ratio` (3× per paired-runs.md).
+
+3. **3+-way interactions.** `factorial.max_interaction_order: 3`
+   parameter exists in the analysis-framework manifest; the
+   analyzer ships only 2-way interactions. Higher-order opt-in
+   lands in Phase 5/6 if sample-size analysis warrants.
+
+4. **`PromotionAuthor` factorial-winner handling.** When a factorial
+   declares a winner, the existing `MaybePromoteRule` path mints a
+   single-rule promotion proposal; per paired-runs.md, factorial
+   winners may need richer evidence captures (per-factor effect
+   sizes attached to the proposal). Surfaced as an
+   operator-discretion item — current behavior is to promote
+   the winner cell's prompt_template_ref, leaving cell context to
+   the operator's review of the experiment dashboard.
+
+#### Anti-cheat self-check
+
+| Claim | Status |
+|---|---|
+| Factorial schema additions are MINIMAL (didn't redo cell_json which was already present) | ✅ |
+| Single-treatment path UNCHANGED — TestLifecycle_EndToEnd_ShakedownExperiment still PASS | ✅ |
+| Math fixtures non-tautological — hand-computed posterior means match implementation | ✅ |
+| All new mutators return error | ✅ |
+| Determinism: same unit + same factorial experiment → same cell, every time | ✅ — `TestEnrollFactorialUnit_Deterministic` asserts |
+| Determinism: same unit + same scheduler candidates → same selected set | ✅ — `TestSelectOrthogonal_DeterministicAcrossRuns` asserts |
+| Naive "enroll in every match" code path removed (no parallel old/new behavior) | ✅ — `loadActiveExperiments` deleted |
+| Six `--no-ff` merges preserve topology | ✅ |
+
+#### Operator-discretion items surfaced
+
+1. **CHECK constraint asymmetry.** Fresh DBs enforce
+   `CHECK (kind IN ('single','factorial'))`; upgraded DBs do NOT
+   (SQLite limitation). The `internal/experiments` validator
+   enforces the same set before insert, so the asymmetry is
+   invisible at the application layer — but a direct SQL write
+   from outside the application could insert a malformed `kind`
+   on an upgraded DB. Risk is low (no other writers exist) but
+   surfaced here for awareness.
+
+2. **Factorial promotion shape.** As noted under "did NOT land",
+   the existing single-rule `MaybePromoteRule` path treats a
+   factorial winner identically to a single-treatment winner —
+   it promotes the winning cell's prompt_template_ref. If the
+   winning cell is a multi-factor combination (e.g. `prompt=B,
+   rules=tight`), the operator must decide manually whether to
+   promote prompt B alone, rules tight alone, or both. The
+   evidence-summary JSON on the proposal does include
+   `cell_means_json`, so the operator has the full surface to
+   inspect, but the proposal does not auto-decompose into
+   per-factor proposals.
+
+3. **Scheduler conflict rule.** The current rule fires conflict
+   on (a) shared factor, (b) shared subject_agent + shared
+   prompt_template_ref, (c) shared primary metric. The
+   "shared metric" rule may be too aggressive in practice — two
+   experiments both using `approval_rate` as their primary metric
+   on the same unit would be skipped, but in some scenarios this
+   may be desired (a factorial-on-prompt and a
+   factorial-on-rules both measuring approval_rate could
+   legitimately share a unit). Surfaced as a rule-tuning item;
+   today's behavior errs on the side of safety (skip rather than
+   confound).
+
+#### Forward integration to Phase 5
+
+Phase 5's level-3 paired shadow + adversarial pairing leverages
+the Phase 4 substrate:
+
+- The `mode='paired_shadow'` value already lives in
+  `ExperimentRuns.mode`; Phase 5 lights up shadow-arm spawning
+  inside `treatments.Apply` for tool-using-agent experiments.
+- Adversarial pairing tables (`AdversarialPairings`) join with
+  the Phase 4 `ExperimentRuns.cell_json` so cell-level
+  primary-vs-critic comparisons inherit the factorial slot
+  identity.
+- The orthogonal scheduler is the load-bearing precondition for
+  Phase 5's "one tool-using-agent experiment runs in shadow mode
+  to termination" exit criterion — without it, Phase 5's shadow
+  enrollments would conflict with active P2 single-treatment
+  experiments on the same agent.
