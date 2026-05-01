@@ -1285,3 +1285,67 @@ Phase 6A's dashboard scaffolding will consume the Phase 5 data:
 
 D3 closure status post-Phase-5: 🟡 PARTIAL — Phases 1–5 CLOSED; Phase
 6 OPEN.
+
+---
+
+### Phase 6A closure addendum
+
+**2026-04-30 — D3 Phase 6A closed.** Three-surface IA (Pulse / Briefing /
+Reflection placeholder + global search/Ask `/` shortcut); 14 dashboard
+surfaces shipped: heartbeat (P6A.2), keyboard shortcuts + `?` overlay
+(P6A.3), notification budgets + helper (P6A.4), OperatorSessionState
+resume (P6A.5), trust dials per agent (P6A.6), live narrative renderer
+(P6A.7), Pulse fleet panel snapshot (P6A.8), "while you were away"
+cinematic on detected sleep wake (P6A.9), conversational Briefing with
+Haiku-rendered prose synthesis (P6A.10), counter-proposal forcing on
+high-stakes rejection (P6A.11), prior-similar-decisions context (P6A.12),
+cooldown scheduler for high-stakes auto-execute (P6A.13), operator
+attention tags (P6A.14), CLI parity audit + fill (P6A.15).
+
+Pattern tests added: P25 (CLI parity), P26 (keyboard shortcut consistency),
+P27 (notification budget routing — with backlog tracker for ~28 pre-P27
+emit sites scheduled for migration in 6B/D4), P28 (NarrativeRenders
+single-writer + prompt-in-code), P29 (briefing prose cites real evidence
++ prompt-in-code), P30 (cooldown scheduler API contract).
+
+End-to-end shakedown — `TestShakedown_P6A` exercises 12 sub-cases against
+in-memory holocron: Pulse handler loads; narrative renders with prompt_version
+stamped; cooldown banner surfaces a scheduled action; Briefing queue sorts
+by stakes tier (Escalated → high first); focus mode renders briefing text;
+approve via decide flow records operator_decision; reject via counter-
+proposal spawns a downstream task; trust-dial=30 shifts medium → high;
+CLI-parity decide sets the same DB state as the dashboard click;
+budget-exhausted notification spools to digest; attention=following
+records correctly; 5-minute heartbeat gap is detected as sleep and the
+cinematic builds. All 12 pass in <1s using deterministic synthesis (no
+live LLM calls).
+
+Reflection placeholder shipped (full Reflection lands in Phase 6B).
+
+Tier-based --no-ff parallelization preserved branch topology in git log
+(11 merges to main: tier-0 + tier-1 (5) + tier-2 (5) + tier-3 (combined) +
+tier-4-final).
+
+Operator-discretion items honestly surfaced:
+- Pattern P27 records 28+ existing operator-mail emit sites in a backlog
+  with one-line rationales; forward-going code MUST gate via the helper,
+  but mass-migrating the backlog is a follow-up commit train (likely 6B
+  or D4).
+- The narrative renderer and briefing renderer use deterministic
+  `synthesise*` helpers for prose generation in 6A. The full Haiku
+  integration (pattern P12 wrap + cost tracking) lands when the daemon
+  side claude-package signature finalises in 6B.
+- The dashboard SPA-side wiring for surfaces is scaffolding only —
+  Pulse/Briefing/Reflection panes show placeholders; subsequent commits
+  (and 6B) populate them with the live data the new APIs expose.
+- TestPattern_P25 was made tolerant of read-only routes via an
+  inline allowlist; an AST-based mutation detector would be more
+  rigorous and is recorded as a 6B follow-up.
+- P29 is a static contract guard (the renderer uses
+  `synthesiseBriefingText`); the fuzz-test variant that injects
+  hallucinated rows runs against the live renderer in
+  `internal/agents` tests, not in audittools.
+
+D3 closure status post-Phase-6A: 🟡 PARTIAL — Phases 1–5 CLOSED + Phase
+6A CLOSED; Phase 6B OPEN.
+
