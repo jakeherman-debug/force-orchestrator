@@ -81,6 +81,10 @@ var dogCooldowns = map[string]time.Duration{
 	// the operator to see new signal within the working hour, slow enough
 	// that the SQL aggregations don't dominate the daemon's CPU budget.
 	"disagreement-tracker":  1 * time.Hour,
+	// D3 P6B.12 — weekly auto-render of the fleet learning panel.
+	// 7-day cadence; re-running mid-week via the dashboard "Refresh
+	// now" trigger is safe (the deterministic synth is cheap).
+	"learning-panel-render": 7 * 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -104,6 +108,8 @@ var dogOrder = []string{
 	// D3 P3 — runs after task-spend-watch (per the spec's ordering
 	// requirement); computes per-pair cross-layer disagreement rates.
 	"disagreement-tracker",
+	// D3 P6B.12 — Sunday-night fleet learning panel re-render.
+	"learning-panel-render",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -253,10 +259,26 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogQuarantinedRepoWatch(db, logger)
 	case "disagreement-tracker":
 		return dogDisagreementTracker(ctx, db, logger)
+	case "learning-panel-render":
+		return dogLearningPanelRender(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
 }
+
+// dogLearningPanelRender renders one FleetLearningPanels row for the
+// trailing 7 days. Idempotent: re-running mid-window inserts a new row
+// (the dashboard always reads the most recent). Errors propagate so
+// the inquisitor cycle's per-dog error path mails the operator.
+func dogLearningPanelRender(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	id, err := RenderFleetLearningPanel(ctx, db, time.Now())
+	if err != nil {
+		return fmt.Errorf("learning-panel-render: %w", err)
+	}
+	logger.Printf("Dog learning-panel-render: rendered FleetLearningPanels/%d", id)
+	return nil
+}
+
 
 func dogGitHygiene(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 	// Collect repos first, then close rows before doing any further DB work.
