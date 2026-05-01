@@ -493,6 +493,8 @@ CREATE TABLE IF NOT EXISTS Experiments (
     stakes_tier                 TEXT    NOT NULL DEFAULT 'low',  -- low|medium|high|safety_critical
     declare_threshold_override  REAL,                            -- nullable; operator-approved
     factorial_dimensions_json   TEXT    DEFAULT '[]',
+    kind                        TEXT    NOT NULL DEFAULT 'single' CHECK (kind IN ('single','factorial')),  -- D3 P4
+    factors_json                TEXT    DEFAULT '[]',            -- D3 P4: factor catalog [{name, levels}]
     subject_agent               TEXT    NOT NULL DEFAULT '',     -- 'captain'|'chancellor'|...
     assignment_unit             TEXT    NOT NULL DEFAULT 'task', -- 'feature'|'convoy'|'task'
     analysis_framework_version  TEXT    DEFAULT '',
@@ -509,8 +511,9 @@ CREATE TABLE IF NOT EXISTS Experiments (
     started_at                  TEXT    DEFAULT '',
     terminated_at               TEXT    DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_experiments_status  ON Experiments (status);
-CREATE INDEX IF NOT EXISTS idx_experiments_subject ON Experiments (subject_agent, status);
+CREATE INDEX IF NOT EXISTS idx_experiments_status      ON Experiments (status);
+CREATE INDEX IF NOT EXISTS idx_experiments_subject     ON Experiments (subject_agent, status);
+CREATE INDEX IF NOT EXISTS idx_experiments_kind_status ON Experiments (kind, status);
 
 -- TreatmentSpecs — content-snapshotted treatment definitions. spec_hash is
 -- unique so identical treatments across experiments share rows.
@@ -572,6 +575,28 @@ CREATE TABLE IF NOT EXISTS ExperimentRuns (
 );
 CREATE INDEX IF NOT EXISTS idx_exp_runs_exp_treat ON ExperimentRuns (experiment_id, treatment_id);
 CREATE INDEX IF NOT EXISTS idx_exp_runs_unit      ON ExperimentRuns (natural_unit_kind, natural_unit_id);
+
+-- ExperimentInteractions — D3 Phase 4. Per-(factor pair, level pair) interaction
+-- estimates for factorial experiments. The 2-way interaction
+-- [mean(D1=a,D2=b) - mean(D1=a',D2=b)] - [mean(D1=a,D2=b') - mean(D1=a',D2=b')]
+-- is decomposed into per-cell contrasts so 3+-level factors can store the full
+-- interaction surface (not just a 2x2 contrast scalar). Single-treatment
+-- experiments never write rows here. See paired-runs.md § Factorial Scoring.
+CREATE TABLE IF NOT EXISTS ExperimentInteractions (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id            INTEGER NOT NULL,
+    factor_a                 TEXT    NOT NULL,
+    factor_b                 TEXT    NOT NULL,
+    level_a                  TEXT    NOT NULL DEFAULT '',
+    level_b                  TEXT    NOT NULL DEFAULT '',
+    interaction_estimate     REAL    DEFAULT 0,
+    posterior_alpha          REAL    DEFAULT 0,
+    posterior_beta           REAL    DEFAULT 0,
+    posterior_prob_nonzero   REAL    DEFAULT 0,                  -- P(|interaction| > min_practical) under joint posterior
+    computed_at              TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_exp_interactions_exp  ON ExperimentInteractions (experiment_id);
+CREATE INDEX IF NOT EXISTS idx_exp_interactions_pair ON ExperimentInteractions (experiment_id, factor_a, factor_b);
 
 CREATE TABLE IF NOT EXISTS ExperimentOutcomes (
     id                          INTEGER PRIMARY KEY AUTOINCREMENT,

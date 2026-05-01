@@ -470,6 +470,14 @@ func createSchema(db *sql.DB) {
 
 	// Experiments — one row per registered experiment. status walks
 	// authored → ratified → running → confirming → terminated.
+	// `kind` (D3 Phase 4) discriminates single-treatment from factorial:
+	// 'single' (Phase 2 surface) keeps the one-arm-per-row shape;
+	// 'factorial' adds factor definitions in `factors_json` and
+	// per-cell ExperimentTreatments rows whose `cell_json` records the
+	// factor-level mapping. The CHECK constraint is enforced on fresh
+	// DBs only; SQLite ALTER TABLE ADD COLUMN cannot retro-fit CHECK
+	// on upgraded DBs, so internal/experiments validates the value
+	// before insert (paired-runs.md § Factorial Scoring).
 	db.Exec(`CREATE TABLE IF NOT EXISTS Experiments (
 		id                          INTEGER PRIMARY KEY AUTOINCREMENT,
 		name                        TEXT    NOT NULL,
@@ -478,6 +486,8 @@ func createSchema(db *sql.DB) {
 		stakes_tier                 TEXT    NOT NULL DEFAULT 'low',
 		declare_threshold_override  REAL,
 		factorial_dimensions_json   TEXT    DEFAULT '[]',
+		kind                        TEXT    NOT NULL DEFAULT 'single' CHECK (kind IN ('single','factorial')),
+		factors_json                TEXT    DEFAULT '[]',
 		subject_agent               TEXT    NOT NULL DEFAULT '',
 		assignment_unit             TEXT    NOT NULL DEFAULT 'task',
 		analysis_framework_version  TEXT    DEFAULT '',
@@ -496,6 +506,7 @@ func createSchema(db *sql.DB) {
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_status      ON Experiments (status);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_subject     ON Experiments (subject_agent, status);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_kind_status ON Experiments (kind, status);`)
 
 	// TreatmentSpecs — content-snapshotted treatment definitions.
 	// `spec_hash` is unique so identical treatments across experiments share
@@ -580,6 +591,31 @@ func createSchema(db *sql.DB) {
 		confirm_phase_outcome       TEXT    DEFAULT '',
 		promotion_proposal_id       INTEGER DEFAULT 0
 	);`)
+
+	// ExperimentInteractions — D3 Phase 4. Per-(factor pair, level pair)
+	// interaction estimates for factorial experiments, written by the
+	// factorial analyzer at termination. The 2-way interaction
+	// `[mean(D1=a,D2=b) - mean(D1=a',D2=b)] - [mean(D1=a,D2=b') -
+	// mean(D1=a',D2=b')]` is decomposed into per-cell contrasts so
+	// 3+-level factors can store the full interaction surface (not just
+	// a 2x2 contrast scalar). Single-treatment experiments never write
+	// rows here; the table stays empty for kind='single'. See
+	// paired-runs.md § Factorial Scoring.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentInteractions (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id            INTEGER NOT NULL,
+		factor_a                 TEXT    NOT NULL,
+		factor_b                 TEXT    NOT NULL,
+		level_a                  TEXT    NOT NULL DEFAULT '',
+		level_b                  TEXT    NOT NULL DEFAULT '',
+		interaction_estimate     REAL    DEFAULT 0,
+		posterior_alpha          REAL    DEFAULT 0,
+		posterior_beta           REAL    DEFAULT 0,
+		posterior_prob_nonzero   REAL    DEFAULT 0,
+		computed_at              TEXT    DEFAULT (datetime('now'))
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_interactions_exp  ON ExperimentInteractions (experiment_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_interactions_pair ON ExperimentInteractions (experiment_id, factor_a, factor_b);`)
 
 	// AnalysisFrameworks — versioned algorithm config; published
 	// definitions are immutable (deprecated_at marks retirement).
@@ -1544,6 +1580,8 @@ func runMigrations(db *sql.DB) {
 		stakes_tier                 TEXT    NOT NULL DEFAULT 'low',
 		declare_threshold_override  REAL,
 		factorial_dimensions_json   TEXT    DEFAULT '[]',
+		kind                        TEXT    NOT NULL DEFAULT 'single' CHECK (kind IN ('single','factorial')),
+		factors_json                TEXT    DEFAULT '[]',
 		subject_agent               TEXT    NOT NULL DEFAULT '',
 		assignment_unit             TEXT    NOT NULL DEFAULT 'task',
 		analysis_framework_version  TEXT    DEFAULT '',
@@ -1560,8 +1598,9 @@ func runMigrations(db *sql.DB) {
 		started_at                  TEXT    DEFAULT '',
 		terminated_at               TEXT    DEFAULT ''
 	)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_status  ON Experiments (status)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_subject ON Experiments (subject_agent, status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_status      ON Experiments (status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_subject     ON Experiments (subject_agent, status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_kind_status ON Experiments (kind, status)`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS TreatmentSpecs (
 		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1636,6 +1675,23 @@ func runMigrations(db *sql.DB) {
 		confirm_phase_outcome       TEXT    DEFAULT '',
 		promotion_proposal_id       INTEGER DEFAULT 0
 	)`)
+
+	// ExperimentInteractions — D3 Phase 4 (upgrade-path mirror).
+	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentInteractions (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		experiment_id            INTEGER NOT NULL,
+		factor_a                 TEXT    NOT NULL,
+		factor_b                 TEXT    NOT NULL,
+		level_a                  TEXT    NOT NULL DEFAULT '',
+		level_b                  TEXT    NOT NULL DEFAULT '',
+		interaction_estimate     REAL    DEFAULT 0,
+		posterior_alpha          REAL    DEFAULT 0,
+		posterior_beta           REAL    DEFAULT 0,
+		posterior_prob_nonzero   REAL    DEFAULT 0,
+		computed_at              TEXT    DEFAULT (datetime('now'))
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_interactions_exp  ON ExperimentInteractions (experiment_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_interactions_pair ON ExperimentInteractions (experiment_id, factor_a, factor_b)`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS AnalysisFrameworks (
 		version           TEXT PRIMARY KEY,
@@ -2103,4 +2159,14 @@ func runMigrations(db *sql.DB) {
 		prompt_version         TEXT    NOT NULL DEFAULT '',
 		source_event_refs_json TEXT    DEFAULT '[]'
 	)`)
+
+	// ── D3 Phase 4: factorial experiment columns (upgrade path) ──────────────
+	// kind/factors_json land on existing Experiments rows so upgraded DBs
+	// can author factorial experiments without a full rebuild. SQLite's
+	// ALTER TABLE ADD COLUMN cannot retro-fit CHECK constraints; the
+	// application-layer validator in internal/experiments enforces the
+	// allowed kind set ('single', 'factorial') before insert.
+	db.Exec(`ALTER TABLE Experiments ADD COLUMN kind         TEXT    NOT NULL DEFAULT 'single'`)
+	db.Exec(`ALTER TABLE Experiments ADD COLUMN factors_json TEXT             DEFAULT '[]'`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_experiments_kind_status ON Experiments (kind, status)`)
 }
