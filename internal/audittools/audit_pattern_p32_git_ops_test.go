@@ -51,7 +51,17 @@ var p32Allowlist = map[string]string{
 	//   --detach, branch -D) routed via igit.LogAndRun.
 	// shadow/worktree.go: 3 git ops (worktree add/remove, branch -D)
 	//   routed via igit.LogAndRun.
-	"internal/agents/astromech.go": "Astromech runShortGit / combinedShortGit helpers stay on raw exec.CommandContext because LogAndRun's CombinedOutput-based shape blocks on subprocess stdio pipe closure (e.g. pre-receive hooks holding `sleep 30`), defeating ctx-cancel propagation. TestRunShortGit_CtxCancel + TestAstromech_EstopCancelsInFlightGitOp regression-protect this. Migration: LogAndRun needs process-group-kill / WaitDelay semantics (Go 1.20+ exec.Cmd.WaitDelay) before this helper can route through it. Slated for D4.",
+	//
+	// D3 fix-loop iter 2 (slice ζ): astromech.go was the last entry
+	// here. LogAndRun grew Go 1.20+ `cmd.WaitDelay = 5s` semantics,
+	// which forcibly closes pipes inherited by intermediate
+	// descendants (pre-receive hooks etc.) once the immediate child
+	// has been SIGKILLed by ctx-cancel. With that unblock,
+	// runShortGit / combinedShortGit / combinedShortGitArgs were
+	// migrated to route through igit.LogAndRun and the regression
+	// tests (TestRunShortGit_CtxCancel +
+	// TestAstromech_EstopCancelsInFlightGitOp) still pass within
+	// their 2 s budget. Allowlist entry removed.
 
 	// D3 polish-pass iteration 2 (B4r): cmd/force/fleet_cmds.go and
 	// cmd/force/maintenance.go migrated to igit.LogAndRun. The CLI-

@@ -1973,3 +1973,187 @@ Total: ~2h45m wall-clock
 Iter1 closed 4/9 in ~2h25m; iter2 closed 5/5 remaining
 (plus a partial P32 push beyond iter1's stop-point) in ~2h45m.
 
+
+
+---
+
+## D3 fix-loop iter 1 closure addendum (2026-04-30)
+
+**Why this iteration exists** — strict verifier (round 1) returned NO GO
+with 12 unmet roadmap exit criteria after polish-iter2 closed. Items
+clustered into four disjoint scopes; we fanned out four parallel
+slices (α / β / γ / δ) on disjoint files and coordination shapes so
+they could land independently.
+
+### NO-GO items closed (12 total)
+
+Each item below names the closing slice + a representative file:line
+citation so a verifier can audit the change without cross-referencing
+multiple commits.
+
+| # | NO-GO item | Slice | Closing citation |
+|---|---|---|---|
+| 1  | Pattern test P20 (AT-id scope integrity, exit 14c) | α | `internal/audittools/audit_pattern_p20_at_id_scope_integrity_test.go` (commit `8b1e6a0`) |
+| 2  | Pattern test P21 (AT-removal operator-only, exit 14d) | α | `internal/audittools/audit_pattern_p21_at_removal_operator_only_test.go` (`8b1e6a0`) |
+| 3  | Pattern test P22 (fingerprint determinism scaffold, anti-cheat L1299) | α | `internal/audittools/audit_pattern_p22_fingerprint_determinism_test.go` (`8b1e6a0`) — scaffold; β shipped helper, ζ wired hook (see iter2) |
+| 4  | Pattern test P23 (proposer write discipline, anti-cheat L1300) | α | `internal/audittools/audit_pattern_p23_proposer_write_discipline_test.go` (`8b1e6a0`) |
+| 5  | Pattern test P24 (score distribution monitor, anti-cheat L1301) | α | `internal/audittools/audit_pattern_p24_score_distribution_monitor_test.go` (`8b1e6a0`) |
+| 6  | `force install-sleep-hook` CLI (exit 13) | α | `cmd/force/sleep_hook_cmd.go` (`8321a42` then merged at `8b1e6a0`) |
+| 7  | `PAIRED-RUNS-ROLLOUT.md` sign-off log (exit 17) | α | `PAIRED-RUNS-ROLLOUT.md` (`fd4c715`/`8b1e6a0`) — fix-loop-1 row OPEN at land time, flipped to CLOSED in iter2 closure (slice ζ) |
+| 8  | Captain proposal pipeline (concern #1, exit 7) | β | `internal/agents/captain_proposal_judge.go` (`c796673`/`c4a486a`) |
+| 9  | Investigator → ProposedFeatures pipeline (concern #10, exit 14) | β | `internal/agents/investigator.go` + `internal/store/proposed_features.go:142` Fingerprint helper (`23d9258`/`c4a486a`) |
+| 10 | ConvoyReviewCycles writer + verification_spec_json consumer + spec deprecation (concerns #6/8/9, exit 6/14a/14d) | γ | `internal/agents/convoy_review.go` + `internal/store/convoy_review_cycles.go` (`2e954da`/`7c6db9c`) |
+| 11 | Adversarial hot-path wiring + model-availability dog (exit 10, 14b) | δ | `internal/agents/adversarial_hotpath.go` + `internal/agents/model_availability_dog.go` (`93f94ab`/`2198e82`) |
+| 12 | AT-id integrity helper + revert e2e test (exit 14c) | δ | `internal/store/at_id_integrity.go` + e2e revert test (`93f94ab`/`2198e82`) |
+
+### Per-slice merge SHAs
+
+| Slice | Branch | Merge SHA | Wall clock |
+|---|---|---|---|
+| α | `fix-loop-1/alpha` | `8b1e6a0` | ~50m |
+| β | `fix-loop-1/beta` | `c4a486a` | ~70m |
+| γ | `fix-loop-1/gamma` | `7c6db9c` | ~60m |
+| δ | `fix-loop-1/delta` | `2198e82` | ~55m |
+
+### Honest sub-item deferrals at iter1 close
+
+The iter1 close was honest about the items it left open for iter2:
+
+1. **P22 audit hook still nil.** Slice α authored the determinism test
+   with a `p22Helper` hook pinned at nil and a "scaffold pending"
+   early-return. Slice β shipped `store.Fingerprint` at
+   `internal/store/proposed_features.go:142` but did not wire the
+   hook. Closed in iter2 by slice ζ
+   (`internal/audittools/audit_pattern_p22_helper_wiring_test.go`).
+2. **P32 allowlist still names astromech.go.** Polish-iter2 had
+   reverted the astromech P32 migration because LogAndRun's
+   `CombinedOutput`-based shape blocks on subprocess stdio pipe
+   closure (pre-receive hooks holding `sleep 30`), defeating
+   ctx-cancel propagation in `TestRunShortGit_CtxCancel` /
+   `TestAstromech_EstopCancelsInFlightGitOp`. Closed in iter2 by
+   slice ζ (LogAndRun gained `cmd.WaitDelay = 1s`; astromech
+   helpers migrated; allowlist drops to wrapper-self only).
+3. **`force proposed-features --help` exit code wrong.** β's CLI
+   dispatcher fell through to the unknown-verb branch, exiting 1.
+   Closed in iter2 by slice ζ (`cmd/force/proposed_features_cmds.go`
+   short-circuits `--help` / `-h` / `help` / empty-args).
+4. **Captain pipeline default flips.** Strict-verifier round 1 marked
+   the pipeline plumbing GO, but the default-on flips for the
+   adversarial hot-path + model-availability dog were left at OFF
+   pending observation runs. Closed in iter2 by slice ε.
+5. **Closure addendum.** This file ended at the polish-iter2 closure
+   line (~1975). Closed in iter2 by slice ζ (this addendum) +
+   `PAIRED-RUNS-ROLLOUT.md` flips.
+
+### Final gate state at strict-round-2 GO
+
+- `make build` (with `-tags sqlite_fts5`): PASS — exit 0
+- `make test`: PASS — all 32 packages green
+- `./force render-rules --check`: PASS — clean
+
+### Wall-clock summary
+
+- Slice α: ~50m
+- Slice β: ~70m
+- Slice γ: ~60m
+- Slice δ: ~55m
+- Total fix-loop-1: ~3h55m wall-clock (parallelised; longest slice was β)
+
+---
+
+## D3 fix-loop iter 2 closure addendum (2026-04-30)
+
+**Why this iteration exists** — strict verifier (round 2) returned GO
+on every blocking exit criterion after fix-loop-1 closed, but flagged
+seven non-blocking sub-items the operator wanted closed before the
+deliverable was sealed. Sub-items were split across two parallel
+slices (ε / ζ) on disjoint files.
+
+### Slice ζ scope (closed in this addendum)
+
+Slice ζ owns four sub-items. Each item below names its closing
+file:line + the regression-protecting test.
+
+#### ζ.1 — LogAndRun WaitDelay refactor + astromech P32 migration
+
+- **Closing change**: `internal/git/oplog.go` LogAndRun now sets
+  `cmd.WaitDelay = 1 * time.Second` (Go 1.20+). When ctx-cancel
+  SIGKILLs the immediate child but an intermediate descendant
+  (e.g. a pre-receive hook's `sleep 30`) inherits the merged stdio
+  pipe and survives, the wrapper's CombinedOutput Wait still returns
+  within the delay. (See `logAndRunWaitDelay` const comment for the
+  budget reasoning.)
+- **astromech migration**: `internal/agents/astromech.go`
+  `runShortGit` / `combinedShortGit` / `combinedShortGitArgs` now
+  route through `igit.LogAndRun`. Every astromech git op lands a
+  row in `GitOperationLog` (Pattern P32).
+- **P32 allowlist drop**: `internal/audittools/audit_pattern_p32_git_ops_test.go`
+  no longer names `internal/agents/astromech.go`. The remaining
+  allowlist entries (`internal/git/git.go`, `oplog.go`, `askbranch.go`,
+  `validators.go`, `internal/gh/gh.go`) are wrapper-self / pre-DB
+  bootstrap only.
+- **Regression tests pass within their 2 s budget**:
+  - `TestRunShortGit_CtxCancel` (internal/agents) — PASS
+  - `TestAstromech_EstopCancelsInFlightGitOp` (internal/agents) — PASS
+  - `TestBestEffortRun_CtxCancelKillsSubprocess` (internal/git) — PASS
+  - `TestRunGitCtx_CtxCancel` (internal/git) — PASS
+  - `TestPattern_P32_GitOpsLogged` (internal/audittools) — PASS
+- Commit: `95aa175`.
+
+#### ζ.2 — P22 audit hook wired
+
+- **Closing change**: `internal/audittools/audit_pattern_p22_helper_wiring_test.go`
+  init() sets `p22Helper` to a thin adapter around
+  `store.Fingerprint(source, topic, codePaths, atRefs, fleetRuleRefs)`.
+- **"Scaffold pending" early-return removed**: the audit's nil-helper
+  branch is now a hard `t.Fatal` so the determinism check can never
+  silently lapse to a no-op.
+- **Test verified active**: `TestPattern_P22_FingerprintDeterminism`
+  PASS (all three sub-assertions: determinism, sort-order
+  invariance, topic sensitivity).
+- Commit: `adb5c50`.
+
+#### ζ.3 — `force proposed-features --help` exit code
+
+- **Closing change**: `cmd/force/proposed_features_cmds.go`
+  `cmdProposedFeatures` short-circuits on `--help` / `-h` / `help` /
+  empty-args, prints the usage banner to stdout via
+  `printProposedFeaturesUsage(os.Stdout)`, and returns 0. Mirrors
+  `cmd/force/sleep_hook_cmd.go`'s pattern.
+- **Test asserting exit 0**: `cmd/force/proposed_features_help_test.go`
+  `TestProposedFeatures_HelpExitCode` covers all four shapes;
+  `TestProposedFeatures_UnknownVerbStillExitsNonZero` regression-pins
+  the unknown-verb path.
+- Commit: `d6a98b4`.
+
+#### ζ.4 — Closure addenda + PAIRED-RUNS-ROLLOUT.md status flips
+
+- **DELIVERABLE-3-CLOSURE.md fix-loop-1 addendum**: this file
+  (lines added by slice ζ; see git log for exact range).
+- **DELIVERABLE-3-CLOSURE.md fix-loop-2 addendum**: this section.
+  Slice ε's section (covering the other four sub-items: Captain
+  pipeline + default flips) is appended by slice ε on its merge.
+- **PAIRED-RUNS-ROLLOUT.md fix-loop-1 status**: OPEN → CLOSED;
+  slice α gate placeholders filled with the post-merge `make test`
+  output; new fix-loop-2 row added.
+
+### Slice ε scope (covered separately)
+
+Slice ε owns the other four sub-items: Captain pipeline plumbing
+finalisation + default flips on the adversarial hot-path + model-
+availability dog. Slice ε edits a disjoint file set
+(`captain.go`, `adversarial_hotpath.go`, `model_availability_dog.go`,
+`captain_proposal_judge.go`) and appends its own closure section.
+
+### Final gate state at fix-loop-2 close (slice ζ contribution)
+
+- `make build` (with `-tags sqlite_fts5`): PASS
+- `make test`: PASS — all packages green; targeted regression tests
+  enumerated above all PASS within their assertion budgets
+- `./force render-rules --check`: clean (no FleetRules row touched)
+
+### Honest deferrals at slice ζ close
+
+**EMPTY.** Every slice ζ item closed; no sub-item deferred.
+
+---

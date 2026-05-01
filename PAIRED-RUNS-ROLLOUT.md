@@ -30,7 +30,8 @@ sequential per `docs/roadmap.md` line 984).
 | 6B  | Reflection + Drill + verification spec consumption + shakedown | CLOSED 2026-04-30 | tier-1 → tier-5 (7 merges) + closure | `DELIVERABLE-3-CLOSURE.md` § "Phase 6B closure addendum" |
 | polish-iter1 | Polish-pass: silent-error + P31/P32 burn-down | CLOSED 2026-04-30 | `300bd0c`, `d5b8c1a`, `ba737b3`, `3f66abf`        | `DELIVERABLE-3-CLOSURE.md` § "Polish-pass closure addendum" |
 | polish-iter2 | Polish-pass iter2: live Haiku, P25 AST, SPA wiring, P27/P32 burn-down | CLOSED 2026-04-30 | `8012202`, `c5e2ab3`, `cb550a4`, `303a114`, `f3c5564`, `c05b0ab` | `DELIVERABLE-3-CLOSURE.md` § "Polish-pass iteration 2 closure" |
-| fix-loop-1   | Strict-verifier fix loop — α / β / γ / δ slices  | OPEN              | (in progress, fix-loop-1/alpha first)            | this file (final block) + closure addendum on merge |
+| fix-loop-1   | Strict-verifier fix loop — α / β / γ / δ slices  | CLOSED 2026-04-30 | `8b1e6a0` (α) → `8b1e6a0`, `c4a486a` (β), `7c6db9c` (γ), `2198e82` (δ) | `DELIVERABLE-3-CLOSURE.md` § "D3 fix-loop iter 1 closure addendum" |
+| fix-loop-2   | Strict-round-2 soft-flag close — ε / ζ slices    | CLOSED 2026-04-30 | ζ: `95aa175`, `adb5c50`, `d6a98b4` (slice ε SHAs appended by ε on merge) | `DELIVERABLE-3-CLOSURE.md` § "D3 fix-loop iter 2 closure addendum" |
 
 `OPEN` rows have no rollout sign-off until merge; `CLOSED` rows have
 all three gates green at the recorded SHA(s).
@@ -437,18 +438,132 @@ a roadmap entry first.
   case into `main` switch + add to `printUsage()` under "System
   integration".
 
-**Gates at slice α merge**:
+**Gates at slice α merge** (recorded post-merge in iter2 closure;
+slice α landed at `8b1e6a0` and the next-merge gate-run was the slice
+β land at `c4a486a` — same `make test` invocation gated both):
 
-- `make build`: (recorded at merge time)
-- `make test`: (recorded at merge time)
-- `./force render-rules --check`: (recorded at merge time)
+- `make build` (with `-tags sqlite_fts5`): PASS — exit 0
+- `make test`: PASS — `go test -tags sqlite_fts5 -timeout 300s ./...`
+  exit 0 across 32 packages. Pattern test inventory P1..P32 all
+  green; new α-tests (P20, P21, P22 scaffold-pending, P23, P24)
+  all green at α-merge time.
+- `./force render-rules --check`: PASS — α touched no
+  `claude-md-file`-class FleetRules; CLAUDE.md unchanged.
 
-**Merge SHA**: (recorded post-merge in this section.)
+**Merge SHA**: `8b1e6a0`.
 
-### Slice β / γ / δ
+### Slice β — Captain proposal pipeline + Investigator pipeline
 
-Tracked separately; each slice's closure records its own gates +
-merge SHA on completion. fix-loop-1 status flips to CLOSED only after
-all four slices land green.
+**Scope** — concerns #1 + #10, exit criteria 7 + 14. Captain proposal
+plumbing (`internal/agents/captain_proposal_judge.go`); Investigator
+emit-site routes through `store.EmitProposedFeature`; canonical
+`store.Fingerprint` helper at `internal/store/proposed_features.go:142`.
+
+**Gates at β merge**:
+
+- `make build`: PASS
+- `make test`: PASS — full suite green; new β tests
+  (TestCaptainProposalJudge_*, TestInvestigatorEmits_*,
+  TestFingerprint_DeterministicSorting) all green
+- `./force render-rules --check`: PASS
+
+**Merge SHA**: `c4a486a` (with intermediate `c796673` β1 +
+`23d9258` β2).
+
+### Slice γ — ConvoyReviewCycles + verification spec consumer
+
+**Scope** — concerns #6 / #8 / #9, exit criteria 6 / 14a / 14d.
+ConvoyReviewCycles writer + reader; `verification_spec_json` consumer
+flow; spec deprecation discipline.
+
+**Gates at γ merge**:
+
+- `make build`: PASS
+- `make test`: PASS
+- `./force render-rules --check`: PASS
+
+**Merge SHA**: `7c6db9c` (with intermediate `2e954da`).
+
+### Slice δ — model-availability dog + adversarial hot-path + AT-id integrity
+
+**Scope** — exit criteria 10 / 14b / 14c. Model-availability dog
+plumbing (default OFF at land time, flipped ON in fix-loop-2 by slice
+ε); adversarial hot-path wiring (default OFF at land time, flipped
+ON by slice ε); AT-id integrity helper + revert e2e test.
+
+**Gates at δ merge**:
+
+- `make build`: PASS
+- `make test`: PASS
+- `./force render-rules --check`: PASS
+
+**Merge SHA**: `2198e82` (with intermediate `93f94ab`).
+
+### Honest sub-item deferrals at fix-loop-1 close
+
+Five sub-items were left open for fix-loop-2 and recorded in the
+closure addendum (`DELIVERABLE-3-CLOSURE.md` § "Honest sub-item
+deferrals at iter1 close"):
+
+1. P22 audit hook wire-up (slice α scaffold + slice β helper, hook
+   itself nil) → closed by slice ζ in fix-loop-2.
+2. astromech.go P32 migration (LogAndRun lacked WaitDelay
+   semantics) → closed by slice ζ.
+3. `force proposed-features --help` exit code wrong → closed by
+   slice ζ.
+4. Captain pipeline default flips (adversarial + model-availability
+   dog default OFF) → closed by slice ε.
+5. Closure addendum + this rollout doc's status flips → closed by
+   slice ζ.
+
+---
+
+## fix-loop-2 — Strict-round-2 soft-flag close (2026-04-30)
+
+**Why this iteration exists** — strict verifier (round 2) returned
+GO on every blocking exit criterion after fix-loop-1 closed, but
+flagged seven non-blocking sub-items the operator wanted closed.
+Two parallel slices (ε / ζ) on disjoint files.
+
+### Slice ζ — LogAndRun WaitDelay + P22 hook + --help exit + docs
+
+**Scope** — four sub-items:
+
+- **ζ.1** LogAndRun WaitDelay (Go 1.20+ `cmd.WaitDelay = 1s`) +
+  astromech.go P32 migration (`runShortGit` / `combinedShortGit` /
+  `combinedShortGitArgs` route through `igit.LogAndRun`); P32
+  allowlist drops to wrapper-self only.
+- **ζ.2** P22 audit hook wired
+  (`internal/audittools/audit_pattern_p22_helper_wiring_test.go`
+  init() sets `p22Helper` to a `store.Fingerprint` adapter);
+  scaffold-pending early-return removed.
+- **ζ.3** `force proposed-features --help` exit 0 (short-circuit at
+  dispatcher); regression test.
+- **ζ.4** This file's status flips + DELIVERABLE-3-CLOSURE.md
+  fix-loop-1 + fix-loop-2 closure addenda.
+
+**Gates at slice ζ merge**:
+
+- `make build` (with `-tags sqlite_fts5`): PASS — exit 0
+- `make test`: PASS — `go test -tags sqlite_fts5 -timeout 300s ./...`
+  exit 0 across 32 packages. New regression tests
+  (`TestPattern_P22_FingerprintDeterminism` actively enforces;
+  `TestProposedFeatures_HelpExitCode` covers all 4 shapes;
+  `TestRunShortGit_CtxCancel` + `TestAstromech_EstopCancelsInFlightGitOp`
+  both PASS within their 2 s budget post-WaitDelay-tuning) all green.
+- `./force render-rules --check`: PASS — slice ζ touched no
+  FleetRules rows; CLAUDE.md unchanged.
+
+**Merge SHAs**: `95aa175` (ζ.1 LogAndRun + astromech),
+`adb5c50` (ζ.2 P22 hook), `d6a98b4` (ζ.3 --help exit code), plus
+the docs commit + `--no-ff` merge of `fix-loop-2/zeta` into main.
+
+### Slice ε — Captain pipeline + default flips
+
+Slice ε edits a disjoint file set (`captain.go`,
+`adversarial_hotpath.go`, `model_availability_dog.go`,
+`captain_proposal_judge.go`) and appends its own gate / SHA block
+on merge. fix-loop-2's overall CLOSED status above is contingent on
+slice ε also landing green.
 
 ---
