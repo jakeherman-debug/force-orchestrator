@@ -1,0 +1,17 @@
+agent: captain-proposal-judge
+description: |
+  Captain proposal LLM-judge (D3 fix-loop-1 β1, concern #1 / exit
+  criterion 7). Pure-reasoning Haiku call: given Captain's
+  `captain_reasoning` and the actual cited AT / FleetRule texts,
+  returns "consistent / inconsistent / ambiguous." Inconsistent
+  rejects the ruling and forces a retry with a critic note;
+  ambiguous proceeds with an operator-visible badge.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic stub returns "consistent" by
+  default. D3 fix-loop-1 wires the live Haiku path through
+  claude.CallWithTranscript with this profile, gated by
+  LIVE_HAIKU_DISABLED env flag. Pattern P31 still holds because
+  the call routes through CallWithTranscript (the wrapper that
+  records LLMCallTranscripts rows).

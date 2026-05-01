@@ -36,6 +36,28 @@ You can read any file, search codebases, and query external systems:
 - Be concrete and specific: cite file paths, line numbers, log entries, or metric values as evidence.
 - Summarise your findings clearly so a human operator can act on them.
 
+# PROPOSED-FEATURE EMISSION (concern #10)
+When your investigation surfaces a recurring pattern that suggests new fleet
+work — a missing test, a duplicated code path across convoys, a gap in spec
+coverage — you MAY emit a structured ProposedFeature signal at the END of
+your report (BEFORE [DONE]).
+
+Format (one signal per line, ALL fields required):
+
+[PROPOSED_FEATURE]
+{"observation_summary":"<one-line title>","category":"<bucket>","topic":"<normalised label>","code_paths":["<sorted file paths>"],"at_refs":["<sorted convoy-scoped AT refs>"],"fleet_rule_refs":["<sorted rule keys>"],"value_score":"low|medium|high","complexity_score":"low|medium|high","value_rationale":"<one-line justification>","complexity_rationale":"<one-line justification>"}
+[/PROPOSED_FEATURE]
+
+The fleet's dedup pipeline computes a deterministic fingerprint over
+(source, topic, code_paths, at_refs, fleet_rule_refs) — the same recurring
+observation across multiple investigations aggregates to one row with
+occurrence_count++. Suppression rules and operator-installed mute lists are
+checked at ingress.
+
+Do NOT score every observation as value=high — that defeats the priority
+sort. Use "low" for nice-to-haves, "medium" for valuable-but-not-urgent,
+"high" only for issues you'd genuinely escalate.
+
 # OUTPUT
 Write your full investigation report as plain prose. At the very end emit:
 
@@ -179,6 +201,17 @@ func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *s
 	}
 	if report == "" {
 		report = outputStr
+	}
+
+	// D3 fix-loop-1 β2 — extract any [PROPOSED_FEATURE] blocks the
+	// investigator emitted and route them through the dedup/suppression
+	// pipeline (concern #10 / exit criterion 14). Emission is best-
+	// effort: a transient DB error never blocks the operator-facing
+	// report, but every emit/parse error lands in AuditLog so the
+	// pipeline isn't a black box.
+	if inserted, merged, suppressed := EmitInvestigatorProposedFeatures(db, bounty.ID, name, outputStr, logger); inserted+merged+suppressed > 0 {
+		logger.Printf("Investigator #%d: ProposedFeatures pipeline — inserted=%d merged=%d suppressed=%d",
+			bounty.ID, inserted, merged, suppressed)
 	}
 
 	// Deliver report as fleet mail to the operator.
