@@ -38,29 +38,37 @@ const (
 )
 
 // Manifest is the YAML schema accepted by AuthorFromYAML. Required
-// fields are enforced by validateManifest after unmarshal.
+// fields are enforced by validateManifest after unmarshal. The
+// optional Kind / Factors fields (D3 Phase 4) discriminate factorial
+// from single-treatment manifests; when absent or 'single', the Phase 2
+// path runs unchanged.
 type Manifest struct {
-	Name                     string `yaml:"name"`
-	Hypothesis               string `yaml:"hypothesis"`
-	MinPracticalEffect       float64 `yaml:"min_practical_effect"`
-	StakesTier               string `yaml:"stakes_tier"`
-	SubjectAgent             string `yaml:"subject_agent"`
-	AssignmentUnit           string `yaml:"assignment_unit"`
-	AnalysisFrameworkVersion string `yaml:"analysis_framework_version"`
-	DurationCapHours         int     `yaml:"duration_cap_hours"`
-	BudgetUSD                float64 `yaml:"budget_usd"`
-	HardCapUSD               float64 `yaml:"hard_cap_usd"`
+	Name                     string              `yaml:"name"`
+	Hypothesis               string              `yaml:"hypothesis"`
+	MinPracticalEffect       float64             `yaml:"min_practical_effect"`
+	StakesTier               string              `yaml:"stakes_tier"`
+	SubjectAgent             string              `yaml:"subject_agent"`
+	AssignmentUnit           string              `yaml:"assignment_unit"`
+	AnalysisFrameworkVersion string              `yaml:"analysis_framework_version"`
+	DurationCapHours         int                 `yaml:"duration_cap_hours"`
+	BudgetUSD                float64             `yaml:"budget_usd"`
+	HardCapUSD               float64             `yaml:"hard_cap_usd"`
+	Kind                     string              `yaml:"kind"`             // D3 P4: '' or 'single' or 'factorial'
+	Factors                  []ManifestFactor    `yaml:"factors"`          // D3 P4: factorial factor catalog
 	Treatments               []ManifestTreatment `yaml:"treatments"`
 	Metrics                  []ManifestMetric    `yaml:"metrics"`
 	Promote                  *ManifestPromotion  `yaml:"promote"`
 }
 
-// ManifestTreatment is one arm of the experiment.
+// ManifestTreatment is one arm of the experiment. For factorial
+// manifests, Cell pins one level per declared factor. For single-
+// treatment manifests, Cell stays empty.
 type ManifestTreatment struct {
-	ArmLabel          string  `yaml:"arm_label"`
-	PromptTemplateRef string  `yaml:"prompt_template_ref"`
-	Model             string  `yaml:"model"`
-	TargetCellWeight  float64 `yaml:"target_cell_weight"`
+	ArmLabel          string            `yaml:"arm_label"`
+	PromptTemplateRef string            `yaml:"prompt_template_ref"`
+	Model             string            `yaml:"model"`
+	TargetCellWeight  float64           `yaml:"target_cell_weight"`
+	Cell              map[string]string `yaml:"cell"` // D3 P4: factorial cell mapping
 }
 
 // ManifestMetric pins one metric the experiment tracks. Exactly one
@@ -105,6 +113,23 @@ func validateManifest(m Manifest) error {
 	if primaries != 1 {
 		return fmt.Errorf("manifest: exactly one metric must be is_primary=true (got %d)", primaries)
 	}
+
+	// D3 P4: factorial-shape validation runs only when the manifest
+	// declares kind='factorial'. Empty / 'single' kinds are validated
+	// by the rules above and the factorial fields are ignored.
+	switch strings.TrimSpace(m.Kind) {
+	case "", KindSingle:
+		// Single-treatment path; no factor validation.
+	case KindFactorial:
+		if err := validateFactors(m.Factors); err != nil {
+			return err
+		}
+		if err := validateFactorialTreatments(m.Factors, m.Treatments); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("manifest: kind must be one of 'single', 'factorial' (got %q)", m.Kind)
+	}
 	return nil
 }
 
@@ -147,6 +172,16 @@ func AuthorFromManifest(ctx context.Context, db *sql.DB, m Manifest) (int, error
 		m.StakesTier = "low"
 	}
 
+	// Resolve kind ('' → 'single' default; factorial preserves declared kind).
+	resolvedKind := KindSingle
+	if strings.TrimSpace(m.Kind) == KindFactorial {
+		resolvedKind = KindFactorial
+	}
+	resolvedFactorsJSON := "[]"
+	if resolvedKind == KindFactorial {
+		resolvedFactorsJSON = factorsJSON(m.Factors)
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("AuthorFromManifest: begin tx: %w", err)
@@ -158,12 +193,14 @@ func AuthorFromManifest(ctx context.Context, db *sql.DB, m Manifest) (int, error
 			(name, hypothesis_text, min_practical_effect, stakes_tier,
 			 subject_agent, assignment_unit, analysis_framework_version,
 			 status, duration_cap_hours, budget_usd, hard_cap_usd,
+			 kind, factors_json,
 			 created_by, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 	`,
 		m.Name, m.Hypothesis, m.MinPracticalEffect, m.StakesTier,
 		m.SubjectAgent, m.AssignmentUnit, m.AnalysisFrameworkVersion,
 		StatusAuthored, m.DurationCapHours, m.BudgetUSD, m.HardCapUSD,
+		resolvedKind, resolvedFactorsJSON,
 		"engineering-corps",
 	)
 	if err != nil {
@@ -191,11 +228,19 @@ func AuthorFromManifest(ctx context.Context, db *sql.DB, m Manifest) (int, error
 		if err != nil {
 			return 0, fmt.Errorf("AuthorFromManifest: insert treatment spec %q: %w", tr.ArmLabel, err)
 		}
+		// cell_json carries the factor-level mapping for factorial
+		// treatments; single-treatment arms keep the schema default
+		// '{}'. canonicalCellJSON orders keys by factor declaration
+		// so two equivalent cells round-trip to the same string.
+		cellJSON := "{}"
+		if resolvedKind == KindFactorial && len(tr.Cell) > 0 {
+			cellJSON = canonicalCellJSON(m.Factors, tr.Cell)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO ExperimentTreatments
-				(experiment_id, arm_label, treatment_spec_id, target_cell_weight)
-			VALUES (?, ?, ?, ?)
-		`, expID, tr.ArmLabel, specID, tr.TargetCellWeight); err != nil {
+				(experiment_id, arm_label, cell_json, treatment_spec_id, target_cell_weight)
+			VALUES (?, ?, ?, ?, ?)
+		`, expID, tr.ArmLabel, cellJSON, specID, tr.TargetCellWeight); err != nil {
 			return 0, fmt.Errorf("AuthorFromManifest: insert treatment %q: %w", tr.ArmLabel, err)
 		}
 	}
