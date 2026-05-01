@@ -337,15 +337,27 @@ CREATE TABLE IF NOT EXISTS Dogs (
 -- Lessons learned from completed/failed tasks, injected into future agents on same repo.
 
 CREATE TABLE IF NOT EXISTS FleetMemory (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo          TEXT    NOT NULL,
-    task_id       INTEGER DEFAULT 0,
-    outcome       TEXT    NOT NULL DEFAULT 'success',  -- 'success' | 'failure'
-    summary       TEXT    NOT NULL,
-    files_changed TEXT    DEFAULT '',   -- comma-separated affected file paths (success only)
-    topic_tags    TEXT    DEFAULT '',   -- comma-separated 3-6 short keywords from Librarian (e.g. "auth, jwt, middleware")
-    embedding     BLOB    DEFAULT NULL, -- reserved: float32 vector for future sqlite-vec upgrade
-    created_at    TEXT    DEFAULT (datetime('now'))
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo              TEXT    NOT NULL,
+    task_id           INTEGER DEFAULT 0,
+    outcome           TEXT    NOT NULL DEFAULT 'success',  -- 'success' | 'failure'
+    summary           TEXT    NOT NULL,
+    files_changed     TEXT    DEFAULT '',   -- comma-separated affected file paths (success only)
+    topic_tags        TEXT    DEFAULT '',   -- comma-separated 3-6 short keywords from Librarian (e.g. "auth, jwt, middleware")
+    embedding         BLOB    DEFAULT NULL, -- reserved: float32 vector for future sqlite-vec upgrade
+    created_at        TEXT    DEFAULT (datetime('now')),
+    -- D4 Phase 0 — Librarian evolution: quality-scoring columns.
+    -- freshness_score decays from 1.0 with row age (RecomputeFreshnessScores dog).
+    -- validation_score adjusted by RecordValidation (positive/negative outcome feedback).
+    -- retrieval_count + last_retrieved_at bumped by RecordRetrieval at memory-injection time.
+    -- canonical_id is set by DedupAndMerge to point a non-canonical row at its survivor.
+    -- hypothesis_emitted_at stamped by EmitHypothesisCandidates so re-runs don't duplicate.
+    freshness_score   REAL    NOT NULL DEFAULT 1.0,
+    validation_score  REAL    NOT NULL DEFAULT 0.0,
+    retrieval_count   INTEGER NOT NULL DEFAULT 0,
+    last_retrieved_at TEXT    DEFAULT '',
+    canonical_id      INTEGER NOT NULL DEFAULT 0,
+    hypothesis_emitted_at TEXT DEFAULT ''
 );
 -- Hot-table index (AUDIT-024, Fix #4) — per-repo recency retrieval.
 CREATE INDEX IF NOT EXISTS idx_fleet_memory_repo_created ON FleetMemory (repo, created_at);
@@ -766,10 +778,33 @@ CREATE TABLE IF NOT EXISTS PromotionProposals (
     rejection_action   TEXT    DEFAULT 'leave_as_is',           -- leave_as_is|clean_revert|cascade_revert|surgical_revert|escalate
     rejection_rationale TEXT   DEFAULT '',                      -- mandatory when rejection_action != 'leave_as_is'
     revert_task_id     INTEGER DEFAULT 0,                       -- spawned CodeEdit that performs the revert
-    refiled_feature_id INTEGER DEFAULT 0                        -- if rejection re-files as a new feature
+    refiled_feature_id INTEGER DEFAULT 0,                       -- if rejection re-files as a new feature
+    -- D4 Phase 0: source FleetMemory.id for Librarian-emitted candidates.
+    -- 0 means "no source memory" (EC promotions, operator-direct-write rows).
+    -- Used by EmitHypothesisCandidates for idempotence (one candidate per memory).
+    source_memory_id   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp   ON PromotionProposals (experiment_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);
+CREATE INDEX IF NOT EXISTS idx_promotion_proposals_source_memory ON PromotionProposals (source_memory_id) WHERE source_memory_id != 0;
+
+-- ── D4 Phase 0 — ConflictTickets ─────────────────────────────────────────────
+-- Pairs of FleetMemory rows the librarian-conflict-watch dog flagged as
+-- contradictory. Operator-surfaced via /api/conflicts/tickets; status
+-- transitions: 'open' → 'resolved' (+ resolution_note). reason carries a
+-- short classifier (e.g. "antonym", "negation", "llm-judge").
+CREATE TABLE IF NOT EXISTS ConflictTickets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_a_id     INTEGER NOT NULL,
+    memory_b_id     INTEGER NOT NULL,
+    reason          TEXT    NOT NULL DEFAULT '',
+    status          TEXT    NOT NULL DEFAULT 'open',
+    created_at      TEXT    DEFAULT (datetime('now')),
+    resolved_at     TEXT    DEFAULT '',
+    resolution_note TEXT    DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_conflict_tickets_status ON ConflictTickets (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_conflict_tickets_pair   ON ConflictTickets (memory_a_id, memory_b_id);
 
 -- ── D3 Phase 1 — ProposedFeatures + suppressions + score overrides ───────────
 -- ProposedFeatures — Investigator's cross-convoy aggregation queue.

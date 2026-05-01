@@ -278,16 +278,29 @@ func createSchema(db *sql.DB) {
 	// (e.g. "authentication") can retrieve memories whose summary uses different words
 	// (e.g. "JWT middleware"). Broadens recall without hurting precision — the LLM re-ranker
 	// filters noise on the read side.
+	// D4 Phase 0 — Librarian evolution: quality-scoring columns
+	// (freshness_score / validation_score / retrieval_count /
+	// last_retrieved_at) are written by the librarian-quality-recompute
+	// dog + RecordRetrieval / RecordValidation helpers; canonical_id
+	// supports the dedup-and-merge audit trail (rows merged into a
+	// canonical entry retain their id but stamp canonical_id at the row
+	// they collapsed into).
 	db.Exec(`CREATE TABLE IF NOT EXISTS FleetMemory (
-		id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		repo          TEXT    NOT NULL,
-		task_id       INTEGER DEFAULT 0,
-		outcome       TEXT    NOT NULL DEFAULT 'success',
-		summary       TEXT    NOT NULL,
-		files_changed TEXT    DEFAULT '',
-		topic_tags    TEXT    DEFAULT '',
-		embedding     BLOB    DEFAULT NULL,
-		created_at    TEXT    DEFAULT (datetime('now'))
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo              TEXT    NOT NULL,
+		task_id           INTEGER DEFAULT 0,
+		outcome           TEXT    NOT NULL DEFAULT 'success',
+		summary           TEXT    NOT NULL,
+		files_changed     TEXT    DEFAULT '',
+		topic_tags        TEXT    DEFAULT '',
+		embedding         BLOB    DEFAULT NULL,
+		created_at        TEXT    DEFAULT (datetime('now')),
+		freshness_score   REAL    NOT NULL DEFAULT 1.0,
+		validation_score  REAL    NOT NULL DEFAULT 0.0,
+		retrieval_count   INTEGER NOT NULL DEFAULT 0,
+		last_retrieved_at TEXT    DEFAULT '',
+		canonical_id      INTEGER NOT NULL DEFAULT 0,
+		hypothesis_emitted_at TEXT DEFAULT ''
 	);`)
 	// Hot-table index on FleetMemory (AUDIT-024, Fix #4). GetFleetMemories runs
 	// per-repo recency retrieval before FTS re-rank; without this index it
@@ -765,10 +778,32 @@ func createSchema(db *sql.DB) {
 		rejection_action   TEXT    DEFAULT 'leave_as_is',
 		rejection_rationale TEXT   DEFAULT '',
 		revert_task_id     INTEGER DEFAULT 0,
-		refiled_feature_id INTEGER DEFAULT 0
+		refiled_feature_id INTEGER DEFAULT 0,
+		source_memory_id   INTEGER NOT NULL DEFAULT 0
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp ON PromotionProposals (experiment_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_source_memory ON PromotionProposals (source_memory_id) WHERE source_memory_id != 0;`)
+
+	// D4 Phase 0 — ConflictTickets: pairs of FleetMemory rows that the
+	// librarian-conflict-watch dog flagged as contradictory. Operator-
+	// surfaced via /api/conflicts/tickets; status transitions: 'open' →
+	// 'resolved' (+ resolution_note). reason is a short human-readable
+	// classifier (e.g. "antonym", "negation", "llm-judge").
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConflictTickets (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		memory_a_id     INTEGER NOT NULL,
+		memory_b_id     INTEGER NOT NULL,
+		reason          TEXT    NOT NULL DEFAULT '',
+		status          TEXT    NOT NULL DEFAULT 'open',
+		created_at      TEXT    DEFAULT (datetime('now')),
+		resolved_at     TEXT    DEFAULT '',
+		resolution_note TEXT    DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_conflict_tickets_status ON ConflictTickets (status, created_at);`)
+	// Pair index used by the dedup detector to avoid emitting duplicate
+	// tickets for the same pair (memory_a_id, memory_b_id).
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_conflict_tickets_pair ON ConflictTickets (memory_a_id, memory_b_id);`)
 
 	// ProposedFeatures — Investigator's cross-convoy aggregation queue.
 	// `fingerprint` (canonical-content SHA256) + partial UNIQUE on active
@@ -1510,6 +1545,44 @@ func runMigrations(db *sql.DB) {
 	// drop-and-recreate because FTS5 columns are immutable. After recreating,
 	// re-populate from FleetMemory so no search data is lost.
 	db.Exec(`ALTER TABLE FleetMemory ADD COLUMN topic_tags TEXT DEFAULT ''`)
+
+	// ── D4 Phase 0 — Librarian evolution: quality-scoring columns ────────────
+	// Each ALTER is idempotent via SQLite's silent-failure-on-duplicate
+	// behaviour for ADD COLUMN. The createSchema row defaults match these
+	// (1.0 freshness, 0.0 validation, 0 retrieval count, '' last-retrieved-
+	// at, 0 canonical_id, '' hypothesis_emitted_at) so fresh DBs and
+	// upgraded DBs converge on the same shape (per CLAUDE.md "Store /
+	// schema conventions" — column adds need to land in createSchema +
+	// runMigrations + schema/schema.sql in the same commit).
+	db.Exec(`ALTER TABLE FleetMemory ADD COLUMN freshness_score REAL NOT NULL DEFAULT 1.0`)
+	db.Exec(`ALTER TABLE FleetMemory ADD COLUMN validation_score REAL NOT NULL DEFAULT 0.0`)
+	db.Exec(`ALTER TABLE FleetMemory ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE FleetMemory ADD COLUMN last_retrieved_at TEXT DEFAULT ''`)
+	db.Exec(`ALTER TABLE FleetMemory ADD COLUMN canonical_id INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE FleetMemory ADD COLUMN hypothesis_emitted_at TEXT DEFAULT ''`)
+
+	// ── D4 Phase 0 — PromotionProposals.source_memory_id ─────────────────────
+	// Used by EmitHypothesisCandidates to track which FleetMemory row a
+	// candidate proposal was emitted from, so re-running the dog over the
+	// same high-signal memory does not produce duplicates (idempotence
+	// invariant). Default 0 matches "no source memory" for non-Librarian-
+	// emitted candidates (EC promotions, operator-direct-write rows).
+	db.Exec(`ALTER TABLE PromotionProposals ADD COLUMN source_memory_id INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_source_memory ON PromotionProposals (source_memory_id) WHERE source_memory_id != 0`)
+
+	// ── D4 Phase 0 — ConflictTickets table ────────────────────────────────────
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConflictTickets (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		memory_a_id     INTEGER NOT NULL,
+		memory_b_id     INTEGER NOT NULL,
+		reason          TEXT    NOT NULL DEFAULT '',
+		status          TEXT    NOT NULL DEFAULT 'open',
+		created_at      TEXT    DEFAULT (datetime('now')),
+		resolved_at     TEXT    DEFAULT '',
+		resolution_note TEXT    DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_conflict_tickets_status ON ConflictTickets (status, created_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_conflict_tickets_pair ON ConflictTickets (memory_a_id, memory_b_id)`)
 
 	// Check whether the current FTS definition already includes topic_tags.
 	// sqlite_master stores the CREATE statement verbatim; a Contains check on

@@ -103,6 +103,28 @@ var dogCooldowns = map[string]time.Duration{
 	// 30-day-old high-value row demotes within a day after the
 	// cutoff fires.
 	"proposed-features-decay": 12 * time.Hour,
+	// D4 Phase 0 — Librarian evolution dogs.
+	// librarian-dedup-watch folds near-identical FleetMemory rows.
+	// 12h is slow enough that the curator's outputs settle before
+	// the next pass, fast enough that an operator-observed
+	// duplicate doesn't sit in the index for a full day.
+	"librarian-dedup-watch": 12 * time.Hour,
+	// librarian-quality-recompute decays freshness_score so older
+	// memories rank below newer ones. 24h matches the natural
+	// freshness-half-life cadence (default 30 days; the per-run
+	// effect is small, the cumulative effect is what matters).
+	"librarian-quality-recompute": 24 * time.Hour,
+	// librarian-conflict-watch surfaces contradictory memories as
+	// operator-actionable tickets. 24h matches the dedup cycle.
+	"librarian-conflict-watch": 24 * time.Hour,
+	// librarian-hypothesis-emit walks high-signal memories and
+	// emits candidate PromotionProposals. 24h aligns with EC's
+	// natural ratification cadence.
+	"librarian-hypothesis-emit": 24 * time.Hour,
+	// claude-md-drift-watch scans CLAUDE.md invariants vs FleetRules
+	// and emits drift candidates. Weekly — invariants don't change
+	// daily and the scan reads CLAUDE.md + walks FleetRules.
+	"claude-md-drift-watch": 7 * 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -134,6 +156,22 @@ var dogOrder = []string{
 	"model-availability-watch",
 	// D3 fix-loop-1 β2 — score-decay for stale ProposedFeatures.
 	"proposed-features-decay",
+	// D4 Phase 0 — Librarian-evolution dogs. Order:
+	//  1. dedup-watch first (folds duplicates into canonicals so
+	//     the conflict / hypothesis passes operate on the post-merge
+	//     view).
+	//  2. quality-recompute next (freshness decay informs the
+	//     hypothesis emission threshold).
+	//  3. conflict-watch surfaces operator-actionable contradictions.
+	//  4. hypothesis-emit picks up high-quality memories now that
+	//     dedup + quality have run.
+	//  5. claude-md-drift-watch is independent of the FleetMemory
+	//     pipeline; ordered last for tidiness.
+	"librarian-dedup-watch",
+	"librarian-quality-recompute",
+	"librarian-conflict-watch",
+	"librarian-hypothesis-emit",
+	"claude-md-drift-watch",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -304,6 +342,16 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogModelAvailabilityWatch(ctx, db, logger)
 	case "proposed-features-decay":
 		return dogProposedFeaturesDecay(db, logger)
+	case "librarian-dedup-watch":
+		return dogLibrarianDedup(ctx, db, logger)
+	case "librarian-quality-recompute":
+		return dogLibrarianQualityRecompute(ctx, db, logger)
+	case "librarian-conflict-watch":
+		return dogLibrarianConflictWatch(ctx, db, logger)
+	case "librarian-hypothesis-emit":
+		return dogLibrarianHypothesisEmit(ctx, db, logger)
+	case "claude-md-drift-watch":
+		return dogClaudeMDDriftWatch(ctx, db, lib, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

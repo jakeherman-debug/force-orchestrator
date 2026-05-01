@@ -77,6 +77,17 @@ var p25Allowlist = map[string]string{
 	// task_cmds.go:cmdAddJira); both surfaces share the
 	// agents.QueueFeatureFromJira reusable core.
 	"/api/feature/from-jira": "CLI parity via `force add-jira <TICKET-ID>` — both call agents.QueueFeatureFromJira",
+
+	// D4 Phase 0 — Librarian conflict tickets. List endpoint is
+	// GET-only (read-only); the resolve subroute is operator-action
+	// but its surface is dashboard-only by design — operators inspect
+	// the contradiction text in the dashboard and click "resolve" with
+	// a note. A `force conflicts resolve` CLI is reasonable Phase 3
+	// follow-up (when the Senate's review surface absorbs this) but
+	// shipping the CLI in Phase 0 would land before any actual
+	// surface that needs it.
+	"/api/conflicts/tickets":  "Librarian conflict tickets list (D4-P0); GET-only read view",
+	"/api/conflicts/tickets/": "Librarian conflict ticket resolve (D4-P0); dashboard-only surface — `force conflicts resolve` CLI deferred to Phase 3 when Senate absorbs review",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in

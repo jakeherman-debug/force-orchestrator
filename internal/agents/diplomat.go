@@ -499,11 +499,11 @@ func buildDiplomatConvoyContext(ctx context.Context, db *sql.DB, convoy *store.C
 		}
 	}
 
-	// Relevant memory excerpts — FTS over-fetches, re-ranker trims to top 3.
-	// Diplomat is summarizing for the draft PR body so 3 is plenty. The
-	// re-ranker's own log lines aren't useful here (there's no operator
-	// logger in scope at context-build time), so discard them.
-	candidates := store.GetFleetMemories(db, ab.Repo, convoy.Name, 15)
+	// Relevant memory excerpts — D4 P0 (Pattern P33): route through
+	// the Librarian Client's weighted-score ingress. The re-ranker
+	// still trims to top 3 for the draft PR body; the change is the
+	// candidate pool now respects freshness × validation ranking.
+	candidates := getMemoriesForPromptInjection(ctx, db, ab.Repo, 15)
 	// Re-rank under the librarian profile (the rerank LLM is part of the
 	// librarian retrieval pipeline). Profile load failure here degrades to
 	// FTS order via RerankFleetMemories' nil-profile branch — graceful
