@@ -90,6 +90,11 @@ func RunDashboard(db *sql.DB, port int) {
 	// requires operator_email and writes to AuditLog.
 	mux.HandleFunc("/api/proposed-features", handleProposedFeaturesList(db))
 	mux.HandleFunc("/api/proposed-features/", handleProposedFeaturesSubroutes(db))
+	// JIRA-from-UI — POST /api/feature/from-jira. Operator-routed entry
+	// point that calls agents.QueueFeatureFromJira (the reusable core
+	// extracted from cmd/force/task_cmds.go cmdAddJira). See
+	// handlers_feature_from_jira.go for validation + response shape.
+	mux.HandleFunc("/api/feature/from-jira", handleFeatureFromJira(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── D3 P6A.14 — Operator attention tags API.

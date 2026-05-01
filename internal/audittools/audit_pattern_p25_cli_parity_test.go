@@ -70,6 +70,13 @@ var p25Allowlist = map[string]string{
 	// D3 P6B.13 — Retro generator. CLI parity via `force retro`.
 	"/api/reflection/retro/generate": "CLI parity via `force retro generate` (6B.13)",
 	"/api/reflection/retro/save":     "CLI parity via `force retro save` (6B.13)",
+
+	// JIRA-from-UI — POST /api/feature/from-jira queues a Feature task
+	// from a Jira ticket. CLI parity is the existing `force add-jira
+	// [--priority N] [--plan-only] <TICKET-ID>` command (cmd/force/
+	// task_cmds.go:cmdAddJira); both surfaces share the
+	// agents.QueueFeatureFromJira reusable core.
+	"/api/feature/from-jira": "CLI parity via `force add-jira <TICKET-ID>` — both call agents.QueueFeatureFromJira",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in

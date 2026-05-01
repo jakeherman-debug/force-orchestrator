@@ -1791,6 +1791,80 @@ async function submitAddTask() {
   }
 }
 
+// ── JIRA-from-UI ──────────────────────────────────────────────────────────────
+// Inline "Queue from Jira" form rendered above the Tasks tab's stats bar.
+// Posts to POST /api/feature/from-jira; the handler calls
+// agents.QueueFeatureFromJira (the reusable core extracted from
+// `force add-jira`). On success: surface task id + first 200 chars of
+// the fetched description in the inline status area; refresh the task
+// table so the new row shows up. On failure: inline error toast, form
+// stays populated so the operator can correct + retry.
+async function submitJiraFeature() {
+  const ticketEl   = $('jira-ticket-id');
+  const priorityEl = $('jira-priority');
+  const planOnlyEl = $('jira-plan-only');
+  const btn        = $('jira-submit-btn');
+  const result     = $('jira-result');
+  if (!ticketEl) return;
+
+  const ticket   = (ticketEl.value || '').trim().toUpperCase();
+  const priority = parseInt(priorityEl.value || '0', 10);
+  const planOnly = !!planOnlyEl.checked;
+
+  if (!ticket) { showToast('Ticket id required', 'err'); ticketEl.focus(); return; }
+  if (!/^[A-Z]+-\d+$/.test(ticket)) {
+    showToast('Ticket id must look like ABC-123', 'err');
+    ticketEl.focus();
+    return;
+  }
+
+  // Lock the form while the LLM fetch runs (Atlassian MCP can be slow).
+  btn.disabled = true;
+  const originalLabel = btn.textContent;
+  btn.textContent = 'Fetching…';
+  if (result) { result.textContent = `Fetching ${ticket}…`; result.style.color = 'var(--text2)'; }
+
+  try {
+    const r = await api('/api/feature/from-jira', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ticket_id: ticket, priority, plan_only: planOnly }),
+    });
+    showToast(`Task #${r.task_id} queued from ${ticket}`, 'ok');
+    if (result) {
+      result.style.color = 'var(--text1)';
+      result.textContent = `#${r.task_id}: ${truncate(r.summary || '', 200)}`;
+      result.title       = r.summary || '';
+    }
+    ticketEl.value     = '';
+    priorityEl.value   = '5';
+    planOnlyEl.checked = false;
+    // Refresh the task list so the queued Feature shows up.
+    if (typeof loadTasks === 'function') { loadTasks(); }
+    if (typeof pollStats === 'function') { pollStats(); }
+  } catch(e) {
+    showToast('Queue from Jira failed: ' + e.message, 'err');
+    if (result) {
+      result.style.color = 'var(--err)';
+      result.textContent = 'Failed: ' + e.message;
+    }
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = originalLabel;
+  }
+}
+
+// Submit-on-Enter for the ticket id input — purely a UX nicety so the
+// operator doesn't have to mouse to the button.
+document.addEventListener('DOMContentLoaded', () => {
+  const ticketEl = document.getElementById('jira-ticket-id');
+  if (ticketEl) {
+    ticketEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); submitJiraFeature(); }
+    });
+  }
+});
+
 // ── Modal helpers ─────────────────────────────────────────────────────────────
 function closeModal(id) {
   $(id).classList.add('hidden');

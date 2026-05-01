@@ -10,8 +10,6 @@ import (
 
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/agents"
-	"force-orchestrator/internal/agents/capabilities"
-	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
@@ -259,6 +257,11 @@ func cmdAddAudit(db *sql.DB, args []string) {
 
 func cmdAddJira(db *sql.DB, args []string) {
 	// Usage: force add-jira [--priority N] [--plan-only] <TICKET-ID>
+	//
+	// JIRA-from-UI: the fetch + payload-formatting body has moved into
+	// agents.QueueFeatureFromJira so the dashboard's
+	// `POST /api/feature/from-jira` handler can call the same core. This
+	// function preserves the CLI's argv-parsing + stdout shape verbatim.
 	priority := 0
 	planOnly := false
 	jiraArgs := args
@@ -280,37 +283,16 @@ func cmdAddJira(db *sql.DB, args []string) {
 	ticketID := jiraArgs[0]
 	fmt.Printf("Fetching Jira ticket %s...\n", ticketID)
 
-	jiraSystemPrompt := `You are a product manager assistant. Use your Atlassian Jira MCP tools to fetch the requested ticket.
-Return a comprehensive feature description as plain text including: ticket title, description, acceptance criteria, and any relevant context from linked tickets.
-Do not use markdown formatting. Write it as a clear feature request that a software architect can decompose into coding tasks.`
-
-	cliJiraProfile, profErr := capabilities.LoadProfile("cli-jira")
-	if profErr != nil {
-		fmt.Printf("force add-jira: cannot load cli-jira capability profile: %v\n", profErr)
-		os.Exit(1)
-	}
-	mcpConfig, _ := cliJiraProfile.MCPConfigArg()
-	description, err := claude.AskClaudeCLI(jiraSystemPrompt,
-		fmt.Sprintf("Fetch Jira ticket %s and return its full context as a feature description.", ticketID),
-		cliJiraProfile.AllowedToolsArg(), cliJiraProfile.DisallowedToolsArg(), mcpConfig, 5)
+	res, err := agents.QueueFeatureFromJira(context.Background(), db, ticketID, priority, planOnly)
 	if err != nil {
 		fmt.Printf("Failed to fetch Jira ticket: %v\n", err)
 		os.Exit(1)
-	}
-
-	payload := fmt.Sprintf("[JIRA: %s]\n%s", ticketID, strings.TrimSpace(description))
-	if planOnly {
-		payload = "[PLAN_ONLY]\n" + payload
-	}
-	id := store.AddBounty(db, 0, "Feature", payload)
-	if priority != 0 {
-		store.SetBountyPriority(db, id, priority)
 	}
 	planSuffix := ""
 	if planOnly {
 		planSuffix = " — Commander will plan only; approve with: force convoy approve <convoy-id>"
 	}
-	fmt.Printf("Jira ticket %s added to the Fleet%s.\n", ticketID, planSuffix)
+	fmt.Printf("Jira ticket %s added to the Fleet as task #%d%s.\n", ticketID, res.TaskID, planSuffix)
 }
 
 // cmdReset handles both "reset" and "retry" (identical behavior).
