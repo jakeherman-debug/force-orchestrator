@@ -214,11 +214,33 @@ const (
 // The captain checks convoy plan coherence after each Astromech commit —
 // it is not a code reviewer (that is the council's job) but a plan coherence check.
 type CaptainRuling struct {
-	Decision       string          `json:"decision"`        // "approve", "reject", "escalate"
-	Feedback       string          `json:"feedback"`        // reason for rejection or escalation; empty on approve
-	TaskUpdates    []CaptainUpdate `json:"task_updates"`    // downstream task payload changes
-	NewTasks       []CaptainTask   `json:"new_tasks"`       // additional tasks to insert into the convoy
-	RejectedFiles  []string        `json:"rejected_files"`  // files touched out-of-scope; propagated as a SCOPE GUARD section on requeue
+	Decision      string          `json:"decision"`       // "approve", "reject", "escalate"
+	Feedback      string          `json:"feedback"`       // reason for rejection or escalation; empty on approve
+	TaskUpdates   []CaptainUpdate `json:"task_updates"`   // downstream task payload changes
+	NewTasks      []CaptainTask   `json:"new_tasks"`      // additional tasks to insert into the convoy
+	RejectedFiles []string        `json:"rejected_files"` // files touched out-of-scope; propagated as a SCOPE GUARD section on requeue
+
+	// CitedATs is the convoy-scoped acceptance-test references the LLM
+	// claims its rationale relies on (concern #1 / Pattern P20). Each
+	// entry MUST carry both convoy_id and at_id; bare at_id rejects at
+	// SetProposedAction. Empty slice is fine when the ruling cites no
+	// AT (e.g. infra-only diffs) but the field MUST be present so the
+	// proposal's structured payload satisfies P23.
+	CitedATs []CitedAT `json:"cited_ats"`
+
+	// CitedFleetRules is the list of FleetRules `rule_key` values the
+	// LLM claims its rationale relies on. Same P23 contract: empty
+	// slice OK, omission produces an empty slice via Go's JSON decode.
+	CitedFleetRules []string `json:"cited_fleet_rules"`
+
+	// ClassificationConfidence is the LLM-emitted certainty in the
+	// chosen Decision, in [0.0, 1.0]. Validation rejects out-of-range
+	// values (proposal validator). 0.0 is reserved for "the LLM did not
+	// emit a confidence" — emitCaptainProposal falls back to the
+	// deterministic floor (captainConfidenceFromDecision) on a 0
+	// reading so a missing field never silently produces a meaningless
+	// "0% confident" routing signal.
+	ClassificationConfidence float64 `json:"classification_confidence"`
 }
 
 // CaptainUpdate is a payload modification for an existing downstream task.
