@@ -10,6 +10,12 @@ import (
 
 // seedDraftPROpenConvoy creates a minimal convoy in DraftPROpen state with one
 // ConvoyAskBranch row pointing at draft PR #42 on repo "api".
+//
+// Also pins adversarial_pairing_rate=0 so ConvoyReview / Council / Medic tests
+// that assert precise Claude CallCount don't get a stochastic second invocation
+// from the production-default 0.1 sampling rate (slice ε3, fix-loop iter 2).
+// Tests that DO want adversarial sampling must override the SystemConfig row
+// after this helper runs.
 func seedDraftPROpenConvoy(t *testing.T, db *sql.DB) (convoyID int) {
 	t.Helper()
 	store.AddRepo(db, "api", "/tmp/api", "")
@@ -20,6 +26,10 @@ func seedDraftPROpenConvoy(t *testing.T, db *sql.DB) (convoyID int) {
 	// Mark the ask-branch as having an Open draft PR at #42.
 	db.Exec(`UPDATE ConvoyAskBranches SET draft_pr_number = 42, draft_pr_state = 'Open', draft_pr_url = ? WHERE convoy_id = ? AND repo = ?`,
 		"https://github.com/acme/api/pull/42", cid, "api")
+	// Pin adversarial sampling off (explicit empty value, not absent) so the
+	// helper at adversarial_hotpath.go reads "operator authored silence"
+	// rather than "key absent → 0.1 default ramp".
+	db.Exec(`INSERT OR REPLACE INTO SystemConfig (key, value) VALUES ('adversarial_pairing_rate', '0')`)
 	return cid
 }
 
