@@ -308,6 +308,86 @@ func TestApply_StickyAcrossRetries(t *testing.T) {
 	}
 }
 
+// TestApply_OrthogonalOverlap_NoDoubleEnrollment — three running
+// experiments all match (captain, task). A and B both declare factor
+// "prompt"; C declares "rules". The orthogonal-overlap scheduler
+// must enroll the unit in {A, C} only — A wins over B by id-order
+// tie-break, A and C are orthogonal (disjoint factor sets), B is
+// skipped because it conflicts with the already-selected A on
+// "prompt" (paired-runs.md § Orthogonal dimension invariant).
+func TestApply_OrthogonalOverlap_NoDoubleEnrollment(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+
+	// A: factors={prompt}, declares a unique prompt rewrite so we can
+	// confirm A's treatment landed on the descriptor.
+	expA := seedFactorialExperiment(t, db, "captain", "task", `[{"name":"prompt","levels":["A","B"]}]`)
+	seedTreatment(t, db, expA, "treatment", "captain/factorA@HEAD", 1.0)
+
+	// B: factors={prompt} — conflicts with A on the "prompt" factor.
+	// MUST be skipped.
+	expB := seedFactorialExperiment(t, db, "captain", "task", `[{"name":"prompt","levels":["A","B"]}]`)
+	seedTreatment(t, db, expB, "treatment", "captain/factorB@HEAD", 1.0)
+
+	// C: factors={rules} — orthogonal to both A and B.
+	expC := seedFactorialExperiment(t, db, "captain", "task", `[{"name":"rules","levels":["on","off"]}]`)
+	seedTreatment(t, db, expC, "treatment", "captain/rulesC@HEAD", 1.0)
+
+	in := CallDescriptor{
+		AgentName:       "captain",
+		NaturalUnitKind: "task",
+		NaturalUnitID:   555,
+		PromptTemplate:  "captain/default@HEAD",
+	}
+	_, assignments, err := Apply(ctx, db, in)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if len(assignments) != 2 {
+		t.Fatalf("expected exactly 2 assignments (A + C), got %d: %+v", len(assignments), assignments)
+	}
+
+	gotIDs := map[int]bool{}
+	for _, a := range assignments {
+		gotIDs[a.ExperimentID] = true
+	}
+	if !gotIDs[expA] {
+		t.Errorf("expected A (id=%d) to be enrolled — lowest id wins tie-break with B", expA)
+	}
+	if !gotIDs[expC] {
+		t.Errorf("expected C (id=%d) to be enrolled — orthogonal to A on factors", expC)
+	}
+	if gotIDs[expB] {
+		t.Errorf("B (id=%d) should have been skipped — conflicts with A on factor 'prompt'", expB)
+	}
+
+	// Two ExperimentRuns rows for this unit — one per selected
+	// experiment. B never recorded a run.
+	var runs int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM ExperimentRuns
+		WHERE natural_unit_kind = ? AND natural_unit_id = ?
+	`, "task", 555).Scan(&runs); err != nil {
+		t.Fatalf("scan ExperimentRuns: %v", err)
+	}
+	if runs != 2 {
+		t.Errorf("ExperimentRuns rows for unit: got %d, want 2 (A + C, NOT B)", runs)
+	}
+
+	// And specifically: zero rows for B.
+	var bRuns int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM ExperimentRuns
+		WHERE experiment_id = ? AND natural_unit_id = ?
+	`, expB, 555).Scan(&bRuns); err != nil {
+		t.Fatalf("scan B runs: %v", err)
+	}
+	if bRuns != 0 {
+		t.Errorf("ExperimentRuns rows for skipped experiment B: got %d, want 0", bRuns)
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // helpers
 // ──────────────────────────────────────────────────────────────────────────
@@ -341,6 +421,24 @@ func seedRunningExperiment(t *testing.T, db *sql.DB, agent, unit string) int {
 	`, "exp-"+agent+"-"+unit, agent, unit)
 	if err != nil {
 		t.Fatalf("seed experiment: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return int(id)
+}
+
+// seedFactorialExperiment seeds a running factorial experiment with
+// the given factors_json payload. Used by orthogonal-overlap tests
+// where the conflict signal is the factor-name set, not the prompt
+// template.
+func seedFactorialExperiment(t *testing.T, db *sql.DB, agent, unit, factorsJSON string) int {
+	t.Helper()
+	res, err := db.Exec(`
+		INSERT INTO Experiments
+			(name, hypothesis_text, kind, factors_json, subject_agent, assignment_unit, status, created_by)
+		VALUES (?, 'test hypothesis', 'factorial', ?, ?, ?, 'running', 'test')
+	`, "factorial-"+agent+"-"+unit+"-"+factorsJSON, factorsJSON, agent, unit)
+	if err != nil {
+		t.Fatalf("seed factorial experiment: %v", err)
 	}
 	id, _ := res.LastInsertId()
 	return int(id)

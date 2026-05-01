@@ -42,10 +42,18 @@ func activeApplyMode(db *sql.DB) string {
 //     if the caller already inherited it from the natural unit's
 //     parent).
 //  2. If in holdout: short-circuit, no experiment enrollment.
-//  3. Otherwise: enrol the unit in every running experiment whose
-//     subject_agent + assignment_unit matches; rewrite the
-//     CallDescriptor's prompt template / model per the assigned
-//     TreatmentSpec.
+//  3. Otherwise: load every running experiment whose subject_agent +
+//     assignment_unit matches, hand the candidate set to the
+//     orthogonal-overlap scheduler, and enroll the unit in the
+//     maximal non-conflicting subset (paired-runs.md § Orthogonal
+//     dimension invariant). Rewrite the CallDescriptor's prompt
+//     template / model per each assigned TreatmentSpec.
+//
+// D3 Phase 4: the Phase 2 "enroll in every match" loop has been
+// replaced by SelectOrthogonalEnrollments. Single-experiment
+// behaviour is preserved (one candidate → one selection → identical
+// effect to the old path); the scheduler only changes outcomes when
+// two or more candidates touch overlapping dimensions.
 //
 // Returns the (possibly rewritten) descriptor and the list of
 // assignment records to journal.
@@ -63,13 +71,17 @@ func applyLive(ctx context.Context, db *sql.DB, call CallDescriptor) (CallDescri
 		return call, nil
 	}
 
-	experiments, err := loadActiveExperiments(ctx, db, call.AgentName, call.NaturalUnitKind)
-	if err != nil || len(experiments) == 0 {
+	candidates, err := loadExperimentDescriptors(ctx, db, call.AgentName, call.NaturalUnitKind)
+	if err != nil || len(candidates) == 0 {
+		return call, nil
+	}
+	selected := SelectOrthogonalEnrollments(call.NaturalUnitKind, call.NaturalUnitID, candidates)
+	if len(selected) == 0 {
 		return call, nil
 	}
 
 	var assignments []RunAssignment
-	for _, exp := range experiments {
+	for _, exp := range selected {
 		treats, err := loadExperimentTreatments(ctx, db, exp.ID)
 		if err != nil || len(treats) == 0 {
 			continue
@@ -84,40 +96,6 @@ func applyLive(ctx context.Context, db *sql.DB, call CallDescriptor) (CallDescri
 		recordExperimentRun(ctx, db, exp.ID, assigned.ID, call, now)
 	}
 	return call, assignments
-}
-
-// experimentRow is the in-memory shape of a row from Experiments,
-// scoped to the columns Apply consumes.
-type experimentRow struct {
-	ID             int
-	Name           string
-	SubjectAgent   string
-	AssignmentUnit string
-	Status         string
-}
-
-func loadActiveExperiments(ctx context.Context, db *sql.DB, agent, unitKind string) ([]experimentRow, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, name, subject_agent, assignment_unit, status
-		FROM Experiments
-		WHERE status = 'running'
-		  AND subject_agent = ?
-		  AND assignment_unit = ?
-		ORDER BY id
-	`, agent, unitKind)
-	if err != nil {
-		return nil, fmt.Errorf("loadActiveExperiments query: %w", err)
-	}
-	defer rows.Close()
-	var out []experimentRow
-	for rows.Next() {
-		var e experimentRow
-		if err := rows.Scan(&e.ID, &e.Name, &e.SubjectAgent, &e.AssignmentUnit, &e.Status); err != nil {
-			return nil, fmt.Errorf("loadActiveExperiments scan: %w", err)
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
 }
 
 // treatmentRow joins ExperimentTreatments + TreatmentSpecs into a
