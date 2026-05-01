@@ -22,8 +22,6 @@
 package golden_set
 
 import (
-	"context"
-	"database/sql"
 	"errors"
 )
 
@@ -89,43 +87,7 @@ type AccuracyTrend struct {
 // set on its first evaluation cycle.
 var ErrNoFixtures = errors.New("golden_set: no non-retired fixtures for agent")
 
-// CurateFromCleanShipping scans recent convoys for the given agent and
-// auto-curates fixtures from those that shipped clean (no rework, no
-// escalation, no fix-task spawn cycles). Returns the count of fixtures
-// inserted. Idempotent on (agent, input) — re-running won't duplicate.
-//
-// Sub-agent C fills in the concrete query + insert logic.
-func CurateFromCleanShipping(_ context.Context, _ *sql.DB, _ string) (int, error) {
-	// Sub-agent C overwrites this with the real curation logic.
-	return 0, nil
-}
-
-// AddManualFixture inserts an operator-curated fixture. operator is the
-// authoring email; written to GoldenSetFixtures.curated_by as
-// `operator:<email>`.
-//
-// Sub-agent C fills in the concrete insert + validation logic.
-func AddManualFixture(_ context.Context, _ *sql.DB, _ string, _ string, _ string, _ string) (int64, error) {
-	// Sub-agent C overwrites this with the real insert logic.
-	return 0, nil
-}
-
-// RunEvaluationCycle runs the agent's current prompt against every
-// non-retired fixture for that agent, scores each output against the
-// fixture's expected output (0.0–1.0 accuracy), and persists the row to
-// GoldenSetEvaluations. Returns the count of evaluations performed.
-//
-// Sub-agent C fills in the concrete LLM-call + scoring logic.
-func RunEvaluationCycle(_ context.Context, _ *sql.DB, _ string, _ string) (int, error) {
-	// Sub-agent C overwrites this with the real evaluation logic.
-	return 0, ErrNoFixtures
-}
-
-// ReportAccuracyTrend computes the rolling-week mean accuracy for the
-// agent, optionally filtering to evaluations after sinceDate (RFC 3339).
-// Sub-agent C wires the alert path when RegressionFromPriorWeek crosses
-// the operator-configured threshold.
-func ReportAccuracyTrend(_ context.Context, _ *sql.DB, _ string, _ string) ([]AccuracyTrend, error) {
-	// Sub-agent C overwrites this with the real aggregation.
-	return nil, nil
-}
+// Production implementations of CurateFromCleanShipping,
+// AddManualFixture, RunEvaluationCycle, and ReportAccuracyTrend live
+// in curator.go and evaluator.go. The skeleton stubs that previously
+// lived here have been replaced.

@@ -2,7 +2,6 @@ package golden_set
 
 import (
 	"context"
-	"errors"
 	"testing"
 )
 
@@ -60,39 +59,20 @@ func TestSourceConstants(t *testing.T) {
 	}
 }
 
-func TestCurateFromCleanShipping_Stub_ReturnsZero(t *testing.T) {
-	n, err := CurateFromCleanShipping(context.Background(), nil, "council")
-	if err != nil {
-		t.Fatalf("CurateFromCleanShipping stub: want nil error, got %v", err)
+// The skeleton stubs that previously lived here have been replaced
+// by production implementations in curator.go and evaluator.go. These
+// tests now live in curator_test.go and evaluator_test.go.
+//
+// We keep one fail-closed assertion to prove the production functions
+// validate inputs (no silent zero-returns on nil DB).
+func TestProduction_FailsClosedOnNilDB(t *testing.T) {
+	if _, err := CurateFromCleanShipping(context.Background(), nil, "council"); err == nil {
+		t.Errorf("CurateFromCleanShipping nil db: want error")
 	}
-	if n != 0 {
-		t.Fatalf("CurateFromCleanShipping stub: want 0 inserts, got %d", n)
+	if _, err := AddManualFixture(context.Background(), nil, "council", "x", "y", "op"); err == nil {
+		t.Errorf("AddManualFixture nil db: want error")
 	}
-}
-
-func TestAddManualFixture_Stub_ReturnsZero(t *testing.T) {
-	id, err := AddManualFixture(context.Background(), nil, "council", "input", "expected", "operator@example.com")
-	if err != nil {
-		t.Fatalf("AddManualFixture stub: want nil error, got %v", err)
-	}
-	if id != 0 {
-		t.Fatalf("AddManualFixture stub: want 0 id, got %d", id)
-	}
-}
-
-func TestRunEvaluationCycle_Stub_ReturnsErrNoFixtures(t *testing.T) {
-	_, err := RunEvaluationCycle(context.Background(), nil, "council", "council-v3")
-	if !errors.Is(err, ErrNoFixtures) {
-		t.Fatalf("RunEvaluationCycle stub: want ErrNoFixtures, got %v", err)
-	}
-}
-
-func TestReportAccuracyTrend_Stub_ReturnsEmpty(t *testing.T) {
-	rows, err := ReportAccuracyTrend(context.Background(), nil, "council", "")
-	if err != nil {
-		t.Fatalf("ReportAccuracyTrend stub: want nil error, got %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("ReportAccuracyTrend stub: want 0 rows, got %d", len(rows))
+	if _, err := ReportAccuracyTrend(context.Background(), nil, "council", ""); err == nil {
+		t.Errorf("ReportAccuracyTrend nil db: want error")
 	}
 }
