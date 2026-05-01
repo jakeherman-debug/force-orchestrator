@@ -85,6 +85,10 @@ var dogCooldowns = map[string]time.Duration{
 	// 7-day cadence; re-running mid-week via the dashboard "Refresh
 	// now" trigger is safe (the deterministic synth is cheap).
 	"learning-panel-render": 7 * 24 * time.Hour,
+	// D3 P6B.9 — daily transcript archival sweep. Bounded
+	// (maxArchivesPerRun=1000); rows >30d OR for closed convoys >7d
+	// get summarised + offloaded to ~/.force/transcripts/.
+	"transcript-archive": 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -110,6 +114,8 @@ var dogOrder = []string{
 	"disagreement-tracker",
 	// D3 P6B.12 — Sunday-night fleet learning panel re-render.
 	"learning-panel-render",
+	// D3 P6B.9 — daily transcript archival.
+	"transcript-archive",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -261,6 +267,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogDisagreementTracker(ctx, db, logger)
 	case "learning-panel-render":
 		return dogLearningPanelRender(ctx, db, logger)
+	case "transcript-archive":
+		return dogTranscriptArchive(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
