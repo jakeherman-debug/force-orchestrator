@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -158,7 +159,7 @@ func TestRunCommanderTask_NoRepos(t *testing.T) {
 
 	withStubCLIRunner(t, "", nil)
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -176,7 +177,7 @@ func TestRunCommanderTask_CLIError(t *testing.T) {
 
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI failed: exit 1"))
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -198,7 +199,7 @@ func TestRunCommanderTask_CLIError_MaxRetries(t *testing.T) {
 
 	withStubCLIRunner(t, "", fmt.Errorf("claude CLI failed: exit 1"))
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -216,7 +217,7 @@ func TestRunCommanderTask_JSONError(t *testing.T) {
 
 	withStubCLIRunner(t, "not valid json at all", nil)
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Pending" {
@@ -234,7 +235,7 @@ func TestRunCommanderTask_EmptyTaskList(t *testing.T) {
 
 	withStubCLIRunner(t, "[]", nil)
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -254,7 +255,7 @@ func TestRunCommanderTask_UnknownRepo(t *testing.T) {
 	tasks := `[{"id":1,"repo":"ghost-repo","task":"do it","blocked_by":[]}]`
 	withStubCLIRunner(t, tasks, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -274,7 +275,7 @@ func TestRunCommanderTask_CyclicDeps(t *testing.T) {
 	tasks := `[{"id":1,"repo":"myrepo","task":"t1","blocked_by":[2]},{"id":2,"repo":"myrepo","task":"t2","blocked_by":[1]}]`
 	withStubCLIRunner(t, tasks, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "Failed" {
@@ -294,7 +295,7 @@ func TestRunCommanderTask_Success(t *testing.T) {
 		`{"id":2,"repo":"myrepo","task":"Add login form","blocked_by":[1]}]`
 	withStubCLIRunner(t, tasks, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	b, _ = store.GetBounty(db, id)
 	if b.Status != "AwaitingChancellorReview" {
@@ -457,7 +458,7 @@ func TestRunCommanderTask_PlanOnly(t *testing.T) {
 	tasks := `[{"id":1,"repo":"myrepo","task":"plan task","blocked_by":[]}]`
 	withStubCLIRunner(t, tasks, nil)
 	logger := log.New(io.Discard, "", 0)
-	runCommanderTask(db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
+	runCommanderTask(context.Background(), db, "Commander-Cody", b, mustLoadCapProfile(t, "commander"), logger)
 
 	// Commander should have stored a ProposedConvoy for Chancellor to create subtasks
 	var planJSON string

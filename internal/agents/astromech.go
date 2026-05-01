@@ -278,6 +278,7 @@ func buildNotesBlock(db *sql.DB, taskID int, logger interface{ Printf(string, ..
 // and inbox mail. The directive is excluded — callers add it to the system prompt.
 // Used by both the daemon loop (runAstromechTask) and the foreground runner (RunTaskForeground).
 func buildAstromechContext(
+	ctx context.Context,
 	db *sql.DB,
 	bounty *store.Bounty,
 	agentName string,
@@ -318,7 +319,7 @@ func buildAstromechContext(
 	// us recall; the re-ranker gives us precision. If the re-ranker is
 	// disabled or errors, we fall through to the FTS order trimmed to 5.
 	candidates := store.GetFleetMemories(db, bounty.TargetRepo, bounty.Payload, 20)
-	if memories := RerankFleetMemories(db, bounty.Payload, candidates, 5, librarianProfile, logger); len(memories) > 0 {
+	if memories := RerankFleetMemories(ctx, db, bounty.Payload, candidates, 5, librarianProfile, logger); len(memories) > 0 {
 		var successes, failures []string
 		for _, m := range memories {
 			injectedMemoryIDs = append(injectedMemoryIDs, m.ID)
@@ -514,7 +515,7 @@ func runAstromechTask(ctx context.Context, db *sql.DB, name string, bounty *stor
 	// ── Build prompt ─────────────────────────────────────────────────────
 
 	goalContext, fleetMemoryContext, checkpointContext, seanceContext, inboxContext, injectedMemoryIDs :=
-		buildAstromechContext(db, bounty, name, librarianProfile, logger)
+		buildAstromechContext(ctx, db, bounty, name, librarianProfile, logger)
 
 	directive := LoadDirective("astromech", bounty.TargetRepo)
 	directiveSection := ""
@@ -658,7 +659,11 @@ Do not re-do work that is already correctly committed.`
 		bashGuardEnv = shimEnv
 	}
 
-	rawOut, err := claude.RunCLIStreamingContext(claudeCtx, fullPrompt,
+	rawOut, err := claude.CallWithTranscriptStreaming(claudeCtx, claude.CallDescriptor{
+		Agent:         "astromech",
+		TaskID:        int(bounty.ID),
+		PromptVersion: "astromech-v1",
+	}, fullPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
 		worktreeDir, maxTurnsInt, sessionTimeout, taskWriter, bashGuardEnv...)
 
@@ -1145,7 +1150,7 @@ func RunTaskForeground(ctx context.Context, db *sql.DB, taskID int) {
 	fgLogger := log.New(os.Stderr, "[force-run] ", log.LstdFlags)
 
 	// Build the same rich context as the daemon loop; checkpoint is intentionally skipped (_).
-	goalCtx, fleetMemCtx, _, seanceCtx, inboxCtx, injectedMemoryIDs := buildAstromechContext(db, b, fgAgent, librarianProfile, fgLogger)
+	goalCtx, fleetMemCtx, _, seanceCtx, inboxCtx, injectedMemoryIDs := buildAstromechContext(ctx, db, b, fgAgent, librarianProfile, fgLogger)
 
 	directive := LoadDirective("astromech", b.TargetRepo)
 	directiveSection := ""

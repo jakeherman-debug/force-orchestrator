@@ -144,7 +144,7 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, bo
 		CheckConvoyCompletions(db, logger)
 		store.RecoverStaleConvoys(db)
 		cleanOrphanedBranches(ctx, db, logger)
-		detectStalledTasks(db, bootProfile, logger)
+		detectStalledTasks(ctx, db, bootProfile, logger)
 		backfillMissingAskBranches(db, logger)
 
 		// Prune bootLastCalled entries for tasks that are no longer in a locked state
@@ -239,7 +239,7 @@ func classifyPendingTasks(db *sql.DB, profile *capabilities.Profile, logger inte
 
 // detectStalledTasks finds tasks that are Locked/UnderReview for too long with
 // no new commits in their worktree.
-func detectStalledTasks(db *sql.DB, bootProfile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
+func detectStalledTasks(ctx context.Context, db *sql.DB, bootProfile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	rows, err := db.Query(`
 		SELECT id, owner, target_repo, branch_name, locked_at,
 		       (julianday('now') - julianday(locked_at)) * 1440 AS locked_minutes
@@ -310,7 +310,7 @@ func detectStalledTasks(db *sql.DB, bootProfile *capabilities.Profile, logger in
 			bootLastCalled[t.id] = time.Now()
 			var errorLog string
 			db.QueryRow(`SELECT IFNULL(error_log,'') FROM BountyBoard WHERE id = ?`, t.id).Scan(&errorLog)
-			verdict := BootTriage(db, t.id, t.owner, t.repo, t.lockedMinutes, errorLog, bootProfile)
+			verdict := BootTriage(ctx, db, t.id, t.owner, t.repo, t.lockedMinutes, errorLog, bootProfile)
 			logger.Printf("Task %d: Boot triage → %s (%s)", t.id, verdict.Decision, verdict.Reason)
 
 			switch verdict.Decision {

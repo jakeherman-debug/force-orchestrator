@@ -207,7 +207,14 @@ func classifyPRReviewComment(
 	}
 	// D3 P1: append every active FleetRules row scoped to 'pr-review-triage'.
 	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "pr-review-triage", prReviewSystemPrompt, nil)
-	raw, err := claude.AskClaudeCLI(systemPrompt, userPrompt,
+	// CallDescriptor.TaskID intentionally 0: the comment id is not a
+	// BountyBoard.task_id, so leave it blank (descriptor convention:
+	// 0 = "task-less" call). Comment id is captured in the user
+	// prompt body so Drill / forensic queries can still trace it.
+	raw, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "pr-review-triage",
+		PromptVersion: "pr-review-triage-v1",
+	}, systemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 	if err != nil {
 		return prReviewDecision{}, err

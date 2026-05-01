@@ -192,7 +192,11 @@ func runMedicCITriage(ctx context.Context, db *sql.DB, agentName string, bounty 
 	if mcpErr != nil {
 		logger.Printf("CIFailureTriage #%d: MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
 	}
-	rawOut, claudeErr := claude.AskClaudeCLI(medicCISystemPrompt, userPrompt,
+	rawOut, claudeErr := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "medic-ci",
+		TaskID:        int(bounty.ID),
+		PromptVersion: "medic-ci-v1",
+	}, medicCISystemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if claudeErr != nil {
 		logger.Printf("CIFailureTriage #%d: Claude failed (%v) — escalating parent task", bounty.ID, claudeErr)

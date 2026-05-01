@@ -117,7 +117,11 @@ func runInvestigatorTask(ctx context.Context, db *sql.DB, name string, bounty *s
 	if mcpErr != nil {
 		logger.Printf("Task %d: investigator MCP config write failed (%v) — proceeding without --mcp-config", bounty.ID, mcpErr)
 	}
-	rawOut, err := claude.RunCLI(ctx, fullPrompt,
+	rawOut, err := claude.CallWithTranscriptOneShot(ctx, claude.CallDescriptor{
+		Agent:         "investigator",
+		TaskID:        int(bounty.ID),
+		PromptVersion: "investigator-v1",
+	}, fullPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig,
 		runDir, 30, investigatorTimeout)
 	outputStr := strings.TrimSpace(rawOut)

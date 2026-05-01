@@ -395,7 +395,11 @@ func runFindPRTemplate(ctx context.Context, db *sql.DB, bounty *store.Bounty, pr
 		// *log.Logger; pass nil and rely on AppendFleetRulesToPrompt's
 		// fail-open semantics on DB errors.
 		systemPrompt = AppendFleetRulesToPrompt(ctx, db, "pilot", systemPrompt, nil)
-		return claude.AskClaudeCLI(systemPrompt, userPrompt,
+		return claude.CallWithTranscript(ctx, claude.CallDescriptor{
+			Agent:         "pilot",
+			TaskID:        int(bounty.ID),
+			PromptVersion: "pilot-find-pr-template-v1",
+		}, systemPrompt, userPrompt,
 			profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, maxTurns)
 	}
 	path, err := FindPRTemplatePathLLM(payload.LocalPath, runCLI)

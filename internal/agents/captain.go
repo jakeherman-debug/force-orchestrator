@@ -436,7 +436,11 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 	if mcpErr != nil {
 		logger.Printf("Task %d: captain MCP config write failed (%v) — proceeding without --mcp-config", b.ID, mcpErr)
 	}
-	response, err := claude.AskClaudeCLIContext(callCtx, systemPrompt, reviewPrompt,
+	response, err := claude.CallWithTranscript(callCtx, claude.CallDescriptor{
+		Agent:         "captain",
+		TaskID:        int(b.ID),
+		PromptVersion: "captain-v1",
+	}, systemPrompt, reviewPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 5)
 	if err != nil {
 		msg := fmt.Sprintf("Claude CLI Err: %v", err)

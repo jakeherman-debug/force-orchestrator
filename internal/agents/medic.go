@@ -197,7 +197,11 @@ func runMedicTask(ctx context.Context, db *sql.DB, agentName string, bounty *sto
 	}
 	// D3 P1: append every active FleetRules row scoped to 'medic'.
 	medicSystemPromptWithRules := AppendFleetRulesToPrompt(ctx, db, "medic", medicSystemPrompt, logger)
-	rawOut, claudeErr := claude.AskClaudeCLI(medicSystemPromptWithRules, userPrompt,
+	rawOut, claudeErr := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "medic",
+		TaskID:        int(bounty.ID),
+		PromptVersion: "medic-v1",
+	}, medicSystemPromptWithRules, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if claudeErr != nil {
 		// Claude CLI flakes are infra-class failures, not task-analysis

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -44,7 +45,7 @@ Decision guide:
 // D1 T0-1: profile is the boot capability profile loaded by the caller
 // (Inquisitor in production). A nil profile is rejected via WARN so a
 // missing profile cannot silently grant the default Claude tool catalog.
-func BootTriage(db *sql.DB, taskID int, owner, repo string, lockedMinutes float64, errorLog string, profile *capabilities.Profile) BootVerdict {
+func BootTriage(ctx context.Context, db *sql.DB, taskID int, owner, repo string, lockedMinutes float64, errorLog string, profile *capabilities.Profile) BootVerdict {
 	if profile == nil {
 		return BootVerdict{Decision: BootWarn, Reason: "boot triage skipped: no capability profile supplied"}
 	}
@@ -54,7 +55,11 @@ func BootTriage(db *sql.DB, taskID int, owner, repo string, lockedMinutes float6
 	)
 
 	mcpConfig, _ := profile.MCPConfigArg()
-	resp, err := claude.AskClaudeCLI(bootSystemPrompt, summary,
+	resp, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "boot",
+		TaskID:        taskID,
+		PromptVersion: "boot-triage-v1",
+	}, bootSystemPrompt, summary,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 3)
 	if err != nil {
 		return BootVerdict{Decision: BootWarn, Reason: fmt.Sprintf("boot triage unavailable: %v", err)}

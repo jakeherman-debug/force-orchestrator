@@ -121,7 +121,11 @@ func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty,
 	// D3 P1 follow-up B: ctx threads from SpawnChancellor → runChancellorReview
 	// so daemon shutdown / e-stop cancels the in-flight LLM call.
 	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "chancellor", chancellorSystemPrompt, nil)
-	response, err := claude.AskClaudeCLIContext(ctx, systemPrompt, userPrompt,
+	response, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "chancellor",
+		TaskID:        int(feature.ID),
+		PromptVersion: "chancellor-v1",
+	}, systemPrompt, userPrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on Claude CLI failure.
@@ -640,7 +644,11 @@ Respond with ONLY the raw JSON array — no explanation, no markdown, no code fe
 	// D3 P1 follow-up B: ctx threads from runChancellorReview → mergeProposals
 	// → synthesizeMergedPlan so daemon shutdown cancels the merge LLM call.
 	systemPrompt := AppendFleetRulesToPrompt(ctx, db, "chancellor", chancellorSystemPrompt, nil)
-	response, err := claude.AskClaudeCLIContext(ctx, systemPrompt, mergePrompt,
+	response, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "chancellor-merge",
+		TaskID:        int(featureA.ID),
+		PromptVersion: "chancellor-merge-v1",
+	}, systemPrompt, mergePrompt,
 		profile.AllowedToolsArg(), profile.DisallowedToolsArg(), mcpConfig, 1)
 	if err != nil {
 		logger.Printf("Merge synthesis Claude call failed: %v", err)

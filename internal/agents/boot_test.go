@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -15,7 +16,7 @@ func TestBootTriage_Reset(t *testing.T) {
 
 	withStubCLIRunner(t, `{"decision":"RESET","reason":"agent is stuck in a loop"}`, nil)
 
-	verdict := BootTriage(db, 1, "R2-D2", "api", 45, "", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 1, "R2-D2", "api", 45, "", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootReset {
 		t.Errorf("expected BootReset, got %q", verdict.Decision)
 	}
@@ -30,7 +31,7 @@ func TestBootTriage_Escalate(t *testing.T) {
 
 	withStubCLIRunner(t, `{"decision":"ESCALATE","reason":"auth failure, needs human"}`, nil)
 
-	verdict := BootTriage(db, 2, "BB-8", "frontend", 120, "auth error: 401", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 2, "BB-8", "frontend", 120, "auth error: 401", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootEscalate {
 		t.Errorf("expected BootEscalate, got %q", verdict.Decision)
 	}
@@ -42,7 +43,7 @@ func TestBootTriage_Warn(t *testing.T) {
 
 	withStubCLIRunner(t, `{"decision":"WARN","reason":"task appears stalled but may recover"}`, nil)
 
-	verdict := BootTriage(db, 3, "C-3PO", "backend", 20, "", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 3, "C-3PO", "backend", 20, "", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootWarn {
 		t.Errorf("expected BootWarn, got %q", verdict.Decision)
 	}
@@ -54,7 +55,7 @@ func TestBootTriage_Ignore(t *testing.T) {
 
 	withStubCLIRunner(t, `{"decision":"IGNORE","reason":"agent is making steady progress"}`, nil)
 
-	verdict := BootTriage(db, 4, "R2-D2", "api", 10, "", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 4, "R2-D2", "api", 10, "", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootIgnore {
 		t.Errorf("expected BootIgnore, got %q", verdict.Decision)
 	}
@@ -66,7 +67,7 @@ func TestBootTriage_CLIError_DefaultsToWarn(t *testing.T) {
 
 	withStubCLIRunner(t, "", errors.New("claude CLI not available"))
 
-	verdict := BootTriage(db, 5, "R2-D2", "api", 30, "", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 5, "R2-D2", "api", 30, "", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootWarn {
 		t.Errorf("expected BootWarn on CLI error, got %q", verdict.Decision)
 	}
@@ -81,7 +82,7 @@ func TestBootTriage_MalformedJSON_DefaultsToWarn(t *testing.T) {
 
 	withStubCLIRunner(t, `this is not json at all`, nil)
 
-	verdict := BootTriage(db, 6, "R2-D2", "api", 30, "", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 6, "R2-D2", "api", 30, "", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootWarn {
 		t.Errorf("expected BootWarn on malformed JSON, got %q", verdict.Decision)
 	}
@@ -93,7 +94,7 @@ func TestBootTriage_UnknownDecision_DefaultsToWarn(t *testing.T) {
 
 	withStubCLIRunner(t, `{"decision":"DESTROY","reason":"chaos"}`, nil)
 
-	verdict := BootTriage(db, 7, "R2-D2", "api", 30, "", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 7, "R2-D2", "api", 30, "", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootWarn {
 		t.Errorf("expected BootWarn for unknown decision, got %q", verdict.Decision)
 	}
@@ -106,7 +107,7 @@ func TestBootTriage_JSONInMarkdownFence(t *testing.T) {
 	// Claude sometimes wraps responses in markdown fences
 	withStubCLIRunner(t, "```json\n{\"decision\":\"RESET\",\"reason\":\"stuck\"}\n```", nil)
 
-	verdict := BootTriage(db, 8, "R2-D2", "api", 60, "repeated error", mustLoadCapProfile(t, "boot"))
+	verdict := BootTriage(context.Background(), db, 8, "R2-D2", "api", 60, "repeated error", mustLoadCapProfile(t, "boot"))
 	if verdict.Decision != BootReset {
 		t.Errorf("expected BootReset from fenced JSON, got %q", verdict.Decision)
 	}
