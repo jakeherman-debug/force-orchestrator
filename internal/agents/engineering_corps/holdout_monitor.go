@@ -10,19 +10,22 @@ import (
 	"force-orchestrator/internal/store"
 )
 
-// HoldoutMonitor — Phase 3 minimal scope.
+// HoldoutMonitor — bounty-claim plumbing for the GlobalHoldouts heartbeat.
 //
-// Per docs/paired-runs.md § Global Holdout, the full lifecycle and
-// model-deprecation watch lives in P5/P6. The Phase 3 deliverable here
-// is the bounty-claim plumbing: the handler reads the GlobalHoldouts
-// table to confirm a holdout exists (or doesn't), logs a "no model
-// deprecation detected" debug line, and completes the bounty cleanly.
+// This handler emits a debug heartbeat against the GlobalHoldouts
+// table — confirming a holdout exists (or doesn't), logging the
+// active-count, and completing the bounty cleanly. SQL-only: no LLM
+// call needed.
 //
-// SQL-only: no LLM call needed. The full model-availability probe
-// (issuing minimal-cost availability calls per model identifier in
-// active experiments / holdouts; recording ModelAvailability rows;
-// emitting [HOLDOUT AT RISK] mail) is deferred to the
-// model-availability-watch dog landing in Phase 5/6.
+// The model-availability probe (issuing minimal-cost availability
+// calls per model identifier in active experiments / holdouts;
+// recording ModelAvailability rows) lives in the
+// `model-availability-watch` dog (D3 fix-loop-1 / slice δ —
+// internal/agents/model_availability_dog.go). The two paths are
+// deliberately split: this handler is per-claim heartbeat plumbing;
+// the dog is per-fleet ledger maintenance. Conflating them muddies
+// which row-set is authoritative when a [HOLDOUT AT RISK] signal
+// fires.
 //
 // No operator routing: this handler does not produce ratifiable
 // output — it only emits a debug heartbeat. Any actionable signal
@@ -50,7 +53,7 @@ func handleHoldoutMonitor(
 		return fmt.Errorf("HoldoutMonitor: count active holdouts: %w", err)
 	}
 
-	logger.Printf("[%s] HoldoutMonitor #%d: %d active holdout(s) — no model deprecation detected (full availability watch deferred to Phase 5/6)",
+	logger.Printf("[%s] HoldoutMonitor #%d: %d active holdout(s) — heartbeat ok (probe ledger maintained by model-availability-watch dog)",
 		agentName, bounty.ID, activeCount)
 
 	// Mark the bounty Completed — the heartbeat ran successfully.

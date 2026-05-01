@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/adversarial"
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
@@ -309,6 +310,20 @@ The "approved" field is REQUIRED. Do not omit it; a missing field will be treate
 	// Fix #8.5 — Approved is *bool; nil was rejected above, safe to deref.
 	approved := *ruling.Approved
 	telemetry.EmitEvent(telemetry.EventCouncilRuling(sessionID, agentName, b.ID, approved, ruling.Feedback))
+
+	// D3 fix-loop-1 (slice δ) — adversarial pair sampling.
+	// Exit criterion 10: surface Council-vs-critic disagreements
+	// against a sampled fraction of decisions. Non-blocking; the
+	// Council flow continues immediately while the pair runs in the
+	// background and (on disagreement) surfaces a Fleet_Mail row.
+	primaryOutcome := fmt.Sprintf(`{"approved":%t,"feedback":%q}`, approved, ruling.Feedback)
+	WrapHotPathAdversarialPair(ctx, db, adversarial.PrimaryDecision{
+		DecisionID:    int64(b.ID),
+		Agent:         adversarial.AgentCouncil,
+		Outcome:       primaryOutcome,
+		Reasoning:     ruling.Feedback,
+		PromptVersion: "council-v1",
+	}, logger)
 
 	if approved {
 		// Split on pr_flow_enabled: if the repo is on the PR flow, open a sub-PR
