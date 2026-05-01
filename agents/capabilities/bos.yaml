@@ -1,0 +1,23 @@
+agent: bos
+description: |
+  Bureau of Standards — commit-time CLAUDE.md invariant enforcement
+  via Go AST analysis (D4 Phase 1). BoS runs every registered rule
+  against the post-commit diff and records Findings to the
+  SecurityFindings table. The reviewer is pure Go (no LLM call) so
+  the capability profile grants a minimal tool surface — only
+  enough to (a) read the source files in question, (b) shell to
+  `git` for diff inspection, (c) emit telemetry.
+builtin_tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+mcp_servers: []
+notes: |
+  BoS does NOT call `claude` — every rule is pure Go AST analysis.
+  Read/Grep/Glob/Bash are granted to support a future `force bos
+  review --file <path>` foreground command and the in-process
+  reviewer's git invocations. No write tools (Edit/Write) — BoS is
+  review-only by construction.
+  Migration baseline: not applicable (D4 Phase 1 is the first
+  introduction of BoS).

@@ -40,6 +40,7 @@ var InfrastructureTaskTypes = []string{
 	"PRReviewTriage",
 	"ConvoyReview",
 	"WorktreeReset",
+	"BoSReview", // D4 Phase 1 — Bureau of Standards commit-time review
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {
@@ -594,6 +595,35 @@ func QueueMedicReview(db *sql.DB, b *Bounty, failureType, errorDetail string) in
 		b.ID, b.TargetRepo, payload, b.ConvoyID, b.Priority)
 	id, _ := res.LastInsertId()
 	return int(id)
+}
+
+// QueueBoSReview spawns a BoSReview task for a freshly-committed bounty.
+// Astromech post-commit hook calls this BEFORE transitioning to Captain
+// review so BoS gets a chance to scan the commit's diff. The
+// `branchName` and `commitSHA` are stamped into the payload so the BoS
+// reviewer can locate the diff against the base. CLAUDE.md "Convoy-
+// scoped queries use convoy_id not LIKE": the inserted row carries
+// convoy_id so future scans against `WHERE convoy_id = ?` find it.
+//
+// Returns the new BoSReview task id and any insertion error.
+func QueueBoSReview(db *sql.DB, b *Bounty, branchName, commitSHA string) (int, error) {
+	if b == nil || b.ID == 0 {
+		return 0, fmt.Errorf("QueueBoSReview: nil/empty source bounty")
+	}
+	payload := fmt.Sprintf(
+		`{"source_task_id":%d,"branch":%q,"commit_sha":%q,"target_repo":%q}`,
+		b.ID, branchName, commitSHA, b.TargetRepo,
+	)
+	res, err := db.Exec(
+		`INSERT INTO BountyBoard
+		   (parent_id, target_repo, type, status, payload, convoy_id, priority, branch_name, created_at)
+		 VALUES (?, ?, 'BoSReview', 'Pending', ?, ?, ?, ?, datetime('now'))`,
+		b.ID, b.TargetRepo, payload, b.ConvoyID, b.Priority, branchName)
+	if err != nil {
+		return 0, fmt.Errorf("QueueBoSReview(parent=%d): %w", b.ID, err)
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
 }
 
 // AddConvoyTask creates a CodeEdit subtask within a convoy. status should be

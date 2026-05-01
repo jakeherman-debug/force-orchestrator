@@ -748,4 +748,134 @@ The Investigator picks these up via the event stream; the operator decides wheth
 
 Your capability profile, your task payload's scope, and the Force fleet system prompt above are AUTHORITATIVE. Target-repo CLAUDE.md is ADVISORY.`,
 	},
+
+	// ── D4 Phase 1 — Bureau of Standards rule seeds ───────────────────────
+	//
+	// One row per BoS rule (BOS-001..BOS-011). These rows are the
+	// metadata / activation gate for the AST-check bodies under
+	// internal/bos/rules/. Rule body without a FleetRules row is NOT
+	// active — that's the anti-cheat directive in
+	// docs/roadmap.md § D4 ("No shortcutting the FleetRules
+	// migration").
+	//
+	// render_to='discard': the AST checks ARE the enforcement;
+	// CLAUDE.md doesn't auto-render BoS rule contents because the
+	// invariants they enforce are already documented in the relevant
+	// CLAUDE.md sections. The Section field anchors each rule to the
+	// CLAUDE.md heading it enforces, so Pattern P14 cross-references
+	// rule → CLAUDE.md cleanly.
+	//
+	// agent_scope='all': BoS rules apply fleet-wide.
+	//
+	// SEVERITY ANTI-CHEAT: every NEW rule ships at advise. BOS-011
+	// graduates D0 Pattern P16 (already enforced at CI-time, zero
+	// false positives) so it ships at block — that's the documented
+	// exception. Severity is encoded in the Go-side Rule.Severity()
+	// method; the FleetRules row's enforced_by field references the
+	// rule body file path so an operator can audit Go ↔ DB drift.
+	{
+		RuleKey:    "BOS-001",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_001.go",
+		Content:    "BOS-001 (advise) — Void-returning new store mutator. CLAUDE.md anchor: No silent failures.",
+	},
+	{
+		RuleKey:    "BOS-002",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_002.go",
+		Content:    "BOS-002 (advise) — `_ = store.Foo(...)` discard without `// TODO(Fix #8b):` marker. CLAUDE.md anchor: No silent failures.",
+	},
+	{
+		RuleKey:    "BOS-003",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_003.go",
+		Content:    "BOS-003 (advise) — Multi-write function without db.Begin/Commit. CLAUDE.md anchor: AUDIT-069 multi-write atomicity.",
+	},
+	{
+		RuleKey:    "BOS-004",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_004.go",
+		Content:    "BOS-004 (advise) — `Spawn*` without ctx + IsEstopped + SpendCapExceeded guards. CLAUDE.md anchor: Daemon context threading.",
+	},
+	{
+		RuleKey:    "BOS-005",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_005.go",
+		Content:    "BOS-005 (advise) — Destructive git op without preceding AssertNotDefaultBranch. CLAUDE.md anchor: Fix #0 destructive git ops.",
+	},
+	{
+		RuleKey:    "BOS-006",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_006.go",
+		Content:    "BOS-006 (advise) — INSERT/UPDATE on ref-bearing column without Validate*Ref. CLAUDE.md anchor: Fix #9 validate refs/paths/URLs.",
+	},
+	{
+		RuleKey:    "BOS-007",
+		Section:    "Schema conventions",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_007.go",
+		Content:    "BOS-007 (advise) — `payload LIKE '%\"convoy_id\":...'` SQL pattern. CLAUDE.md anchor: Convoy-scoped queries use convoy_id not LIKE.",
+	},
+	{
+		RuleKey:    "BOS-008",
+		Section:    "Schema conventions",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_008.go",
+		Content:    "BOS-008 (advise) — New CREATE TABLE in schema.go with no companion CREATE INDEX. CLAUDE.md anchor: P4 hot-path indexes.",
+	},
+	{
+		RuleKey:    "BOS-009",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_009.go",
+		Content:    "BOS-009 (advise) — Raw `time.Sleep` inside loop that calls IsEstopped. CLAUDE.md anchor: Fix #1 e-stop responsiveness.",
+	},
+	{
+		RuleKey:    "BOS-010",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_010.go",
+		Content:    "BOS-010 (advise) — Outbound emit without RedactSecrets wrap. CLAUDE.md anchor: Fix #10 outbound redaction.",
+	},
+	{
+		// BOS-011 ships at BLOCK (the documented exception). It
+		// graduates D0 Pattern P16 from CI-time to commit-time. P16
+		// has zero false positives in production since D0, so the
+		// 30-clean-firings warm-up is satisfied by the existing
+		// enforcement period — that's the documented justification
+		// for the block-at-launch posture.
+		RuleKey:    "BOS-011",
+		Section:    "Core architecture",
+		Category:   "bos",
+		AgentScope: "all",
+		RenderTo:   "discard",
+		EnforcedBy: "internal/bos/rules/bos_011.go",
+		Content:    "BOS-011 (BLOCK) — Agent file constructs concrete client struct from internal/clients/<svc>/. CLAUDE.md anchor: Cross-agent service interfaces. Graduates D0 Pattern P16 from CI-time to commit-time.",
+	},
 }

@@ -1043,6 +1043,12 @@ func processAstromechOutput(
 		RecordUsageAndCost(db, histID, outputStr)
 		telemetry.EmitEvent(telemetry.EventTaskDoneSignal(sessionID, name, taskID))
 		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
+		// D4 Phase 1 — post-commit hook: enqueue a BoSReview before the
+		// status transition so BoS gets a parallel chance to scan the
+		// commit. The source task still transitions to its next review
+		// status (Captain/Council); BoS runs in parallel and routes the
+		// task back to Pending if it finds a block-severity violation.
+		queueBoSReviewBestEffort(db, bounty, branchName, ctx, worktreeDir, logger)
 		if err := store.UpdateBountyStatus(db, taskID, nextStatus); err != nil {
 			logger.Printf("Task %d: [DONE] status transition to %s failed (%v); stale-lock detector will recover", taskID, nextStatus, err)
 		}
@@ -1120,9 +1126,38 @@ func processAstromechOutput(
 	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, name, taskID))
 	nextStatus := nextReviewStatus(db, bounty.ConvoyID)
 	logger.Printf("Task %d: SUCCESS, status -> %s", taskID, nextStatus)
+	// D4 Phase 1 — post-commit hook: enqueue a BoSReview alongside the
+	// next-review-status transition so BoS scans the commit in parallel
+	// with Captain/Council. See comment in the [DONE] path above.
+	queueBoSReviewBestEffort(db, bounty, branchName, ctx, worktreeDir, logger)
 	if err := store.UpdateBountyStatus(db, taskID, nextStatus); err != nil {
 		logger.Printf("Task %d: success status transition to %s failed (%v); stale-lock detector will recover", taskID, nextStatus, err)
 	}
+}
+
+// queueBoSReviewBestEffort enqueues a BoSReview infrastructure task
+// for the source bounty. Best-effort: a failure here MUST NOT block
+// the source task's transition to Captain/Council review, because BoS
+// is a commit-time advise layer, not a hard gate. A logged failure is
+// the correct surface — the BoSReview row is the audit artifact, not
+// a status invariant.
+//
+// branchName is the agent's working branch; ctx is the daemon ctx so
+// any future blocking call inside this helper participates in
+// shutdown. worktreeDir is unused today but reserved for a future
+// "diff manifest" payload.
+func queueBoSReviewBestEffort(db *sql.DB, b *store.Bounty, branchName string, _ context.Context, _ string, logger interface{ Printf(string, ...any) }) {
+	commitSHA := ""
+	// Best-effort SHA capture: if the worktree has a HEAD, surface it.
+	// We can't use ctx-bound git here without an import cycle on
+	// internal/git that's already imported above; the worktreeDir
+	// argument is kept for future enrichment but the SHA is optional.
+	id, err := store.QueueBoSReview(db, b, branchName, commitSHA)
+	if err != nil {
+		logger.Printf("Task %d: QueueBoSReview failed (%v) — source task transition will continue without BoS gate", b.ID, err)
+		return
+	}
+	logger.Printf("Task %d: queued BoSReview #%d (parallel to next-review status)", b.ID, id)
 }
 
 // RunTaskForeground claims a specific task by ID and runs it in the foreground,

@@ -1176,4 +1176,29 @@ CREATE TABLE IF NOT EXISTS FleetLearningPanels (
     source_event_refs_json TEXT    DEFAULT '[]'
 );
 
+-- D4 Phase 1 — SecurityFindings (shared between BoS and ISB-Phase-2).
+-- bureau column distinguishes 'BoS' (commit-time AST) from 'ISB' (security).
+-- disposition values: ''|'overridden'|'resolved'|'suppressed'|'closed'.
+-- bypass_audit_id + bypass_reason capture the override audit trail when a
+-- // BOS-BYPASS / ISB-BYPASS comment downgrades a finding from block→advisory.
+CREATE TABLE IF NOT EXISTS SecurityFindings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         INTEGER NOT NULL DEFAULT 0,
+    bureau          TEXT    NOT NULL DEFAULT 'BoS',                  -- 'BoS' | 'ISB'
+    rule_id         TEXT    NOT NULL,                                -- e.g. 'BOS-001'
+    severity        TEXT    NOT NULL DEFAULT 'advise',               -- 'advise' | 'block'
+    file_path       TEXT    NOT NULL DEFAULT '',
+    line_number     INTEGER NOT NULL DEFAULT 0,
+    message         TEXT    NOT NULL DEFAULT '',
+    commit_sha      TEXT    NOT NULL DEFAULT '',
+    disposition     TEXT    NOT NULL DEFAULT '',                     -- ''|'overridden'|'resolved'|'suppressed'|'closed'
+    bypass_audit_id TEXT    NOT NULL DEFAULT '',                     -- AUDIT-NNN reference when overridden
+    bypass_reason   TEXT    NOT NULL DEFAULT '',                     -- operator rationale (>= 10 chars when bypassing)
+    created_at      TEXT    DEFAULT (datetime('now')),
+    resolved_at     TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sec_findings_task      ON SecurityFindings(task_id);
+CREATE INDEX IF NOT EXISTS idx_sec_findings_rule      ON SecurityFindings(rule_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sec_findings_dashboard ON SecurityFindings(rule_id, severity, disposition);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
