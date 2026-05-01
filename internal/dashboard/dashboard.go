@@ -43,6 +43,13 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/escalations/", handleEscalationsSubroutes(db))
 	mux.HandleFunc("/api/convoys", handleConvoys(db))
 	mux.HandleFunc("/api/convoys/", handleConvoysSubroutes(db))
+	// D3 fix-loop-1 / γ3 — spec deprecation flow (concern #9, exit 14d).
+	// Operator-only endpoint for moving an AT or EC out of the active
+	// verification spec into the deprecated[] archive. Pattern P21
+	// (slice α) walks LLM proposal schemas to assert no agent-internal
+	// path can synthesise a "remove" intent on AT references; this
+	// handler is the only legitimate write path.
+	mux.HandleFunc("/api/convoy/", handleSpecDeprecation(db))
 	mux.HandleFunc("/api/agents", handleAgents(db))
 	mux.HandleFunc("/api/repos", handleRepos(db))
 	mux.HandleFunc("/api/repos/", handleReposSubroutes(db))
