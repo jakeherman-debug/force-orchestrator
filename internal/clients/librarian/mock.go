@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"sync"
+	"time"
 )
 
 // MockClient is the test-side Client backing. Every Client method is
@@ -36,6 +37,10 @@ type MockClient struct {
 	SummarizeForOverflowFn      func(ctx context.Context, prompt string, targetBytes int) (string, error)
 	EmitCandidateFn             func(ctx context.Context, candidate Candidate) (int, error)
 	ListPendingCandidatesFn     func(ctx context.Context) ([]Candidate, error)
+	GetWeightedMemoriesFn       func(ctx context.Context, scope Scope, k int) ([]Memory, error)
+	RecentCommitsDigestFn       func(ctx context.Context, repo string, window time.Duration) (CommitsDigest, error)
+	BootstrapSenatorRulesFn     func(ctx context.Context, repo string) ([]CandidateRule, error)
+	RefreshSenatorMemoryFn      func(ctx context.Context, repo string) (SenatorDigest, error)
 
 	// D3 Phase 3 — Librarian → EC handoff state. Candidates added via
 	// EmitCandidate live here; ListPendingCandidates returns the slice.
@@ -52,6 +57,24 @@ type MockClient struct {
 	SummarizeCalls   []MockSummarizeCall
 	EmitCalls        []Candidate
 	ListPendingCalls int
+
+	// D4 Phase 0 — call history for the new client methods.
+	GetWeightedCalls   []MockGetWeightedCall
+	RecentCommitsCalls []MockRecentCommitsCall
+	BootstrapCalls     []string
+	RefreshDigestCalls []string
+}
+
+// MockGetWeightedCall records one GetWeightedMemories invocation.
+type MockGetWeightedCall struct {
+	Scope Scope
+	K     int
+}
+
+// MockRecentCommitsCall records one RecentCommitsDigest invocation.
+type MockRecentCommitsCall struct {
+	Repo   string
+	Window time.Duration
 }
 
 // MockSummarizeCall captures one SummarizeForContextOverflow invocation.
@@ -253,6 +276,74 @@ func (m *MockClient) ListPendingCandidates(ctx context.Context) ([]Candidate, er
 	return out, nil
 }
 
+// GetWeightedMemories returns the same shape as GetMemoriesByScope by
+// default, but capped at k (or 20 if k <= 0). Tests fixturing the
+// composite-score ordering should override via GetWeightedMemoriesFn.
+func (m *MockClient) GetWeightedMemories(ctx context.Context, s Scope, k int) ([]Memory, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.GetWeightedCalls = append(m.GetWeightedCalls, MockGetWeightedCall{Scope: s, K: k})
+	if m.GetWeightedMemoriesFn != nil {
+		return m.GetWeightedMemoriesFn(ctx, s, k)
+	}
+	if s.Repo == "" && s.SinceCreatedAt == "" {
+		return nil, ErrEmptyScope
+	}
+	if k <= 0 {
+		k = 20
+	}
+	var out []Memory
+	for _, mm := range m.Memories {
+		if s.Repo != "" && mm.Repo != s.Repo {
+			continue
+		}
+		if s.Outcome != "" && mm.Outcome != s.Outcome {
+			continue
+		}
+		out = append(out, mm)
+		if len(out) >= k {
+			break
+		}
+	}
+	return out, nil
+}
+
+// RecentCommitsDigest returns an empty digest by default. Tests
+// override via RecentCommitsDigestFn.
+func (m *MockClient) RecentCommitsDigest(ctx context.Context, repo string, window time.Duration) (CommitsDigest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.RecentCommitsCalls = append(m.RecentCommitsCalls, MockRecentCommitsCall{Repo: repo, Window: window})
+	if m.RecentCommitsDigestFn != nil {
+		return m.RecentCommitsDigestFn(ctx, repo, window)
+	}
+	return CommitsDigest{Repo: repo, Window: window}, nil
+}
+
+// BootstrapSenatorRules returns nil by default. Tests override via
+// BootstrapSenatorRulesFn.
+func (m *MockClient) BootstrapSenatorRules(ctx context.Context, repo string) ([]CandidateRule, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.BootstrapCalls = append(m.BootstrapCalls, repo)
+	if m.BootstrapSenatorRulesFn != nil {
+		return m.BootstrapSenatorRulesFn(ctx, repo)
+	}
+	return nil, nil
+}
+
+// RefreshSenatorMemoryDigest returns an empty digest by default.
+// Tests override via RefreshSenatorMemoryFn.
+func (m *MockClient) RefreshSenatorMemoryDigest(ctx context.Context, repo string) (SenatorDigest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.RefreshDigestCalls = append(m.RefreshDigestCalls, repo)
+	if m.RefreshSenatorMemoryFn != nil {
+		return m.RefreshSenatorMemoryFn(ctx, repo)
+	}
+	return SenatorDigest{Repo: repo}, nil
+}
+
 // Reset clears all recorded calls and fixture state, restoring NextWriteID
 // to 1. Useful between sub-tests inside the same test function.
 func (m *MockClient) Reset() {
@@ -271,6 +362,10 @@ func (m *MockClient) Reset() {
 	m.SummarizeCalls = nil
 	m.EmitCalls = nil
 	m.ListPendingCalls = 0
+	m.GetWeightedCalls = nil
+	m.RecentCommitsCalls = nil
+	m.BootstrapCalls = nil
+	m.RefreshDigestCalls = nil
 }
 
 // Compile-time assertion: *MockClient satisfies the Client interface.

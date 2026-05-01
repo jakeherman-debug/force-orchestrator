@@ -22,6 +22,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 )
 
 // Client is the contract between agents and the Librarian service. The
@@ -97,6 +98,104 @@ type Client interface {
 	// to pick up new hypotheses; the dashboard EC tab reads it (joined
 	// with kind='promote' rows) for the operator-ratification surface.
 	ListPendingCandidates(ctx context.Context) ([]Candidate, error)
+
+	// GetWeightedMemories (D4 Phase 0) returns the top-K memories for
+	// the given scope, ordered by composite quality score
+	// (freshness × validation × scope-relevance). Memories whose
+	// canonical_id != 0 (i.e. merged into a survivor) are excluded.
+	// Replaces direct store.GetFleetMemories calls in agent ingress
+	// per Pattern P33.
+	//
+	// The composite score is freshness_score * (1.0 + validation_score)
+	// computed in SQL so the sort is index-friendly. validation_score
+	// is clamped to [-1, 1] at write time, so the multiplier lives in
+	// [0, 2] — a memory with validation 0 ranks at freshness alone, a
+	// fully-positive memory ranks 2× freshness, a fully-negative one
+	// ranks 0 (effectively excluded).
+	//
+	// k <= 0 defaults to 20 (the historic GetFleetMemories cap). An
+	// empty Scope is rejected (ErrEmptyScope).
+	GetWeightedMemories(ctx context.Context, scope Scope, k int) ([]Memory, error)
+
+	// RecentCommitsDigest (D4 Phase 0) reads the local clone of the
+	// supplied repo (via store.GetRepoPath) and returns a structured
+	// digest of commits within `window`. Used by Phase 3 (Senate) for
+	// per-Senator context. Phase 0 ships the method, Phase 3 wires
+	// the call. The git invocation routes through `igit.LogAndRun`
+	// so the call is captured in GitOperationLog (Pattern P32).
+	//
+	// Returns an error (not a panic) when the repo is unregistered or
+	// the local path is unreadable.
+	RecentCommitsDigest(ctx context.Context, repo string, window time.Duration) (CommitsDigest, error)
+
+	// BootstrapSenatorRules (D4 Phase 0) reads a repo and produces a
+	// slice of CandidateRule entries — proposed FleetRules rows with
+	// category 'senate' and agent_scope 'senate:<repo>'. Each carries
+	// rule body, rationale, and cited evidence. Phase 3 (Senate) will
+	// wire the SenatorOnboarding task type that calls this; Phase 0
+	// ships the method only.
+	//
+	// Live-Haiku-gated: when LIVE_HAIKU_DISABLED is set, the
+	// implementation returns a deterministic stub fixture so unit
+	// tests stay hermetic. Production daemons leave the flag unset
+	// and the call routes through claude.CallWithTranscript with the
+	// librarian capability profile.
+	BootstrapSenatorRules(ctx context.Context, repo string) ([]CandidateRule, error)
+
+	// RefreshSenatorMemoryDigest (D4 Phase 0) produces a SenatorDigest
+	// for the supplied repo — the shape Phase 3's `senate-refresh`
+	// dog will call to update SenateMemory. Phase 0 ships the method
+	// only. LIVE_HAIKU_DISABLED gates as above.
+	RefreshSenatorMemoryDigest(ctx context.Context, repo string) (SenatorDigest, error)
+}
+
+// CommitsDigest is the per-repo recent-commits view returned by
+// RecentCommitsDigest. The shape carries enough signal for a Senator
+// or Librarian-LLM to reason about repo activity without having to
+// stream the full diff. Each commit's diffstat is the
+// `git log --shortstat` line ("X files changed, Y insertions, Z
+// deletions") rendered verbatim — analyzers can re-parse it cheaply.
+type CommitsDigest struct {
+	Repo      string         // canonical repo name from Repositories
+	Window    time.Duration  // window applied to git log --since
+	Commits   []DigestCommit // newest-first
+	Truncated bool           // true if the digest hit the per-call commit cap
+}
+
+// DigestCommit is one line of CommitsDigest. SHA + Subject + Author +
+// Diffstat are sourced from `git log --shortstat`. AuthorTime is the
+// commit's author-date as a SQLite-comparable string (UTC).
+type DigestCommit struct {
+	SHA        string
+	Subject    string
+	Author     string
+	AuthorTime string
+	Diffstat   string
+}
+
+// CandidateRule is one rule emitted by BootstrapSenatorRules. The
+// shape mirrors a FleetRules row but lives in-memory until Phase 3
+// promotes it through the standard candidate pipeline.
+type CandidateRule struct {
+	RuleKey    string // proposed FleetRules.rule_key (e.g. "senate-<repo>-<slug>")
+	Category   string // 'senate' for D4-P0 outputs
+	AgentScope string // 'senate:<repo>'
+	Body       string // FleetRules.content (the rule body)
+	Rationale  string // human-readable WHY (becomes the audit comment)
+	Evidence   string // cited evidence — README path, commit shas, etc.
+}
+
+// SenatorDigest is the per-repo refresh shape consumed by Phase 3's
+// senate-refresh dog. Includes the recent-commits digest plus a
+// summary of the public API surface — the two signals a Senator
+// needs to keep its rule context fresh.
+type SenatorDigest struct {
+	Repo               string
+	GeneratedAt        string // SQLite UTC timestamp
+	APISurfaceSummary  string // one-paragraph summary of public APIs
+	RecentCommits      CommitsDigest
+	OutstandingRulesK  int    // count of FleetRules currently scoped to this Senator
+	NotesForOperator   string // optional human-readable notes the Librarian wants surfaced
 }
 
 // Candidate is the handoff payload between the Librarian and EC. The
