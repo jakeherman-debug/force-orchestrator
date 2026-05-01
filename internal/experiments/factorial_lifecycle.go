@@ -1,12 +1,11 @@
 // Package experiments — D3 Phase 4 factorial-lifecycle entry points.
 //
-// AuthorFactorialFromYAML, EnrollFactorialUnit, and (later in this
-// commit series) TerminateFactorial are typed wrappers around the
-// existing single-treatment surface. They exist to give callers (CLI,
-// daemon, tests) a way to assert the experiment's kind at the API
-// boundary instead of discovering a kind-mismatch deep inside the
-// Bayesian framework when the cell-mean shape doesn't match the
-// analyzer's expectations.
+// AuthorFactorialFromYAML, EnrollFactorialUnit, and TerminateFactorial
+// are typed wrappers around the existing single-treatment surface.
+// They exist to give callers (CLI, daemon, tests) a way to assert the
+// experiment's kind at the API boundary instead of discovering a
+// kind-mismatch deep inside the Bayesian framework when the cell-mean
+// shape doesn't match the analyzer's expectations.
 //
 // Determinism contract — paired-runs.md § Assignment and Inheritance:
 // EnrollFactorialUnit's cell selection is a pure function of
@@ -20,6 +19,7 @@ package experiments
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -175,6 +175,147 @@ func loadFactorialTreatments(ctx context.Context, db *sql.DB, experimentID int) 
 		return nil, fmt.Errorf("loadFactorialTreatments rows: %w", err)
 	}
 	return out, nil
+}
+
+// TerminateFactorial transitions a running factorial experiment to
+// 'terminated' and writes an ExperimentOutcomes row whose
+// cell_means_json maps each cell's canonical key to its observed mean
+// score. The full main-effects + 2-way-interactions computation is
+// performed by the internal/analysis factorial analyzer (sub-agent B
+// owns that surface). TerminateFactorial just persists the per-cell
+// summary so that downstream layer can read it and write its own rows.
+//
+// Like Terminate, errors if the experiment is not in 'running' or
+// 'confirming' status (CAS), and errors with ErrNotFactorial if the
+// experiment's kind != 'factorial'.
+func TerminateFactorial(ctx context.Context, db *sql.DB, experimentID int, reason string) error {
+	if err := assertFactorialKind(ctx, db, experimentID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "operator_closed"
+	}
+
+	// Status CAS — only running/confirming experiments can be terminated.
+	res, err := db.ExecContext(ctx, `
+		UPDATE Experiments
+		SET status = ?, terminated_at = datetime('now'), termination_reason = ?
+		WHERE id = ? AND status IN (?, ?)
+	`, StatusTerminated, reason, experimentID, StatusRunning, StatusConfirming)
+	if err != nil {
+		return fmt.Errorf("TerminateFactorial: update: %w", err)
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return fmt.Errorf("TerminateFactorial: experiment %d is not running/confirming — refusing to flip", experimentID)
+	}
+
+	cellMeans, err := computeCellMeans(ctx, db, experimentID)
+	if err != nil {
+		return fmt.Errorf("TerminateFactorial: compute cell means: %w", err)
+	}
+	body, err := json.Marshal(cellMeans)
+	if err != nil {
+		return fmt.Errorf("TerminateFactorial: marshal cell means: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO ExperimentOutcomes
+			(experiment_id, terminated_at, termination_reason, cell_means_json)
+		VALUES (?, datetime('now'), ?, ?)
+	`, experimentID, reason, string(body)); err != nil {
+		return fmt.Errorf("TerminateFactorial: insert outcome: %w", err)
+	}
+	return nil
+}
+
+// computeCellMeans groups ExperimentRuns by the parent treatment's
+// cell_json (which carries the canonical factor-ordered cell key) and
+// emits one entry per cell. Bernoulli interpretation: a row with
+// score >= 0.5 counts as a success. Cells with no recorded runs map
+// to 0 — matching computeOutcome's single-treatment shape.
+//
+// The cell key emitted to JSON is a compact stringified form of the
+// canonical cell ordering ("prompt=A,rules=tight"), NOT the cell_json
+// blob itself, so callers (sub-agent B's analyzer + dashboards) can
+// index without re-parsing every value. The ordering is preserved by
+// canonicalCellJSON at author time, so the keys are stable and
+// comparable across experiments that share factor declarations.
+func computeCellMeans(ctx context.Context, db *sql.DB, experimentID int) (map[string]float64, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT IFNULL(t.cell_json, '{}') AS cell_json,
+		       COUNT(r.id) AS trials,
+		       IFNULL(SUM(CASE WHEN r.score >= 0.5 THEN 1 ELSE 0 END), 0) AS successes
+		FROM ExperimentTreatments t
+		LEFT JOIN ExperimentRuns r ON r.treatment_id = t.id
+		WHERE t.experiment_id = ?
+		GROUP BY t.id
+		ORDER BY t.id
+	`, experimentID)
+	if err != nil {
+		return nil, fmt.Errorf("computeCellMeans: query: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]float64{}
+	for rows.Next() {
+		var cellJSON string
+		var trials, successes int
+		if err := rows.Scan(&cellJSON, &trials, &successes); err != nil {
+			return nil, fmt.Errorf("computeCellMeans: scan: %w", err)
+		}
+		key := cellJSONToKey(cellJSON)
+		mean := 0.0
+		if trials > 0 {
+			mean = float64(successes) / float64(trials)
+		}
+		out[key] = mean
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("computeCellMeans: rows: %w", err)
+	}
+	return out, nil
+}
+
+// cellJSONToKey converts the on-disk canonical cell_json into the
+// "factor=level,..." string used as the key in cell_means_json. The
+// input is canonical (factor declaration order preserved by
+// canonicalCellJSON), so a streaming token decode in iteration order
+// gives a stable key. We intentionally avoid Go's map iteration order:
+// the canonical writer preserves ordering, so the streaming decoder
+// recovers it.
+//
+// Treats malformed input defensively — an empty / unparseable cell
+// returns the empty string, matching the schema default.
+func cellJSONToKey(cellJSON string) string {
+	cellJSON = strings.TrimSpace(cellJSON)
+	if cellJSON == "" || cellJSON == "{}" {
+		return ""
+	}
+	var ordered []string
+	dec := json.NewDecoder(strings.NewReader(cellJSON))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return ""
+	}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		ks, ok := k.(string)
+		if !ok {
+			return ""
+		}
+		v, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		vs, ok := v.(string)
+		if !ok {
+			return ""
+		}
+		ordered = append(ordered, ks+"="+vs)
+	}
+	return strings.Join(ordered, ",")
 }
 
 // pickFactorialCell is the cumulative-weight bucket picker. It mirrors
