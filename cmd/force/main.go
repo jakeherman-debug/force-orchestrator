@@ -414,6 +414,9 @@ func main() {
 	case "costs":
 		cmdCosts(db)
 
+	case "session":
+		os.Exit(cmdSession(db, os.Args[2:]))
+
 	case "dashboard":
 		port := 8080
 		if len(os.Args) >= 4 && os.Args[2] == "--port" {
