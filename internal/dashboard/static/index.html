@@ -103,6 +103,15 @@
   </div>
 </div>
 
+<!-- ── D3 P6A.2 — Dashboard heartbeat banner ────────────────────────────────
+     Visible when /api/dashboard/health reports a stale (> 60s) heartbeat.
+     The dashboard process may have just restarted; reload state
+     accordingly. Yellow, distinct from the red high-esc banner. -->
+<div id="dashboard-health-banner" class="health-banner hidden" role="status">
+  <span class="health-banner-icon">&#9888;</span>
+  <span class="health-banner-msg" id="dashboard-health-msg">Dashboard heartbeat is stale — the process may have just restarted.</span>
+</div>
+
 <!-- ── High-escalations banner (AUDIT-064 / Fix #2) ─────────────────────────
      Visible when >=3 Open escalations exist, from any tab. The fleet is
      failing in ways that self-healing couldn't resolve — the operator is

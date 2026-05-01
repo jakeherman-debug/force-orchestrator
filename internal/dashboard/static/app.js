@@ -2139,3 +2139,25 @@ showSurface(currentSurfaceFromHash());
 if (!window.location.hash) {
   try { history.replaceState(null, '', '#/pulse'); } catch (_) {}
 }
+
+// ── D3 P6A.2 — Heartbeat banner ───────────────────────────────────────────
+// Poll /api/dashboard/health every 30s. Show the yellow banner when the
+// most recent heartbeat is older than 60s (the API reports `fresh: false`).
+async function refreshDashboardHealth() {
+  try {
+    const r = await fetch('/api/dashboard/health');
+    if (!r.ok) return;
+    const data = await r.json();
+    const banner = document.getElementById('dashboard-health-banner');
+    const msg    = document.getElementById('dashboard-health-msg');
+    if (!banner || !msg) return;
+    if (data.fresh) {
+      banner.classList.add('hidden');
+    } else {
+      msg.textContent = 'Dashboard last successfully ticked ' + data.message + ' — the process may have just restarted.';
+      banner.classList.remove('hidden');
+    }
+  } catch (_) { /* network error during poll — leave banner state untouched */ }
+}
+refreshDashboardHealth();
+setInterval(refreshDashboardHealth, 30000);

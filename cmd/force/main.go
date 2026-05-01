@@ -415,6 +415,14 @@ func main() {
 		cmdCosts(db)
 
 	case "dashboard":
+		// D3 P6A.2 — `force dashboard status` reads the latest heartbeat
+		// row from the DB and exits 0 (fresh) / 1 (stale). The full
+		// `force dashboard` (no subcommand) starts the live server as
+		// before. Status is checked first so it doesn't get confused
+		// with a stray --port=status.
+		if len(os.Args) >= 3 && os.Args[2] == "status" {
+			os.Exit(cmdDashboardStatus(db))
+		}
 		port := 8080
 		if len(os.Args) >= 4 && os.Args[2] == "--port" {
 			port = mustParseID(os.Args[3])

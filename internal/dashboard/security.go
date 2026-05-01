@@ -168,6 +168,12 @@ func securityMiddleware(port int, next http.Handler) http.Handler {
 			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		}
 
+		// D3 P6A.2 — track in-flight count so the heartbeat row carries the
+		// live concurrency snapshot. Increment before the handler, decrement
+		// on response (deferred so panics still close the counter).
+		IncInFlight()
+		defer DecInFlight()
+
 		next.ServeHTTP(w, r)
 	})
 }
