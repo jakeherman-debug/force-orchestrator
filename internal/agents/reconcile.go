@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -264,8 +263,9 @@ func branchDivergedFromRecordedTree(ctx context.Context, db *sql.DB, repoLocalPa
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, reconcileShortGitTimeout)
 	defer cancel()
-	out, gitErr := exec.CommandContext(lookupCtx, "git", "-C", repoLocalPath,
-		"log", "--pretty=%T", s.BranchName, "--").Output()
+	out, gitErr := igit.LogAndRun(lookupCtx, igit.OpContext{Branch: s.BranchName},
+		"log", "git", "-C", repoLocalPath,
+		"log", "--pretty=%T", s.BranchName, "--")
 	if gitErr != nil {
 		return false, fmt.Errorf("git log %s: %w", s.BranchName, gitErr)
 	}
@@ -397,7 +397,9 @@ func branchExistsLocal(ctx context.Context, repoPath, branch string) bool {
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, reconcileShortGitTimeout)
 	defer cancel()
-	return exec.CommandContext(lookupCtx, "git", "-C", repoPath, "rev-parse", "--verify", branch, "--").Run() == nil
+	_, err := igit.LogAndRun(lookupCtx, igit.OpContext{Branch: branch},
+		"rev-parse", "git", "-C", repoPath, "rev-parse", "--verify", branch, "--")
+	return err == nil
 }
 
 // emitReconcileSummary writes a [RECONCILE SUMMARY] line to the log and,

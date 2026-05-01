@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
 
@@ -176,7 +176,7 @@ func EscalateOnCircle(ctx context.Context, db *sql.DB, taskID int, fromStatus st
 func readWorktreeTreeHash(ctx context.Context, worktreeDir string) (string, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, divergenceTreeHashLookupTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(lookupCtx, "git", "-C", worktreeDir, "rev-parse", "HEAD^{tree}").Output()
+	out, err := igit.LogAndRun(lookupCtx, igit.OpContext{}, "rev-parse", "git", "-C", worktreeDir, "rev-parse", "HEAD^{tree}")
 	if err != nil {
 		return "", err
 	}

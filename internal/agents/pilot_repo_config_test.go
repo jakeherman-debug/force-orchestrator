@@ -22,7 +22,7 @@ func TestRunRevalidateRepoConfig_AllGood_NoChange(t *testing.T) {
 	os.WriteFile(templatePath, []byte("## Summary\n"), 0644)
 
 	store.AddRepo(db, "api", wt, "")
-	remote, _ := repoRemoteURL(wt)
+	remote, _ := repoRemoteURL(context.Background(), wt)
 	_ = store.SetRepoRemoteInfo(db, "api", remote, "main")
 	_ = store.SetRepoPRTemplatePath(db, "api", templatePath)
 
@@ -78,7 +78,7 @@ func TestRunRevalidateRepoConfig_TemplateMoved_RequeuesFindPRTemplate(t *testing
 
 	wt, _ := makeOriginAndClone(t)
 	store.AddRepo(db, "api", wt, "")
-	remote, _ := repoRemoteURL(wt)
+	remote, _ := repoRemoteURL(context.Background(), wt)
 	_ = store.SetRepoRemoteInfo(db, "api", remote, "main")
 	// Point to a template path that doesn't exist.
 	missingPath := filepath.Join(wt, ".github", "gone.md")
@@ -105,7 +105,7 @@ func TestRunRevalidateRepoConfig_RemoteURLChanged_Updates(t *testing.T) {
 	defer db.Close()
 
 	wt, _ := makeOriginAndClone(t)
-	actualRemote, _ := repoRemoteURL(wt)
+	actualRemote, _ := repoRemoteURL(context.Background(), wt)
 	// Store a WRONG remote — revalidation should correct it.
 	store.AddRepo(db, "api", wt, "")
 	_ = store.SetRepoRemoteInfo(db, "api", "https://wrong.example.com/x.git", "main")

@@ -144,23 +144,28 @@ func cmdDaemon(db *sql.DB) {
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
 
+	// AUDIT-020 (Fix #1): threaded context for graceful shutdown. Every agent
+	// Spawn loop exits cleanly when ctx is cancelled, which happens on
+	// SIGINT/SIGTERM BEFORE the drain loop begins. This replaces the prior
+	// behaviour where agents kept claiming fresh Pending tasks during the 30s
+	// drain window and `claude -p` children orphaned on daemon exit.
+	//
+	// D3 polish-pass B4: ctx hoisted ABOVE runPRFlowStartup so the
+	// preflight ls-remote / get-url ops route through igit.LogAndRun
+	// with a real cancellable ctx (Pattern P11 forbids
+	// context.Background() in agent code).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// PR-flow preflight + Layer B backfill. Fatal checks abort daemon startup;
 	// per-repo failures mark the repo pr_flow_enabled=0 and continue.
-	if err := runPRFlowStartup(db); err != nil {
+	if err := runPRFlowStartup(ctx, db); err != nil {
 		fmt.Fprintf(os.Stderr, "Daemon start aborted: %v\n", err)
 		os.Exit(1)
 	}
 
 	fmt.Printf("Starting the Fleet Daemon (%d astromech(s), %d captain(s), %d council member(s), %d commander(s), %d investigator(s), %d auditor(s), %d librarian(s), %d medic(s), %d pilot(s))...\n",
 		numAgents, numCaptain, numCouncil, numCommanders, numInvestigators, numAuditors, numLibrarians, numMedics, numPilots)
-
-	// AUDIT-020 (Fix #1): threaded context for graceful shutdown. Every agent
-	// Spawn loop exits cleanly when ctx is cancelled, which happens on
-	// SIGINT/SIGTERM BEFORE the drain loop begins. This replaces the prior
-	// behaviour where agents kept claiming fresh Pending tasks during the 30s
-	// drain window and `claude -p` children orphaned on daemon exit.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// D2 T1-0: crash-recovery + reconciliation, in this exact order, BEFORE
 	// any agent spawns.

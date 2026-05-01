@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
 
@@ -87,7 +87,7 @@ func runRevalidateRepoConfig(ctx context.Context, db *sql.DB, bounty *store.Boun
 	var healedAny bool
 
 	// 1. Origin URL.
-	currentRemote, remoteErr := repoRemoteURL(repo.LocalPath)
+	currentRemote, remoteErr := repoRemoteURL(ctx, repo.LocalPath)
 	if remoteErr != nil {
 		if qErr := store.QuarantineRepo(db, payload.Repo,
 			fmt.Sprintf("origin unreachable: %v", remoteErr)); qErr != nil {
@@ -113,7 +113,7 @@ func runRevalidateRepoConfig(ctx context.Context, db *sql.DB, bounty *store.Boun
 	}
 
 	// 2. Default branch still present.
-	currentDefault := repoDefaultBranch(repo.LocalPath)
+	currentDefault := repoDefaultBranch(ctx, repo.LocalPath)
 	if currentDefault == "" {
 		if err := store.QuarantineRepo(db, payload.Repo, "default branch undetectable"); err != nil {
 			logger.Printf("RevalidateRepoConfig #%d: QuarantineRepo(%s, no-default-branch) failed: %v — next RevalidateRepoConfig dog tick will retry", bounty.ID, payload.Repo, err)
@@ -159,8 +159,9 @@ func runRevalidateRepoConfig(ctx context.Context, db *sql.DB, bounty *store.Boun
 	// daemon SIGINT could not cancel a hung ls-remote. Now ctx is the daemon
 	// ctx via SpawnPilot → runRevalidateRepoConfig and the dog ctx (5min)
 	// derives from the same root.
-	if out, pingErr := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "ls-remote", "--heads",
-		"origin", currentDefault).CombinedOutput(); pingErr != nil {
+	if out, pingErr := igit.LogAndRun(ctx, igit.OpContext{Repo: payload.Repo, TaskID: int(bounty.ID)},
+		"ls-remote", "git", "-C", repo.LocalPath, "ls-remote", "--heads",
+		"origin", currentDefault); pingErr != nil {
 		msg := strings.TrimSpace(string(out))
 		if qErr := store.QuarantineRepo(db, payload.Repo, fmt.Sprintf("origin ls-remote failed: %s", msg)); qErr != nil {
 			logger.Printf("RevalidateRepoConfig #%d: QuarantineRepo(%s, ls-remote-failed) failed: %v — next RevalidateRepoConfig dog tick will retry", bounty.ID, payload.Repo, qErr)

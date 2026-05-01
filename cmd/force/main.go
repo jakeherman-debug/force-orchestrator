@@ -100,7 +100,7 @@ func main() {
 		}
 		switch os.Args[2] {
 		case "sync":
-			cmdRepoSync(db)
+			cmdRepoSync(ctx, db)
 		case "set-pr-flow":
 			if len(os.Args) < 5 {
 				fmt.Println("Usage: force repo set-pr-flow <name> on|off")
@@ -114,7 +114,7 @@ func main() {
 		}
 
 	case "migrate":
-		cmdMigrate(db, os.Args[2:])
+		cmdMigrate(ctx, db, os.Args[2:])
 
 	case "add-repo":
 		if len(os.Args) < 5 {

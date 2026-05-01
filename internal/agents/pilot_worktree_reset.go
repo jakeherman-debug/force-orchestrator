@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -116,11 +115,12 @@ func runWorktreeReset(ctx context.Context, db *sql.DB, bounty *store.Bounty, log
 	// stale refs/remotes/origin/* happen to be cached locally. `--` keeps the
 	// refspec positional.
 	// Fix #8e: ctx-bounded fetch so daemon shutdown cancels this network op.
-	// AUDIT-127 / AUDIT-165: this remains a direct exec.CommandContext (not
-	// igit.RunCmd) because the call site is intentionally ctx-bounded with
-	// the caller's daemon ctx and we want a tight error-path that fails the
-	// task rather than going through RunCmd's CombinedOutput shape.
-	if out, err := exec.CommandContext(ctx, "git", "-C", repo.LocalPath, "fetch", "origin", "--", p.TargetBranch).CombinedOutput(); err != nil {
+	// D3 polish-pass B4: routes through igit.LogAndRun so the GitOperationLog
+	// row records the fetch (the wrapper preserves the ctx-bounded
+	// CombinedOutput shape and returns the error verbatim, so the
+	// failTask error-path semantics are unchanged).
+	if out, err := igit.LogAndRun(ctx, igit.OpContext{Repo: p.Repo, TaskID: int(bounty.ID), Branch: p.TargetBranch},
+		"fetch", "git", "-C", repo.LocalPath, "fetch", "origin", "--", p.TargetBranch); err != nil {
 		failTask(fmt.Sprintf("fetch %s: %s", p.TargetBranch, strings.TrimSpace(string(out))))
 		return
 	}
@@ -290,14 +290,18 @@ func resetAndCleanWorktree(ctx context.Context, worktreePath, targetRef string) 
 	// make reset behave unexpectedly.
 	// Fix #8e: each subprocess runs under the caller's daemon ctx so a
 	// shutdown signal propagates instantly.
-	exec.CommandContext(ctx, "git", "-C", worktreePath, "rebase", "--abort").Run()
-	exec.CommandContext(ctx, "git", "-C", worktreePath, "merge", "--abort").Run()
+	_, _ = igit.LogAndRun(ctx, igit.OpContext{},
+		"rebase-abort", "git", "-C", worktreePath, "rebase", "--abort")
+	_, _ = igit.LogAndRun(ctx, igit.OpContext{},
+		"merge-abort", "git", "-C", worktreePath, "merge", "--abort")
 	// Trailing `--` keeps the ref in the positional slot (Fix #9).
 	// (reset --hard -- <ref> is ambiguous: git treats it as pathspec.)
-	if out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "reset", "--hard", targetRef, "--").CombinedOutput(); err != nil {
+	if out, err := igit.LogAndRun(ctx, igit.OpContext{},
+		"reset", "git", "-C", worktreePath, "reset", "--hard", targetRef, "--"); err != nil {
 		return fmt.Errorf("reset --hard %s: %s", targetRef, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "clean", "-fdx").CombinedOutput(); err != nil {
+	if out, err := igit.LogAndRun(ctx, igit.OpContext{},
+		"clean", "git", "-C", worktreePath, "clean", "-fdx"); err != nil {
 		return fmt.Errorf("clean -fdx: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
