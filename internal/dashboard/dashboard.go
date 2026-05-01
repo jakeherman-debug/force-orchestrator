@@ -92,6 +92,12 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/briefing/decision/", handleBriefingDecision(db))
 	mux.HandleFunc("/api/briefing/decide", handleBriefingDecide(db))
 
+	// ── D3 P6A.11 — Briefing reject (counter-proposal forcing).
+	mux.HandleFunc("/api/briefing/reject", handleBriefingReject(db))
+
+	// ── D3 P6A.9 — Cinematic on detected sleep wake.
+	mux.HandleFunc("/api/pulse/cinematic", handlePulseCinematic(db))
+
 	// ── D3 P6A.7 — Pulse narrative panel API (read-side; renderer is in
 	// internal/agents/narrative_renderer.go and is spawned by the daemon).
 	mux.HandleFunc("/api/pulse/narrative", handlePulseNarrative(db))
