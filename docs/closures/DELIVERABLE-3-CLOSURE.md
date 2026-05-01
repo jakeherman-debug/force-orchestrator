@@ -2137,13 +2137,135 @@ file:line + the regression-protecting test.
   slice α gate placeholders filled with the post-merge `make test`
   output; new fix-loop-2 row added.
 
-### Slice ε scope (covered separately)
+### Slice ε scope
 
 Slice ε owns the other four sub-items: Captain pipeline plumbing
 finalisation + default flips on the adversarial hot-path + model-
-availability dog. Slice ε edits a disjoint file set
+availability dog. Slice ε edits a disjoint file set from slice ζ
 (`captain.go`, `adversarial_hotpath.go`, `model_availability_dog.go`,
-`captain_proposal_judge.go`) and appends its own closure section.
+`captain_proposal_judge.go`).
+
+#### ε.1 — Captain emits real `cited_ats[]` + `cited_fleet_rules[]`
+
+Round-2 verifier flagged that the Captain proposal pipeline shipped
+with empty citation arrays — the storage-layer mechanical validator
+accepted them (P23 satisfied at the storage boundary), but the LLM
+itself wasn't asked to populate citations.
+
+- **Schema extension**: `internal/store/types.go:216-247` — new
+  fields on `CaptainRuling`: `CitedATs []CitedAT` (compound
+  `(convoy_id, at_id)` shape per Pattern P20),
+  `CitedFleetRules []string`, `ClassificationConfidence float64`.
+- **Prompt extension**: `internal/agents/captain.go:72-93` — new
+  CITATION DISCIPLINE block instructs the LLM to populate compound
+  AT references and lists the empty-array semantics; new field row
+  in the JSON schema example at line 91-92.
+- **Emit pass-through**: `internal/agents/captain.go:730-749` —
+  `emitCaptainProposal` mirrors `ruling.CitedATs` /
+  `ruling.CitedFleetRules` into the `store.ProposedAction` payload
+  (defaulting to non-nil empty slices for P23 stability).
+- **Tests**: `TestEmitCaptainProposal_CitedArraysPropagated`,
+  `TestEmitCaptainProposal_NilCitedArrays` in
+  `internal/agents/captain_proposal_emit_test.go`.
+
+#### ε.2 — Classification confidence is LLM-emitted
+
+Round-2 verifier flagged that `captainConfidenceFromDecision`
+returned hardcoded floors (approve=0.8, reject=0.7, etc.) on every
+production path. With ε.2 the LLM emits a real confidence float and
+the floor helper becomes a fallback only.
+
+- **Schema extension**: `internal/store/types.go:240-247` —
+  `ClassificationConfidence float64` field on `CaptainRuling`.
+- **Prompt instruction**: `internal/agents/captain.go:95-101` —
+  new CONFIDENCE block with calibration anchors and the `0.0`
+  "I cannot estimate" sentinel rule that opts the path back into
+  the deterministic fallback.
+- **Emit pass-through**: `internal/agents/captain.go:719` (call
+  site) plus `pickClassificationConfidence` at
+  `internal/agents/captain.go:826-845`.
+- **Deterministic fallback at `LIVE_HAIKU_DISABLED=1`**: same
+  helper — short-circuits to `captainConfidenceFromDecision(...)`
+  when the env flag is set, the LLM emitted the `0.0` sentinel,
+  or the LLM emitted an out-of-range value.
+- **Tests**: `TestEmitCaptainProposal_LLMConfidenceUsedInLiveMode`,
+  `..._DeterministicFloorInTestMode`,
+  `..._LLMZeroFallsBackToFloor`,
+  `..._LLMOutOfRangeFallsBackToFloor` in
+  `captain_proposal_emit_test.go`.
+
+#### ε.3 — Adversarial default rate ramp
+
+Round-2 verifier flagged that the SystemConfig key
+`adversarial_pairing_rate` defaulted to 0 when absent — meaning
+fresh deploys never sampled disagreements at all. Exit criterion 10
+needs `AdversarialPairings` rows accumulating in production for the
+strict-verifier disagreement-rate evidence to land.
+
+- **Default value**: 0.1 (10% sampling). The roadmap doesn't pin a
+  specific value, but 10% gives a busy convoy a disagreement within
+  a day or two while staying cheap.
+- **Helper update**: `internal/agents/adversarial_hotpath.go:51-91` —
+  the helper now distinguishes three cases: (a) key absent → return
+  `adversarialPairingRateDefault = 0.1` (line 67); (b) operator
+  authored an empty value → return 0 (silence is explicit consent);
+  (c) parse error / out-of-range → fail-closed to 0 with a logged
+  warning. The implementation uses a sentinel-string trick at
+  `SystemConfig.GetOrDefault` to keep the absent-vs-explicit
+  distinction at the helper level.
+- **No SystemConfig migration**: deliberately did NOT add a fresh-DB
+  init row, because that would semantically read as "operator-
+  authored", which conflicts with the absent-vs-explicit
+  distinction the helper now relies on.
+- **Tests**: `TestHotPathAdversarialPair_DefaultRampWhenKeyAbsent`,
+  `..._ExplicitEmptyTreatedAsSilence`; existing `..._RateZeroSkips`
+  updated to `SetConfig` an explicit "0".
+
+#### ε.4 — Model-availability real probe
+
+Round-2 verifier flagged that the model-availability dog's default
+probe was record-only — `last_checked_at` advanced every 30 minutes
+but `last_success_at` only updated when an operator explicitly
+overrode `modelAvailabilityProbe` at daemon startup. Production
+deploys couldn't actually detect deprecations.
+
+- **Live probe implementation**:
+  `internal/agents/model_availability_dog.go:60-128` — new
+  injectable seam `modelAvailabilityProbeCaller` (line 56-60)
+  wrapping `claude.CallWithTranscript`. The default probe at line
+  83-124 issues a one-shot "ping" call against each configured
+  model with the new `model-availability-dog` capability profile
+  at `agents/capabilities/model-availability-dog.yaml`.
+- **`LIVE_HAIKU_DISABLED` env-flag gate**:
+  `internal/agents/model_availability_dog.go:69-72` — when set,
+  falls back to the record-only stub so tests don't burn budget.
+- **Per-dog kill switch**:
+  `internal/agents/model_availability_dog.go:73-77` —
+  `FORCE_MODEL_AVAILABILITY_LIVE_PROBE=0` lets operators suppress
+  live probes without flipping the global env flag (e.g. during
+  a known Anthropic outage).
+- **Tests**:
+  `TestDefaultModelAvailabilityProbe_LivePathWiredViaFakeAdapter`
+  (injects fake at the seam),
+  `..._LivePathFailureSurfaces`,
+  `..._EmptyBodyTreatedAsFailure`,
+  `..._LiveHaikuDisabledIsRecordOnly` (test-mode pin),
+  `..._KillSwitchSuppressesLiveCall` (operator-suppression path)
+  in `model_availability_dog_test.go`.
+
+### Final gate state at fix-loop-2 close (slice ε contribution)
+
+- `make build` (with `-tags sqlite_fts5`): PASS
+- `make test`: PASS (single transient flake on first run cleared
+  on re-run; final pass clean)
+- `./force render-rules --check`: clean (no FleetRules touched)
+- Pattern P13 / P20 / P23 audits: green
+- Merge SHA: `7e7ec49` (slice ε commit `5f56d7b` merged via
+  `--no-ff` into `main`)
+
+### Honest deferrals at slice ε close
+
+**EMPTY.** Every slice ε item closed; no sub-item deferred.
 
 ### Final gate state at fix-loop-2 close (slice ζ contribution)
 
