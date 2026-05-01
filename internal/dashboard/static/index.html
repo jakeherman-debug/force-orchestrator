@@ -58,10 +58,84 @@
     <p>Decision queue + conversational triage. Conversational briefings land in 6A.10.</p>
   </div>
 </div>
+
+<!-- ── D3 P6B SPA wiring (polish-pass iteration 2 / C1) ───────────────────
+     The Reflection surface renders three sub-tabs:
+       - Diagnostics: drill, search, replay, annotations
+       - Reflection: calibration, learning, retro
+       - Ask: free-form `/api/ask` console
+     Each sub-tab loads its data via a vanilla-JS fetch + table renderer
+     in app.js. No frameworks. -->
 <div id="surface-reflection-pane" class="surface-pane" hidden>
-  <div class="surface-placeholder">
-    <h2>Reflection</h2>
-    <p>Calibration + learning. Full Reflection lands in Phase 6B.</p>
+  <div id="reflection-tabs" class="reflection-tabs">
+    <button class="reflection-tab reflection-tab-active" data-reflection-tab="diagnostics">Diagnostics</button>
+    <button class="reflection-tab" data-reflection-tab="reflection-main">Reflection</button>
+    <button class="reflection-tab" data-reflection-tab="ask">Ask</button>
+  </div>
+
+  <div id="reflection-pane-diagnostics" class="reflection-pane">
+    <h3>Drill — search across convoys / tasks / events</h3>
+    <p class="reflection-help">Free-text search the fleet's transcript / git-op / task history. Tap a result to drill into the convoy or task timeline.</p>
+    <input id="drill-search-input" type="search" placeholder="Search drill (e.g. convoy name, error message, AT-id)…" aria-label="Drill search">
+    <button onclick="window.runDrillSearch && window.runDrillSearch()">Search</button>
+    <div id="drill-search-results" class="reflection-table"></div>
+
+    <h3>Drill — by convoy</h3>
+    <p class="reflection-help">Enter a convoy id to load its unified event stream (transitions, mail, git ops, LLM transcripts).</p>
+    <input id="drill-convoy-id" type="number" placeholder="convoy id" min="1">
+    <button onclick="window.loadDrillConvoy && window.loadDrillConvoy()">Load convoy</button>
+    <div id="drill-convoy-events" class="reflection-table"></div>
+
+    <h3>Drill — by task</h3>
+    <p class="reflection-help">Enter a task id to load its event stream (single-task drill).</p>
+    <input id="drill-task-id" type="number" placeholder="task id" min="1">
+    <button onclick="window.loadDrillTask && window.loadDrillTask()">Load task</button>
+    <div id="drill-task-events" class="reflection-table"></div>
+
+    <h3>Drill — single event detail</h3>
+    <p class="reflection-help">Inspect the full body of one event (transcript, git op, mail).</p>
+    <input id="drill-event-kind" type="text" placeholder="kind (e.g. llm_call)">
+    <input id="drill-event-id" type="number" placeholder="event id" min="1">
+    <button onclick="window.loadDrillEvent && window.loadDrillEvent()">Load event</button>
+    <div id="drill-event-detail" class="reflection-table"></div>
+
+    <h3>Replay — re-run a historical decision</h3>
+    <p class="reflection-help">Re-run a past Captain / Council / Medic / Convoy-review decision under the current prompt version. Pure read on live state — only ReplayResults + replay's own LLMCallTranscripts row are written.</p>
+    <input id="replay-event-kind" type="text" placeholder="kind (captain_ruling | council_ruling | …)">
+    <input id="replay-event-id" type="number" placeholder="event id" min="1">
+    <button onclick="window.runReplay && window.runReplay()">Replay</button>
+    <div id="replay-result" class="reflection-table"></div>
+
+    <h3>Annotations — operator notes on events</h3>
+    <p class="reflection-help">Browse annotations the operator has flagged on events. CRUD via `force annotate` CLI (write paths are CLI-only; this view is read-only).</p>
+    <button onclick="window.refreshAnnotations && window.refreshAnnotations()">Refresh</button>
+    <div id="annotations-list" class="reflection-table"></div>
+  </div>
+
+  <div id="reflection-pane-reflection-main" class="reflection-pane" hidden>
+    <h3>Calibration scoreboard</h3>
+    <p class="reflection-help">Confirmed-vs-overridden audit decisions per stakes bucket. Buckets surface drift early — accuracy_pct dropping in one bucket while staying steady in another is the signal.</p>
+    <button onclick="window.refreshCalibration && window.refreshCalibration()">Refresh</button>
+    <div id="calibration-scoreboard" class="reflection-table"></div>
+
+    <h3>Fleet learning panel</h3>
+    <p class="reflection-help">Weekly auto-rendered summary of how the fleet itself is changing — promotions ratified, features filed, spec amendments, convoy-review activity.</p>
+    <button onclick="window.refreshLearning && window.refreshLearning()">Refresh now</button>
+    <div id="learning-panel" class="reflection-table"></div>
+
+    <h3>5-min retro generator</h3>
+    <p class="reflection-help">Generate a markdown retro for the trailing 7 days — top win, top frustration, suggested experiment. Save to <code>docs/retros/&lt;date&gt;.md</code> (operator commits manually).</p>
+    <button onclick="window.generateRetro && window.generateRetro()">Generate retro</button>
+    <button onclick="window.saveRetro && window.saveRetro()">Save draft</button>
+    <pre id="retro-markdown" class="reflection-pre"></pre>
+  </div>
+
+  <div id="reflection-pane-ask" class="reflection-pane" hidden>
+    <h3>Ask Force a question</h3>
+    <p class="reflection-help">Free-form question; the agent answers via read-only DB lookup. No write tools — Pattern P-AskNoWriteTools enforces this at the capability layer.</p>
+    <input id="ask-question" type="text" placeholder="e.g. what's blocking convoy 47">
+    <button onclick="window.runAsk && window.runAsk()">Ask</button>
+    <div id="ask-answer" class="reflection-table"></div>
   </div>
 </div>
 

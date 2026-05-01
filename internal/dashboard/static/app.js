@@ -2130,3 +2130,357 @@ async function refreshDashboardHealth() {
 }
 refreshDashboardHealth();
 setInterval(refreshDashboardHealth, 30000);
+
+// ── D3 P6B SPA wiring (polish-pass iteration 2 / C1) ────────────────────
+//
+// Wires the Reflection surface's three sub-tabs (Diagnostics, Reflection,
+// Ask) to the P6B endpoints. Each renderer is a vanilla-JS function that
+// fetch()es JSON, builds a small <table>/<pre> from the response, and
+// appends it under the surface pane. No frameworks; no shadow DOM; no
+// build step.
+//
+// Endpoints exercised:
+//   GET  /api/drill/convoy/:id            (timeline + spend rollup)
+//   GET  /api/drill/task/:id              (single-task event stream)
+//   GET  /api/drill/event/:kind/:id       (single event body)
+//   GET  /api/drill/search?q=…            (free-text drill search)
+//   POST /api/drill/replay/:kind/:id      (re-run historical decision)
+//   GET  /api/annotations                 (operator event annotations)
+//   POST /api/ask                         (free-form ask)
+//   GET  /api/reflection/calibration      (per-bucket calibration scoreboard)
+//   GET  /api/reflection/learning         (latest learning panel)
+//   POST /api/reflection/learning         (refresh now)
+//   POST /api/reflection/retro/generate   (build markdown draft)
+//   POST /api/reflection/retro/save       (write to docs/retros/<date>.md)
+
+// Sub-tab switcher for the Reflection surface.
+function activateReflectionTab(name) {
+  document.querySelectorAll('.reflection-tab').forEach(b => {
+    b.classList.toggle('reflection-tab-active', b.dataset.reflectionTab === name);
+  });
+  document.querySelectorAll('.reflection-pane').forEach(p => {
+    p.hidden = p.id !== ('reflection-pane-' + name);
+  });
+}
+document.querySelectorAll('.reflection-tab').forEach(b => {
+  b.addEventListener('click', () => activateReflectionTab(b.dataset.reflectionTab));
+});
+
+// Tiny helpers — keep DOM-construction scoped to the Reflection surface.
+function _refTextNode(s) { return document.createTextNode(s == null ? '' : String(s)); }
+function _refSafeHTML(target, html) {
+  // Fail-closed: if the target element doesn't exist, do nothing rather
+  // than throwing. Production wiring may render a sub-tab before its
+  // panes are present (race during initial route hydration).
+  const el = (typeof target === 'string') ? document.getElementById(target) : target;
+  if (!el) return;
+  // We trust ourselves to never inject untrusted strings — payload is
+  // built from JSON we just fetched. Still, route IDs and labels through
+  // textContent below; this innerHTML is for layout chrome only.
+  el.innerHTML = html;
+}
+function _refRenderTable(targetID, headers, rows) {
+  const el = document.getElementById(targetID);
+  if (!el) return;
+  el.innerHTML = '';
+  if (!rows || rows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'reflection-empty';
+    empty.textContent = '(no rows)';
+    el.appendChild(empty);
+    return;
+  }
+  const table = document.createElement('table');
+  table.className = 'reflection-data-table';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headers.forEach(h => {
+    const th = document.createElement('th');
+    th.textContent = h;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    r.forEach(cell => {
+      const td = document.createElement('td');
+      td.appendChild(_refTextNode(cell));
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  el.appendChild(table);
+}
+
+// — Drill: free-text search.
+async function runDrillSearch() {
+  const inputEl = document.getElementById('drill-search-input');
+  if (!inputEl) return;
+  const q = inputEl.value.trim();
+  if (!q) {
+    _refRenderTable('drill-search-results', ['kind', 'ref_id', 'snippet'], []);
+    return;
+  }
+  try {
+    const r = await fetch('/api/drill/search?q=' + encodeURIComponent(q));
+    if (!r.ok) {
+      _refSafeHTML('drill-search-results', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const rows = (data.results || []).map(x => [x.kind, x.ref_id, x.snippet || '']);
+    _refRenderTable('drill-search-results', ['kind', 'ref_id', 'snippet'], rows);
+  } catch (e) {
+    _refSafeHTML('drill-search-results', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.runDrillSearch = runDrillSearch;
+
+// — Drill: convoy timeline.
+async function loadDrillConvoy() {
+  const idEl = document.getElementById('drill-convoy-id');
+  const id = parseInt(idEl && idEl.value, 10);
+  if (!id) return;
+  try {
+    const r = await fetch('/api/drill/convoy/' + id);
+    if (!r.ok) {
+      _refSafeHTML('drill-convoy-events', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const rows = (data.events || []).map(e => [e.at || '', e.kind || '', e.label || '', e.ref_id || '']);
+    _refRenderTable('drill-convoy-events', ['at', 'kind', 'label', 'ref_id'], rows);
+  } catch (e) {
+    _refSafeHTML('drill-convoy-events', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadDrillConvoy = loadDrillConvoy;
+
+// — Drill: task timeline.
+async function loadDrillTask() {
+  const idEl = document.getElementById('drill-task-id');
+  const id = parseInt(idEl && idEl.value, 10);
+  if (!id) return;
+  try {
+    const r = await fetch('/api/drill/task/' + id);
+    if (!r.ok) {
+      _refSafeHTML('drill-task-events', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const rows = (data.events || []).map(e => [e.at || '', e.kind || '', e.label || '', e.ref_id || '']);
+    _refRenderTable('drill-task-events', ['at', 'kind', 'label', 'ref_id'], rows);
+  } catch (e) {
+    _refSafeHTML('drill-task-events', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadDrillTask = loadDrillTask;
+
+// — Drill: single event detail.
+async function loadDrillEvent() {
+  const kindEl = document.getElementById('drill-event-kind');
+  const idEl = document.getElementById('drill-event-id');
+  const kind = kindEl && kindEl.value.trim();
+  const id = parseInt(idEl && idEl.value, 10);
+  if (!kind || !id) return;
+  try {
+    const r = await fetch('/api/drill/event/' + encodeURIComponent(kind) + '/' + id);
+    if (!r.ok) {
+      _refSafeHTML('drill-event-detail', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const pre = document.createElement('pre');
+    pre.className = 'reflection-pre';
+    pre.textContent = JSON.stringify(data, null, 2);
+    const target = document.getElementById('drill-event-detail');
+    if (target) {
+      target.innerHTML = '';
+      target.appendChild(pre);
+    }
+  } catch (e) {
+    _refSafeHTML('drill-event-detail', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadDrillEvent = loadDrillEvent;
+
+// — Replay: re-run a historical decision.
+async function runReplay() {
+  const kindEl = document.getElementById('replay-event-kind');
+  const idEl = document.getElementById('replay-event-id');
+  const kind = kindEl && kindEl.value.trim();
+  const id = parseInt(idEl && idEl.value, 10);
+  if (!kind || !id) return;
+  try {
+    const r = await fetch('/api/drill/replay/' + encodeURIComponent(kind) + '/' + id, { method: 'POST' });
+    if (!r.ok) {
+      _refSafeHTML('replay-result', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const pre = document.createElement('pre');
+    pre.className = 'reflection-pre';
+    pre.textContent = JSON.stringify(data, null, 2);
+    const target = document.getElementById('replay-result');
+    if (target) {
+      target.innerHTML = '';
+      target.appendChild(pre);
+    }
+  } catch (e) {
+    _refSafeHTML('replay-result', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.runReplay = runReplay;
+
+// — Annotations: list.
+async function refreshAnnotations() {
+  try {
+    const r = await fetch('/api/annotations');
+    if (!r.ok) {
+      _refSafeHTML('annotations-list', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const rows = (data.annotations || []).map(a => [a.id || '', a.kind || '', a.ref_id || '', a.flag || '', a.text || '', a.noted_at || '']);
+    _refRenderTable('annotations-list', ['id', 'kind', 'ref_id', 'flag', 'text', 'noted_at'], rows);
+  } catch (e) {
+    _refSafeHTML('annotations-list', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.refreshAnnotations = refreshAnnotations;
+
+// — Calibration scoreboard (per-bucket).
+async function refreshCalibration() {
+  try {
+    const r = await fetch('/api/reflection/calibration');
+    if (!r.ok) {
+      _refSafeHTML('calibration-scoreboard', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const buckets = data.sample_stats_by_bucket || [];
+    const rows = buckets.map(b => [b.selection_bucket || '', b.confirmed || 0, b.overridden || 0, b.total || 0, (b.accuracy_pct != null ? b.accuracy_pct + '%' : '')]);
+    _refRenderTable('calibration-scoreboard', ['bucket', 'confirmed', 'overridden', 'total', 'accuracy'], rows);
+  } catch (e) {
+    _refSafeHTML('calibration-scoreboard', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.refreshCalibration = refreshCalibration;
+
+// — Fleet learning panel.
+async function refreshLearning() {
+  // Trigger a refresh first (POST), then GET the latest row.
+  try {
+    await fetch('/api/reflection/learning', { method: 'POST' });
+  } catch (_) { /* refresh is best-effort */ }
+  try {
+    const r = await fetch('/api/reflection/learning');
+    if (!r.ok) {
+      _refSafeHTML('learning-panel', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const target = document.getElementById('learning-panel');
+    if (!target) return;
+    target.innerHTML = '';
+    if (data.prose) {
+      const pre = document.createElement('pre');
+      pre.className = 'reflection-pre';
+      pre.textContent = data.prose;
+      target.appendChild(pre);
+    } else {
+      target.textContent = '(no learning panel rendered yet)';
+    }
+    if (data.sources && data.sources.length > 0) {
+      const div = document.createElement('div');
+      div.className = 'reflection-help';
+      div.textContent = 'Cited evidence: ' + data.sources.join(', ');
+      target.appendChild(div);
+    }
+  } catch (e) {
+    _refSafeHTML('learning-panel', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.refreshLearning = refreshLearning;
+
+// — Retro generator + save.
+let _lastRetroPayload = null;
+async function generateRetro() {
+  try {
+    const r = await fetch('/api/reflection/retro/generate', { method: 'POST' });
+    if (!r.ok) {
+      _refSafeHTML('retro-markdown', 'HTTP ' + r.status);
+      return;
+    }
+    const data = await r.json();
+    _lastRetroPayload = data;
+    const target = document.getElementById('retro-markdown');
+    if (target) target.textContent = data.markdown || '(empty markdown)';
+  } catch (e) {
+    _refSafeHTML('retro-markdown', e.message);
+  }
+}
+async function saveRetro() {
+  if (!_lastRetroPayload) {
+    alert('Generate a retro first.');
+    return;
+  }
+  try {
+    const r = await fetch('/api/reflection/retro/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        suggested_path: _lastRetroPayload.suggested_path,
+        markdown: _lastRetroPayload.markdown,
+      }),
+    });
+    if (!r.ok) {
+      alert('save failed: HTTP ' + r.status);
+      return;
+    }
+    const data = await r.json();
+    alert('Saved to: ' + (data.absolute_path || data.path || _lastRetroPayload.suggested_path));
+  } catch (e) {
+    alert('save failed: ' + e.message);
+  }
+}
+window.generateRetro = generateRetro;
+window.saveRetro = saveRetro;
+
+// — Ask: free-form question.
+async function runAsk() {
+  const qEl = document.getElementById('ask-question');
+  const q = qEl && qEl.value.trim();
+  if (!q) return;
+  try {
+    const r = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q }),
+    });
+    if (!r.ok) {
+      _refSafeHTML('ask-answer', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const target = document.getElementById('ask-answer');
+    if (!target) return;
+    target.innerHTML = '';
+    const ans = document.createElement('div');
+    ans.className = 'reflection-pre';
+    ans.textContent = data.answer || '(no answer)';
+    target.appendChild(ans);
+    if (data.cite_links && data.cite_links.length > 0) {
+      const div = document.createElement('div');
+      div.className = 'reflection-help';
+      div.textContent = 'Citations: ' + data.cite_links.map(c => c.kind + '/' + c.id).join(', ');
+      target.appendChild(div);
+    }
+  } catch (e) {
+    _refSafeHTML('ask-answer', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.runAsk = runAsk;
