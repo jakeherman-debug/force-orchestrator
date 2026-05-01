@@ -1,0 +1,17 @@
+agent: librarian-curator
+description: |
+  Librarian curator — D4 Phase 0. Covers the maintenance dog call
+  sites (claude-md-drift-watch, librarian-dedup-watch,
+  librarian-quality-recompute, librarian-conflict-watch,
+  librarian-hypothesis-emit) plus the LLM-judge layer in
+  DetectConflicts when LIVE_HAIKU_DISABLED is unset. Pure-reasoning
+  over text in the prompt; no tool access required.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Deliberately minimal surface — every curator call is a one-shot
+  prompt that produces structured JSON (a contradiction verdict, a
+  hypothesis nudge, a CLAUDE.md drift finding). The dogs run under
+  LIVE_HAIKU_DISABLED in unit tests so the suite stays hermetic;
+  production daemons leave the flag unset and the call routes
+  through claude.CallWithTranscript with this profile.
