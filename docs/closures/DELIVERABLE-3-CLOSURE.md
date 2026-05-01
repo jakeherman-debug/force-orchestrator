@@ -1895,14 +1895,38 @@ Round-trip parity test (`spa_wiring_test.go::TestSPAWiring_EveryReferencedEndpoi
 asserts every JS-referenced URL has a matching `mux.HandleFunc` in
 `dashboard.go`.
 
-### Branches merged (--no-ff, 5 polish-iter2 merges to main)
+### Branches merged (--no-ff, 6 polish-iter2 merges to main)
 
 - `polish-iter2/tier-alpha-haiku` → main: A1 + C2
 - `polish-iter2/tier-beta-p25` → main: B1 (P25 AST upgrade)
 - `polish-iter2/tier-beta-p27` → main: B2 (P27 32→4 burn-down)
 - `polish-iter2/tier-gamma-spa` → main: C1 (SPA wiring)
-- `polish-iter2/tier-beta-p32` → main: B4r (P32 11→5 burn-down)
+- `polish-iter2/tier-beta-p32` → main: B4r (P32 11→6 burn-down)
 - `polish-iter2/tier-delta-closure` → main: this addendum
+
+### Post-merge fix-ups (direct commits to main)
+
+Two surface-level issues surfaced by `make test` after the merge train
+landed and got fix-up commits directly on main:
+
+- **P11 audit + P27 burn-down interaction**: the P27 migration script
+  emitted 29 inline `RespectNotificationBudget(context.Background(), …)`
+  calls. P11 (which forbids `context.Background()` in agent code as
+  a regression guard against subprocess detachment) flagged all 29.
+  The two failure modes don't overlap — RespectNotificationBudget
+  runs short-running SQLite queries, not subprocess spawns. P11
+  audit now skips `context.Background()` lines that appear within a
+  2-line window of a `RespectNotificationBudget` / `emitOperatorMail*`
+  call. Threading ctx through every emit site is structurally fine
+  but invasive; slated for D4 once `handleInfraFailure` et al gain
+  ctx parameters.
+
+- **dashboard TestMain pin**: `TestShakedown_P6B/step8_ask` was making
+  real Haiku calls (23K tokens, 10s) because the dashboard package
+  had no `LIVE_HAIKU_DISABLED` pin. Added
+  `internal/dashboard/testmain_test.go` matching the agents package's
+  TestMain shape so all dashboard handler tests route through the
+  deterministic synth path.
 
 ### Final gates (post-iter2, on main)
 
@@ -1911,7 +1935,8 @@ asserts every JS-referenced URL has a matching `mux.HandleFunc` in
 - `./force render-rules --check`: clean
 - Pattern test inventory: P1..P32 all green, P25 now AST-based,
   P27 backlog 4 entries (legitimate exemptions only),
-  P32 backlog 5 entries (wrapper-self only)
+  P32 backlog 6 entries (5 wrapper-self + astromech.go pending
+  LogAndRun WaitDelay)
 
 ### Honest deferrals remaining
 
