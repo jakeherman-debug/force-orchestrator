@@ -10,6 +10,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 )
 
@@ -32,6 +33,21 @@ type CalibrationSampleStats struct {
 	AccuracyPct     float64 `json:"accuracy_pct"`
 }
 
+// BucketSampleStats — per-bucket breakout (D3 polish-pass A3) of the
+// CalibrationAuditSamples accuracy aggregate. Surfaces in the
+// scoreboard alongside the rolling 30d total so the operator can see
+// whether random / adversarial / high-confidence buckets calibrate
+// differently. Bucket label is the raw selection_bucket column —
+// buckets emitted today are 'fast_high_stakes', 'high_approve_rate',
+// 'random' (per schema/schema.sql:914).
+type BucketSampleStats struct {
+	Bucket          string  `json:"bucket"`
+	ConfirmedCount  int     `json:"confirmed_count"`
+	OverriddenCount int     `json:"overridden_count"`
+	Total           int     `json:"total"`
+	AccuracyPct     float64 `json:"accuracy_pct"`
+}
+
 // ReplayDriftStats summarises ReplayResults outcomes — how many
 // historical decisions changed under the current prompt version.
 type ReplayDriftStats struct {
@@ -42,10 +58,11 @@ type ReplayDriftStats struct {
 // CalibrationScoreboard is the unified payload backing the
 // Reflection calibration panel.
 type CalibrationScoreboard struct {
-	DecisionTimes  []AgentDecisionTime    `json:"decision_times"`
-	SampleStats    CalibrationSampleStats `json:"sample_stats"`
-	ReplayDrift    ReplayDriftStats       `json:"replay_drift"`
-	Suggestions    []CoachingSuggestion   `json:"suggestions"`
+	DecisionTimes        []AgentDecisionTime    `json:"decision_times"`
+	SampleStats          CalibrationSampleStats `json:"sample_stats"`
+	SampleStatsByBucket  []BucketSampleStats    `json:"sample_stats_by_bucket"`
+	ReplayDrift          ReplayDriftStats       `json:"replay_drift"`
+	Suggestions          []CoachingSuggestion   `json:"suggestions"`
 }
 
 // CoachingSuggestion is a UI-actionable proposal surfaced to the
@@ -110,26 +127,77 @@ func LoadCalibrationScoreboard(ctx context.Context, db *sql.DB) (CalibrationScor
 		}
 	}
 
-	// Calibration sample stats
-	db.QueryRowContext(ctx,
+	// Calibration sample stats — rolling 30d aggregate across all buckets.
+	// Per-bucket breakout lives in sb.SampleStatsByBucket below.
+	if sErr := db.QueryRowContext(ctx,
 		`SELECT
 		   SUM(CASE WHEN operator_action = 'confirm' THEN 1 ELSE 0 END),
 		   SUM(CASE WHEN operator_action = 'override' THEN 1 ELSE 0 END),
 		   COUNT(*)
 		 FROM CalibrationAuditSamples
 		 WHERE surfaced_at > datetime('now', '-30 days')`,
-	).Scan(&sb.SampleStats.ConfirmedCount, &sb.SampleStats.OverriddenCount, &sb.SampleStats.Total)
+	).Scan(&sb.SampleStats.ConfirmedCount, &sb.SampleStats.OverriddenCount, &sb.SampleStats.Total); sErr != nil && !errors.Is(sErr, sql.ErrNoRows) {
+		log.Printf("calibration_queries.go:LoadCalibrationScoreboard: sample stats: %v", sErr)
+	}
 	if sb.SampleStats.Total > 0 {
 		sb.SampleStats.AccuracyPct = float64(sb.SampleStats.ConfirmedCount) * 100.0 / float64(sb.SampleStats.Total)
 	}
 
+	// Per-bucket breakout (D3 polish-pass A3): random vs adversarial vs
+	// high-confidence. Schema column is `selection_bucket`. Buckets we
+	// know are emitted today: 'fast_high_stakes', 'high_approve_rate',
+	// 'random'; any unrecognised label is surfaced verbatim so the UI
+	// reveals new buckets as they appear.
+	bRows, bErr := db.QueryContext(ctx,
+		`SELECT IFNULL(selection_bucket, ''),
+		        SUM(CASE WHEN operator_action = 'confirm' THEN 1 ELSE 0 END) AS confirmed,
+		        SUM(CASE WHEN operator_action = 'override' THEN 1 ELSE 0 END) AS overridden,
+		        COUNT(*) AS total
+		   FROM CalibrationAuditSamples
+		  WHERE surfaced_at > datetime('now', '-30 days')
+		  GROUP BY selection_bucket
+		  ORDER BY total DESC`,
+	)
+	if bErr != nil {
+		log.Printf("calibration_queries.go:LoadCalibrationScoreboard: per-bucket query: %v", bErr)
+	} else {
+		for bRows.Next() {
+			var (
+				bucket            string
+				confirmed, overr  int
+				total             int
+			)
+			if scanErr := bRows.Scan(&bucket, &confirmed, &overr, &total); scanErr != nil {
+				log.Printf("calibration_queries.go:LoadCalibrationScoreboard: per-bucket scan: %v", scanErr)
+				continue
+			}
+			pct := 0.0
+			if total > 0 {
+				pct = float64(confirmed) * 100.0 / float64(total)
+			}
+			sb.SampleStatsByBucket = append(sb.SampleStatsByBucket, BucketSampleStats{
+				Bucket:          bucket,
+				ConfirmedCount:  confirmed,
+				OverriddenCount: overr,
+				Total:           total,
+				AccuracyPct:     pct,
+			})
+		}
+		if itErr := bRows.Err(); itErr != nil {
+			log.Printf("calibration_queries.go:LoadCalibrationScoreboard: per-bucket rows iter: %v", itErr)
+		}
+		bRows.Close()
+	}
+
 	// Replay drift
-	db.QueryRowContext(ctx,
+	if rErr := db.QueryRowContext(ctx,
 		`SELECT COUNT(*),
 		        SUM(CASE WHEN decision_changed != 0 THEN 1 ELSE 0 END)
 		   FROM ReplayResults
 		  WHERE replay_started_at > datetime('now', '-30 days')`,
-	).Scan(&sb.ReplayDrift.Total, &sb.ReplayDrift.DecisionChanged)
+	).Scan(&sb.ReplayDrift.Total, &sb.ReplayDrift.DecisionChanged); rErr != nil && !errors.Is(rErr, sql.ErrNoRows) {
+		log.Printf("calibration_queries.go:LoadCalibrationScoreboard: replay drift: %v", rErr)
+	}
 
 	// Coaching suggestions — derived from the per-agent reject rate
 	// vs the configured baseline (default 0.05).

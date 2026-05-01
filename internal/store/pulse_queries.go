@@ -9,6 +9,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -144,10 +145,18 @@ func pulseQueue(ctx context.Context, db *sql.DB) (PulseQueue, error) {
 	var q PulseQueue
 	// PromotionProposals + Captain proposals etc. Keep simple: count tasks
 	// in AwaitingCaptainReview / AwaitingCouncilReview as the operator's queue.
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM BountyBoard
-		WHERE status IN ('AwaitingCaptainReview', 'AwaitingCouncilReview', 'Escalated')`).Scan(&q.Total)
+	//
+	// Polish-pass fix (D3 polish): each Scan error is now propagated rather
+	// than swallowed. sql.ErrNoRows is normalised to a zero count so an
+	// empty board doesn't error; only real driver/query errors propagate.
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM BountyBoard
+		WHERE status IN ('AwaitingCaptainReview', 'AwaitingCouncilReview', 'Escalated')`).Scan(&q.Total); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return q, fmt.Errorf("pulse queue total: %w", err)
+	}
 	// Stakes tier breakdown approximate: Escalated=high, others=medium.
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM BountyBoard WHERE status = 'Escalated'`).Scan(&q.HighStakes)
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM BountyBoard WHERE status = 'Escalated'`).Scan(&q.HighStakes); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return q, fmt.Errorf("pulse queue high-stakes: %w", err)
+	}
 	q.MediumStakes = q.Total - q.HighStakes
 	return q, nil
 }
