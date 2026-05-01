@@ -77,6 +77,12 @@ func RunDashboard(db *sql.DB, port int) {
 	// Reads the latest DisagreementPairs row per pair × window combination;
 	// the dog (dogDisagreementTracker) writes; this endpoint reads.
 	mux.HandleFunc("/api/disagreement-rates", handleDisagreementRates(db))
+	// D3 fix-loop-1 β2 — ProposedFeatures operator endpoints
+	// (concern #10 / exit criterion 14). List / per-feature read /
+	// suppress / score-override / promote. Every mutating handler
+	// requires operator_email and writes to AuditLog.
+	mux.HandleFunc("/api/proposed-features", handleProposedFeaturesList(db))
+	mux.HandleFunc("/api/proposed-features/", handleProposedFeaturesSubroutes(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── D3 P6A.14 — Operator attention tags API.

@@ -375,9 +375,10 @@ func TestListDogs(t *testing.T) {
 	dogs := ListDogs(db)
 	// D2 T1-1 added task-spend-watch; D2 T1-4 added quarantined-repo-watch;
 	// D3 P3 added disagreement-tracker; D3 P6B.12 added learning-panel-render;
-	// D3 P6B.9 added transcript-archive.
-	if len(dogs) != 24 {
-		t.Errorf("expected 24 built-in dogs (... + learning-panel-render + transcript-archive), got %d", len(dogs))
+	// D3 P6B.9 added transcript-archive; D3 fix-loop-1 β2 added
+	// proposed-features-decay.
+	if len(dogs) != 25 {
+		t.Errorf("expected 25 built-in dogs (... + proposed-features-decay), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {

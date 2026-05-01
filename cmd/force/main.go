@@ -458,6 +458,12 @@ func main() {
 		// D3 P6B.13 — 5-min retro CLI parity.
 		os.Exit(cmdRetro(db, os.Args[2:]))
 
+	case "proposed-features":
+		// D3 fix-loop-1 β2 — ProposedFeatures CLI parity (Pattern P25)
+		// for /api/proposed-features endpoints. Subcommands:
+		// list / suppress / score / promote.
+		os.Exit(cmdProposedFeatures(db, os.Args[2:]))
+
 	case "dashboard":
 		// D3 P6A.2 — `force dashboard status` reads the latest heartbeat
 		// row from the DB and exits 0 (fresh) / 1 (stale). The full

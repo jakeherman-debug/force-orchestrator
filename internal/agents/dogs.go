@@ -88,6 +88,14 @@ var dogCooldowns = map[string]time.Duration{
 	// (maxArchivesPerRun=1000); rows >30d OR for closed convoys >7d
 	// get summarised + offloaded to ~/.force/transcripts/.
 	"transcript-archive": 24 * time.Hour,
+	// D3 fix-loop-1 β2 — proposed-features-decay decays stale
+	// value_score from high → medium → low so old features don't
+	// permanently rank highest in the ProposedFeatures queue
+	// (concern #10 / exit criterion 14). 12-hour cadence — slow
+	// enough to not churn live prioritisation; fast enough that a
+	// 30-day-old high-value row demotes within a day after the
+	// cutoff fires.
+	"proposed-features-decay": 12 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -115,6 +123,8 @@ var dogOrder = []string{
 	"learning-panel-render",
 	// D3 P6B.9 — daily transcript archival.
 	"transcript-archive",
+	// D3 fix-loop-1 β2 — score-decay for stale ProposedFeatures.
+	"proposed-features-decay",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -281,9 +291,33 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogLearningPanelRender(ctx, db, logger)
 	case "transcript-archive":
 		return dogTranscriptArchive(ctx, db, logger)
+	case "proposed-features-decay":
+		return dogProposedFeaturesDecay(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
+}
+
+// dogProposedFeaturesDecay decays stale ProposedFeatures value_score
+// (high → medium → low) so old rows don't permanently rank highest in
+// the queue (concern #10 / exit criterion 14). The store helper writes
+// a paired ProposedFeatureScoreOverrides audit row for every demotion
+// so the distribution-shift signal stays auditable (Pattern P24
+// composes naturally — proposer-emitted scores aren't mutated; the
+// dog's writes are tagged scored_by='system:decay-dog').
+//
+// `staleAfter` is hard-coded to 30 days here. Slice α/γ may extend
+// this with operator-tunable thresholds in a later iteration.
+func dogProposedFeaturesDecay(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	const staleAfter = 30 * 24 * time.Hour
+	n, err := store.DecayProposedFeatureScores(db, staleAfter)
+	if err != nil {
+		return fmt.Errorf("proposed-features-decay: %w", err)
+	}
+	if n > 0 {
+		logger.Printf("Dog proposed-features-decay: decayed %d rows (stale > %v)", n, staleAfter)
+	}
+	return nil
 }
 
 // dogLearningPanelRender renders one FleetLearningPanels row for the
