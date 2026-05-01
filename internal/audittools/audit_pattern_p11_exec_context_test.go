@@ -66,6 +66,17 @@ var shortExecAllowlist = map[string]string{
 	// as documentation/examples; no runtime calls.
 	"internal/git/validators.go": "comment-only reference (CVE-2017-1000117 documentation in validator commentary)",
 	"internal/store/tasks.go":    "comment-only reference (branch_name validator doc cites the downstream exec.Command shape)",
+
+	// D4 Phase 2 — ISB rule bodies that DETECT exec.Command misuse.
+	// These files contain literal `exec.Command(` substrings inside
+	// docstrings and inside the AST checker (e.g., `se.Sel.Name ==
+	// "Command"` matched against an SelectorExpr whose receiver is
+	// `exec`). The rule code never CALLS exec.Command — it pattern-
+	// matches AST nodes describing it. The comment-style references
+	// in the rule's package commentary describe the shape the rule
+	// flags. Allowlist scope: ISB rule bodies only.
+	"internal/isb/rules/isb_002.go": "comment-only reference (ISB-002 detects exec.Command misuse — docstring + AST predicate, not a runtime call)",
+	"internal/isb/rules/isb_007.go": "comment-only reference (ISB-007 recognizes `exec.Command(\"git\", \"clean\", \"-fdx\", ...)` shape — docstring + AST predicate, not a runtime call)",
 }
 
 // fabricatedCtxRe matches the literal cheat shape that Fix #8d delivered

@@ -151,6 +151,18 @@ func cmdDaemon(db *sql.DB) {
 	}
 	bosRoster := []string{"BoS-Phasma", "BoS-Pyre", "BoS-Cardinal"}
 
+	// D4 Phase 2 — Imperial Security Bureau. One agent is sufficient
+	// (deterministic AST + cached gitleaks detector; near-zero
+	// per-task wall time). Operators scale via num_isb.
+	numISB := 1
+	if n := store.GetConfig(db, "num_isb", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numISB)
+	}
+	if numISB < 1 {
+		numISB = 1
+	}
+	isbRoster := []string{"ISB-Tarkin", "ISB-Krennic", "ISB-Yularen"}
+
 	// Recover any Failed convoys whose tasks were manually reset (e.g. via `force reset` or
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
@@ -361,6 +373,16 @@ func cmdDaemon(db *sql.DB) {
 			name = bosRoster[i]
 		}
 		go agents.SpawnBoS(ctx, db, name)
+	}
+	// D4 Phase 2 — Imperial Security Bureau. Runs in parallel with
+	// BoS at the same astromech post-commit hook point; the dual-gate
+	// pipeline logic in the reviewers ensures both must approve.
+	for i := 0; i < numISB; i++ {
+		name := fmt.Sprintf("ISB-%d", i+1)
+		if i < len(isbRoster) {
+			name = isbRoster[i]
+		}
+		go agents.SpawnISB(ctx, db, name)
 	}
 	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient})
 

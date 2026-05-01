@@ -1,0 +1,34 @@
+agent: isb
+description: |
+  Imperial Security Bureau — commit-time deterministic security
+  scanner (D4 Phase 2). ISB runs every registered rule against the
+  post-commit diff and records Findings to the SecurityFindings table.
+  Runs in parallel with BoS at the same astromech post-commit hook
+  point; the dual-gate pipeline logic ensures the source task only
+  advances when BOTH bureaus have approved.
+
+  All-Go decision: ISB rules run as in-process Go-library wraps of
+  gosec + gitleaks (no Python, no semgrep), plus pure Go AST checks.
+  Subprocess shell-out is forbidden by construction — see
+  internal/isb/scanners/.
+builtin_tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+mcp_servers: []
+notes: |
+  ISB does NOT call `claude` at launch — every rule is a deterministic
+  AST/regex/scanner-library check. Read/Grep/Glob/Bash are granted to
+  support a future `force isb review --file <path>` foreground command
+  and the in-process reviewer's git invocations. No write tools
+  (Edit/Write) — ISB is review-only by construction.
+
+  If a future rule (most likely ISB-005 or ISB-008) graduates to an
+  LLM-judge layer, the capability profile gets `claude` added at that
+  time AND the rule's package comment must document the deterministic-
+  fallback attempt. Anti-cheat per docs/roadmap.md § D4: no LLM-layer
+  ISB rule without a deterministic fallback attempt.
+
+  Migration baseline: not applicable (D4 Phase 2 is the first
+  introduction of ISB).

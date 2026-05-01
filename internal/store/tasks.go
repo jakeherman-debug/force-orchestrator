@@ -41,6 +41,7 @@ var InfrastructureTaskTypes = []string{
 	"ConvoyReview",
 	"WorktreeReset",
 	"BoSReview", // D4 Phase 1 — Bureau of Standards commit-time review
+	"ISBReview", // D4 Phase 2 — Imperial Security Bureau commit-time review
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {
@@ -621,6 +622,38 @@ func QueueBoSReview(db *sql.DB, b *Bounty, branchName, commitSHA string) (int, e
 		b.ID, b.TargetRepo, payload, b.ConvoyID, b.Priority, branchName)
 	if err != nil {
 		return 0, fmt.Errorf("QueueBoSReview(parent=%d): %w", b.ID, err)
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
+// QueueISBReview spawns an ISBReview task for a freshly-committed
+// bounty. D4 Phase 2 — runs in PARALLEL with BoSReview at the same
+// pre-Captain point in the pipeline; the dual-gate logic in the BoS/
+// ISB reviewers ensures the source task only advances when BOTH have
+// approved (or both have advise-only findings). Same payload shape as
+// QueueBoSReview so a future shared reviewer harness can consume both
+// from one parser.
+//
+// CLAUDE.md "Convoy-scoped queries use convoy_id not LIKE": the
+// inserted row carries convoy_id.
+//
+// Returns the new ISBReview task id and any insertion error.
+func QueueISBReview(db *sql.DB, b *Bounty, branchName, commitSHA string) (int, error) {
+	if b == nil || b.ID == 0 {
+		return 0, fmt.Errorf("QueueISBReview: nil/empty source bounty")
+	}
+	payload := fmt.Sprintf(
+		`{"source_task_id":%d,"branch":%q,"commit_sha":%q,"target_repo":%q}`,
+		b.ID, branchName, commitSHA, b.TargetRepo,
+	)
+	res, err := db.Exec(
+		`INSERT INTO BountyBoard
+		   (parent_id, target_repo, type, status, payload, convoy_id, priority, branch_name, created_at)
+		 VALUES (?, ?, 'ISBReview', 'Pending', ?, ?, ?, ?, datetime('now'))`,
+		b.ID, b.TargetRepo, payload, b.ConvoyID, b.Priority, branchName)
+	if err != nil {
+		return 0, fmt.Errorf("QueueISBReview(parent=%d): %w", b.ID, err)
 	}
 	id, _ := res.LastInsertId()
 	return int(id), nil
