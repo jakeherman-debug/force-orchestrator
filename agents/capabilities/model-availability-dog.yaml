@@ -1,0 +1,16 @@
+agent: model-availability-dog
+description: |
+  Model-availability watch dog (D3 fix-loop-2 ε4). Issues a minimal
+  one-token Claude call against each configured model_identifier in
+  TreatmentSpecs to confirm the endpoint resolves; success / failure
+  is recorded into ModelAvailability so a deprecation surfaces as a
+  [HOLDOUT AT RISK] signal. Pure-reasoning probe — no tool access.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Live calls gated by LIVE_HAIKU_DISABLED env flag. When set
+  (tests / CI), the dog records a heartbeat row but does NOT issue a
+  real call. When unset (production daemons), the probe routes through
+  claude.CallWithTranscript with this profile so Pattern P13 (capability
+  profile per call site) and P31 (every LLM call writes a transcript)
+  hold.

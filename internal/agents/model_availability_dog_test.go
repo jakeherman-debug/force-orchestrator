@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -234,5 +235,147 @@ func mustExecMA(t *testing.T, db *sql.DB, q string, args ...any) {
 	t.Helper()
 	if _, err := db.Exec(q, args...); err != nil {
 		t.Fatalf("exec %q: %v", q, err)
+	}
+}
+
+// TestDefaultModelAvailabilityProbe_LivePathWiredViaFakeAdapter exercises
+// the production live-path code (LIVE_HAIKU_DISABLED unset) by injecting
+// a fake adapter at the modelAvailabilityProbeCaller seam. The fake
+// records that it was invoked with the configured model_id and returns a
+// non-empty body — the probe should report success.
+//
+// This is the regression that catches "default probe is record-only"
+// silently coming back in a future refactor: the test fails if the fake
+// adapter is never called.
+func TestDefaultModelAvailabilityProbe_LivePathWiredViaFakeAdapter(t *testing.T) {
+	t.Setenv("LIVE_HAIKU_DISABLED", "")
+	t.Setenv("FORCE_MODEL_AVAILABILITY_LIVE_PROBE", "")
+
+	priorCaller := modelAvailabilityProbeCaller
+	defer func() { modelAvailabilityProbeCaller = priorCaller }()
+
+	var gotModelID string
+	var calls int
+	modelAvailabilityProbeCaller = func(ctx context.Context, desc claude.CallDescriptor, systemPrompt, userPrompt, allowed, disallowed, mcpConfig string, maxTurns int) (string, error) {
+		calls++
+		gotModelID = desc.PromptVersion
+		return "pong", nil
+	}
+
+	ok, err := defaultModelAvailabilityProbe(context.Background(), "claude-test-live")
+	if err != nil {
+		t.Fatalf("live probe with fake adapter: unexpected error %v", err)
+	}
+	if !ok {
+		t.Errorf("live probe: expected ok=true on non-empty body")
+	}
+	if calls != 1 {
+		t.Errorf("expected fake adapter to be called exactly once; got %d", calls)
+	}
+	if gotModelID != "claude-test-live" {
+		t.Errorf("expected fake adapter to receive model_id in PromptVersion; got %q", gotModelID)
+	}
+}
+
+// TestDefaultModelAvailabilityProbe_LivePathFailureSurfaces — when the
+// adapter returns an error (model endpoint dead), the probe propagates
+// it so recordModelAvailability flips the deprecation_detected_at path.
+func TestDefaultModelAvailabilityProbe_LivePathFailureSurfaces(t *testing.T) {
+	t.Setenv("LIVE_HAIKU_DISABLED", "")
+	t.Setenv("FORCE_MODEL_AVAILABILITY_LIVE_PROBE", "")
+
+	priorCaller := modelAvailabilityProbeCaller
+	defer func() { modelAvailabilityProbeCaller = priorCaller }()
+
+	modelAvailabilityProbeCaller = func(ctx context.Context, desc claude.CallDescriptor, systemPrompt, userPrompt, allowed, disallowed, mcpConfig string, maxTurns int) (string, error) {
+		return "", errors.New("simulated 404 from anthropic")
+	}
+
+	ok, err := defaultModelAvailabilityProbe(context.Background(), "claude-test-dead")
+	if err == nil {
+		t.Fatalf("live probe: expected error from dead endpoint, got nil")
+	}
+	if ok {
+		t.Errorf("live probe: expected ok=false on error path")
+	}
+}
+
+// TestDefaultModelAvailabilityProbe_EmptyBodyTreatedAsFailure —
+// belt-and-suspenders: an adapter that returns ("", nil) is treated as
+// a failure. A live model that returned nothing is unhealthy.
+func TestDefaultModelAvailabilityProbe_EmptyBodyTreatedAsFailure(t *testing.T) {
+	t.Setenv("LIVE_HAIKU_DISABLED", "")
+	t.Setenv("FORCE_MODEL_AVAILABILITY_LIVE_PROBE", "")
+
+	priorCaller := modelAvailabilityProbeCaller
+	defer func() { modelAvailabilityProbeCaller = priorCaller }()
+
+	modelAvailabilityProbeCaller = func(ctx context.Context, desc claude.CallDescriptor, systemPrompt, userPrompt, allowed, disallowed, mcpConfig string, maxTurns int) (string, error) {
+		return "", nil
+	}
+
+	ok, err := defaultModelAvailabilityProbe(context.Background(), "claude-test-empty")
+	if err == nil {
+		t.Fatalf("live probe with empty body: expected error, got nil")
+	}
+	if ok {
+		t.Errorf("live probe: expected ok=false for empty body")
+	}
+}
+
+// TestDefaultModelAvailabilityProbe_LiveHaikuDisabledIsRecordOnly —
+// regression for the test-mode pin. Setting LIVE_HAIKU_DISABLED MUST
+// short-circuit BEFORE the live caller would be invoked, even if the
+// adapter would have returned success.
+func TestDefaultModelAvailabilityProbe_LiveHaikuDisabledIsRecordOnly(t *testing.T) {
+	t.Setenv("LIVE_HAIKU_DISABLED", "1")
+
+	priorCaller := modelAvailabilityProbeCaller
+	defer func() { modelAvailabilityProbeCaller = priorCaller }()
+
+	calls := 0
+	modelAvailabilityProbeCaller = func(ctx context.Context, desc claude.CallDescriptor, systemPrompt, userPrompt, allowed, disallowed, mcpConfig string, maxTurns int) (string, error) {
+		calls++
+		return "pong", nil
+	}
+
+	ok, err := defaultModelAvailabilityProbe(context.Background(), "claude-test-disabled")
+	if err != nil {
+		t.Fatalf("record-only mode: unexpected error %v", err)
+	}
+	if ok {
+		t.Errorf("record-only mode: expected ok=false (no probe issued)")
+	}
+	if calls != 0 {
+		t.Errorf("record-only mode: live caller should NOT have been invoked; got %d calls", calls)
+	}
+}
+
+// TestDefaultModelAvailabilityProbe_KillSwitchSuppressesLiveCall —
+// FORCE_MODEL_AVAILABILITY_LIVE_PROBE=0 is the per-dog kill switch.
+// Lets the operator suppress live probes without flipping
+// LIVE_HAIKU_DISABLED (which would also pin renderers / judge).
+func TestDefaultModelAvailabilityProbe_KillSwitchSuppressesLiveCall(t *testing.T) {
+	t.Setenv("LIVE_HAIKU_DISABLED", "")
+	t.Setenv("FORCE_MODEL_AVAILABILITY_LIVE_PROBE", "0")
+
+	priorCaller := modelAvailabilityProbeCaller
+	defer func() { modelAvailabilityProbeCaller = priorCaller }()
+
+	calls := 0
+	modelAvailabilityProbeCaller = func(ctx context.Context, desc claude.CallDescriptor, systemPrompt, userPrompt, allowed, disallowed, mcpConfig string, maxTurns int) (string, error) {
+		calls++
+		return "pong", nil
+	}
+
+	ok, err := defaultModelAvailabilityProbe(context.Background(), "claude-test-kill-switch")
+	if err != nil {
+		t.Fatalf("kill switch: unexpected error %v", err)
+	}
+	if ok {
+		t.Errorf("kill switch: expected ok=false (no probe issued)")
+	}
+	if calls != 0 {
+		t.Errorf("kill switch: live caller should NOT have been invoked; got %d calls", calls)
 	}
 }

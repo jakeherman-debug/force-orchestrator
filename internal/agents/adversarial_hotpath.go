@@ -49,17 +49,41 @@ import (
 var adversarialDiceRoll = func() float64 { return rand.Float64() }
 
 // adversarialPairingRateKey is the SystemConfig key the operator
-// twiddles to flip pair sampling on/off. Empty / unparsable / out-
-// of-range values fail closed (rate=0 → no sampling).
+// twiddles to flip pair sampling on/off. Parse errors and out-of-
+// range values fail closed (rate=0 → no sampling) so a malformed
+// config row never accidentally turns the spigot on. Absence of the
+// key, by contrast, falls back to the default ramp rate — fresh
+// deploys need to sample SOMETHING for AdversarialPairings rows to
+// accumulate per exit criterion 10. Iter1 closed with a 0-default
+// that left fresh deploys mute; iter2 ramps it up.
 const adversarialPairingRateKey = "adversarial_pairing_rate"
 
+// adversarialPairingRateDefault is the ramp rate applied when the
+// SystemConfig key is missing entirely. 10% sampling is enough that a
+// busy convoy surfaces a disagreement within a day or two while still
+// being cheap (one extra LLM critic call per ten primary decisions).
+// Operators twiddle the SystemConfig key to opt down to 0 (silence)
+// or up to 1.0 (always-pair while debugging a surface).
+const adversarialPairingRateDefault = 0.1
+
 // adversarialPairingRate reads the configured sampling rate. Returns
-// 0.0 (no pairing) on any parse / range error so a malformed config
-// row never accidentally turns the spigot on.
+// the default ramp (0.1) when the key is absent — fresh deploys need
+// to sample some traffic so AdversarialPairings rows accumulate per
+// exit criterion 10. Returns 0.0 on parse / range error so a
+// malformed config row never accidentally turns the spigot on.
 func adversarialPairingRate(db *sql.DB) float64 {
-	v := store.GetConfig(db, adversarialPairingRateKey, "")
+	// Distinguish "key absent" (fall back to default) from "key set to
+	// empty string" (operator-authored silence): GetConfig returns the
+	// passed default-string only on the absent path. We pin a sentinel
+	// here so we can detect the absence-vs-empty distinction.
+	const sentinel = "__force_default__"
+	v := store.GetConfig(db, adversarialPairingRateKey, sentinel)
+	if v == sentinel {
+		return adversarialPairingRateDefault
+	}
 	v = strings.TrimSpace(v)
 	if v == "" {
+		// Operator authored an empty string — treat as silence.
 		return 0.0
 	}
 	f, err := strconv.ParseFloat(v, 64)

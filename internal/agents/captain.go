@@ -69,16 +69,33 @@ CRITICAL: A file is IN-scope if the task description asks to modify it — even 
 
 Counter-example: if the task says "extend rateLimitPatterns in internal/claude/claude.go" and the agent modifies claude.go AND dashboard.go, rejected_files = ["internal/dashboard/dashboard.go"] — NOT ["internal/claude/claude.go", "internal/dashboard/dashboard.go"]. Listing claude.go would forbid the next attempt from doing the task.
 
+CITATION DISCIPLINE — populate "cited_ats" and "cited_fleet_rules" with the evidence your rationale relies on:
+
+- "cited_ats": every acceptance test (AT) your reasoning leans on. Use the COMPOUND (convoy_id, at_id) shape — bare at_id without convoy scope is rejected by the validator (Pattern P20: AT id space is convoy-local). When the convoy context above lists AT-NNN identifiers and your rationale references them, every AT-NNN token in your "feedback" prose MUST also appear here as a {"convoy_id": <id>, "at_id": "AT-NNN"} entry. Empty array is correct when the rationale cites no AT (e.g. an infra-only diff with no acceptance criteria attached). NEVER cite an AT id you did not see in the convoy context — the validator resolves every cited entry against the convoy's spec history.
+- "cited_fleet_rules": every FleetRules rule_key your reasoning relies on. Empty array is correct when no fleet rule was load-bearing. Cite rule_key strings verbatim from the operator-directive section above; never invent a rule_key.
+
+CONFIDENCE — emit a "classification_confidence" float in [0.0, 1.0] reflecting your certainty in the "decision" choice:
+- ~0.9 — diff clearly matches the task's stated scope and downstream tasks remain coherent
+- ~0.7 — minor ambiguity but you're confident in the call (e.g. one stylistic deviation that doesn't affect outcome)
+- ~0.5 — genuine ambiguity; the call could go either way
+- ~0.3 — you're approving/rejecting under uncertainty; consider escalating instead
+- 0.0 is reserved for "I cannot estimate" and triggers a deterministic floor downstream — emit a real positive number unless you mean exactly that.
+
 Respond in raw JSON ONLY — no markdown, no explanation outside the JSON:
 {
   "decision": "approve" | "reject" | "escalate",
   "feedback": "reason if rejecting or escalating, empty string if approving",
   "task_updates": [{"id": <task_id>, "new_payload": "<updated full description>"}],
   "new_tasks": [{"repo": "<repo_name>", "task": "<description>", "blocked_by": [<task_id>, ...]}],
-  "rejected_files": ["path/one.go", "path/two.go"]
+  "rejected_files": ["path/one.go", "path/two.go"],
+  "cited_ats": [{"convoy_id": <convoy_id>, "at_id": "AT-NNN"}],
+  "cited_fleet_rules": ["rule_key_one", "rule_key_two"],
+  "classification_confidence": 0.0
 }
 
-The "decision" field is REQUIRED and MUST be exactly one of approve, reject, or escalate. Any other value will be rejected as a parse failure and retried.` + promptInjectionClause
+The "decision" field is REQUIRED and MUST be exactly one of approve, reject, or escalate. Any other value will be rejected as a parse failure and retried.
+
+The "cited_ats", "cited_fleet_rules", and "classification_confidence" fields are REQUIRED — the proposal validator rejects nil arrays and out-of-range confidence. Empty arrays are acceptable; omitting the fields entirely is not.` + promptInjectionClause
 
 // scopeGuardMarker delimits the auto-prepended "DO NOT MODIFY" block so
 // subsequent rejections can find and replace it instead of accumulating.
@@ -714,15 +731,31 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 // metadata. The stale-lock detector catches any pathological cases.
 func emitCaptainProposal(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, ruling store.CaptainRuling, logger *log.Logger) {
 	action := mapDecisionToProposedAction(ruling.Decision)
-	confidence := captainConfidenceFromDecision(ruling.Decision)
+	confidence := pickClassificationConfidence(ruling)
 	rationale := ruling.Feedback
 	if rationale == "" {
 		rationale = fmt.Sprintf("Captain decision: %s", ruling.Decision)
 	}
+
+	// P23: cited arrays must be present (non-nil) at the helper boundary.
+	// Mirror the LLM's emitted slices into the storage shape, defaulting
+	// to empty slices when the LLM produced nil. Pattern P20: every
+	// CitedAT carries the compound (convoy_id, at_id); the validator
+	// inside SetProposedAction rejects bare-at_id entries.
+	citedATs := make([]store.CitedAT, 0, len(ruling.CitedATs))
+	for _, at := range ruling.CitedATs {
+		citedATs = append(citedATs, store.CitedAT{
+			ConvoyID: at.ConvoyID,
+			ATID:     at.ATID,
+		})
+	}
+	citedFleetRules := make([]string, 0, len(ruling.CitedFleetRules))
+	citedFleetRules = append(citedFleetRules, ruling.CitedFleetRules...)
+
 	payload := store.ProposedAction{
 		Action:                   action,
-		CitedATs:                 []store.CitedAT{},        // P23: present, possibly empty
-		CitedFleetRules:          []string{},               // P23: present, possibly empty
+		CitedATs:                 citedATs,
+		CitedFleetRules:          citedFleetRules,
 		ClassificationConfidence: confidence,
 		Rationale:                rationale,
 	}
@@ -779,11 +812,12 @@ func mapDecisionToProposedAction(decision string) string {
 	}
 }
 
-// captainConfidenceFromDecision returns a default classification
-// confidence in [0.0, 1.0] for each decision type. The Captain prompt
-// today does not emit a confidence field; this is the floor signal
-// downstream UIs / tier-routing can build on (slice γ extends the
-// prompt to surface real confidence).
+// captainConfidenceFromDecision returns a deterministic floor
+// classification confidence in [0.0, 1.0] for each decision type.
+// Used as a fallback when the LLM didn't emit a confidence (test mode
+// under LIVE_HAIKU_DISABLED, or live-mode degenerate output where the
+// model returned 0.0 / out-of-range). The fallback shape preserves
+// downstream tier-routing on infra-only paths.
 func captainConfidenceFromDecision(decision string) float64 {
 	switch decision {
 	case "approve":
@@ -797,5 +831,27 @@ func captainConfidenceFromDecision(decision string) float64 {
 	default:
 		return 0.5
 	}
+}
+
+// pickClassificationConfidence routes between the LLM-emitted value
+// and the deterministic floor. Production daemons (LIVE_HAIKU_DISABLED
+// unset) prefer the LLM's per-call certainty — the prompt instructs
+// it to emit a positive float in [0.0, 1.0]. Tests (LIVE_HAIKU_DISABLED
+// set) use the floor so the deterministic stub keeps stable. A live
+// LLM that emits exactly 0.0 ("I cannot estimate") or an out-of-range
+// value also falls back to the floor: the proposal validator rejects
+// out-of-range, and 0.0 is reserved per the prompt as the "no value"
+// signal — silently shipping a meaningless 0% would mis-route in the
+// dashboard's tier mapping.
+func pickClassificationConfidence(ruling store.CaptainRuling) float64 {
+	floor := captainConfidenceFromDecision(ruling.Decision)
+	if liveHaikuDisabled() {
+		return floor
+	}
+	c := ruling.ClassificationConfidence
+	if c <= 0.0 || c > 1.0 {
+		return floor
+	}
+	return c
 }
 

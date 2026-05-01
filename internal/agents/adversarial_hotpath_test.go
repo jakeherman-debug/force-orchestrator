@@ -12,12 +12,15 @@ import (
 	"force-orchestrator/internal/store"
 )
 
-// TestHotPathAdversarialPair_RateZeroSkips confirms the default
-// configuration (no SystemConfig key, rate=0) is a clean no-op fast
-// path. No goroutine, no DB writes.
+// TestHotPathAdversarialPair_RateZeroSkips confirms an explicit
+// operator-authored rate=0 is a clean no-op fast path. No goroutine,
+// no DB writes. (Distinct from the absent-key path: see
+// TestHotPathAdversarialPair_DefaultRampWhenKeyAbsent.)
 func TestHotPathAdversarialPair_RateZeroSkips(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
+
+	store.SetConfig(db, adversarialPairingRateKey, "0")
 
 	logger := log.New(os.Stderr, "[test] ", 0)
 	primary := adversarial.PrimaryDecision{
@@ -35,6 +38,82 @@ func TestHotPathAdversarialPair_RateZeroSkips(t *testing.T) {
 	db.QueryRow(`SELECT COUNT(*) FROM AdversarialPairings`).Scan(&n)
 	if n != 0 {
 		t.Errorf("rate=0: AdversarialPairings rows expected=0; got %d", n)
+	}
+}
+
+// TestHotPathAdversarialPair_DefaultRampWhenKeyAbsent — fresh-deploy
+// path: no SystemConfig row → adversarialPairingRate falls back to
+// the default ramp (0.1), so a primary decision rolling under 0.1
+// schedules. Iter1 left this branch returning 0.0, which silenced
+// fresh deploys; iter2 ramps it up so AdversarialPairings rows
+// accumulate per exit criterion 10.
+func TestHotPathAdversarialPair_DefaultRampWhenKeyAbsent(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	// Fresh DB — no SystemConfig row for adversarial_pairing_rate.
+	got := adversarialPairingRate(db)
+	if got != adversarialPairingRateDefault {
+		t.Errorf("adversarialPairingRate fresh DB: got %f, want %f (default ramp)", got, adversarialPairingRateDefault)
+	}
+
+	// Pin the dice below the default (any value < 0.1 should sample).
+	restore := setAdversarialDiceRollForTest(0.05)
+	defer restore()
+
+	// Register a stub critic so the goroutine doesn't crash on the
+	// no-critic path.
+	var ran sync.WaitGroup
+	ran.Add(1)
+	adversarial.RegisterCritic(adversarial.AgentCouncil,
+		func(ctx context.Context, p adversarial.PrimaryDecision) (adversarial.CriticOutcome, error) {
+			defer ran.Done()
+			return adversarial.CriticOutcome{Outcome: `{"approved":true}`, PromptVersion: "council-critic-v1"}, nil
+		})
+	defer EnableAdversarialPairing(context.Background())
+
+	logger := log.New(os.Stderr, "[test] ", 0)
+	primary := adversarial.PrimaryDecision{
+		DecisionID:    707,
+		Agent:         adversarial.AgentCouncil,
+		Outcome:       `{"approved":true}`,
+		PromptVersion: "council-v1",
+	}
+	if scheduled := WrapHotPathAdversarialPair(context.Background(), db, primary, logger); !scheduled {
+		t.Fatalf("default ramp + dice=0.05: pair should be scheduled")
+	}
+	if !waitWGTimeout(&ran, 3*time.Second) {
+		t.Fatalf("critic goroutine did not run within 3s under default ramp")
+	}
+}
+
+// TestHotPathAdversarialPair_ExplicitEmptyTreatedAsSilence — the
+// distinction between "key missing" (default ramp) and "key set to
+// empty string" (operator silenced explicitly) MUST not blur. An
+// operator who authored an empty value gets silence.
+func TestHotPathAdversarialPair_ExplicitEmptyTreatedAsSilence(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	store.SetConfig(db, adversarialPairingRateKey, "")
+
+	got := adversarialPairingRate(db)
+	if got != 0.0 {
+		t.Errorf("explicit empty rate: got %f, want 0.0 (silence)", got)
+	}
+
+	restore := setAdversarialDiceRollForTest(0.0)
+	defer restore()
+
+	logger := log.New(os.Stderr, "[test] ", 0)
+	primary := adversarial.PrimaryDecision{
+		DecisionID:    808,
+		Agent:         adversarial.AgentCouncil,
+		Outcome:       `{"approved":true}`,
+		PromptVersion: "council-v1",
+	}
+	if scheduled := WrapHotPathAdversarialPair(context.Background(), db, primary, logger); scheduled {
+		t.Errorf("explicit empty rate: pair should NOT be scheduled")
 	}
 }
 

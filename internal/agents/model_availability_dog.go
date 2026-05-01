@@ -37,6 +37,7 @@ import (
 	"os"
 	"time"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -53,27 +54,83 @@ type modelAvailabilityProbeFn func(ctx context.Context, modelID string) (probed 
 // model_availability_dog_test.go.
 var modelAvailabilityProbe modelAvailabilityProbeFn = defaultModelAvailabilityProbe
 
+// modelAvailabilityProbeCaller is the seam the live probe uses to
+// reach claude.CallWithTranscript. Tests overwrite this to inject a
+// fake adapter so the live-path code can be exercised without burning
+// budget. Production wires it to the real wrapper.
+var modelAvailabilityProbeCaller = func(ctx context.Context, desc claude.CallDescriptor, systemPrompt, userPrompt, allowed, disallowed, mcpConfig string, maxTurns int) (string, error) {
+	return claude.CallWithTranscript(ctx, desc, systemPrompt, userPrompt, allowed, disallowed, mcpConfig, maxTurns)
+}
+
 // defaultModelAvailabilityProbe is the production default. It honours
-// the LIVE_HAIKU_DISABLED env-flag — when set, the dog still records
-// a heartbeat row but does NOT issue a real Anthropic call. The
-// SystemConfig key "model_availability_live_probe" is the explicit
-// opt-in for production daemons that want the dog to actually probe.
+// the LIVE_HAIKU_DISABLED env-flag — when set, the dog records a
+// heartbeat row but does NOT issue a real Anthropic call. When unset,
+// the probe issues a minimal one-shot Claude call against the given
+// model_id and reports success / failure to recordModelAvailability so
+// a deprecation surfaces as a [HOLDOUT AT RISK] signal.
 //
-// The probe itself is deliberately minimal — a tiny user prompt with
+// The probe is deliberately minimal — a tiny "ping" user prompt with
 // max_turns=1 — because the goal is just "did the model_id resolve
-// to a live endpoint", not "is the model healthy under load". That's
-// expensive enough that we leave it gated.
-func defaultModelAvailabilityProbe(_ context.Context, _ string) (bool, error) {
+// to a live endpoint", not "is the model healthy under load". The
+// model_id is propagated as the CallDescriptor.PromptVersion field so
+// LLMCallTranscripts rows for the dog are filterable by which model
+// they probed; this is the cheapest way to attribute the call without
+// adding a new transcript column.
+//
+// Pattern P13: routes through claude.CallWithTranscript with the
+// model-availability-dog capability profile. Pattern P31: the wrapper
+// records an LLMCallTranscripts row.
+func defaultModelAvailabilityProbe(ctx context.Context, modelID string) (bool, error) {
 	if liveHaikuDisabled() {
 		return false, nil // no probe — record-only mode
 	}
-	// Default production behaviour: record-only (still gated). Operators
-	// who want a real probe override modelAvailabilityProbe at daemon
-	// startup with a CallWithTranscript-backed implementation. Leaving
-	// the default off keeps a fresh deploy from issuing N Anthropic
-	// calls every 30 minutes before the operator has reviewed the cost.
-	return false, nil
+	if os.Getenv("FORCE_MODEL_AVAILABILITY_LIVE_PROBE") == "0" {
+		// Explicit per-dog kill switch — operator can suppress live
+		// probes without flipping the global LIVE_HAIKU_DISABLED flag.
+		return false, nil
+	}
+
+	prof, err := loadRendererProfile("model-availability-dog")
+	if err != nil {
+		// Profile failure is fatal-shape per Pattern P13. Fall back to
+		// record-only so a transient profile load issue doesn't strand
+		// the dog (the recorded heartbeat row still surfaces the dog is
+		// running; the operator sees the failure in logs).
+		return false, fmt.Errorf("load profile: %w", err)
+	}
+
+	// Minimal one-shot probe. The system prompt asks for a single token;
+	// the user prompt is a literal "ping". A live model returns
+	// something (anything non-empty); a dead endpoint returns an error
+	// from CallWithTranscript.
+	out, callErr := modelAvailabilityProbeCaller(ctx,
+		claude.CallDescriptor{
+			Agent:         "model-availability-dog",
+			PromptVersion: modelID, // identifies which model this row probed
+		},
+		modelAvailabilitySystemPrompt,
+		modelAvailabilityUserPrompt,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if callErr != nil {
+		return false, callErr
+	}
+	if len(out) == 0 {
+		// Empty body without an error is rare but possible — the
+		// endpoint accepted the request but returned nothing. Treat as
+		// failure so deprecation detection fires.
+		return false, fmt.Errorf("probe returned empty body")
+	}
+	return true, nil
 }
+
+// modelAvailabilitySystemPrompt is the system half of the probe call.
+// Kept tiny so even a probe failure (rate limit / token budget) is
+// cheap. We deliberately do NOT instruct the model to do anything
+// useful — the goal is "endpoint resolves, returns SOMETHING."
+const modelAvailabilitySystemPrompt = `Reply with exactly one word: "pong".`
+
+// modelAvailabilityUserPrompt is the user half. Same minimal shape.
+const modelAvailabilityUserPrompt = `ping`
 
 // dogModelAvailabilityWatch is the entry point registered in dogs.go.
 // Returns nil even when individual probes fail — partial success is
@@ -136,10 +193,13 @@ func probeMode() string {
 	if liveHaikuDisabled() {
 		return "record-only (LIVE_HAIKU_DISABLED)"
 	}
-	if os.Getenv("FORCE_MODEL_AVAILABILITY_LIVE_PROBE") == "1" {
-		return "live-probe"
+	if os.Getenv("FORCE_MODEL_AVAILABILITY_LIVE_PROBE") == "0" {
+		// Operator-visible kill switch in case live probing needs to be
+		// disabled without flipping the global LIVE_HAIKU_DISABLED flag
+		// (which also pins renderers / judge to deterministic mode).
+		return "record-only (FORCE_MODEL_AVAILABILITY_LIVE_PROBE=0)"
 	}
-	return "record-only (default)"
+	return "live-probe"
 }
 
 // listConfiguredModels returns the distinct non-empty model_identifier
