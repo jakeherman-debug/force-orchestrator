@@ -61,19 +61,27 @@ type ShadowSession struct {
 // shadow infrastructure stays inactive on real-arm-only runs.
 var ErrShadowNotConfigured = errors.New("shadow: experiment not configured for paired-shadow mode")
 
-// SetupShadowWorktree creates the shadow worktree + opens the gh
-// recording file for the given experiment run. Sub-agent A's
-// worktree.go provides the concrete implementation; this stub exists
-// so adversarial / golden_set call sites compile against a stable
-// signature during the parallel build.
+// SetupShadowWorktree is the legacy stub kept for downstream
+// compatibility with skeleton-era call sites. Production code should
+// use SetupShadowWorktreeAt (worktree.go) which takes the full
+// SetupOptions, including RepoPath. This stub fails closed —
+// downstream callers that haven't wired RepoPath through yet receive
+// ErrShadowNotConfigured and short-circuit, so a missing wire-up never
+// silently turns into a real-arm-only run.
 func SetupShadowWorktree(_ context.Context, _ *sql.DB, _ int64) (*ShadowSession, error) {
-	// Sub-agent A overwrites this with the real implementation.
 	return nil, ErrShadowNotConfigured
 }
 
-// CleanupShadowWorktree tears down the shadow worktree and finalizes
-// the gh recording file. Idempotent — safe to call multiple times.
-func CleanupShadowWorktree(_ context.Context, _ *sql.DB, _ *ShadowSession) error {
-	// Sub-agent A overwrites this with the real implementation.
+// CleanupShadowWorktree is the legacy stub kept for downstream
+// compatibility. Production code should use CleanupShadowWorktreeAt.
+// Idempotent — safe to call with a nil session.
+func CleanupShadowWorktree(_ context.Context, _ *sql.DB, sess *ShadowSession) error {
+	if sess == nil {
+		return nil
+	}
+	// We don't have repoPath here; delegate to the *At cleanup is
+	// intentionally not done (it requires repoPath). Caller should use
+	// CleanupShadowWorktreeAt directly. Returning nil is the safe
+	// idempotent contract.
 	return nil
 }
