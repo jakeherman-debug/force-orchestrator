@@ -89,26 +89,39 @@ type Pair struct {
 // sham agreements to inflate the agreement-rate metric.
 var ErrIdenticalPromptVersions = errors.New("adversarial: critic prompt version must differ from primary")
 
-// RunAdversarialPair takes a primary decision, runs a critic LLM call
-// against it with an opposite-framing prompt, persists both outcomes to
-// AdversarialPairings, and returns the resulting Pair. On disagreement,
-// callers SHOULD invoke SurfaceDisagreementToOperator with the returned
-// pair's ID to write the operator-facing notification.
+// RunAdversarialPair is the production entry point that loads the
+// agent's wired CriticFn and delegates to RunAdversarialPairWith. The
+// wiring (which CriticFn each agent uses) lives in council.go,
+// medic.go, convoy.go.
 //
-// Sub-agent B fills in the concrete implementation. The skeleton
-// stub returns ErrIdenticalPromptVersions when called with no critic
-// prompt version, which keeps Pattern P12 / P13 happy at compile time
-// for downstream call sites that thread a profile + ctx through.
-func RunAdversarialPair(_ context.Context, _ *sql.DB, _ PrimaryDecision) (*Pair, error) {
-	// Sub-agent B overwrites this with the real critic-LLM call.
-	return nil, ErrIdenticalPromptVersions
+// When called for an Agent value with no wired critic, returns
+// ErrIdenticalPromptVersions (fail-closed contract). Tests should call
+// RunAdversarialPairWith directly with a stub CriticFn.
+func RunAdversarialPair(ctx context.Context, db *sql.DB, primary PrimaryDecision) (*Pair, error) {
+	critic, ok := wiredCritics[primary.Agent]
+	if !ok || critic == nil {
+		return nil, ErrIdenticalPromptVersions
+	}
+	return RunAdversarialPairWith(ctx, db, primary, critic)
 }
 
-// SurfaceDisagreementToOperator writes a Fleet_Mail row + dashboard
-// banner when a Pair has agreement=false. Idempotent: re-calling with
-// the same pair ID is a no-op (driven by AdversarialPairings.surfaced_at
-// being non-empty).
-func SurfaceDisagreementToOperator(_ context.Context, _ *sql.DB, _ int64) error {
-	// Sub-agent B overwrites this with the real surfacing logic.
-	return nil
+// SurfaceDisagreementToOperator is a convenience wrapper that surfaces
+// to the canonical "operator" inbox.
+func SurfaceDisagreementToOperator(ctx context.Context, db *sql.DB, pairID int64) error {
+	return SurfaceDisagreementToOperatorWith(ctx, db, pairID, "operator")
+}
+
+// wiredCritics is populated by council.go / medic.go / convoy.go via
+// RegisterCritic. Keeping this as a package-level var (vs a registry
+// struct) is intentional — these are static, set once at package init,
+// and reading without a lock from RunAdversarialPair is safe by
+// construction.
+var wiredCritics = map[Agent]CriticFn{}
+
+// RegisterCritic wires a CriticFn for an Agent. Called from
+// council.go / medic.go / convoy.go's init() once each. Re-registering
+// for the same Agent is allowed (lets tests inject deterministic
+// stubs); production registration is one-time.
+func RegisterCritic(agent Agent, fn CriticFn) {
+	wiredCritics[agent] = fn
 }
