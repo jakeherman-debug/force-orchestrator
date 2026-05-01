@@ -1,0 +1,15 @@
+agent: retro
+description: |
+  5-min retro generator (D3 P6B.13). Friday button in Reflection.
+  Synthesises a markdown post — top win, top frustration, suggested
+  experiment for next week — from the trailing 7 days of fleet
+  signal. Pure-reasoning over the structured stats; no tool surface.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic markdown templating in
+  GenerateRetro. D3 polish-pass iteration 2 wires the live Haiku
+  path through claude.CallWithTranscript with this profile, gated
+  by LIVE_HAIKU_DISABLED env flag. The retro saves to
+  docs/retros/<date>.md (operator commits manually); the live path
+  does not change that filesystem write surface.

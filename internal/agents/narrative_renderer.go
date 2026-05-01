@@ -23,9 +23,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"force-orchestrator/internal/agents/narrative_prompts"
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -103,16 +105,55 @@ func renderOneNarrative(ctx context.Context, db *sql.DB, now time.Time) error {
 			narrative_prompts.FallbackProse, narrative_prompts.PromptVersion, 0, false)
 	}
 
-	// Build the prompt by serialising events. The actual LLM call is
-	// stubbed in 6A.7 — production wiring lands when the daemon-side
-	// claude package signature is finalised. The prose is a
-	// deterministic synthesis derived from the events count so the
-	// pattern-test contract (no editorial copy) holds.
+	// Live Haiku path (D3 polish-pass iteration 2): when the
+	// LIVE_HAIKU_DISABLED env flag is unset, route through
+	// claude.CallWithTranscript with the narrative-renderer profile
+	// so the renderer's call gets the same transcript / redaction /
+	// cost-attribution treatment as Captain / Council / Medic.
+	// Tests pin to deterministic mode via TestMain. Pattern P13
+	// validates the profile at boot; load failures fall back to
+	// the deterministic stub so the dog tick keeps producing rows.
 	prose := synthesiseNarrativeProse(events)
 	costUSD := narrativeCostEstimate(len(events))
+	if !liveHaikuDisabled() {
+		if live, livecost, err := callNarrativeHaiku(ctx, events); err == nil && strings.TrimSpace(live) != "" {
+			prose = live
+			costUSD = livecost
+		} else if err != nil {
+			log.Printf("[NARRATIVE-RENDER] live Haiku failed, falling back to deterministic: %v", err)
+		}
+	}
 
 	return writeNarrativeRow(ctx, db, windowStart, windowEnd, len(events), refsJSON,
 		prose, narrative_prompts.PromptVersion, costUSD, false)
+}
+
+// callNarrativeHaiku is the live Haiku path. Builds the prompt from
+// the structured event list and routes through CallWithTranscript so
+// the call is recorded in LLMCallTranscripts (Pattern P31). Returns
+// (prose, costUSD, error). On error, callers fall back to the
+// deterministic synth.
+func callNarrativeHaiku(ctx context.Context, events []narrativeEvent) (string, float64, error) {
+	prof, err := loadRendererProfile("narrative-renderer")
+	if err != nil {
+		return "", 0, fmt.Errorf("load profile: %w", err)
+	}
+	// Inline the events into the prompt template — narrative_prompts
+	// reserves {events_json} as the substitution point. The system
+	// prompt is empty: the template above is itself the operator-
+	// facing instructions.
+	eventsJSON, _ := json.Marshal(events)
+	userPrompt := strings.Replace(narrative_prompts.PromptTemplate,
+		"{events_json}", string(eventsJSON), 1)
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "narrative-renderer",
+		PromptVersion: narrative_prompts.PromptVersion,
+	}, "", userPrompt,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if err != nil {
+		return "", 0, fmt.Errorf("CallWithTranscript: %w", err)
+	}
+	return strings.TrimSpace(out), narrativeCostEstimate(len(events)), nil
 }
 
 // narrativeEvent is the light shape collected from the window.

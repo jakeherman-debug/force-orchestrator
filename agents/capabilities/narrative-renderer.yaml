@@ -1,0 +1,15 @@
+agent: narrative-renderer
+description: |
+  Live narrative renderer (D3 P6A.7). Builds prose summaries of fleet
+  events from a 30-second event window. Pure-reasoning over the
+  inlined event list — no tool surface required. Output is a single
+  prose string that lands directly in NarrativeRenders.prose.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic synthesiseNarrativeProse stub.
+  D3 polish-pass iteration 2 wires the live Haiku path through
+  claude.CallWithTranscript with this profile, gated by the
+  LIVE_HAIKU_DISABLED env flag (tests pin to deterministic mode).
+  Empty tool grant ARE the contract — the renderer reasons over
+  inlined events; no Read/Bash needed.

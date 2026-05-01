@@ -1,0 +1,15 @@
+agent: replay
+description: |
+  Replay re-runs a historical decision (Captain ruling, Council ruling,
+  Medic decision, ConvoyReviewCycle) under the current prompt version
+  for side-by-side comparison (D3 P6B.7). Pure-reasoning over the
+  original transcript inlined in the prompt; no tool surface.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic synthesiseReplayResponse stub.
+  D3 polish-pass iteration 2 wires the live Haiku path through
+  claude.CallWithTranscript with this profile, gated by
+  LIVE_HAIKU_DISABLED env flag. Pattern P-Replay enforces the writes
+  surface (ReplayResults + own LLMCallTranscripts row only); the
+  live-Haiku swap does not change that contract.

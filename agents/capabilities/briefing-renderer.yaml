@@ -1,0 +1,15 @@
+agent: briefing-renderer
+description: |
+  Briefing focus-mode renderer (D3 P6A.10). Synthesises a structured
+  decision summary citing real DB-sourced prior similar decisions.
+  Pattern P29 contract: every decision ID mentioned MUST resolve to
+  a real row. Pure-reasoning over inlined evidence; no tool surface.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic synthesiseBriefingText stub.
+  D3 polish-pass iteration 2 wires the live Haiku path through
+  claude.CallWithTranscript with this profile, gated by
+  LIVE_HAIKU_DISABLED env flag. The structured prior-decisions input
+  is built BEFORE the Haiku call, so even the live path's IDs come
+  from the DB — Pattern P29 still holds.

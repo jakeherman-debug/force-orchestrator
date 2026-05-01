@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -131,10 +132,17 @@ func dogTranscriptArchive(ctx context.Context, db *sql.DB, logger interface{ Pri
 			continue
 		}
 		// 1-line summary blurb replacing response_text — the in-row
-		// row stays small. The deterministic synth here is the same
-		// shape as 6B.12: live-Haiku swap is mechanical when the
-		// claude-package signature finalises.
+		// row stays small. The deterministic synth (truncation-based)
+		// is the fallback; the live Haiku path produces a richer
+		// 1-line semantic summary when LIVE_HAIKU_DISABLED is unset.
 		summary := summariseTranscript(c.resp)
+		if !liveHaikuDisabled() {
+			if live, err := callTranscriptArchiveHaiku(ctx, c.resp); err == nil && strings.TrimSpace(live) != "" {
+				summary = "[archived] " + live
+			} else if err != nil {
+				log.Printf("transcript_archive.go: live Haiku summary failed for %d, using deterministic blurb: %v", c.id, err)
+			}
+		}
 		_, err := db.ExecContext(ctx,
 			`UPDATE LLMCallTranscripts
 			    SET response_text = ?,
@@ -229,6 +237,44 @@ func LoadArchivedBody(id int64, callStartedAt string) (string, error) {
 		}
 	}
 	return sb.String(), nil
+}
+
+// callTranscriptArchiveHaiku is the live Haiku path. Asks the model
+// for a 1-line semantic summary of the response body. Falls back
+// to truncation-based summary on any error.
+func callTranscriptArchiveHaiku(ctx context.Context, resp string) (string, error) {
+	prof, err := loadRendererProfile("transcript-archive")
+	if err != nil {
+		return "", fmt.Errorf("load profile: %w", err)
+	}
+	// Cap the inlined body so a 200KB transcript doesn't blow up
+	// the prompt. The first 4KB is sufficient for a 1-line summary.
+	cappedResp := resp
+	if len(cappedResp) > 4096 {
+		cappedResp = cappedResp[:4096] + "...[truncated]"
+	}
+	userPrompt := fmt.Sprintf(`Summarise the following LLM response in ONE sentence (max 200 chars).
+Plain English, no jargon, no quotes around the summary itself.
+
+Response:
+%s
+`, cappedResp)
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "transcript-archive",
+		PromptVersion: "transcript-archive-v1",
+	}, "", userPrompt,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if err != nil {
+		return "", fmt.Errorf("CallWithTranscript: %w", err)
+	}
+	one := strings.TrimSpace(out)
+	if i := strings.Index(one, "\n"); i > 0 {
+		one = one[:i]
+	}
+	if len(one) > 200 {
+		one = one[:200] + "…"
+	}
+	return one, nil
 }
 
 // summariseTranscript produces a 1-line blurb from the response body.

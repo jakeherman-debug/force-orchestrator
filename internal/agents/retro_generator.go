@@ -13,12 +13,15 @@ package agents
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
 
@@ -116,12 +119,68 @@ func GenerateRetro(ctx context.Context, db *sql.DB, now time.Time) (RetroPayload
 	fmt.Fprintf(&b, "_Generated %s by force-orchestrator's 5-min retro helper. Edit then commit to docs/retros/._\n",
 		now.UTC().Format("2006-01-02 15:04 UTC"))
 
+	markdown := b.String()
+	// Live Haiku path (D3 polish-pass iteration 2): when the
+	// LIVE_HAIKU_DISABLED env flag is unset, route through
+	// CallWithTranscript with the retro profile. The structured
+	// stats are inlined; the model returns a richer markdown post.
+	// On any error we fall back to the deterministic markdown
+	// already in `markdown` so the Friday button never fails.
+	if !liveHaikuDisabled() {
+		if live, err := callRetroHaiku(ctx, dateLabel, ratified, rejections, escalations, problems); err == nil && strings.TrimSpace(live) != "" {
+			markdown = live
+		} else if err != nil {
+			log.Printf("[RETRO] live Haiku failed, falling back to deterministic markdown: %v", err)
+		}
+	}
+
 	suggestedPath := filepath.Join(retrosDir, dateLabel+".md")
 	return RetroPayload{
-		Markdown:      b.String(),
+		Markdown:      markdown,
 		SuggestedPath: suggestedPath,
 		GeneratedAt:   store.NowSQLite(),
 	}, nil
+}
+
+// callRetroHaiku is the live Haiku path. Hands the structured weekly
+// stats to the model and returns a markdown retro post. The cite
+// fields are computed BEFORE the call so the model only references
+// counts that came from the DB.
+func callRetroHaiku(ctx context.Context, dateLabel string, ratified, rejections, escalations, problems int) (string, error) {
+	prof, err := loadRendererProfile("retro")
+	if err != nil {
+		return "", fmt.Errorf("load profile: %w", err)
+	}
+	statsJSON, _ := json.Marshal(map[string]int{
+		"ratified":    ratified,
+		"rejections":  rejections,
+		"escalations": escalations,
+		"problems":    problems,
+	})
+	userPrompt := fmt.Sprintf(`Render the operator's 5-minute retro for the week ending %s.
+Output a single markdown document with these sections in order:
+  # Fleet retro — week ending <date>
+  ## Top win
+  ## Top frustration
+  ## Suggested experiment for next week
+  ## Week's stats
+
+Use the structured stats below verbatim — do NOT invent counts.
+Style: plain English, present tense, no jargon. 4-6 sentences total
+across the win/frustration/experiment sections combined; the stats
+section is a bulleted list.
+
+Stats: %s
+`, dateLabel, string(statsJSON))
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "retro",
+		PromptVersion: "retro-v1",
+	}, "", userPrompt,
+		prof.allowedTools, prof.disallowedTools, prof.mcpConfig, 1)
+	if err != nil {
+		return "", fmt.Errorf("CallWithTranscript: %w", err)
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // SaveRetroDraft writes the markdown to its suggested path. Returns

@@ -1,0 +1,16 @@
+agent: transcript-archive
+description: |
+  Transcript archival housekeeping (D3 P6B.9). Daily dog tick that
+  offloads transcripts > 30 days OR for convoys closed > 7 days to
+  ~/.force/transcripts/<year>/<month>/<id>.txt.gz, replacing the
+  in-row body with a 1-line blurb. Pure-reasoning over the response
+  text inlined in the prompt; no tool surface.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  Migration baseline: deterministic summariseTranscript stub (first
+  line + 200-char cap). D3 polish-pass iteration 2 wires the live
+  Haiku path through claude.CallWithTranscript with this profile,
+  gated by LIVE_HAIKU_DISABLED env flag. The Haiku call replaces the
+  truncation-based blurb with a 1-line semantic summary; tests pin
+  to deterministic mode.
