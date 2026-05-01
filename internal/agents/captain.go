@@ -580,6 +580,20 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 	histID := store.RecordTaskHistory(db, b.ID, agentName, sessionID, response, captainOutcome)
 	RecordUsageAndCost(db, histID, response)
 
+	// D3 fix-loop-1 β1 — emit the structured proposed_action_json payload
+	// for this task on every Captain → Council transition (concern #1 /
+	// exit criterion 7). The mechanical validator inside SetProposedAction
+	// rejects hallucinated cited references and out-of-range confidence;
+	// the LLM-judge layer flags reasoning-vs-evidence inconsistency.
+	//
+	// The CaptainRuling LLM schema doesn't yet carry citation arrays, so
+	// today's emit produces a structurally-valid stub (empty arrays + the
+	// ruling's feedback prose as rationale). This satisfies P23 (cited
+	// arrays present, never nil) and unblocks concerns #1/#7's downstream
+	// surfaces. Slice α/γ can later extend the prompt schema; the storage
+	// boundary here doesn't need to change.
+	emitCaptainProposal(ctx, db, agentName, b, ruling, logger)
+
 	switch ruling.Decision {
 	case "approve":
 		logger.Printf("Task %d: captain APPROVED — forwarding to council", b.ID)
@@ -682,3 +696,106 @@ func runCaptainTask(ctx context.Context, db *sql.DB, agentName string, b *store.
 		handleInfraFailure(db, agentName, "captain", b, sessionID, msg, "AwaitingCaptainReview", true, logger)
 	}
 }
+
+// emitCaptainProposal writes the structured `proposed_action_json`
+// payload for `b` derived from the Captain's `ruling`, then runs the
+// LLM-judge consistency check and logs the verdict.
+//
+// Per concern #1 / exit criterion 7:
+//   - mechanical validation runs at the helper boundary
+//     (store.ValidateProposedAction inside SetProposedAction)
+//   - LLM-judge runs after a successful write (deterministic stub
+//     "consistent" under LIVE_HAIKU_DISABLED; live Haiku otherwise)
+//   - inconsistent / ambiguous verdicts log + audit but do NOT block the
+//     Captain → Council transition; operator UI surfaces the badge
+//
+// Validation failures are logged + audited (no silent failures per
+// CLAUDE.md), but never abort routing — the proposal is supplementary
+// metadata. The stale-lock detector catches any pathological cases.
+func emitCaptainProposal(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, ruling store.CaptainRuling, logger *log.Logger) {
+	action := mapDecisionToProposedAction(ruling.Decision)
+	confidence := captainConfidenceFromDecision(ruling.Decision)
+	rationale := ruling.Feedback
+	if rationale == "" {
+		rationale = fmt.Sprintf("Captain decision: %s", ruling.Decision)
+	}
+	payload := store.ProposedAction{
+		Action:                   action,
+		CitedATs:                 []store.CitedAT{},        // P23: present, possibly empty
+		CitedFleetRules:          []string{},               // P23: present, possibly empty
+		ClassificationConfidence: confidence,
+		Rationale:                rationale,
+	}
+	if err := store.SetProposedAction(db, b.ID, payload); err != nil {
+		logger.Printf("Task %d: emitCaptainProposal: SetProposedAction failed (%v) — proposal not written; downstream UI lacks structured citation set", b.ID, err)
+		store.LogAudit(db, agentName, "captain-proposal-emit-failed", b.ID, err.Error())
+		return
+	}
+	store.LogAudit(db, agentName, "captain-proposal-emit", b.ID, fmt.Sprintf("action=%s confidence=%.2f", action, confidence))
+
+	// Run the LLM-judge layer. Evidence resolution is a future hook —
+	// today we pass the Captain's payload + the (possibly empty) citation
+	// set; live-Haiku call gating routes through LIVE_HAIKU_DISABLED.
+	report, jerr := JudgeProposalConsistency(ctx, payload, CitedEvidence{
+		ATs:        []CitedATText{},
+		FleetRules: []CitedFleetRuleText{},
+	})
+	if jerr != nil {
+		logger.Printf("Task %d: emitCaptainProposal: LLM-judge errored (%v) — proceeding without verdict", b.ID, jerr)
+		return
+	}
+	store.LogAudit(db, agentName, "captain-proposal-judge", b.ID,
+		fmt.Sprintf("verdict=%s note=%s", report.Verdict, util.TruncateStr(report.Note, 200)))
+	if report.Verdict == JudgeInconsistent {
+		// Inconsistent verdicts surface to the operator via audit log +
+		// mail. The roadmap calls for retry-with-critic-note here; that
+		// hook lives in the Captain claim loop's next attempt and reads
+		// the audit trail. For now we surface the signal and let the
+		// existing reject path handle re-queue.
+		logger.Printf("Task %d: captain-proposal-judge VERDICT=inconsistent: %s", b.ID, util.TruncateStr(report.Note, 200))
+	}
+}
+
+// mapDecisionToProposedAction maps the existing CaptainRuling decision
+// strings to the proposed_action_json `action` schema (concern #1):
+// {approve, reject, fix, escalate}. The legacy CaptainRuling has no
+// "fix" verb today; only approve/reject/escalate. The mapping is
+// straight passthrough until the Captain prompt grows the verb.
+func mapDecisionToProposedAction(decision string) string {
+	switch decision {
+	case "approve":
+		return "approve"
+	case "reject":
+		return "reject"
+	case "escalate":
+		return "escalate"
+	case "fix":
+		return "fix"
+	default:
+		// Unknown decisions never reach this helper (the caller's
+		// fail-closed branch handles them), but if one does, treat as
+		// escalate so the operator sees something actionable.
+		return "escalate"
+	}
+}
+
+// captainConfidenceFromDecision returns a default classification
+// confidence in [0.0, 1.0] for each decision type. The Captain prompt
+// today does not emit a confidence field; this is the floor signal
+// downstream UIs / tier-routing can build on (slice γ extends the
+// prompt to surface real confidence).
+func captainConfidenceFromDecision(decision string) float64 {
+	switch decision {
+	case "approve":
+		return 0.8 // high — Captain saw the diff and approved
+	case "reject":
+		return 0.7 // moderately high — Captain found a concrete issue
+	case "escalate":
+		return 0.4 // low — Captain admitted uncertainty
+	case "fix":
+		return 0.6
+	default:
+		return 0.5
+	}
+}
+
