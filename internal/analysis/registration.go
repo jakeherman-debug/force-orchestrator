@@ -19,6 +19,21 @@ const BayesianBetaBinomialVersion = "2026-04-29"
 // `analysis_framework_version` column on Experiments.
 const BayesianBetaBinomialName = "bayesian-beta-binomial"
 
+// BayesianBetaBinomialFactorialVersion is the canonical version
+// string under which the factorial extension is registered. Bumped
+// only when the factorial algorithm changes (decomposition shape,
+// interaction prior, decision rule). Decoupled from the
+// single-treatment version so a single-treatment analyzer change
+// doesn't force a factorial-row rewrite (and vice versa).
+const BayesianBetaBinomialFactorialVersion = "2026-04-30"
+
+// BayesianBetaBinomialFactorialName is the factorial framework's
+// name as recorded in AnalysisFrameworks. Mirrors the single-treatment
+// shape (sibling row, separate version) rather than mutating the
+// existing row — the AnalysisFrameworks contract is that published
+// versions are immutable.
+const BayesianBetaBinomialFactorialName = "bayesian-beta-binomial-factorial"
+
 // bayesianBetaBinomialParams is the parameter manifest stored on the
 // AnalysisFrameworks row. It documents the prior, decision rule, and
 // minimum sample size so a future replay can reconstruct the exact
@@ -91,6 +106,84 @@ func RegisterBayesianBetaBinomial(ctx context.Context, db *sql.DB) error {
 	)
 	if err != nil {
 		return fmt.Errorf("RegisterBayesianBetaBinomial: insert: %w", err)
+	}
+	return nil
+}
+
+// bayesianBetaBinomialFactorialParams is the parameter manifest for
+// the factorial framework row. The `decomposition` key matches
+// paired-runs.md § Factorial Scoring (`main_effects_plus_2way`); the
+// `max_interaction_order` mirrors the YAML default. `algorithm_ref`
+// names the Go entry points so a future replay can reproduce the
+// math from the source tree alone.
+var bayesianBetaBinomialFactorialParams = map[string]any{
+	"name":                  BayesianBetaBinomialFactorialName,
+	"version":               BayesianBetaBinomialFactorialVersion,
+	"family":                "bayesian-beta-binomial",
+	"prior_alpha":           1.0,
+	"prior_beta":            1.0,
+	"min_samples_per_arm":   30,
+	"winner_threshold":      0.95,
+	"monte_carlo_samples":   200000,
+	"decomposition":         "main_effects_plus_2way",
+	"max_interaction_order": 2,
+	"sql_or_code_ref":       "internal/analysis/factorial_analysis.go",
+	"description":           "Factorial Beta-Binomial: per-(factor,level) marginal posteriors as main effects; per-(factor_a,factor_b,level_a,level_b) cell-level 2-way interaction contrasts with Monte Carlo P(|interaction| > min_practical_effect); decision rule declares best cell when no interactions cross WinnerThreshold, else flags 'significant_interaction'.",
+	"published_by":          "operator:jake.herman@upstart.com",
+	"reproducibility_note":  "Algorithm is deterministic given DecisionRule.RandomSeed; per-(factor,level) and per-interaction MC sample paths are seeded by hashing the identifier into an offset, so different rows don't collapse onto identical sample paths.",
+}
+
+// RegisterBayesianBetaBinomialFactorial inserts the factorial
+// framework row into AnalysisFrameworks. Mirrors
+// RegisterBayesianBetaBinomial: idempotent on identical re-call,
+// errors if the same version is re-registered with a different
+// manifest hash. The factorial row is a SIBLING of the single-
+// treatment row (separate version PK) — they cohabit
+// AnalysisFrameworks because both are valid analyzer choices for
+// different experiment kinds (single vs factorial).
+func RegisterBayesianBetaBinomialFactorial(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("RegisterBayesianBetaBinomialFactorial: db is nil")
+	}
+	body, err := json.Marshal(bayesianBetaBinomialFactorialParams)
+	if err != nil {
+		return fmt.Errorf("RegisterBayesianBetaBinomialFactorial: marshal params: %w", err)
+	}
+	hash := sha256Hex(string(body))
+
+	var existingHash string
+	err = db.QueryRowContext(ctx,
+		`SELECT IFNULL(config_hash, '') FROM AnalysisFrameworks WHERE version = ?`,
+		BayesianBetaBinomialFactorialVersion,
+	).Scan(&existingHash)
+	switch {
+	case err == sql.ErrNoRows:
+		// Not yet present — insert.
+	case err != nil:
+		return fmt.Errorf("RegisterBayesianBetaBinomialFactorial: lookup existing: %w", err)
+	default:
+		if existingHash == hash {
+			return nil
+		}
+		return fmt.Errorf("RegisterBayesianBetaBinomialFactorial: version %q already registered with a different config_hash (existing=%s, new=%s); bump the version constant before changing the manifest",
+			BayesianBetaBinomialFactorialVersion, existingHash, hash)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO AnalysisFrameworks
+			(version, config_content, config_hash, algorithm_git_sha,
+			 published_at, published_by, description)
+		VALUES (?, ?, ?, ?, datetime('now'), ?, ?)
+	`,
+		BayesianBetaBinomialFactorialVersion,
+		string(body),
+		hash,
+		"", // populated on demand by a future operator command
+		bayesianBetaBinomialFactorialParams["published_by"],
+		bayesianBetaBinomialFactorialParams["description"],
+	)
+	if err != nil {
+		return fmt.Errorf("RegisterBayesianBetaBinomialFactorial: insert: %w", err)
 	}
 	return nil
 }

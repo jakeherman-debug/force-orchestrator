@@ -506,6 +506,256 @@ func Test2WayInteractions_PersistsToTable(t *testing.T) {
 	}
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Decision rule
+// ──────────────────────────────────────────────────────────────────────────
+
+// TestDecideFactorialOutcome_DeclaredWinner — additive cells where
+// one cell clearly dominates. Reason should be 'declared_winner' and
+// BestCell should be set.
+func TestDecideFactorialOutcome_DeclaredWinner(t *testing.T) {
+	db := openMemoryDB(t)
+	factors := []factorSpec{
+		{Name: "prompt", Levels: []string{"A", "B"}},
+		{Name: "rules", Levels: []string{"tight", "loose"}},
+	}
+	// Big effect, big N: (A, tight) clearly dominates and the
+	// remaining cells stay additive — no significant interactions.
+	expID := seedFactorialExperiment(t, db, factors, map[string]struct{ Successes, Trials int }{
+		"prompt=A,rules=tight": {180, 200}, // 0.90
+		"prompt=A,rules=loose": {120, 200}, // 0.60
+		"prompt=B,rules=tight": {100, 200}, // 0.50
+		"prompt=B,rules=loose": {40, 200},  // 0.20
+	})
+
+	rule := DecisionRule{RandomSeed: 44444}
+	dec, err := DecideFactorialOutcome(context.Background(), db, expID, rule)
+	if err != nil {
+		t.Fatalf("DecideFactorialOutcome: %v", err)
+	}
+	if dec.Reason != "declared_winner" {
+		t.Fatalf("Reason: got %q, want 'declared_winner' (decision=%+v)", dec.Reason, dec)
+	}
+	if dec.BestCell == nil {
+		t.Fatalf("BestCell should be set; got nil")
+	}
+	if dec.BestCell["prompt"] != "A" || dec.BestCell["rules"] != "tight" {
+		t.Errorf("BestCell: got %+v, want {prompt:A, rules:tight}", dec.BestCell)
+	}
+	if dec.BestCellPosterior <= 0.95 {
+		t.Errorf("BestCellPosterior: got %v, want > 0.95", dec.BestCellPosterior)
+	}
+}
+
+// TestDecideFactorialOutcome_SignificantInteraction — strong-
+// interaction fixture; expect Reason='significant_interaction' and
+// SignificantInteractions populated. BestCell should be nil because
+// the operator must read the interaction surface.
+func TestDecideFactorialOutcome_SignificantInteraction(t *testing.T) {
+	db := openMemoryDB(t)
+	factors := []factorSpec{
+		{Name: "prompt", Levels: []string{"A", "B"}},
+		{Name: "rules", Levels: []string{"tight", "loose"}},
+	}
+	expID := seedFactorialExperiment(t, db, factors, map[string]struct{ Successes, Trials int }{
+		"prompt=A,rules=tight": {180, 200}, // 0.90
+		"prompt=A,rules=loose": {60, 200},  // 0.30
+		"prompt=B,rules=tight": {60, 200},  // 0.30
+		"prompt=B,rules=loose": {180, 200}, // 0.90
+	})
+
+	rule := DecisionRule{RandomSeed: 55555}
+	dec, err := DecideFactorialOutcome(context.Background(), db, expID, rule)
+	if err != nil {
+		t.Fatalf("DecideFactorialOutcome: %v", err)
+	}
+	if dec.Reason != "significant_interaction" {
+		t.Fatalf("Reason: got %q, want 'significant_interaction' (decision=%+v)", dec.Reason, dec)
+	}
+	if len(dec.SignificantInteractions) == 0 {
+		t.Errorf("SignificantInteractions should be populated; got empty")
+	}
+	if dec.BestCell != nil {
+		t.Errorf("BestCell should be nil when interactions are significant; got %+v", dec.BestCell)
+	}
+}
+
+// TestDecideFactorialOutcome_Inconclusive — small-N cells. Reason
+// should be 'inconclusive' and BestCell nil.
+func TestDecideFactorialOutcome_Inconclusive(t *testing.T) {
+	db := openMemoryDB(t)
+	factors := []factorSpec{
+		{Name: "prompt", Levels: []string{"A", "B"}},
+		{Name: "rules", Levels: []string{"tight", "loose"}},
+	}
+	// n=10/cell — well below MinSamplesPerArm=30 default. Counts kept
+	// near 50/50 so no interaction crosses ProbNonzero threshold and
+	// the outcome lands on 'inconclusive' rather than
+	// 'significant_interaction'.
+	expID := seedFactorialExperiment(t, db, factors, map[string]struct{ Successes, Trials int }{
+		"prompt=A,rules=tight": {5, 10},
+		"prompt=A,rules=loose": {5, 10},
+		"prompt=B,rules=tight": {5, 10},
+		"prompt=B,rules=loose": {5, 10},
+	})
+
+	rule := DecisionRule{RandomSeed: 66666}
+	dec, err := DecideFactorialOutcome(context.Background(), db, expID, rule)
+	if err != nil {
+		t.Fatalf("DecideFactorialOutcome: %v", err)
+	}
+	if dec.Reason != "inconclusive" {
+		t.Errorf("Reason: got %q, want 'inconclusive' (decision=%+v)", dec.Reason, dec)
+	}
+	if dec.BestCell != nil {
+		t.Errorf("BestCell should be nil; got %+v", dec.BestCell)
+	}
+}
+
+// TestDecideFactorialOutcome_Idempotent — running the same fixture
+// through DecideFactorialOutcome twice with the same rule returns
+// identical decisions (modulo map ordering on BestCell).
+func TestDecideFactorialOutcome_Idempotent(t *testing.T) {
+	db := openMemoryDB(t)
+	factors := []factorSpec{
+		{Name: "prompt", Levels: []string{"A", "B"}},
+		{Name: "rules", Levels: []string{"tight", "loose"}},
+	}
+	expID := seedFactorialExperiment(t, db, factors, map[string]struct{ Successes, Trials int }{
+		"prompt=A,rules=tight": {180, 200},
+		"prompt=A,rules=loose": {120, 200},
+		"prompt=B,rules=tight": {100, 200},
+		"prompt=B,rules=loose": {40, 200},
+	})
+
+	rule := DecisionRule{RandomSeed: 77777}
+	d1, err := DecideFactorialOutcome(context.Background(), db, expID, rule)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	d2, err := DecideFactorialOutcome(context.Background(), db, expID, rule)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if d1.Reason != d2.Reason {
+		t.Errorf("Reason: first %q, second %q", d1.Reason, d2.Reason)
+	}
+	if math.Abs(d1.BestCellPosterior-d2.BestCellPosterior) > 1e-9 {
+		t.Errorf("BestCellPosterior: first %v, second %v", d1.BestCellPosterior, d2.BestCellPosterior)
+	}
+	if !sameCell(d1.BestCell, d2.BestCell) {
+		t.Errorf("BestCell mismatch: first %+v, second %+v", d1.BestCell, d2.BestCell)
+	}
+}
+
+func sameCell(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Factorial framework registration
+// ──────────────────────────────────────────────────────────────────────────
+
+// TestRegisterBayesianBetaBinomialFactorial_HappyPath inserts the
+// factorial framework row, asserts the row's name/version/decomposition
+// match the package constants, and confirms the sibling shape (the
+// single-treatment row is unaffected).
+func TestRegisterBayesianBetaBinomialFactorial_HappyPath(t *testing.T) {
+	db := openMemoryDB(t)
+	ctx := context.Background()
+
+	// Pre-register the single-treatment row so we can verify the
+	// factorial row is a sibling, not a replacement.
+	if err := RegisterBayesianBetaBinomial(ctx, db); err != nil {
+		t.Fatalf("RegisterBayesianBetaBinomial: %v", err)
+	}
+	if err := RegisterBayesianBetaBinomialFactorial(ctx, db); err != nil {
+		t.Fatalf("RegisterBayesianBetaBinomialFactorial: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM AnalysisFrameworks`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("AnalysisFrameworks row count: got %d, want 2 (single + factorial)", count)
+	}
+
+	var version, hash, configContent string
+	err := db.QueryRowContext(ctx, `
+		SELECT version, config_hash, config_content
+		FROM AnalysisFrameworks WHERE version = ?
+	`, BayesianBetaBinomialFactorialVersion).Scan(&version, &hash, &configContent)
+	if err != nil {
+		t.Fatalf("read factorial row: %v", err)
+	}
+	if version != BayesianBetaBinomialFactorialVersion {
+		t.Errorf("version: got %q, want %q", version, BayesianBetaBinomialFactorialVersion)
+	}
+	if hash == "" {
+		t.Errorf("config_hash should be non-empty")
+	}
+	// decomposition key must be present and == 'main_effects_plus_2way'
+	// per paired-runs.md § Factorial Scoring.
+	if !contains(configContent, `"decomposition":"main_effects_plus_2way"`) {
+		t.Errorf("config_content missing decomposition='main_effects_plus_2way': %s", configContent)
+	}
+}
+
+// TestRegisterBayesianBetaBinomialFactorial_Idempotent — calling
+// register twice produces exactly one row.
+func TestRegisterBayesianBetaBinomialFactorial_Idempotent(t *testing.T) {
+	db := openMemoryDB(t)
+	ctx := context.Background()
+	if err := RegisterBayesianBetaBinomialFactorial(ctx, db); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if err := RegisterBayesianBetaBinomialFactorial(ctx, db); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM AnalysisFrameworks WHERE version = ?`,
+		BayesianBetaBinomialFactorialVersion,
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("row count: got %d, want 1", count)
+	}
+}
+
+// TestRegisterBayesianBetaBinomialFactorial_NilDB — nil db is a
+// programmer error, not a runtime panic.
+func TestRegisterBayesianBetaBinomialFactorial_NilDB(t *testing.T) {
+	if err := RegisterBayesianBetaBinomialFactorial(context.Background(), nil); err == nil {
+		t.Errorf("expected error for nil db, got nil")
+	}
+}
+
+// contains is a substring helper used by the registration test —
+// chosen over importing strings.Contains to keep the test file's
+// dependency set minimal.
+func contains(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
+
 // TestBetaBinomial_StillPasses asserts that the existing single-
 // treatment tests in bayesian_beta_binomial_test.go still cover the
 // untouched single-treatment path. We re-call the public surface

@@ -9,8 +9,10 @@
 //   - Compute2WayInteractions: per-(factor_a, factor_b, level_a,
 //     level_b) cell-level interaction estimates with a Monte Carlo
 //     P(|interaction| > min_practical_effect) on the joint posterior.
-//
-// The decision-rule layer lands in a follow-up commit.
+//   - DecideFactorialOutcome: terminal verdict combining main effects
+//     and interactions — declares a best cell when no significant
+//     interactions cross threshold; otherwise tags
+//     'significant_interaction' so the operator reads the surface.
 //
 // All inference reads the on-disk experiment shape (Experiments.
 // factors_json, ExperimentRuns.cell_json, ExperimentRuns.score). It
@@ -34,6 +36,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 )
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -75,6 +78,19 @@ type Interaction2Way struct {
 	PosteriorAlpha      float64 // pooled successes for the (level_a, level_b) cell + prior_alpha
 	PosteriorBeta       float64 // pooled failures  for the (level_a, level_b) cell + prior_beta
 	ProbNonzero         float64 // P(|interaction| > min_practical_effect) under joint posterior, Monte Carlo
+}
+
+// FactorialDecision is the analyzer's terminal verdict. BestCell is
+// nil when no cell crosses WinnerThreshold or the experiment is
+// inconclusive; SignificantInteractions is non-empty when at least
+// one 2-way contrast's ProbNonzero exceeds WinnerThreshold (in which
+// case the operator must read the interaction surface rather than
+// auto-promoting BestCell).
+type FactorialDecision struct {
+	BestCell                map[string]string // cell that won; nil if no winner
+	BestCellPosterior       float64
+	SignificantInteractions []Interaction2Way
+	Reason                  string // 'declared_winner' | 'inconclusive' | 'significant_interaction'
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -573,4 +589,119 @@ func persistInteractions(ctx context.Context, db *sql.DB, experimentID int, rows
 		return fmt.Errorf("persistInteractions: commit: %w", err)
 	}
 	return nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// DecideFactorialOutcome
+// ──────────────────────────────────────────────────────────────────────────
+
+// DecideFactorialOutcome combines main effects + interactions into a
+// terminal verdict:
+//
+//   - If at least one 2-way interaction's ProbNonzero crosses
+//     rule.WinnerThreshold, Reason = 'significant_interaction' and
+//     SignificantInteractions is populated. BestCell is left nil
+//     (the operator must read the surface; we do NOT auto-promote).
+//   - Else if a single cell's posterior > rule.WinnerThreshold against
+//     every OTHER cell, Reason = 'declared_winner' and BestCell is
+//     set to that cell's factor-level mapping.
+//   - Else Reason = 'inconclusive' and BestCell is nil.
+//
+// Default rule mirrors DecideOutcome's medium tier
+// (WinnerThreshold = 0.95, MonteCarloSamples = 200_000, RandomSeed
+// fixed for determinism).
+func DecideFactorialOutcome(ctx context.Context, db *sql.DB, experimentID int, rule DecisionRule) (FactorialDecision, error) {
+	view, err := loadFactorialView(ctx, db, experimentID)
+	if err != nil {
+		return FactorialDecision{}, err
+	}
+	rule = rule.withDefaults()
+
+	interactions, err := Compute2WayInteractionsWithRule(ctx, db, experimentID, rule)
+	if err != nil {
+		return FactorialDecision{}, err
+	}
+
+	// 1) Significant interactions — operator must read the surface.
+	var significant []Interaction2Way
+	for _, it := range interactions {
+		if it.ProbNonzero > rule.WinnerThreshold {
+			significant = append(significant, it)
+		}
+	}
+	if len(significant) > 0 {
+		return FactorialDecision{
+			SignificantInteractions: significant,
+			Reason:                  "significant_interaction",
+		}, nil
+	}
+
+	// 2) Cell-vs-all comparison: pick the cell whose posterior beats
+	// every OTHER cell with probability > WinnerThreshold. Iterate in
+	// canonical key order for determinism.
+	keys := sortedCellKeys(view)
+	type cellPost struct {
+		Key       string
+		Cell      map[string]string
+		Posterior *BetaBinomialPosterior
+		Trials    int
+	}
+	cells := make([]cellPost, 0, len(keys))
+	for _, k := range keys {
+		c := view.Cells[k]
+		cells = append(cells, cellPost{
+			Key:       k,
+			Cell:      c.Cell,
+			Posterior: NewPosterior(rule.PriorAlpha, rule.PriorBeta, c.Successes, c.Trials),
+			Trials:    c.Trials,
+		})
+	}
+
+	bestIdx := -1
+	bestMinProb := 0.0
+	for i, ci := range cells {
+		if ci.Trials < rule.MinSamplesPerArm {
+			continue
+		}
+		minProb := 1.0
+		dominates := true
+		for j, cj := range cells {
+			if i == j {
+				continue
+			}
+			seed := rule.RandomSeed + int64(hashStringSeed("cell|"+ci.Key+"|"+cj.Key))
+			p := compareWithSeed(ci.Posterior, cj.Posterior, rule.MonteCarloSamples, seed)
+			if p < minProb {
+				minProb = p
+			}
+			if p <= rule.WinnerThreshold {
+				dominates = false
+				// Don't break — we want the true min for diagnostics.
+			}
+		}
+		if dominates && minProb > bestMinProb {
+			bestMinProb = minProb
+			bestIdx = i
+		}
+	}
+
+	if bestIdx < 0 {
+		return FactorialDecision{
+			Reason: "inconclusive",
+		}, nil
+	}
+	return FactorialDecision{
+		BestCell:          cells[bestIdx].Cell,
+		BestCellPosterior: bestMinProb,
+		Reason:            "declared_winner",
+	}, nil
+}
+
+func sortedCellKeys(view *factorialView) []string {
+	keys := make([]string, 0, len(view.Cells))
+	for k := range view.Cells {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
