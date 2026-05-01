@@ -58,6 +58,11 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/add", handleAdd(db))
 	mux.HandleFunc("/api/memories", handleMemories(db))
 	mux.HandleFunc("/api/memories/", handleMemories(db))
+	// D4 Phase 0 — Librarian conflict tickets. Operators inspect open
+	// contradictions and resolve with a note; the resolve transition
+	// stamps resolved_at + resolution_note via store.ResolveConflictTicket.
+	mux.HandleFunc("/api/conflicts/tickets", handleConflictsTickets(db))
+	mux.HandleFunc("/api/conflicts/tickets/", handleConflictsTickets(db))
 	mux.HandleFunc("/api/events", handleHolonetStream("holonet.jsonl"))
 	mux.HandleFunc("/api/fleet-log", handleFleetLogStream("fleet.log"))
 	mux.HandleFunc("/api/dogs", handleDogsList(db))

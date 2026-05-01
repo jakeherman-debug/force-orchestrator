@@ -360,11 +360,15 @@ func buildAstromechContext(
 			len(history), strings.Join(parts, "\n\n"))
 	}
 
-	// Fleet memory — retrieve FTS candidates over-fetched at 20, then let
-	// the LLM re-ranker filter to the 5 genuinely relevant ones. FTS gives
-	// us recall; the re-ranker gives us precision. If the re-ranker is
-	// disabled or errors, we fall through to the FTS order trimmed to 5.
-	candidates := store.GetFleetMemories(db, bounty.TargetRepo, bounty.Payload, 20)
+	// Fleet memory — D4 P0 (Pattern P33): route through the Librarian
+	// Client's weighted-score ingress (composite freshness × validation
+	// score, canonical_id-merged rows excluded, retrieval bookkeeping
+	// stamped). The re-ranker still runs over the resulting candidates;
+	// the only change is the input now reflects quality-scored ranking
+	// rather than raw recency + FTS re-rank. If the Librarian path
+	// returns nothing (uninitialised quality columns, etc.), the
+	// re-ranker degrades cleanly.
+	candidates := getMemoriesForPromptInjection(ctx, db, bounty.TargetRepo, 20)
 	if memories := RerankFleetMemories(ctx, db, bounty.Payload, candidates, 5, librarianProfile, logger); len(memories) > 0 {
 		var successes, failures []string
 		for _, m := range memories {
