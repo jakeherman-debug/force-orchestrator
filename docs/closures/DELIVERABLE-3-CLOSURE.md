@@ -1349,3 +1349,181 @@ Operator-discretion items honestly surfaced:
 D3 closure status post-Phase-6A: 🟡 PARTIAL — Phases 1–5 CLOSED + Phase
 6A CLOSED; Phase 6B OPEN.
 
+### Phase 6B closure addendum
+
+**2026-04-30 — D3 Phase 6B closed.** Diagnostic substrate
+(LLMCallTranscripts capture wrapper + Pattern P31; GitOperationLog at
+internal/git helpers + Pattern P32; transcript archival housekeeping
+dog). Drill diagnostic surface (convoy / task / event views with
+filtering + free-text FTS5 search; replay mode purely-diagnostic;
+operator annotations with flag taxonomy). Ask `/` shortcut with
+read-only DB-query tools. Reflection (calibration scoreboard + fleet
+learning panel + 5-min retro generator). End-to-end shakedown
+exercises drill + ask + reflection integrated flow. P6B completes the
+dashboard rebuild substrate; D3 strict verifier likely flags P6A's
+deferred live-Haiku rendering + SPA-side rendering as remaining work.
+
+Tasks shipped (13, all merged via `--no-ff` to main):
+
+- **6B.1** LLMCallTranscripts capture wrapper (`internal/claude/transcript.go`)
+  — `CallWithTranscript`, `CallWithTranscriptStreaming`,
+  `CallWithTranscriptOneShot`. Redaction at write time (Fix #10);
+  cancellation leaves `call_completed_at` empty. Pattern P31 records
+  pre-6B direct call sites as the migration backlog (sweep target:
+  6B follow-up commit train).
+- **6B.2** GitOperationLog wrapper (`internal/git/oplog.go`).
+  `LogAndRun(ctx, OpContext, op, bin, args...)` bookends every
+  `exec.CommandContext` invocation; existing helpers (`runGitCtx`,
+  `runGitCtxOutput`, `bestEffortRun`) refactored to route through it.
+  Pattern P32 records pre-6B direct exec sites as migration backlog.
+- **6B.3** Drill convoy view (`internal/store/drill_queries.go` +
+  `/api/drill/convoy/<id>` + `/spend`). UNION ALL across TaskHistory,
+  LLMCallTranscripts, GitOperationLog, ConvoyReviewCycles,
+  OperatorEventAnnotations; per-(task,agent) cost rollup.
+- **6B.4** Drill task view (`/api/drill/task/<id>`).
+- **6B.5** Drill event view (`/api/drill/event/<kind>/<id>`).
+- **6B.6** Drill free-text search via sqlite_fts5
+  (`internal/store/drill_search.go` + `/api/drill/search`). Six
+  external-content fts5 virtual tables shadow LLMCallTranscripts,
+  BountyBoard, GitOperationLog, ConvoyReviewCycles, BriefingRenders,
+  OperatorEventAnnotations. EnsureDrillFTS5 wired into
+  `InitHolocronDSN`.
+- **6B.7** Drill replay mode (`internal/agents/replay.go` +
+  `/api/drill/replay/...`). Pure-read on live state; only writes are
+  ReplayResults + replay's own LLMCallTranscripts row stamped
+  `agent='<agent>-replay'`. Pattern P-Replay enforces no
+  UPDATE/DELETE/forbidden-mutator inside `replay.go`.
+- **6B.8** Drill operator annotations (`internal/store/annotations.go`
+  + `/api/annotations`). Flag enum (`problem|interesting|follow_up|''`).
+  Cross-operator edits/deletes refused. Pattern
+  P-AnnotationsOperatorOnly enforces non-operator paths can't write.
+- **6B.9** Transcript archival housekeeping dog
+  (`internal/agents/transcript_archive.go`). Daily, capped at 1000
+  rows. Old transcripts (>30d) OR closed-convoy transcripts (>7d) →
+  1-line summary in-row, body offloaded to
+  `~/.force/transcripts/<year>/<month>/<id>.txt.gz` (gzip, 0700 dir,
+  0600 file). Path-traversal guard on `LoadArchivedBody`.
+- **6B.10** Ask `/` shortcut (`internal/agents/ask_handler.go` +
+  `/api/ask`). Read-only routing across convoy / task / fts5 search.
+  Cost-capped via SystemConfig.ask_daily_cap_usd (default $3/day).
+  Pattern P-AskNoWriteTools enforces no UPDATE/DELETE/INSERT in
+  `ask_handler.go`.
+- **6B.11** Reflection calibration scoreboard
+  (`internal/store/calibration_queries.go` +
+  `/api/reflection/calibration`). Per-agent decision time + reject
+  rate from BriefingRenders; sample accuracy from
+  CalibrationAuditSamples; replay drift from ReplayResults. Coaching
+  suggestions are advisory; trust dial mutations route through the
+  existing trust-dial endpoint with `set_by='operator'`.
+- **6B.12** Reflection fleet learning panel
+  (`internal/agents/learning_panel_renderer.go` +
+  `/api/reflection/learning`). Weekly auto-render dog
+  `learning-panel-render` (7-day cooldown); deterministic synthesis
+  (live-Haiku swap mechanical, mirrors P6A renderer shape).
+- **6B.13** 5-min retro generator
+  (`internal/agents/retro_generator.go` +
+  `/api/reflection/retro/{generate,save}`). Markdown post with top
+  win + top frustration + suggested experiment. SaveRetroDraft
+  pinned to `docs/retros/<date>.md` with path-traversal guard.
+
+Pattern tests added:
+
+- **P31** `TestPattern_P31_AllLLMCallsCaptured` — every direct
+  `claude.AskClaudeCLI*` / `claude.RunCLI*` call site routes through
+  the transcript wrapper or appears in the migration backlog with
+  rationale.
+- **P32** `TestPattern_P32_GitOpsLogged` — every direct
+  `exec.Command{,Context}("git"|"gh", ...)` site lives in the
+  internal/git wrapper layer or the migration backlog.
+- **P-Replay** `TestPattern_ReplayNoMutation` — replay.go contains
+  no UPDATE/DELETE and only INSERTs into ReplayResults +
+  LLMCallTranscripts.
+- **P-AnnotationsOperatorOnly** — non-operator paths can't write
+  to OperatorEventAnnotations.
+- **P-AskNoWriteTools** — ask_handler.go contains no
+  INSERT/UPDATE/DELETE and no reach into store mutators.
+
+Schema state — P1 prerequisites all already-present pre-6B:
+LLMCallTranscripts, GitOperationLog, OperatorEventAnnotations,
+ReplayResults, FleetLearningPanels — schema parity test still green.
+P6B added NO new tables; only the 6 fts5 virtual tables (build
+runtime via `EnsureDrillFTS5` in `InitHolocronDSN`).
+
+CLI parity (Pattern P25 / 6A.15 invariant):
+- `force learning {refresh,show}` ↔ `/api/reflection/learning`
+- `force annotate <kind> <ref> <flag> <text>` ↔ `/api/annotations`
+- `force replay <kind> <id>` ↔ `/api/drill/replay/<kind>/<id>`
+- `force ask <question>` ↔ `/api/ask`
+- `force retro {generate,save}` ↔ `/api/reflection/retro/...`
+
+End-to-end shakedown — `TestShakedown_P6B` exercises 10 sub-cases
+against in-memory holocron in <2 seconds: convoy with synthetic LLM
++ git events; drill convoy/task/event views render; fts5 search
+returns "rate limit" hits; Captain ruling replay leaves original
+BountyBoard.status unchanged; operator annotation with flag=problem
+persists; Ask answers "convoy 47" with cite link; calibration
+scoreboard renders from real BriefingRenders rows; Friday retro
+generates markdown with the expected sections + `docs/retros/<date>.md`
+suggested-path. Stub Claude CLI runner means no live LLM calls
+required — the deterministic prose synthesisers stand in until the
+live-Haiku swap lands.
+
+Operator-discretion items honestly surfaced:
+
+- **Live Haiku integration deferred** for: NarrativeRenders (6A.7),
+  BriefingRenders (6A.10), FleetLearningPanels (6B.12),
+  ReplayResults (6B.7's replayed-decision body), TranscriptArchive's
+  summary blurb (6B.9), Ask synthesised answers (6B.10), Retro
+  markdown body (6B.13). The shape is uniform: a `synthesise...`
+  helper today; the live-Haiku swap replaces the body with a
+  `claude.CallWithTranscript(...)` call. The 6B.1 capture wrapper
+  makes the swap mechanical — no surface contract change. Slated for
+  D4 follow-up commit train.
+- **Pattern P31's allowlist is the migration backlog** for ~20
+  pre-6B direct LLM call sites (Captain, Medic, Council,
+  ConvoyReview, PR-review-triage, Chancellor, Astromech, Auditor,
+  Investigator, Commander, Diplomat, Librarian, Pilot, Boot,
+  MemoryRerank, AdversarialWiring, EC authors). Forward-going code
+  uses the wrapper; the sweep is mechanical (replace direct call
+  with `CallWithTranscript(ctx, descriptor{Agent: ...,
+  TaskID: ..., PromptVersion: ...}, ...)`). Same shape as P27's
+  notification-budget backlog.
+- **Pattern P32's allowlist is the migration backlog** for ~14
+  pre-6B direct git/gh exec sites (astromech, dogs, pilot_*,
+  pr_flow, reconcile, shadow, gh-helper, store/tasks,
+  cmd/force/{fleet_cmds,maintenance}). Slated for 6B follow-up +
+  selected D4 work.
+- **SPA-side wiring of P6B surfaces** is API-only in this chunk —
+  the new endpoints `/api/drill/...`, `/api/ask`, `/api/annotations`,
+  `/api/reflection/*` are reachable via curl + CLI parity, but the
+  static SPA does not yet render them. Same shape as P6A's
+  Pulse/Briefing/Reflection scaffolding-only landing. The D4 dashboard
+  SPA work picks them up.
+- **Replay's "decision changed" comparison** uses `equalishHead(80)`
+  on the synthesised response. Once live Haiku swaps in, the
+  comparison should switch to a structured-output diff (parse the
+  JSON ruling) so semantic changes are detected rather than first-
+  80-chars-of-prose. Slated for the same live-Haiku follow-up.
+- **CalibrationAuditSamples accuracy** is computed against the
+  rolling 30-day window only; the sample-bucket distribution
+  (e.g. "random vs adversarial vs high-confidence") is not yet
+  surfaced in the panel. Forward-going work could break out per-
+  bucket accuracy so operators see whether a particular sample-
+  selection bias is dragging the score.
+
+Tier-based --no-ff parallelization preserved branch topology in git
+log. Merges to main:
+- tier-1: phase-6b-transcripts (6B.1) + phase-6b-git-log (6B.2) +
+  phase-6b-reflection-learning (6B.12)
+- tier-2 combined: phase-6b-tier2 (6B.3 + 6B.4 + 6B.5 + 6B.9)
+- tier-3 combined: phase-6b-tier3 (6B.6)
+- tier-4 combined: phase-6b-tier4 (6B.7 + 6B.8)
+- tier-5 combined: phase-6b-tier5 (6B.10 + 6B.11 + 6B.13)
+- shakedown: phase-6b-shakedown
+- closure: phase-6b-closure
+
+D3 closure status post-Phase-6B: 🟡 PARTIAL — Phases 1–5 CLOSED +
+Phase 6A CLOSED + Phase 6B CLOSED. D3 GO pending comprehensive
+verifier; the deferred live-Haiku integration and SPA-side wiring
+are the most likely strict-verifier flags.
+
