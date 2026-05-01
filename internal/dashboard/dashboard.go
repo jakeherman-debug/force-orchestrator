@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -78,6 +79,13 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/disagreement-rates", handleDisagreementRates(db))
 	mux.HandleFunc("/healthz", handleHealthz)
 
+	// ── D3 P6A.2 — Dashboard heartbeat + health endpoint.
+	// /api/dashboard/health surfaces the most recent heartbeat row so the
+	// SPA can show a yellow banner if the dashboard process has been
+	// silently restarting. The CLI command `force dashboard status` reads
+	// the same row from outside the dashboard process.
+	mux.HandleFunc("/api/dashboard/health", handleDashboardHealth(db))
+
 	// ── D3 P6A.1 — Three-surface IA. Top-level navigation is capped at three
 	// surfaces forever: Pulse / Briefing / Reflection. Each handler emits a
 	// thin HTML shell that loads the SPA at the matching hash fragment.
@@ -96,6 +104,12 @@ func RunDashboard(db *sql.DB, port int) {
 	addr := loopbackBindAddr(port)
 	fmt.Printf("Fleet Command Center → http://%s\n", addr)
 	fmt.Println("Press Ctrl+C to stop.")
+
+	// D3 P6A.2 — kick off the heartbeat goroutine. context.Background() is
+	// the right scope here: RunDashboard blocks on ListenAndServe and only
+	// returns on hard shutdown (os.Exit). When ctx threading lands across
+	// the daemon boundary, this swaps for the real ctx.
+	StartHeartbeat(context.Background(), db, addr)
 
 	// Wrap mux in the security middleware stack: CSP headers, Origin allow-list
 	// on mutations, 256 KB body cap. Applied globally so no future handler can
