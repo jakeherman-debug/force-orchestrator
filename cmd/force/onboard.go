@@ -17,11 +17,11 @@ package main
 //
 // Anti-cheat: this CLI MUST NOT duplicate the digest assembly. It
 // consumes librarian.Client.BuildRepoDigest — the same method
-// inprocess_d4.go's BootstrapSenatorRules uses. Pattern P38
-// (internal/audittools/audit_pattern_p38_onboarding_shared_digest_test.go)
-// walks BOTH this file and inprocess_d4.go and asserts each
-// references BuildRepoDigest. Editing this file to inline the digest
-// assembly will trip the audit.
+// inprocess_d4.go's BootstrapSenatorRules uses. The AST audit
+// TestOnboardingSynthesizesFromSenatorPipeline/AST_BothPathsCallBuildRepoDigest
+// in cmd/force/onboard_test.go walks BOTH this file and inprocess_d4.go
+// and asserts each references BuildRepoDigest. Editing this file to
+// inline the digest assembly will trip the audit.
 
 import (
 	"context"

@@ -229,8 +229,9 @@ func (c *inProcessClient) BootstrapSenatorRules(ctx context.Context, repo string
 	// `force onboard` CLI. Calling it here (instead of duplicating
 	// the README + commits + ... assembly) is the call-site-level
 	// guarantee that both consumers move in lockstep — the AST
-	// audit (Pattern P38) walks BOTH this file and cmd/force/onboard.go
-	// and asserts each references BuildRepoDigest.
+	// audit TestOnboardingSynthesizesFromSenatorPipeline/AST_BothPathsCallBuildRepoDigest
+	// in cmd/force/onboard_test.go walks BOTH this file and
+	// cmd/force/onboard.go and asserts each references BuildRepoDigest.
 	repoDigest, _ := c.BuildRepoDigest(ctx, repo)
 	systemPrompt := bootstrapSenatorRulesSystemPrompt
 	userPrompt := buildBootstrapSenatorRulesUserPrompt(repo, repoDigest.RecentCommits, repoDigest.READMESample)
