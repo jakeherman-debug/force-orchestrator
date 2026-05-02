@@ -80,6 +80,7 @@ func createSchema(db *sql.DB) {
 		spawning_at_id            TEXT    DEFAULT '',
 		deferred_revert           INTEGER DEFAULT 0,
 		revert_target_task_id     INTEGER DEFAULT 0,
+		stage_id                  INTEGER DEFAULT NULL,
 		created_at                TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
@@ -90,6 +91,12 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_convoy_status  ON BountyBoard (convoy_id, status);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_parent_id      ON BountyBoard (parent_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_created_at     ON BountyBoard (created_at);`)
+	// stage_id (D5.5 P2) — partial index over the populated subset. Single-mode
+	// convoys leave stage_id NULL; the convoy-stage-watch dog and per-stage
+	// dispatch queries filter `WHERE stage_id = ?` and benefit from the smaller
+	// index. NULL rows are excluded by the partial predicate so legacy single-
+	// stage convoys do not bloat the index.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_stage_id ON BountyBoard (stage_id) WHERE stage_id IS NOT NULL;`)
 
 	// Fix #3 (AUDIT-008/034/035/036): partial UNIQUE index on idempotency_key.
 	// Scoped to non-empty keys AND non-terminal statuses so:
@@ -1686,6 +1693,17 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_stages_convoy_id ON ConvoyStages (convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_stages_status    ON ConvoyStages (status)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_stage_id ON ConvoyAskBranches (stage_id)`)
+
+	// D5.5 P2 — BountyBoard.stage_id. Nullable INTEGER pointing at
+	// ConvoyStages.id; NULL means "task is not assigned to any specific
+	// stage" (legacy single-mode convoys + non-convoy tasks). Multi-stage
+	// convoys populate stage_id at insert time so per-stage dispatch + the
+	// convoy-stage-watch dog can scope queries by stage. The ALTER is
+	// idempotent (silent no-op on duplicate column name); the partial
+	// index follows the createSchema definition so upgraded DBs converge
+	// on the same shape.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN stage_id INTEGER DEFAULT NULL`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounty_stage_id ON BountyBoard (stage_id) WHERE stage_id IS NOT NULL`)
 
 	// Forward-compat data migration: every pre-D5.5 convoy is implicitly a
 	// single-stage convoy. Create stage 1 (status=Open, gate_type=NULL,

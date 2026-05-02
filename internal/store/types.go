@@ -19,6 +19,12 @@ type Bounty struct {
 	TaskTimeout       int // seconds; 0 means use AstromechTimeoutForAttempt progressive default
 	MedicRequeueCount int // Fix #6: number of times Medic has requeued this task; hard-capped to bound the A→C→M→A loop
 	ReshardGeneration int // Fix #6: generation number for auto-reshard cascade; refuses past cap to bound 1→3→9→27 fanout
+	// StageID (D5.5 P2): which ConvoyStages row this task belongs to. Zero
+	// means "no stage assignment" — either a non-convoy task or a legacy
+	// single-mode convoy task. Non-zero means the task is part of stage
+	// `StageID`'s work and the convoy-stage-watch dog will scope dispatch
+	// + completion checks to that stage.
+	StageID int
 }
 
 // ── Planning ──────────────────────────────────────────────────────────────────
