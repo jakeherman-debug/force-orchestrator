@@ -23,6 +23,7 @@ import (
 	"force-orchestrator/internal/clients/metrics"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/holdout"
+	"force-orchestrator/internal/isb/scanners/osv"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/treatments"
@@ -281,6 +282,26 @@ func cmdDaemon(db *sql.DB) {
 	if caErr != nil {
 		fmt.Fprintf(os.Stderr, "[CODEARTIFACT] construction failed (%v) — supply dogs will skip until reconfigured\n", caErr)
 		caClient = nil
+	}
+
+	// D5 fix-loop iter 1 slice α: construct the OSV client and wire the
+	// SUPPLY-* manifest-gated rules + supply-token-recheck dog deps.
+	// Closes the strict-verifier NO-GO gap where rules were registered
+	// only in test code, never in production. WireSupplyRules:
+	//   1. Calls isb.RegisterManifestGated for SUPPLY-001..005 so the
+	//      ISBReview dispatch path actually finds them at run-time.
+	//   2. Calls agents.RegisterSupplyRecheckDeps so the
+	//      supply-token-recheck dog (and the ConvoyReview gate's
+	//      inline replay path) have the codeartifact client + per-rule
+	//      ReplayableRule adapter map they need.
+	// osvClient is non-nil under all environments — osv.NewInProcess
+	// has no external dependencies. A nil caClient is tolerated (the
+	// dispatcher records per-rule errors but continues; SUPPLY-002 +
+	// SUPPLY-005 keep functioning).
+	osvClient := osv.NewInProcess()
+	if wireErr := agents.WireSupplyRules(db, caClient, osvClient); wireErr != nil {
+		fmt.Fprintf(os.Stderr, "[SUPPLY-WIRE] daemon start aborted: %v\n", wireErr)
+		os.Exit(1)
 	}
 
 	// D2 T1-2 — wire the per-agent context-size guard. The DB handle
