@@ -39,7 +39,8 @@ func createSchema(db *sql.DB) {
 		quarantined_at    TEXT    DEFAULT '',
 		quarantine_reason TEXT    DEFAULT '',
 		pr_review_enabled INTEGER DEFAULT 1,
-		mode              TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined'))
+		mode              TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')),
+		license           TEXT    NOT NULL DEFAULT ''
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
@@ -2403,4 +2404,16 @@ func runMigrations(db *sql.DB) {
 		created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_senate_review_feature ON SenateReview(feature_id)`)
+
+	// ── D5 Phase 0 — Repositories.license ────────────────────────────────────
+	// SUPPLY-004 (license compatibility) needs the repo's declared license
+	// to score whether each new dep is compatible. The column is additive
+	// (DEFAULT '') so upgraded DBs land it on the next runMigrations sweep.
+	// AddRepo populates it on registration via the SPDX detector; the
+	// backfill below stamps existing rows from on-disk LICENSE files (best-
+	// effort — silently leaves '' when the local_path is missing or no
+	// LICENSE file exists). Idempotent: a re-run scans only rows still at
+	// '' so already-detected rows stay sticky.
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN license TEXT NOT NULL DEFAULT ''`)
+	backfillRepositoryLicenses(db)
 }

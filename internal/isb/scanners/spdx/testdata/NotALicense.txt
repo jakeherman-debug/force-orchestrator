@@ -1,0 +1,3 @@
+This is a README. It does not contain any license terms.
+
+This project does cool things and the authors are great.

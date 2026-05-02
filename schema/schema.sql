@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS Repositories (
     quarantined_at    TEXT    DEFAULT '',  -- set by repo-config-check when repo becomes unhealthy
     quarantine_reason TEXT    DEFAULT '',
     pr_review_enabled INTEGER DEFAULT 1,   -- 0 = opt-out of PR review-comment triage (AUDIT-023, Fix #4)
-    mode              TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')) -- D2 T1-4
+    mode              TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')), -- D2 T1-4
+    license           TEXT    NOT NULL DEFAULT ''   -- D5 P0: SPDX id detected from LICENSE file at AddRepo time; backfilled on first runMigrations after upgrade
 );
 
 -- ── Ask-branch sub-PR tracking ────────────────────────────────────────────────

@@ -83,6 +83,16 @@ func AddRepo(db *sql.DB, name, path, desc string) {
 			local_path  = excluded.local_path,
 			description = excluded.description`,
 		name, path, desc)
+
+	// D5 P0: detect the SPDX license id from the on-disk LICENSE file
+	// and stamp it. Best-effort — leaves '' (and operator-review path
+	// surfaces Unknown) when local_path doesn't exist or no LICENSE
+	// file is present. Re-registration re-runs detection so a repo
+	// that landed a LICENSE file post-clone picks it up next time
+	// AddRepo is called.
+	if _, err := DetectAndSetRepositoryLicense(db, name, path); err != nil {
+		log.Printf("AddRepo(%s): license detection failed: %v", name, err)
+	}
 }
 
 func GetRepoPath(db *sql.DB, repoName string) string {
