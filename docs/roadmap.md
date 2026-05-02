@@ -1657,6 +1657,208 @@ go test -tags sqlite_fts5 -run TestSupplyDeferral_TokenExpired ./internal/isb/..
 
 ---
 
+## Deliverable 5.5 — Staged Convoys — Commander-Drafted Phase Pipelines
+
+### Mission
+
+Give the Commander first-class tooling to decompose a single logical convoy into N sequenced stages, each with its own ask-branches and PRs and a configurable gate to advance. Single-stage convoys (today's behavior) remain the default; multi-stage is opt-in at planning time. ZDM is one motivating use case among many — staged convoys are the general primitive for any work that shouldn't land in a single PR.
+
+### Classification
+
+Architectural extension to the convoy execution model. Schema + state machine + Commander integration + new dog + dashboard surface.
+
+### Why this is a tool the Commander needs
+
+Single-PR landings are wrong for many real situations Upstart engineers hit regularly:
+
+| Reason | Example |
+|---|---|
+| ZDM schema work | column-add → backfill → dual-write → cutover → drop-old |
+| Feature flag rollout | scaffold + flag-off → impl behind flag → 1% enable → 100% enable → flag removal |
+| Reviewer cognitive load | "this 5000-line PR is unreviewable, split it" — data model + API → client → UI |
+| Risk reduction | observability/metrics first → risky change → measure regression in real prod data |
+| In-repo dependency ordering | refactor a shared utility → update callers (callers depend on the refactor) |
+| Async API contracts | publish new event schema → producers dual-emit → consumers read new → retire old |
+| Library breaking-change migration | bump version on one module → migrate next tranche of call sites → repeat |
+| Parallel-work serialization | two engineers' independent work would conflict; convoy serializes them |
+| Soak between risky changes | "land one phase per day" to limit blast radius even without ZDM |
+| Capacity-aware enablement | turn on for low-traffic repos first, then high-traffic ones |
+
+The unifying primitive is the same: **N sequential phases, each independently shippable, with a configurable gate between them.** The Commander is already the planning agent that decides convoy shape; staged decomposition is a natural extension of its role.
+
+### Required reading
+
+1. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-3-CLOSURE.md` — for ConvoyReview shape (which becomes per-stage post-D5.5).
+2. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-4-CLOSURE.md` — for Senate review patterns (Senate runs against staged convoys at each stage's DraftPROpen).
+3. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-5-CLOSURE.md` — for SUPPLY-* deferral path (the `AwaitingSupplyRecheck` gate runs per-stage post-D5.5).
+
+### Prerequisites
+
+D5 complete: SUPPLY-* rules + deferral path + `AwaitingSupplyRecheck` gate live, AND `docs/closures/DELIVERABLE-5-CLOSURE.md` filed.
+
+### Merge order within D5.5
+
+| Order | Track | Branch | Depends on |
+|---|---|---|---|
+| 1 | D5.5-StagedConvoys | `deliverable/5.5/staged-convoys` | — |
+
+Single track; six phases (P0..P5) test-green-before-next.
+
+### Architecture
+
+**Schema additions:**
+
+```
+ConvoyStages(
+  id INTEGER PRIMARY KEY,
+  convoy_id INTEGER NOT NULL REFERENCES Convoys(id),
+  stage_num INTEGER NOT NULL,           -- 1-indexed; ordered execution
+  intent_text TEXT NOT NULL,            -- Commander's reason for this stage
+  status TEXT NOT NULL DEFAULT 'Pending',  -- Pending|Open|AllPRsMerged|AwaitingGate|GatePassed|Verified|Failed
+  gate_type TEXT,                       -- soak_minutes|operator_confirm|probe_endpoint|release_label_present|metric_threshold|null
+  gate_config_json TEXT NOT NULL DEFAULT '{}',  -- per-gate-type config
+  gate_timeout_minutes INTEGER NOT NULL DEFAULT 10080,  -- 7 days default; escalation after
+  opened_at TEXT,
+  all_prs_merged_at TEXT,
+  gate_passed_at TEXT,
+  completed_at TEXT,
+  UNIQUE(convoy_id, stage_num)
+);
+
+ConvoyAskBranches.stage_id INTEGER  -- FK to ConvoyStages.id; default migration sets all existing rows to stage 1 of an implicit single-stage convoy
+Convoys.staging_mode TEXT NOT NULL DEFAULT 'single'  -- 'single' | 'staged'
+```
+
+**State machine:**
+- Convoy-level states stay flat (`DraftPROpen`, `Shipped`, `Abandoned`). Richer state lives in `ConvoyStages.status`.
+- Per-stage progression: `Pending → Open → AllPRsMerged → AwaitingGate → GatePassed → Verified`.
+- Convoy is `Shipped` only when ALL stages reach `Verified`.
+- Astromech work for stage N is gated: stage N's ask-branches are not opened, no worktrees dispatched, no astromechs claim work, until stage N-1 reports `GatePassed` (which transitions both: stage N-1 → `Verified`, stage N → `Open`).
+
+**Stage gate types (pluggable):**
+
+| Gate type | Config | Mechanism |
+|---|---|---|
+| `soak_minutes` | `{minutes: int}` | Wait N minutes after `all_prs_merged_at` before flipping `GatePassed`. |
+| `operator_confirm` | `{prompt: string}` | Operator clicks "advance" in the dashboard; stage transitions on operator action. |
+| `release_label_present` | `{pattern: regex, polling_interval_minutes: int}` | Polls `gh pr view --json labels` for each merged PR in stage N-1; gate passes when ALL merged PRs carry a label matching the pattern. Aligns with Upstart's external deploy system that labels PRs post-build per release. |
+| `probe_endpoint` | `{url: string, method: GET\|POST, expected_status: int, body_match_regex: optional string, timeout_seconds: int, target_env: prod\|staging}` | Calls the configured URL after the prior gate (typically `release_label_present`) passes; verifies the change is actually working in the target environment. Use cases: new endpoint exists and returns 200, existing endpoint now returns a new field, admin endpoint lists a newly registered consumer. |
+| `metric_threshold` | `{metric_query: string, comparator: lt\|gt\|eq, threshold: float, sample_window_minutes: int}` | Queries metrics backend (Datadog or similar); gate passes when metric satisfies comparator vs threshold over the sample window. Useful for "error rate stayed below 0.1% after stage 1 deployed." |
+| `null` | `{}` | No gate; transitions immediately on `AllPRsMerged → Verified`. Allowed only on the terminal stage of a convoy. |
+
+Gates can compose in a future phase via `all_of` / `any_of` aggregator gates. P3 ships only the singletons above.
+
+**Commander integration:**
+
+When the Commander drafts a convoy from a Feature, its planning prompt is extended to ask: *"Should this be staged?"* Output JSON shape becomes (for staged mode):
+
+```json
+{
+  "staging_mode": "staged",
+  "stages": [
+    {
+      "stage_num": 1,
+      "intent": "Add nullable user_account_status column + migration",
+      "tasks": [...],
+      "gate": {
+        "type": "release_label_present",
+        "config": {"pattern": "release-202\\d+\\.\\d+", "polling_interval_minutes": 15}
+      }
+    },
+    {
+      "stage_num": 2,
+      "intent": "Dual-write to both old and new column",
+      "tasks": [...],
+      "gate": {"type": "soak_minutes", "config": {"minutes": 1440}}
+    },
+    {
+      "stage_num": 3,
+      "intent": "Read from new column only",
+      "tasks": [...],
+      "gate": null
+    }
+  ]
+}
+```
+
+The Commander reasons about *why* each stage is independently safe, *what* the gate verifies, and *what* the rollback story is per stage. This is captured in `ConvoyStages.intent_text` and surfaced to ConvoyReview at each stage's DraftPROpen.
+
+**Stage advancement dog:** `convoy-stage-watch` (every 5 min) walks active stages, evaluates pending gates, advances stage state. Per stage:
+- If `Open` and all stage's ask-branch PRs merged → flip to `AllPRsMerged`, stamp `all_prs_merged_at`.
+- If `AllPRsMerged` → flip to `AwaitingGate`.
+- If `AwaitingGate` and gate evaluator returns pass → flip to `GatePassed`, stamp `gate_passed_at`. Spawn next-stage opening task.
+- If `AwaitingGate` and `now - all_prs_merged_at > gate_timeout_minutes` → emit escalation (operator surface + Slack).
+
+**ConvoyReview per stage:** runs at each stage's DraftPROpen against post-previous-stage main (i.e., what main looks like after stage N-1 has merged). The unified-diff review is now per-stage; the LLM sees only that stage's intent + diff. Cleaner mental model than today's monolithic review for big convoys.
+
+**D5 forward-compat:** the `AwaitingSupplyRecheck` gate from D5 ConvoyReview runs per-stage at each stage's DraftPROpen. SUPPLY-* findings are scoped to the ask-branch they were detected on, which is already stage-scoped post-D5.5 by virtue of `ConvoyAskBranches.stage_id`.
+
+### Phases
+
+| Phase | Scope |
+|---|---|
+| P0 | Schema (`ConvoyStages` + `ConvoyAskBranches.stage_id` + `Convoys.staging_mode`); forward-compat migration (all existing convoys → `staging_mode='single'`, single ConvoyStage at stage 1, gate=null); store helpers (CreateStage, AdvanceStage, ListStages, GetStage); baseline tests including the forward-compat path. |
+| P1 | Gate plug interface (`type Gate interface { Evaluate(ctx, stage) (passed bool, reason string, err error) }`); 3 baseline gates (`soak_minutes`, `operator_confirm`, `null`); `convoy-stage-watch` dog skeleton with stage advancement transitions. |
+| P2 | Commander integration: planning-prompt extension + multi-stage JSON output validator + ConvoyReview per-stage scoping + per-stage Senate review hook. Astromech dispatch gated on stage status. |
+| P3 | 3 advanced gates (`probe_endpoint`, `release_label_present`, `metric_threshold`); gate-timeout escalation surface. |
+| P4 | Dashboard view (stages list per convoy, gate status, advance/skip/abort buttons), notify-after on stage transitions, stage audit trail surface. |
+| P5 | D5.5 strict verifier — Static + Heavy + Race shards, fresh-context cross-walk against this section. Emphasis on anti-cheat directives + forward-compat regression for existing single-stage convoys. |
+
+### Exit criteria
+
+1. Forward-compat: every existing convoy from D3/D4/D5 era continues to function with `staging_mode='single'`, one ConvoyStage row at stage 1, gate=null. No behavior change for single-stage convoys. Migration tests prove this.
+2. Schema parity: `createSchema` + `runMigrations` + `schema/schema.sql` agree on the new tables and columns. `TestSchemaParity` green.
+3. All 6 gate types implemented with dedicated unit tests + at least one integration test per type that walks a staged convoy through advancement.
+4. `convoy-stage-watch` dog registered; `TestListDogs` count incremented; the dog correctly handles every stage status transition.
+5. Commander integration: planning prompt includes the multi-stage option; emitted JSON validated by `internal/agents/commander/staging_validator.go`; multi-stage convoys land in the schema correctly via `runCommanderTask`.
+6. ConvoyReview runs per-stage with stage-N main = post-stage-(N-1) main. End-to-end test walks a 3-stage convoy through ConvoyReview at each stage.
+7. Astromech dispatch gating: a stage-N task is never claimed by an astromech while stage N is `Pending`. Audit test (Pattern P-StageGate) walks the dispatch path and rejects any code path that would claim a Pending-stage task.
+8. Operator dashboard: `/api/convoys/<id>/stages` returns the ConvoyStages list; `POST /api/convoys/<id>/stages/<stage_num>/advance` is the operator-confirm action; SPA renders the staged-convoy view.
+9. Stage-timeout escalation fires correctly when a gate hangs past `gate_timeout_minutes`; escalation includes operator surface + notify-after Slack ping.
+10. Bypass mechanism for emergency stage advancement: operator-only, requires `AUDIT-NNN <reason>` in the advance request, lands in audit trail. Tested.
+
+### Anti-cheat directives
+
+- **No silent gate skip.** Every `gate_passed_at` flip is durable + audited. Tests assert `gate_passed_at` is non-null only after a real gate evaluation, never auto-set.
+- **No Commander single-stage → multi-stage promotion post-hoc** without explicit operator confirmation. Otherwise the Commander could re-plan to hide intent drift. Audit Pattern P-StagingPromotionConfirm enforces.
+- **No null-gate without justification.** `gate_type=null` is allowed only for the terminal stage (no successor). Audit test rejects null-gate on non-terminal stages.
+- **No skip-stage-N-because-stage-N+1-merged-first.** Out-of-order merges that would bypass a gate must trigger escalation, not silent advance. The `convoy-stage-watch` dog refuses to advance non-current stages.
+- **No astromech pre-staging.** Astromechs cannot hold a worktree on a `Pending` stage. Pattern P-StageGate (AST audit) walks the dispatch path and rejects any code path that would claim a Pending-stage task. Verifier executes it.
+- **No Slack-message-triggers-stage-advance.** Per the D4 retrospective: only the operator's explicit dashboard action or a real gate evaluation can advance a stage. Slack pings are read-only signal.
+
+### Verification procedure
+
+```
+# Build + suite
+go test -tags sqlite_fts5 -count=3 ./internal/agents/staged/...        # all gate tests green
+go test -tags sqlite_fts5 -race -count=5 ./...                          # full suite green under -race
+
+# Schema + forward-compat
+sqlite3 holocron.db "SELECT COUNT(*) FROM ConvoyStages WHERE convoy_id IN (SELECT id FROM Convoys WHERE staging_mode='single')"  # equals count of pre-existing convoys
+sqlite3 holocron.db "SELECT COUNT(*) FROM ConvoyAskBranches WHERE stage_id IS NULL"  # expect 0 after forward-compat migration
+
+# Dog registration
+./force daemon --dry-run | grep convoy-stage-watch                      # registered
+
+# E2E walk
+go test -tags sqlite_fts5 -run TestStagedConvoy_E2E_3Stages ./internal/agents/...  # walks 3-stage convoy through DraftPROpen × 3
+```
+
+### Closure report
+
+`docs/closures/DELIVERABLE-5.5-CLOSURE.md` with:
+
+- Per-gate-type status: implementation file:line × gate evaluator test names × integration test name × default config.
+- Forward-compat audit: count of existing convoys migrated to `staging_mode='single'` cleanly; count of ConvoyAskBranches assigned `stage_id`.
+- Commander prompt extension: file:line of the staging-mode planning prompt; sample multi-stage convoy planned end-to-end.
+- ConvoyReview per-stage scoping: evidence that stage-N review sees post-stage-(N-1) main and only stage-N intent.
+- Astromech dispatch gating: pattern P-StageGate test file:line.
+- Dashboard surface: endpoint list + SPA view file:line.
+- Anti-cheat self-check (one line per directive + evidence file:line).
+- Residual list — explicitly NONE blocking.
+
+---
+
 ## Deliverable 6 — Synthetic Onboarding CLI
 
 ### Mission
