@@ -188,7 +188,12 @@ func isbFinish(db *sql.DB, b *store.Bounty, p isbReviewPayload, agentName, sessi
 	srcTask, err := store.GetBounty(db, p.SourceTaskID)
 	if err != nil || srcTask == nil {
 		logger.Printf("Task %d: ISB source task %d not found: %v", b.ID, p.SourceTaskID, err)
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already terminated (source
+		// task vanished); if this status flip fails, the ISBReview row
+		// will be recovered by the stale-lock detector. Non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: ISBReview Completed status transition failed (post source-not-found): %v", b.ID, upErr)
+		}
 		return
 	}
 
@@ -198,7 +203,12 @@ func isbFinish(db *sql.DB, b *store.Bounty, p isbReviewPayload, agentName, sessi
 		store.ReturnTaskForRework(db, p.SourceTaskID, srcTask.Payload+feedback)
 		store.LogAudit(db, agentName, "isb-rejected", p.SourceTaskID, "ISB recorded block-severity findings")
 		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already succeeded
+		// (rejection routed via ReturnTaskForRework + audit + telemetry);
+		// if this status flip fails, the audit-trail flip is non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: ISBReview Completed status transition failed (post block-rejection): %v", b.ID, upErr)
+		}
 		return
 	}
 

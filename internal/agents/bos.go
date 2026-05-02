@@ -165,7 +165,12 @@ func bosFinish(db *sql.DB, b *store.Bounty, p bosReviewPayload, agentName, sessi
 	srcTask, err := store.GetBounty(db, p.SourceTaskID)
 	if err != nil || srcTask == nil {
 		logger.Printf("Task %d: BoS source task %d not found: %v", b.ID, p.SourceTaskID, err)
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already terminated (source
+		// task vanished); if this status flip fails, the BoSReview row
+		// will be recovered by the stale-lock detector. Non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: BoSReview Completed status transition failed (post source-not-found): %v", b.ID, upErr)
+		}
 		return
 	}
 
@@ -176,7 +181,12 @@ func bosFinish(db *sql.DB, b *store.Bounty, p bosReviewPayload, agentName, sessi
 		store.ReturnTaskForRework(db, p.SourceTaskID, srcTask.Payload+feedback)
 		store.LogAudit(db, agentName, "bos-rejected", p.SourceTaskID, "BoS recorded block-severity findings")
 		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already succeeded
+		// (rejection routed via ReturnTaskForRework + audit + telemetry);
+		// if this status flip fails, the audit-trail flip is non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: BoSReview Completed status transition failed (post block-rejection): %v", b.ID, upErr)
+		}
 		return
 	}
 
