@@ -100,6 +100,20 @@ func RunDashboard(db *sql.DB, port int) {
 	// extracted from cmd/force/task_cmds.go cmdAddJira). See
 	// handlers_feature_from_jira.go for validation + response shape.
 	mux.HandleFunc("/api/feature/from-jira", handleFeatureFromJira(db))
+	// ── D4 fix-loop-1 α — Dashboard views for D4 entities (exit criterion 5).
+	// Four operator surfaces back the BoS / ISB / Senate stack:
+	//   1. Security findings list + per-finding resolve (BoS + ISB rows).
+	//   2. Per-rule precision metrics (firings, TP/FP, ramp status).
+	//   3. Override-audit log (disposition='overridden' findings).
+	//   4. Senate review log (chambers + per-feature reviews).
+	mux.HandleFunc("/api/security-findings", handleSecurityFindings(db))
+	mux.HandleFunc("/api/security-findings/", handleSecurityFindingsSubroutes(db))
+	mux.HandleFunc("/api/rule-metrics", handleRuleMetrics(db))
+	mux.HandleFunc("/api/override-audit", handleOverrideAudit(db))
+	mux.HandleFunc("/api/senate/chambers", handleSenateChambers(db))
+	mux.HandleFunc("/api/senate/reviews", handleSenateReviews(db))
+	mux.HandleFunc("/api/senate/reviews/", handleSenateReviewsSubroutes(db))
+
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	// ── D3 P6A.14 — Operator attention tags API.

@@ -274,6 +274,8 @@ function switchTab(name) {
     case 'knowledge':   loadMemoryRepos().then(() => loadMemories()); break;
     case 'experiments': loadExperiments(); loadFleetProgress(); break;
     case 'ec':          loadECProposals(); break;
+    case 'security':    window.loadSecurityFindings && window.loadSecurityFindings(); break;
+    case 'senate':      window.loadSenateChambers   && window.loadSenateChambers(); break;
     case 'logs':        startLogStream(); break;
   }
   if (name !== 'logs') stopLogStream();
@@ -2558,3 +2560,361 @@ async function runAsk() {
   }
 }
 window.runAsk = runAsk;
+
+// ── D4 fix-loop-1 α — Security + Senate dashboard surfaces ────────────────
+//
+// Five fetch endpoints back the four views:
+//
+//   GET  /api/security-findings                       — list filterable rows
+//   POST /api/security-findings/<id>/resolve          — operator action
+//   GET  /api/rule-metrics                            — per-rule rollup
+//   GET  /api/override-audit                          — bypass-comment audit
+//   GET  /api/senate/chambers                         — Senator roster
+//   GET  /api/senate/reviews                          — review log
+//   GET  /api/senate/reviews/<id>                     — single review w/ memories
+//
+// Sub-tab switchers wire the security + senate top-level legacy tabs.
+
+function activateSecurityTab(name) {
+  document.querySelectorAll('#security-tabs .reflection-tab').forEach(b => {
+    b.classList.toggle('reflection-tab-active', b.dataset.securityTab === name);
+  });
+  document.querySelectorAll('#tab-security .reflection-pane').forEach(p => {
+    p.hidden = p.id !== ('security-pane-' + name);
+  });
+  // Auto-load on tab activation so the operator sees data without an
+  // extra click. Each loader is idempotent.
+  if (name === 'findings')        window.loadSecurityFindings && window.loadSecurityFindings();
+  if (name === 'rule-metrics')    window.loadRuleMetrics       && window.loadRuleMetrics();
+  if (name === 'override-audit')  window.loadOverrideAudit     && window.loadOverrideAudit();
+}
+document.querySelectorAll('#security-tabs .reflection-tab').forEach(b => {
+  b.addEventListener('click', () => activateSecurityTab(b.dataset.securityTab));
+});
+
+function activateSenateTab(name) {
+  document.querySelectorAll('#senate-tabs .reflection-tab').forEach(b => {
+    b.classList.toggle('reflection-tab-active', b.dataset.senateTab === name);
+  });
+  document.querySelectorAll('#tab-senate .reflection-pane').forEach(p => {
+    p.hidden = p.id !== ('senate-pane-' + name);
+  });
+  if (name === 'chambers') window.loadSenateChambers && window.loadSenateChambers();
+  if (name === 'reviews')  window.loadSenateReviews  && window.loadSenateReviews();
+}
+document.querySelectorAll('#senate-tabs .reflection-tab').forEach(b => {
+  b.addEventListener('click', () => activateSenateTab(b.dataset.senateTab));
+});
+
+// — /api/security-findings list.
+async function loadSecurityFindings() {
+  const bureau = document.getElementById('sf-bureau');
+  const disp   = document.getElementById('sf-disposition');
+  const ruleEl = document.getElementById('sf-rule-id');
+  const params = new URLSearchParams();
+  if (bureau && bureau.value) params.set('bureau', bureau.value);
+  if (disp && disp.value)     params.set('disposition', disp.value);
+  if (ruleEl && ruleEl.value.trim()) params.set('rule_id', ruleEl.value.trim());
+  try {
+    const r = await fetch('/api/security-findings?' + params.toString());
+    if (!r.ok) {
+      _refSafeHTML('security-findings-table', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const findings = data.findings || [];
+    const sum = document.getElementById('sf-summary');
+    if (sum) sum.textContent = (data.count || 0) + ' shown · ' + (data.total || 0) + ' total';
+    const headers = ['ID', 'Bureau', 'Rule', 'Severity', 'File:Line', 'Message', 'Disposition', 'Audit', 'Created', ''];
+    const target = document.getElementById('security-findings-table');
+    if (!target) return;
+    target.innerHTML = '';
+    if (findings.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'reflection-empty';
+      empty.textContent = '(no findings match the filter)';
+      target.appendChild(empty);
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'reflection-data-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    headers.forEach(h => { const th = document.createElement('th'); th.textContent = h; headRow.appendChild(th); });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    findings.forEach(f => {
+      const tr = document.createElement('tr');
+      const cells = [
+        String(f.ID || f.id || ''),
+        f.Bureau || f.bureau || '',
+        f.RuleID || f.rule_id || '',
+        f.Severity || f.severity || '',
+        (f.FilePath || f.file_path || '') + ':' + (f.LineNumber || f.line_number || ''),
+        f.Message || f.message || '',
+        f.Disposition || f.disposition || 'open',
+        f.BypassAuditID || f.bypass_audit_id || '',
+        f.CreatedAt || f.created_at || '',
+      ];
+      cells.forEach(c => { const td = document.createElement('td'); td.appendChild(_refTextNode(c)); tr.appendChild(td); });
+      // Action cell — resolve.
+      const actionTd = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'btn-sm';
+      btn.textContent = 'Resolve';
+      btn.onclick = () => resolveSecurityFinding(f.ID || f.id);
+      actionTd.appendChild(btn);
+      tr.appendChild(actionTd);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    target.appendChild(table);
+  } catch (e) {
+    _refSafeHTML('security-findings-table', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadSecurityFindings = loadSecurityFindings;
+
+async function resolveSecurityFinding(id) {
+  if (!id) return;
+  const operator = window.prompt('Operator email (for audit log):', '');
+  if (!operator) return;
+  const disposition = window.prompt('Disposition (resolved | closed | suppressed | overridden):', 'resolved');
+  if (!disposition) return;
+  let bypassAuditID = '', bypassReason = '';
+  if (disposition === 'overridden') {
+    bypassAuditID = window.prompt('Bypass audit id (AUDIT-NNN):', '') || '';
+    bypassReason = window.prompt('Bypass reason (>= 10 chars):', '') || '';
+  }
+  try {
+    const r = await fetch('/api/security-findings/' + encodeURIComponent(id) + '/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        disposition: disposition,
+        operator_email: operator,
+        bypass_audit_id: bypassAuditID,
+        bypass_reason: bypassReason,
+      }),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      alert('resolve failed: HTTP ' + r.status + ' ' + txt);
+      return;
+    }
+    window.loadSecurityFindings && window.loadSecurityFindings();
+  } catch (e) {
+    alert('resolve failed: ' + e.message);
+  }
+}
+window.resolveSecurityFinding = resolveSecurityFinding;
+
+// — /api/rule-metrics list.
+async function loadRuleMetrics() {
+  const bureau = document.getElementById('rm-bureau');
+  const params = new URLSearchParams();
+  if (bureau && bureau.value) params.set('bureau', bureau.value);
+  try {
+    const r = await fetch('/api/rule-metrics?' + params.toString());
+    if (!r.ok) {
+      _refSafeHTML('rule-metrics-table', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const rules = data.rules || [];
+    const headers = ['Bureau', 'Rule', 'Severity', 'Total', 'TP', 'FP', 'Precision', 'Last 30d', 'Ramp'];
+    const rows = rules.map(m => [
+      m.bureau || '',
+      m.rule_id || '',
+      m.severity || '',
+      m.total_firings || 0,
+      m.true_positives || 0,
+      m.false_positives || 0,
+      ((m.precision != null) ? (m.precision * 100).toFixed(1) + '%' : '—'),
+      m.last_30_day_firings || 0,
+      (m.ramp_status || '') + (m.firings_to_block_ready ? (' (' + m.firings_to_block_ready + ' to go)') : ''),
+    ]);
+    _refRenderTable('rule-metrics-table', headers, rows);
+  } catch (e) {
+    _refSafeHTML('rule-metrics-table', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadRuleMetrics = loadRuleMetrics;
+
+// — /api/override-audit list.
+async function loadOverrideAudit() {
+  const bureau = document.getElementById('oa-bureau');
+  const ruleEl = document.getElementById('oa-rule-id');
+  const auditEl = document.getElementById('oa-audit-id');
+  const params = new URLSearchParams();
+  if (bureau && bureau.value) params.set('bureau', bureau.value);
+  if (ruleEl && ruleEl.value.trim()) params.set('rule_id', ruleEl.value.trim());
+  if (auditEl && auditEl.value.trim()) params.set('audit_id', auditEl.value.trim());
+  try {
+    const r = await fetch('/api/override-audit?' + params.toString());
+    if (!r.ok) {
+      _refSafeHTML('override-audit-table', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const overrides = data.overrides || [];
+    const sum = document.getElementById('oa-summary');
+    if (sum) sum.textContent = (data.count || 0) + ' shown · ' + (data.total || 0) + ' total';
+    const headers = ['ID', 'Bureau', 'Rule', 'Audit ID', 'File:Line', 'Reason', 'Commit', 'Overridden At'];
+    const rows = overrides.map(f => [
+      f.ID || f.id || '',
+      f.Bureau || f.bureau || '',
+      f.RuleID || f.rule_id || '',
+      f.BypassAuditID || f.bypass_audit_id || '',
+      (f.FilePath || f.file_path || '') + ':' + (f.LineNumber || f.line_number || ''),
+      f.BypassReason || f.bypass_reason || '',
+      (f.CommitSHA || f.commit_sha || '').substring(0, 12),
+      f.ResolvedAt || f.resolved_at || '',
+    ]);
+    _refRenderTable('override-audit-table', headers, rows);
+  } catch (e) {
+    _refSafeHTML('override-audit-table', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadOverrideAudit = loadOverrideAudit;
+
+// — /api/senate/chambers list.
+async function loadSenateChambers() {
+  const status = document.getElementById('sc-status');
+  const params = new URLSearchParams();
+  if (status && status.value) params.set('status', status.value);
+  try {
+    const r = await fetch('/api/senate/chambers?' + params.toString());
+    if (!r.ok) {
+      _refSafeHTML('senate-chambers-table', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const chambers = data.chambers || [];
+    const headers = ['Senator', 'Scope', 'Status', 'Onboarded', 'Last Refreshed'];
+    const rows = chambers.map(c => [
+      c.SenatorName || c.senator_name || '',
+      c.Scope || c.scope || '',
+      c.Status || c.status || '',
+      c.OnboardedAt || c.onboarded_at || '',
+      c.LastRefreshedAt || c.last_refreshed_at || '',
+    ]);
+    _refRenderTable('senate-chambers-table', headers, rows);
+  } catch (e) {
+    _refSafeHTML('senate-chambers-table', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadSenateChambers = loadSenateChambers;
+
+// — /api/senate/reviews list + per-id detail.
+async function loadSenateReviews() {
+  const fid = document.getElementById('sr-feature-id');
+  const sen = document.getElementById('sr-senator');
+  const pos = document.getElementById('sr-position');
+  const params = new URLSearchParams();
+  if (fid && fid.value) params.set('feature_id', fid.value);
+  if (sen && sen.value.trim()) params.set('senator', sen.value.trim());
+  if (pos && pos.value) params.set('position', pos.value);
+  try {
+    const r = await fetch('/api/senate/reviews?' + params.toString());
+    if (!r.ok) {
+      _refSafeHTML('senate-reviews-table', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const reviews = data.reviews || [];
+    const target = document.getElementById('senate-reviews-table');
+    if (!target) return;
+    target.innerHTML = '';
+    if (reviews.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'reflection-empty';
+      empty.textContent = '(no reviews match the filter)';
+      target.appendChild(empty);
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'reflection-data-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['ID', 'Feature', 'Title', 'Senator', 'Position', 'Confidence', 'Created'].forEach(h => {
+      const th = document.createElement('th'); th.textContent = h; headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    reviews.forEach(rv => {
+      const tr = document.createElement('tr');
+      const cells = [
+        String(rv.ID || rv.id || ''),
+        String(rv.FeatureID || rv.feature_id || ''),
+        rv.feature_title || '',
+        rv.Senator || rv.senator || '',
+        rv.Position || rv.position || '',
+        ((rv.Confidence != null) ? rv.Confidence : (rv.confidence || 0)).toString(),
+        rv.CreatedAt || rv.created_at || '',
+      ];
+      cells.forEach((c, idx) => {
+        const td = document.createElement('td');
+        if (idx === 0) {
+          // Make the id clickable → loads detail.
+          const a = document.createElement('a');
+          a.href = '#';
+          a.textContent = c;
+          a.onclick = (ev) => { ev.preventDefault(); loadSenateReviewDetail(rv.ID || rv.id); };
+          td.appendChild(a);
+        } else {
+          td.appendChild(_refTextNode(c));
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    target.appendChild(table);
+    // Clear any prior detail block.
+    _refSafeHTML('senate-review-detail', '');
+  } catch (e) {
+    _refSafeHTML('senate-reviews-table', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadSenateReviews = loadSenateReviews;
+
+async function loadSenateReviewDetail(id) {
+  if (!id) return;
+  try {
+    const r = await fetch('/api/senate/reviews/' + encodeURIComponent(id));
+    if (!r.ok) {
+      _refSafeHTML('senate-review-detail', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const target = document.getElementById('senate-review-detail');
+    if (!target) return;
+    target.innerHTML = '';
+    const h = document.createElement('h4');
+    h.textContent = 'Review ' + (data.review.ID || data.review.id || '') + ' — ' + (data.review.Senator || data.review.senator || '') + ' / ' + (data.review.Position || data.review.position || '');
+    target.appendChild(h);
+    const ratEl = document.createElement('pre');
+    ratEl.className = 'reflection-pre';
+    ratEl.textContent = data.review.Rationale || data.review.rationale || '(no rationale)';
+    target.appendChild(ratEl);
+    if (data.cited_memories && data.cited_memories.length > 0) {
+      const help = document.createElement('div');
+      help.className = 'reflection-help';
+      help.textContent = 'Cited memories (' + data.cited_memories.length + '):';
+      target.appendChild(help);
+      const ul = document.createElement('ul');
+      data.cited_memories.forEach(m => {
+        const li = document.createElement('li');
+        li.textContent = (m.Topic || m.topic || '(untitled)') + ' — ' + (m.Summary || m.summary || '');
+        ul.appendChild(li);
+      });
+      target.appendChild(ul);
+    }
+  } catch (e) {
+    _refSafeHTML('senate-review-detail', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadSenateReviewDetail = loadSenateReviewDetail;

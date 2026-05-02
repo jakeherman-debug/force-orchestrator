@@ -88,6 +88,23 @@ var p25Allowlist = map[string]string{
 	// surface that needs it.
 	"/api/conflicts/tickets":  "Librarian conflict tickets list (D4-P0); GET-only read view",
 	"/api/conflicts/tickets/": "Librarian conflict ticket resolve (D4-P0); dashboard-only surface — `force conflicts resolve` CLI deferred to Phase 3 when Senate absorbs review",
+
+	// D4 fix-loop-1 α — Dashboard views for D4 entities (exit criterion 5).
+	// Five GET-only views + one operator-action POST. The POST surface
+	// (security-findings/<id>/resolve) is dashboard-only by design; the
+	// existing flow for downgrading a finding is via // BOS-BYPASS /
+	// // ISB-BYPASS comments in source (the canonical surface). The
+	// dashboard resolve endpoint is the operator-only escape hatch for
+	// findings on legacy / non-bypassable code paths. A `force security
+	// resolve` CLI is reasonable Phase 5+ follow-up but shipping it in
+	// the fix-loop would land before any actual usage signal.
+	"/api/security-findings":   "BoS+ISB findings list (D4-α); GET-only read view",
+	"/api/security-findings/":  "Findings resolve (D4-α); operator-only dashboard surface — `force security resolve` deferred to Phase 5 when usage signal exists",
+	"/api/rule-metrics":        "Per-rule precision metrics (D4-α); GET-only read view",
+	"/api/override-audit":      "Bypass-comment audit log (D4-α); GET-only read view",
+	"/api/senate/chambers":     "Senator roster (D4-α); GET-only read view",
+	"/api/senate/reviews":      "Senate review log (D4-α); GET-only read view",
+	"/api/senate/reviews/":     "Senate single-review detail (D4-α); GET-only read view",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in

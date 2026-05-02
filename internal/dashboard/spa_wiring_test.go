@@ -33,6 +33,11 @@ import (
 // p6bEndpointsRequired — every P6B endpoint the Reflection surface must
 // reference in app.js. Each entry's value is a one-line description used
 // in the failure message so a developer can fix the omission quickly.
+//
+// D4 fix-loop-1 α extends this map with the four D4 dashboard surfaces
+// (Security findings, rule metrics, override audit, Senate review log).
+// Each new endpoint MUST be referenced by app.js or the SPA's
+// corresponding tab will 404 at runtime.
 var p6bEndpointsRequired = map[string]string{
 	"/api/drill/convoy/":            "Drill convoy timeline",
 	"/api/drill/task/":              "Drill task timeline",
@@ -45,6 +50,13 @@ var p6bEndpointsRequired = map[string]string{
 	"/api/reflection/learning":      "Fleet learning panel",
 	"/api/reflection/retro/generate": "Retro markdown generator",
 	"/api/reflection/retro/save":    "Retro markdown saver",
+
+	// D4 fix-loop-1 α — four dashboard views for D4 entities.
+	"/api/security-findings":  "Security findings list (BoS + ISB)",
+	"/api/rule-metrics":       "Per-rule precision metrics rollup",
+	"/api/override-audit":     "Bypass-comment audit log",
+	"/api/senate/chambers":    "Senate chambers (Senator roster)",
+	"/api/senate/reviews":     "Senate review log per feature",
 }
 
 func TestSPAWiring_ReflectionSurfaceReferencesAllP6BEndpoints(t *testing.T) {
@@ -75,6 +87,20 @@ func TestSPAWiring_ReflectionSurfaceReferencesAllP6BEndpoints(t *testing.T) {
 	} {
 		if !strings.Contains(indexHTML, marker) {
 			t.Errorf("SPA wiring: index.html missing required marker %q (Reflection sub-tab structure)", marker)
+		}
+	}
+	// D4 fix-loop-1 α — Security + Senate tabs and their sub-tab panes.
+	for _, marker := range []string{
+		`id="tab-security"`,
+		`id="tab-senate"`,
+		`id="security-pane-findings"`,
+		`id="security-pane-rule-metrics"`,
+		`id="security-pane-override-audit"`,
+		`id="senate-pane-chambers"`,
+		`id="senate-pane-reviews"`,
+	} {
+		if !strings.Contains(indexHTML, marker) {
+			t.Errorf("SPA wiring: index.html missing D4 marker %q (Security/Senate tab structure)", marker)
 		}
 	}
 }
