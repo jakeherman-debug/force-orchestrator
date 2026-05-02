@@ -1,4 +1,9 @@
-package store
+// Package store_test (external test) — D5 P1 Wave 1 introduced an
+// import cycle when this file was package-internal: store's test build
+// pulled in internal/isb/rules → internal/clients/codeartifact →
+// internal/store. Lifting to package store_test breaks the cycle since
+// external tests do not contribute imports to the store package binary.
+package store_test
 
 import (
 	"context"
@@ -7,6 +12,7 @@ import (
 
 	"force-orchestrator/internal/isb"
 	_ "force-orchestrator/internal/isb/rules" // ensure registry is populated
+	"force-orchestrator/internal/store"
 )
 
 // TestIsbRulesAllSeededInFleetRules — every Rule in isb.All() must
@@ -15,7 +21,7 @@ import (
 // NOT active.
 func TestIsbRulesAllSeededInFleetRules(t *testing.T) {
 	seedKeys := map[string]bool{}
-	for _, s := range BootstrapAudit() {
+	for _, s := range store.BootstrapAudit() {
 		if s.Category == "isb" {
 			seedKeys[s.RuleKey] = true
 		}
@@ -48,9 +54,9 @@ func TestIsbNewRulesShipAtAdvise(t *testing.T) {
 // registry but with no FleetRules row must be silent under
 // DBFleetRulesGate. Demonstrates the run-time gate.
 func TestIsbRuleWithoutFleetRulesRowIsInactive(t *testing.T) {
-	db := InitHolocronDSN(":memory:")
+	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
-	if _, err := BootstrapFleetRules(context.Background(), db, ""); err != nil {
+	if _, err := store.BootstrapFleetRules(context.Background(), db, ""); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -89,7 +95,7 @@ func TestIsbRuleWithoutFleetRulesRowIsInactive(t *testing.T) {
 // gating; SUPPLY-* is a thematic prefix, not a separate category) and
 // land at internal/isb/rules/supply_*.go.
 func TestIsbRuleSeedsCarryRuleBodyPath(t *testing.T) {
-	for _, s := range BootstrapAudit() {
+	for _, s := range store.BootstrapAudit() {
 		if s.Category != "isb" {
 			continue
 		}
