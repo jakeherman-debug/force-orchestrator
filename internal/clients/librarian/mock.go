@@ -41,6 +41,7 @@ type MockClient struct {
 	RecentCommitsDigestFn       func(ctx context.Context, repo string, window time.Duration) (CommitsDigest, error)
 	BootstrapSenatorRulesFn     func(ctx context.Context, repo string) ([]CandidateRule, error)
 	RefreshSenatorMemoryFn      func(ctx context.Context, repo string) (SenatorDigest, error)
+	BuildRepoDigestFn           func(ctx context.Context, repoSpec string) (RepoDigest, error)
 
 	// D3 Phase 3 — Librarian → EC handoff state. Candidates added via
 	// EmitCandidate live here; ListPendingCandidates returns the slice.
@@ -63,6 +64,7 @@ type MockClient struct {
 	RecentCommitsCalls []MockRecentCommitsCall
 	BootstrapCalls     []string
 	RefreshDigestCalls []string
+	BuildDigestCalls   []string
 }
 
 // MockGetWeightedCall records one GetWeightedMemories invocation.
@@ -344,6 +346,21 @@ func (m *MockClient) RefreshSenatorMemoryDigest(ctx context.Context, repo string
 	return SenatorDigest{Repo: repo}, nil
 }
 
+// BuildRepoDigest returns an empty digest by default. Tests override
+// via BuildRepoDigestFn.
+func (m *MockClient) BuildRepoDigest(ctx context.Context, repoSpec string) (RepoDigest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.BuildDigestCalls = append(m.BuildDigestCalls, repoSpec)
+	if m.BuildRepoDigestFn != nil {
+		return m.BuildRepoDigestFn(ctx, repoSpec)
+	}
+	return RepoDigest{
+		RepoName:    repoSpec,
+		Conventions: map[string]string{},
+	}, nil
+}
+
 // Reset clears all recorded calls and fixture state, restoring NextWriteID
 // to 1. Useful between sub-tests inside the same test function.
 func (m *MockClient) Reset() {
@@ -366,6 +383,7 @@ func (m *MockClient) Reset() {
 	m.RecentCommitsCalls = nil
 	m.BootstrapCalls = nil
 	m.RefreshDigestCalls = nil
+	m.BuildDigestCalls = nil
 }
 
 // Compile-time assertion: *MockClient satisfies the Client interface.

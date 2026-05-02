@@ -36,3 +36,11 @@ coverage.out
 # its own `deliverable/<n>/<track>` branch; the directory is disposable
 # and never lands on main as tracked content.
 .build-worktrees/
+
+# D6 — `force onboard` produces ONBOARDING.md at the repo root on demand.
+# The CLI is operator-triggered, NOT a dog; the rendered file is local-
+# only and must never land in git history (anti-cheat directive #2 in
+# roadmap §D6). To intentionally commit a sample ONBOARDING.md (e.g. for
+# a closure report), copy it to a subdirectory that is NOT named
+# /ONBOARDING.md.
+/ONBOARDING.md

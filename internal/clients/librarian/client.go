@@ -147,6 +147,37 @@ type Client interface {
 	// dog will call to update SenateMemory. Phase 0 ships the method
 	// only. LIVE_HAIKU_DISABLED gates as above.
 	RefreshSenatorMemoryDigest(ctx context.Context, repo string) (SenatorDigest, error)
+
+	// BuildRepoDigest (D6) is the shared knowledge-synthesis primitive
+	// that BOTH the SenatorOnboarding task type AND the
+	// `force onboard <repo>` CLI consume. Centralising the assembly
+	// here is the anti-cheat seam called out in roadmap §D6 — the CLI
+	// must never duplicate the digest assembly; it must call this
+	// method, and `BootstrapSenatorRules` must call this method too,
+	// so a single edit moves both call sites in lockstep.
+	//
+	// Sources combined into the returned RepoDigest:
+	//
+	//   - README sample (first 4 KB of README.md / .rst / .txt / plain)
+	//   - Recent commits digest (last 90 days, capped per
+	//     RecentCommitsDigest's per-call cap)
+	//   - Top-level package layout (repo's filesystem walk to depth 1)
+	//   - Public API surface scan (exported Go interfaces, HTTP
+	//     handlers, CLI subcommands found via lightweight regex)
+	//   - Conventions files (CLAUDE.md, CONTRIBUTING.md, SENATE.md
+	//     truncated to 4 KB each)
+	//   - Memory query for fragility signals (failure-outcome
+	//     FleetMemory rows scoped to repo, capped at 20)
+	//
+	// `repoSpec` is either a registered-repo name (looked up via
+	// store.GetRepoPath) or an absolute path on disk. The disk-path
+	// branch supports `force onboard <unregistered-repo-path>` — D6
+	// exit criterion #2 plus the operator-smoke-test path.
+	//
+	// The method is pure-data (no LLM call). Renderers (CLI markdown
+	// emitter, BootstrapSenatorRules prompt builder) consume the
+	// returned RepoDigest and shape it as needed.
+	BuildRepoDigest(ctx context.Context, repoSpec string) (RepoDigest, error)
 }
 
 // CommitsDigest is the per-repo recent-commits view returned by
@@ -183,6 +214,73 @@ type CandidateRule struct {
 	Body       string // FleetRules.content (the rule body)
 	Rationale  string // human-readable WHY (becomes the audit comment)
 	Evidence   string // cited evidence — README path, commit shas, etc.
+}
+
+// RepoDigest (D6) is the shared knowledge-synthesis output of
+// BuildRepoDigest. Both the SenatorOnboarding task type and the
+// `force onboard` CLI consume this shape — the SenatorOnboarding path
+// folds it into a Claude prompt, the CLI renders it to Markdown.
+//
+// The fields are intentionally pure-data; rendering decisions (which
+// section gets emitted, how to wrap, etc.) live in the consumers, not
+// in the digest builder.
+type RepoDigest struct {
+	// RepoName is the canonical name when the repo was looked up by
+	// name; empty when BuildRepoDigest was called with an on-disk path.
+	RepoName string
+
+	// LocalPath is the absolute filesystem path the digest read from.
+	LocalPath string
+
+	// Description is the registered repo description (empty for
+	// disk-only repos).
+	Description string
+
+	// READMESample is the first 4 KB of the repo's README (any of the
+	// supported variants). Empty when no README is present.
+	READMESample string
+
+	// TopLevelDirs is the list of directories at the repo root,
+	// excluding hidden / vendor / node_modules conventions. Each entry
+	// is just the name (not a path); the renderer joins them as
+	// needed.
+	TopLevelDirs []string
+
+	// PublicAPISymbols is the list of exported public API surfaces
+	// detected by a lightweight scan: exported Go interfaces, HTTP
+	// route registrations, and CLI subcommand strings. Each entry is
+	// human-readable on its own line; ordering is deterministic
+	// (sorted).
+	PublicAPISymbols []APISymbol
+
+	// RecentCommits is the same shape RecentCommitsDigest returns,
+	// scoped to the last 90 days for the CLI use case (Senator path
+	// can re-window if it needs).
+	RecentCommits CommitsDigest
+
+	// Conventions captures the conventions files: CLAUDE.md /
+	// CONTRIBUTING.md / SENATE.md (existing). Empty entries mean the
+	// file was absent. Each value is the file's first 4 KB.
+	Conventions map[string]string
+
+	// FragilityMemories is the list of failure-outcome FleetMemory
+	// rows scoped to this repo (capped at 20). Empty for unregistered
+	// repos OR repos with no fleet activity.
+	FragilityMemories []Memory
+
+	// GeneratedAt is the SQLite-UTC timestamp at which the digest was
+	// assembled. Renderers stamp this into the AUTO-GENERATED header.
+	GeneratedAt string
+}
+
+// APISymbol is one detected public API surface symbol, used inside
+// RepoDigest. Kind is "interface" / "http" / "cli"; Description is a
+// 1-line summary suitable for direct rendering.
+type APISymbol struct {
+	Kind        string // "interface" | "http" | "cli"
+	Name        string // exported identifier or route path
+	Location    string // relative path:line where it was found
+	Description string // one-line description for rendering
 }
 
 // SenatorDigest is the per-repo refresh shape consumed by Phase 3's
