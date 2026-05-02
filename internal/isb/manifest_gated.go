@@ -24,6 +24,7 @@ package isb
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 
 	"force-orchestrator/internal/isb/scanners/manifests"
@@ -178,7 +179,69 @@ func DispatchManifestGated(ctx context.Context, db *sql.DB, gate FleetRulesGate,
 		if err != nil {
 			errs[r.ID()] = err
 		}
+		// SUPPLY-BYPASS application: walk each changed manifest's AfterBytes
+		// for SUPPLY-BYPASS markers and apply them to findings whose Path
+		// matches the manifest's path. The marker mutates Severity →
+		// SeverityAdvise and prefixes the Message with the BYPASSED shape
+		// so the agents-side persistence (dispositionFromMessage /
+		// extractAuditFromBypassed / extractReasonFromBypassed) transparently
+		// records disposition='overridden' + bypass_audit_id + bypass_reason
+		// on the SecurityFindings row. Per-rule scoping (RuleKey) means a
+		// SUPPLY-001 bypass does NOT silence a SUPPLY-002 finding —
+		// anti-cheat: bypasses must be targeted by default. An empty RuleKey
+		// applies to all SUPPLY rules (operator-wide override).
+		findings = applySupplyBypasses(findings, input.ChangedManifests)
 		out = append(out, findings...)
 	}
 	return out, errs
+}
+
+// applySupplyBypasses walks the changed manifests for SUPPLY-BYPASS markers
+// and downgrades any matching findings. Findings without a path match
+// against any manifest pass through untouched — a finding's Path must
+// equal a ChangedManifest.Path for that manifest's bypass markers to
+// apply. This keeps cross-file bypass leakage impossible (a bypass in
+// Gemfile cannot suppress a finding in package.json).
+//
+// Returns the (possibly-mutated) findings slice; the underlying Finding
+// values are copied before mutation so callers don't see action-at-a-
+// distance.
+func applySupplyBypasses(findings []Finding, manifestSet []ChangedManifest) []Finding {
+	if len(findings) == 0 || len(manifestSet) == 0 {
+		return findings
+	}
+	// Index markers by manifest path. Parse each manifest's AfterBytes
+	// once per dispatch (cheap regex; manifests are small).
+	byPath := make(map[string][]SupplyBypassMarker, len(manifestSet))
+	for _, m := range manifestSet {
+		if len(m.AfterBytes) == 0 {
+			continue
+		}
+		markers := ParseSupplyBypasses(m.AfterBytes)
+		if len(markers) > 0 {
+			byPath[m.Path] = markers
+		}
+	}
+	if len(byPath) == 0 {
+		return findings
+	}
+	out := make([]Finding, 0, len(findings))
+	for _, f := range findings {
+		markers, ok := byPath[f.Path]
+		if !ok {
+			out = append(out, f)
+			continue
+		}
+		bp := MatchSupplyBypass(markers, f.RuleID)
+		if bp == nil {
+			out = append(out, f)
+			continue
+		}
+		// Apply: downgrade severity and prefix message with the
+		// BYPASSED shape for agents-side disposition extraction.
+		f.Severity = SeverityAdvise
+		f.Message = fmt.Sprintf("[BYPASSED %s: %s] %s", bp.AuditID, bp.Reason, f.Message)
+		out = append(out, f)
+	}
+	return out
 }
