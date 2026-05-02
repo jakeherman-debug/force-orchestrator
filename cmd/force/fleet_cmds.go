@@ -19,11 +19,15 @@ import (
 	"force-orchestrator/internal/analysis"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/codeartifact"
+	"force-orchestrator/internal/clients/databricks"
+	"force-orchestrator/internal/clients/datadog"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/clients/metrics"
+	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/holdout"
 	"force-orchestrator/internal/isb/scanners/osv"
+	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/treatments"
@@ -303,6 +307,34 @@ func cmdDaemon(db *sql.DB) {
 		fmt.Fprintf(os.Stderr, "[SUPPLY-WIRE] daemon start aborted: %v\n", wireErr)
 		os.Exit(1)
 	}
+
+	// D5.5 P3 ζ — wire the stage-gate registry once at daemon startup.
+	// The convoy-stage-watch dog reads it via agents.RegisterStageGateRegistry
+	// (P1 seam). We construct the registry, register baseline gates first,
+	// then layer the four P3 advanced leaves on top — each guarded by
+	// "skip + log" when its backing client is absent so an operator who
+	// hasn't configured Datadog or Databricks credentials still gets a
+	// working daemon with the other gates available.
+	//
+	// Constructor failures for datadog / databricks clients are NON-FATAL:
+	// the operator may not have configured the integration yet, in which
+	// case we log and pass nil. Any gate using a nil client is silently
+	// skipped at registration time per RegisterAllP3Gates' contract.
+	ddClient, ddErr := datadog.NewInProcess(ctx, db)
+	if ddErr != nil {
+		fmt.Fprintf(os.Stderr, "[DATADOG] construction failed (%v) — datadog_metric_threshold gate will be unavailable until configured\n", ddErr)
+		ddClient = nil
+	}
+	dbxClient, dbxErr := databricks.NewInProcess(ctx, db)
+	if dbxErr != nil {
+		fmt.Fprintf(os.Stderr, "[DATABRICKS] construction failed (%v) — databricks_query_threshold gate will be unavailable until configured\n", dbxErr)
+		dbxClient = nil
+	}
+
+	stageGateRegistry := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(stageGateRegistry)
+	stagegate.RegisterAllP3Gates(stageGateRegistry, gh.NewClient(), ddClient, dbxClient)
+	agents.RegisterStageGateRegistry(stageGateRegistry)
 
 	// D2 T1-2 — wire the per-agent context-size guard. The DB handle
 	// drives SystemConfig reads (per-agent caps) and persists

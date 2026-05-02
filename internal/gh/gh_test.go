@@ -193,6 +193,67 @@ func TestPRView_MalformedJSON(t *testing.T) {
 	}
 }
 
+// ── PRLabels ──────────────────────────────────────────────────────────────
+
+func TestPRLabels_ParsesNames(t *testing.T) {
+	stub := newStub()
+	stub.defaultResp = stubResponse{stdout: `{"labels":[{"name":"released-prod"},{"name":"deploy-pending"}]}`}
+	c := NewClientWithRunner(stub)
+	labels, err := c.PRLabels("", "acme/widgets", 17)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(labels) != 2 || labels[0] != "released-prod" || labels[1] != "deploy-pending" {
+		t.Errorf("unexpected labels: %v", labels)
+	}
+	// Verify the runner saw the expected args (`pr view N --json labels --repo R`).
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(stub.calls))
+	}
+	args := strings.Join(stub.calls[0].args, " ")
+	if !strings.Contains(args, "pr view 17 --json labels") {
+		t.Errorf("expected `pr view 17 --json labels` in args, got %q", args)
+	}
+	if !strings.Contains(args, "--repo acme/widgets") {
+		t.Errorf("expected --repo flag, got %q", args)
+	}
+}
+
+func TestPRLabels_NoLabels_EmptySlice(t *testing.T) {
+	stub := newStub()
+	stub.defaultResp = stubResponse{stdout: `{"labels":[]}`}
+	c := NewClientWithRunner(stub)
+	labels, err := c.PRLabels("", "", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(labels) != 0 {
+		t.Errorf("expected empty slice, got %v", labels)
+	}
+}
+
+func TestPRLabels_MalformedJSON(t *testing.T) {
+	stub := newStub()
+	stub.defaultResp = stubResponse{stdout: "not json"}
+	c := NewClientWithRunner(stub)
+	if _, err := c.PRLabels("", "", 1); err == nil {
+		t.Errorf("expected parse error")
+	}
+}
+
+func TestPRLabels_GHError_Surfaced(t *testing.T) {
+	stub := newStub()
+	stub.defaultResp = stubResponse{
+		stderr: "could not find pull request",
+		err:    fmt.Errorf("exit status 1"),
+	}
+	c := NewClientWithRunner(stub)
+	_, err := c.PRLabels("", "acme/widgets", 999)
+	if err == nil {
+		t.Fatalf("expected gh error")
+	}
+}
+
 // ── PRChecks & rollup ───────────────────────────────────────────────────────
 
 func TestPRChecks_AllSuccess(t *testing.T) {

@@ -1,9 +1,11 @@
 package commander
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
@@ -487,5 +489,417 @@ func TestStagingPlan_ToStageSpecs_RoundTrip(t *testing.T) {
 	// terminal stage — null gate → empty GateType + empty config json.
 	if specs[1].GateType != "" {
 		t.Fatalf("stage 2 should have empty gate type (null gate); got %q", specs[1].GateType)
+	}
+}
+
+// ── ValidateReleaseLabelGateForRepos (D5.5 P3 γ) ───────────────────────────
+
+// p3Registry returns a stagegate.Registry pre-loaded with the baseline +
+// the P3 advanced gates so structural validation passes for tests that
+// exercise the per-repo pattern check. The release_label_present gate
+// needs a PRLabelFetcher; the validator never invokes it (only the
+// runtime dispatcher does), so we wire a no-op stub here.
+func p3Registry(t *testing.T) *stagegate.Registry {
+	t.Helper()
+	r := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(r)
+	stagegate.RegisterP3AdvancedGates(r, noopLabelFetcher{})
+	return r
+}
+
+// noopLabelFetcher satisfies stagegate.PRLabelFetcher for the validator
+// tests. The validator never calls PRLabels — only the runtime dispatcher
+// does — so the stub returns empty results for any input.
+type noopLabelFetcher struct{}
+
+func (noopLabelFetcher) PRLabels(_, _ string, _ int) ([]string, error) {
+	return nil, nil
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_AllReposHavePattern_OK — happy
+// path: every repo touched by a release_label_present-gated stage has a
+// non-empty release_label_pattern → planner-time check passes.
+func TestValidateStagingPlan_ReleaseLabelGate_AllReposHavePattern_OK(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	store.AddRepo(db, "frontend", "/tmp/fe", "")
+	if err := store.SetRepositoryReleaseLabelPattern(db, "api", `^released-prod$`); err != nil {
+		t.Fatalf("set pattern api: %v", err)
+	}
+	if err := store.SetRepositoryReleaseLabelPattern(db, "frontend", `^released-prod$`); err != nil {
+		t.Fatalf("set pattern frontend: %v", err)
+	}
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "stage 1 with release_label_present",
+				Tasks:    []store.TaskPlan{taskN(1, "api"), taskN(2, "frontend")},
+				Gate:     &StagingPlanGate{Type: "release_label_present"},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(3, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	// Structural validation must pass first.
+	if err := ValidateStagingPlan(plan, p3Registry(t)); err != nil {
+		t.Fatalf("structural validation failed: %v", err)
+	}
+	if err := ValidateReleaseLabelGateForRepos(plan, db); err != nil {
+		t.Fatalf("expected pattern check to pass; got %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_ReposLackPattern_Rejects — at
+// least one repo touched by a release_label_present-gated stage has an
+// empty pattern → reject with the operator-actionable message naming the
+// stage and the offending repo.
+func TestValidateStagingPlan_ReleaseLabelGate_ReposLackPattern_Rejects(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	store.AddRepo(db, "frontend", "/tmp/fe", "")
+	// Only api has a pattern; frontend is intentionally left empty.
+	if err := store.SetRepositoryReleaseLabelPattern(db, "api", `^released-prod$`); err != nil {
+		t.Fatalf("set pattern api: %v", err)
+	}
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "release-label gate touches both repos",
+				Tasks:    []store.TaskPlan{taskN(1, "api"), taskN(2, "frontend")},
+				Gate:     &StagingPlanGate{Type: "release_label_present"},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(3, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3Registry(t)); err != nil {
+		t.Fatalf("structural validation should still pass: %v", err)
+	}
+	err := ValidateReleaseLabelGateForRepos(plan, db)
+	if err == nil {
+		t.Fatal("expected rejection because frontend has no pattern; got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "stage 1") {
+		t.Errorf("error must name stage 1, got %q", msg)
+	}
+	if !strings.Contains(msg, "frontend") {
+		t.Errorf("error must name the offending repo (frontend), got %q", msg)
+	}
+	if !strings.Contains(msg, "release_label_pattern") {
+		t.Errorf("error must mention release_label_pattern, got %q", msg)
+	}
+	if !strings.Contains(msg, "force config set") {
+		t.Errorf("error must include the operator-actionable hint, got %q", msg)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_NestedInCompound_Rejects —
+// the per-repo check walks compound trees: a release_label_present
+// nested under all_of must still trigger pattern enforcement.
+func TestValidateStagingPlan_ReleaseLabelGate_NestedInCompound_Rejects(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	// api: no pattern set.
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "compound gate with release_label_present nested",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "all_of",
+					Gates: []*StagingPlanGate{
+						soakGate(5),
+						{Type: "release_label_present"},
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3Registry(t)); err != nil {
+		t.Fatalf("structural validation should pass: %v", err)
+	}
+	err := ValidateReleaseLabelGateForRepos(plan, db)
+	if err == nil {
+		t.Fatal("expected rejection because api has no pattern; got nil")
+	}
+	if !strings.Contains(err.Error(), "api") {
+		t.Errorf("error must name api, got %q", err.Error())
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_GateNotUsed_NoOp — when no
+// stage uses release_label_present (even if some repos lack patterns),
+// the per-repo check is a silent no-op.
+func TestValidateStagingPlan_ReleaseLabelGate_GateNotUsed_NoOp(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	// no pattern set — but the plan doesn't use release_label_present,
+	// so the per-repo validator should accept it.
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "soak only",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate:     soakGate(60),
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateReleaseLabelGateForRepos(plan, db); err != nil {
+		t.Errorf("plan without release_label_present should pass; got %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_SingleMode_NoOp — single-mode
+// plans never carry stage gates; the check short-circuits to nil.
+func TestValidateStagingPlan_ReleaseLabelGate_SingleMode_NoOp(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	plan := StagingPlan{StagingMode: string(store.StagingModeSingle)}
+	if err := ValidateReleaseLabelGateForRepos(plan, db); err != nil {
+		t.Errorf("single-mode plan should be a no-op; got %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_NilDB_Errors — wiring guard.
+func TestValidateStagingPlan_ReleaseLabelGate_NilDB_Errors(t *testing.T) {
+	plan := StagingPlan{StagingMode: string(store.StagingModeStaged)}
+	if err := ValidateReleaseLabelGateForRepos(plan, nil); err == nil {
+		t.Fatal("expected error on nil db; got nil")
+	}
+}
+
+// p3FullRegistry returns a registry pre-loaded with baseline + all four
+// P3 advanced gates (with stub clients), used by the D5.5 P3 ζ tests
+// that verify the validator accepts the full P3 vocabulary.
+func p3FullRegistry(t *testing.T) *stagegate.Registry {
+	t.Helper()
+	r := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(r)
+	stagegate.RegisterAllP3Gates(r,
+		noopLabelFetcher{},
+		validatorStubDDClient{},
+		validatorStubDBXClient{},
+	)
+	return r
+}
+
+// validatorStubDDClient is a no-op datadog.Client for validator tests.
+// The validator never calls QueryMetric; only the runtime dispatcher does.
+type validatorStubDDClient struct{}
+
+func (validatorStubDDClient) QueryMetric(_ context.Context, _ string, _ time.Duration) (float64, time.Time, error) {
+	return 0, time.Time{}, nil
+}
+func (validatorStubDDClient) Health(_ context.Context) error { return nil }
+
+// validatorStubDBXClient is the databricks.Client equivalent.
+type validatorStubDBXClient struct{}
+
+func (validatorStubDBXClient) ExecuteQuery(_ context.Context, _, _ string, _ time.Duration) (float64, error) {
+	return 0, nil
+}
+func (validatorStubDBXClient) Health(_ context.Context) error { return nil }
+
+// TestValidateStagingPlan_ProbeEndpointGate_OK — D5.5 P3 ζ contract: a
+// staged plan whose stage uses probe_endpoint validates structurally
+// when the registry has the gate registered.
+func TestValidateStagingPlan_ProbeEndpointGate_OK(t *testing.T) {
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "probe the /health endpoint to confirm rollout",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "probe_endpoint",
+					Config: map[string]interface{}{
+						"url":              "https://api.example.com/health",
+						"expected_status":  200,
+						"polling_interval": 30,
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3FullRegistry(t)); err != nil {
+		t.Fatalf("probe_endpoint gate plan should validate: %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_RegistersInRegistry — proves
+// the P3 wiring actually exposes release_label_present at the validator's
+// Lookup boundary (a guard against accidental regression of
+// RegisterAllP3Gates skipping the release-label gate).
+func TestValidateStagingPlan_ReleaseLabelGate_RegistersInRegistry(t *testing.T) {
+	r := p3FullRegistry(t)
+	if _, ok := r.Lookup("release_label_present"); !ok {
+		t.Fatal("release_label_present must be registered by p3FullRegistry; RegisterAllP3Gates regression?")
+	}
+}
+
+// TestValidateStagingPlan_DatadogMetricGate_OK — staged plan whose stage
+// uses datadog_metric_threshold validates structurally when the gate is
+// registered with a non-nil ddClient.
+func TestValidateStagingPlan_DatadogMetricGate_OK(t *testing.T) {
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "confirm error rate stayed below 0.1% for 30min",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "datadog_metric_threshold",
+					Config: map[string]interface{}{
+						"metric_query":          "avg:trace.http.request.errors{env:prod}.as_rate()",
+						"comparator":            "lt",
+						"threshold":             0.001,
+						"sample_window_minutes": 30,
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3FullRegistry(t)); err != nil {
+		t.Fatalf("datadog_metric_threshold gate plan should validate: %v", err)
+	}
+}
+
+// TestValidateStagingPlan_DatabricksQueryGate_OK — staged plan whose
+// stage uses databricks_query_threshold validates structurally.
+func TestValidateStagingPlan_DatabricksQueryGate_OK(t *testing.T) {
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "confirm backfill row count >= total expected",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "databricks_query_threshold",
+					Config: map[string]interface{}{
+						"sql_query":       "SELECT COUNT(*) FROM users WHERE col IS NOT NULL",
+						"comparator":      "gte",
+						"threshold":       1000000,
+						"warehouse_id":    "abc123def456",
+						"timeout_seconds": 60,
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3FullRegistry(t)); err != nil {
+		t.Fatalf("databricks_query_threshold gate plan should validate: %v", err)
+	}
+}
+
+// TestValidateStagingPlan_DatadogGate_UnregisteredInRegistry_ValidatorFlags
+// — when the registry was built WITHOUT a datadog client (operator hasn't
+// configured Datadog), a plan referencing datadog_metric_threshold MUST
+// be rejected at planning time, not silently dispatched. This is the
+// "no half-wired gate" anti-cheat — without this rejection a stage would
+// sit forever waiting for a gate that can never resolve.
+func TestValidateStagingPlan_DatadogGate_UnregisteredInRegistry_ValidatorFlags(t *testing.T) {
+	// Build a registry with everything EXCEPT datadog (operator hasn't
+	// configured the integration → ddClient was nil at startup → gate
+	// not registered).
+	r := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(r)
+	stagegate.RegisterAllP3Gates(r,
+		noopLabelFetcher{},
+		nil, // no datadog client
+		validatorStubDBXClient{},
+	)
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "datadog gate planned but not configured at runtime",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "datadog_metric_threshold",
+					Config: map[string]interface{}{
+						"metric_query":          "avg:errors{*}.as_rate()",
+						"comparator":            "lt",
+						"threshold":             0.001,
+						"sample_window_minutes": 30,
+					},
+				},
+			},
+			{StageNum: 2, Intent: "terminal", Tasks: []store.TaskPlan{taskN(2, "api")}, Gate: nil},
+		},
+	}
+	err := ValidateStagingPlan(plan, r)
+	if err == nil {
+		t.Fatal("expected validator to reject datadog gate when not in registry; got nil")
+	}
+	if !strings.Contains(err.Error(), "datadog_metric_threshold") {
+		t.Errorf("error must name the unregistered gate type, got %q", err.Error())
 	}
 }

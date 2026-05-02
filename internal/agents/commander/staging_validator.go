@@ -23,8 +23,10 @@
 package commander
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"force-orchestrator/internal/stagegate"
@@ -219,6 +221,115 @@ func ValidateStagingPlan(plan StagingPlan, gateRegistry *stagegate.Registry) err
 		}
 	}
 	return nil
+}
+
+// ValidateReleaseLabelGateForRepos enforces the D5.5 P3 γ planner-time
+// per-repo pattern check for stages that use release_label_present
+// (including nested under all_of / any_of compounds). For each stage
+// whose gate tree contains a release_label_present leaf, every repo
+// touched by that stage's tasks must have a non-empty
+// Repositories.release_label_pattern; if any repo lacks the pattern
+// the function returns an explicit "configure pattern or pick a
+// different gate" error so the operator gets actionable text instead
+// of a runtime gate-misconfigured surprise.
+//
+// Why a separate function (rather than rolling into ValidateStagingPlan):
+//
+//   - The pattern check needs DB access — passing a *sql.DB into
+//     ValidateStagingPlan would force every existing test that calls
+//     it to seed a real DB, polluting the structural-only validation
+//     with a runtime dependency.
+//   - The check runs only once per convoy at planning time. Bundling
+//     it into ValidateStagingPlan would burn DB queries on every
+//     plan even when the gate type doesn't need them.
+//   - Callers compose the two: structural validation first (cheap,
+//     fail-fast), then DB-backed pattern check. Failing the structural
+//     pass means the plan never reaches the DB step.
+//
+// Returns nil when the plan uses no release_label_present gates OR
+// when every release_label_present-touched repo has a non-empty
+// pattern. Returns an error naming the offending stage + repo on the
+// first violation (deterministic ordering — we sort the offending
+// repo set so the error message is stable across runs for the same
+// plan + DB).
+func ValidateReleaseLabelGateForRepos(plan StagingPlan, db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("ValidateReleaseLabelGateForRepos: db must not be nil")
+	}
+	if plan.StagingMode != string(store.StagingModeStaged) {
+		// Single-mode plans don't carry stage-level gates; nothing to
+		// check. (Single-mode never uses release_label_present because
+		// the whole plan is one stage with no gate.)
+		return nil
+	}
+	for _, s := range plan.Stages {
+		if s.Gate == nil {
+			continue
+		}
+		if !gateTreeUsesReleaseLabel(s.Gate) {
+			continue
+		}
+		// Collect the unique repo set this stage touches via its tasks.
+		// A multi-task stage may hit several repos; each must carry
+		// the pattern.
+		repoSet := map[string]struct{}{}
+		for _, task := range s.Tasks {
+			if task.Repo == "" {
+				continue
+			}
+			repoSet[task.Repo] = struct{}{}
+		}
+		repos := make([]string, 0, len(repoSet))
+		for r := range repoSet {
+			repos = append(repos, r)
+		}
+		sort.Strings(repos)
+
+		var missing []string
+		for _, repo := range repos {
+			pattern, err := store.GetRepositoryReleaseLabelPattern(db, repo)
+			if err != nil {
+				return fmt.Errorf("stage %d: release_label_present gate: lookup release_label_pattern for repo %q: %w", s.StageNum, repo, err)
+			}
+			if pattern == "" {
+				missing = append(missing, repo)
+			}
+		}
+		if len(missing) > 0 {
+			// Operator-actionable message: name the offending stage,
+			// list the bare repos, hint at the two ways to resolve.
+			return fmt.Errorf("stage %d uses release_label_present gate but repo %s has no release_label_pattern configured. Either set the pattern via 'force config set repository.<name>.release_label_pattern <regex>' or pick a different gate.",
+				s.StageNum, strings.Join(missing, ", "))
+		}
+	}
+	return nil
+}
+
+// gateTreeUsesReleaseLabel returns true when the gate spec (or any of
+// its descendants, via all_of/any_of compounds) is a
+// release_label_present leaf. Walks at most stagegate.MaxNestingDepth
+// levels — the structural validator has already verified the tree is
+// within the cap, so we don't need a fresh depth guard here.
+func gateTreeUsesReleaseLabel(g *StagingPlanGate) bool {
+	if g == nil {
+		return false
+	}
+	if g.Type == "release_label_present" {
+		return true
+	}
+	if !isCompoundType(g.Type) {
+		return false
+	}
+	children := g.Gates
+	if len(children) == 0 {
+		children = childrenFromConfig(g.Config)
+	}
+	for _, child := range children {
+		if gateTreeUsesReleaseLabel(child) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateStagingStrategy enforces the D5.5 "only strict is supported"

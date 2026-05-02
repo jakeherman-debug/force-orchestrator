@@ -3,7 +3,9 @@ package agents
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -412,5 +414,174 @@ func TestDogConvoyStageWatch_RegistryWired_Dispatches(t *testing.T) {
 
 	if err := dogConvoyStageWatch(context.Background(), db, testLogger{}); err != nil {
 		t.Errorf("expected nil err on wired registry, got %v", err)
+	}
+}
+
+// TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_NotAllowed —
+// D5.5 P3 ζ: when RespectNotificationBudget returns allowed=false, the
+// gate-timeout escalation MUST NOT call SendMail. StakesHigh always
+// punches through in production today, so the only way to drive this
+// branch is to override the budget seam — but the regression slot exists
+// because a future budget-semantics change could silently re-enable
+// emission via the dropped allowed return.
+func TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_NotAllowed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := cswInsertConvoy(t, db, "test-budget-suppress")
+	stageID := cswInsertStage(t, db, convoyID, 1, "soak_minutes", `{"minutes":1440}`)
+	twoHoursAgo := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := db.Exec(`UPDATE ConvoyStages
+		SET status='AwaitingGate', all_prs_merged_at=?, gate_timeout_minutes=5
+		WHERE id = ?`, twoHoursAgo, stageID); err != nil {
+		t.Fatalf("set timeout fixture: %v", err)
+	}
+
+	// Force allowed=false so the dog's escalation path must skip SendMail.
+	restoreBudget := SetGateTimeoutBudgetCheckForTest(
+		func(_ context.Context, _ *sql.DB, _, _, _, _ string, _ store.NotificationStakes) (bool, error) {
+			return false, nil
+		},
+	)
+	defer restoreBudget()
+
+	var sendMailCalls int
+	restoreSend := SetGateTimeoutSendMailForTest(
+		func(_ *sql.DB, _, _, _, _ string, _ int, _ store.MailType) int64 {
+			sendMailCalls++
+			return 0
+		},
+	)
+	defer restoreSend()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("dog returned err: %v", err)
+	}
+
+	// Stage must still flip to Failed — the budget gate only suppresses
+	// the operator notification, not the state transition itself
+	// (anti-cheat: timeout always sinks to Failed).
+	if got := cswStageStatus(t, db, stageID); got != store.StageStatusFailed {
+		t.Errorf("status = %s, want Failed (timeout still flips state regardless of budget)", got)
+	}
+	if sendMailCalls != 0 {
+		t.Errorf("expected SendMail to be skipped when budget denies (allowed=false); got %d call(s)", sendMailCalls)
+	}
+}
+
+// TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_Allowed —
+// the inverse: when allowed=true, SendMail MUST be called. This is the
+// production path (StakesHigh always punches through).
+func TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_Allowed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := cswInsertConvoy(t, db, "test-budget-allowed")
+	stageID := cswInsertStage(t, db, convoyID, 1, "soak_minutes", `{"minutes":1440}`)
+	twoHoursAgo := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := db.Exec(`UPDATE ConvoyStages
+		SET status='AwaitingGate', all_prs_merged_at=?, gate_timeout_minutes=5
+		WHERE id = ?`, twoHoursAgo, stageID); err != nil {
+		t.Fatalf("set timeout fixture: %v", err)
+	}
+
+	restoreBudget := SetGateTimeoutBudgetCheckForTest(
+		func(_ context.Context, _ *sql.DB, _, _, _, _ string, _ store.NotificationStakes) (bool, error) {
+			return true, nil
+		},
+	)
+	defer restoreBudget()
+
+	var capturedSubject, capturedBody string
+	var sendMailCalls int
+	restoreSend := SetGateTimeoutSendMailForTest(
+		func(_ *sql.DB, _, _, subject, body string, _ int, _ store.MailType) int64 {
+			sendMailCalls++
+			capturedSubject = subject
+			capturedBody = body
+			return 1
+		},
+	)
+	defer restoreSend()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("dog returned err: %v", err)
+	}
+
+	if sendMailCalls != 1 {
+		t.Fatalf("expected exactly one SendMail call; got %d", sendMailCalls)
+	}
+
+	// Escalation message contract (D5.5 P3 ζ): subject + body must
+	// include the load-bearing operator-actionable signals so the
+	// inbox alone tells the operator what to do.
+	if !strings.Contains(capturedSubject, "STAGE GATE TIMEOUT") {
+		t.Errorf("subject missing tag, got %q", capturedSubject)
+	}
+	if !strings.Contains(capturedSubject, "soak_minutes") {
+		t.Errorf("subject must name the gate type, got %q", capturedSubject)
+	}
+	for _, want := range []string{
+		"convoy",                    // human-readable convoy reference
+		"test-budget-allowed",       // the convoy name from cswInsertConvoy
+		"Stage intent",              // intent line label
+		"Gate type:",                // gate type line label
+		"Gate config:",              // gate config line label
+		"Awaiting for:",             // duration line label
+		"timeout: 5 minutes",        // configured timeout
+		"Recommendation",            // resolution-path label
+		"operator-confirm",          // recommended fallback path
+		"force convoy show",         // inspection command
+	} {
+		if !strings.Contains(capturedBody, want) {
+			t.Errorf("escalation body missing %q; got:\n%s", want, capturedBody)
+		}
+	}
+}
+
+// TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_BudgetError_FailOpen —
+// when the budget check returns an error, the dog must fail-open and
+// emit the escalation. A SQLite glitch must never silence a high-stakes
+// gate-timeout alert.
+func TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_BudgetError_FailOpen(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := cswInsertConvoy(t, db, "test-budget-error")
+	stageID := cswInsertStage(t, db, convoyID, 1, "soak_minutes", `{"minutes":1440}`)
+	twoHoursAgo := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := db.Exec(`UPDATE ConvoyStages
+		SET status='AwaitingGate', all_prs_merged_at=?, gate_timeout_minutes=5
+		WHERE id = ?`, twoHoursAgo, stageID); err != nil {
+		t.Fatalf("set timeout fixture: %v", err)
+	}
+
+	restoreBudget := SetGateTimeoutBudgetCheckForTest(
+		func(_ context.Context, _ *sql.DB, _, _, _, _ string, _ store.NotificationStakes) (bool, error) {
+			return false, errors.New("simulated sqlite glitch")
+		},
+	)
+	defer restoreBudget()
+
+	var sendMailCalls int
+	restoreSend := SetGateTimeoutSendMailForTest(
+		func(_ *sql.DB, _, _, _, _ string, _ int, _ store.MailType) int64 {
+			sendMailCalls++
+			return 1
+		},
+	)
+	defer restoreSend()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("dog returned err: %v", err)
+	}
+	if sendMailCalls != 1 {
+		t.Errorf("expected SendMail to be called even on budget error (fail-open); got %d call(s)", sendMailCalls)
 	}
 }
