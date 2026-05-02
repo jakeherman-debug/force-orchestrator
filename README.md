@@ -599,6 +599,37 @@ force migrate pr-flow --rollback   # restore the most recent snapshot (daemon mu
 
 Before any work the daemon verifies `gh auth status` passes. If it doesn't, startup aborts with a clear error — the fleet refuses to run a half-migrated PR flow.
 
+### Bureau of Standards — Commit-Time Invariant Enforcer
+
+**File:** `bos.go`
+**Roster:** BoS-Phasma, BoS-Pyre, BoS-Cardinal
+
+The Bureau of Standards (BoS) is the post-commit invariant gate. After every Astromech commit, a `BoSReview` infrastructure task is enqueued in parallel with the next-stage review. BoS runs every registered rule (BOS-001..011) against the diff via Go AST analysis — pure deterministic checks, no LLM call. Findings land in `SecurityFindings` with disposition `flagged` or `overridden` (the latter for `// BOS-BYPASS: <AUDIT-NNN> <reason>` comments).
+
+BoS rules graduate D0 invariants to commit-time enforcement (e.g. BOS-011 graduates Pattern P16 from CI-time to commit-time block). Per the D4 anti-cheat directive, every new rule ships at `severity=advise` for 30 clean firings before being promoted to `block`. BOS-011 is the documented exception: it ships at block because Pattern P16 already had zero false positives across D0–D3.
+
+Together with ISB, BoS is one half of a dual-gate: the source CodeEdit task only forwards to Captain after both BoSReview and ISBReview approve.
+
+### Imperial Security Bureau — Commit-Time Security Scanner
+
+**File:** `isb.go`
+**Roster:** ISB-Tarkin, ISB-Krennic, ISB-Yularen
+
+The Imperial Security Bureau (ISB) is the post-commit security gate, sibling to BoS. Same hook point, same `SecurityFindings` table, same bypass mechanism (`// ISB-BYPASS: <AUDIT-NNN> <reason>`). ISB rules cover hardcoded secrets (ISB-001 — gitleaks + regex fallback), shell-injection vectors (ISB-002 — `exec.Command` arg discipline), concatenated SQL (ISB-003), outbound-URL validation (ISB-004), HTTP-handler hardening (ISB-005), file-mode hygiene (ISB-006), destructive-file-op containment (ISB-007), LLM prompt-injection sentinels (ISB-008), unbounded `io.ReadAll` (ISB-009), and `DisallowUnknownFields` on LLM-response unmarshals (ISB-010).
+
+All 10 ISB rules ship at `severity=advise` per the D4 anti-cheat directive (no block-default on new rules; 30-clean-firings warm-up window precedes promotion to block). Context-sensitive rules (ISB-005, ISB-008, ISB-010) attempt a deterministic check first and only fall through to the LLM layer when the deterministic gate cannot resolve — per the "no LLM-layer ISB rule without a deterministic fallback attempt" directive.
+
+### Senate — Repo-Scoped Advisory Layer
+
+**File:** `senate.go`
+**Roster:** Senate-Mothma, Senate-Bail, Senate-Padme
+
+The Senate is the repo-scoped advisory review layer. Each Senator owns one registered repo (the shakedown Senator is `force-orchestrator` itself, self-onboarded at daemon startup). When the Chancellor receives a `ProposedConvoys` plan that touches a Senator's repo, a `SenateReview` task is enqueued between the proposal write and the `AwaitingChancellorReview` transition. The Senator reviews the plan against its persistent context (FleetRules where `agent_scope='senate:<repo>'`, `SenateMemory` rows accumulated by the `senate-refresh` dog, recent-commits digest from the Librarian) and emits a Verdict (concur / dissent / abstain) with rationale.
+
+The Senate package contains **no direct `INSERT INTO FleetRules`**. Senator rules promote ONLY via the operator-ratified pipeline: Librarian emits a candidate (`BootstrapSenatorRules`), Engineering Corps runs a paired-run experiment, the operator ratifies a `PromotionProposals` row, and the materialization step inserts the FleetRules row with `category='senate'`. Pattern P34 (`audit_pattern_p34_senate_no_self_promote_test.go`) walks the Senate package's AST and rejects any direct-write regression. This is the D4 Phase 3 "no Senator auto-editing its own rules" anti-cheat directive made mechanical.
+
+Senate has an empty tool surface (`builtin_tools: []` in `agents/capabilities/senate.yaml`) — its review is a pure-reasoning LLM call assembled from the per-Senator persistent context, not from at-review-time worktree access. Live-Haiku gating applies; tests run under `LIVE_HAIKU_DISABLED=1` and exercise the deterministic-stub Verdict path.
+
 ---
 
 ## Security & Safety Considerations
@@ -724,7 +755,7 @@ What this does NOT cover: structured log analysis. Force ships the signals; the 
 
 ### Pattern-test enforcement layer
 
-Force ships 30 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P13, P15–P18, P20–P32) that fail CI if specific invariants regress. They convert architectural rules from prose-in-`CLAUDE.md` to mechanical enforcement:
+Force ships 33 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P18, P20–P34) that fail CI if specific invariants regress. They convert architectural rules from prose-in-`CLAUDE.md` to mechanical enforcement:
 
 | Pattern | What it enforces |
 |---|---|
@@ -741,6 +772,7 @@ Force ships 30 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P13, P
 | `TestPattern_P11_ExecCommandsUseContext` | Long-running `exec.Command` migrated to `exec.CommandContext(ctx, …)`; cheat shapes (`WithTimeout(Background, …)`, `Background()` direct) rejected per-site |
 | `TestPattern_P12_PromptInjectionSurface` | LLM prompts wrap attacker-controllable inputs in `<user_content>` and call `strictJSONUnmarshal` on responses |
 | `TestPattern_P13_CapabilityProfiles` | Every Claude call site sources tool args from `capabilities.LoadProfile(agentName)` — no hardcoded literals |
+| `TestPattern_P14_BoSRulesCoverCLAUDEMDInvariants` | Every CLAUDE.md invariant heading is covered by a BoS rule; allowlisted exceptions justified (D4 Phase 1) |
 | `TestPattern_P15_BashGuardIntegrity` + `_BashGuardEnvWiring` | Bash-guard wiring code present AND `setupBashGuardShim` returns both `PATH=` and `SHELL=` entries |
 | `TestPattern_P16_ClientsInterfaces` | Agent code never imports a concrete client struct; goes through the `Client` interface + `NewInProcess` / `NewMock` factories |
 | `TestPattern_P17_ClaudeMdSize` | Rendered `CLAUDE.md` ≤ 20 KB hard cap (D3 Phase 1) |
@@ -758,10 +790,12 @@ Force ships 30 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P13, P
 | `TestPattern_P30_HighStakesCooldown_HelperExists` | Every high-stakes auto-execute decision routes through `CooldownPauses` |
 | `TestPattern_P31_AllLLMCallsCaptured` | Every Claude CLI call site routes through `claude.CallWithTranscript*` (writes `LLMCallTranscripts`) |
 | `TestPattern_P32_GitOpsLogged` | Every `exec.CommandContext(ctx, "git", …)` / `"gh"` routes through `internal/git` helpers (writes `GitOperationLog`) |
+| `TestPattern_P33_AgentMemoryInjectionViaLibrarianClient` | Agent prompt-assembly fetches Fleet Memory via the `librarian.Client` interface, never via direct `store.GetFleetMemories` — keeps the memory-rerank ingress pure (D4 Phase 0) |
+| `TestPattern_P34_SenateNoSelfPromote` | Senate package contains no direct `INSERT INTO FleetRules` — Senator rules promote only via the operator-ratified Librarian → Engineering Corps → operator pipeline (D4 Phase 3 anti-cheat) |
 
 Pattern tests are not "nice-to-have." Each regression they catch is documented with an AUDIT ID in `FIX-LOG.md` describing the original bug. CI failure here means the production code has drifted off an invariant the project earned the hard way.
 
-What this does NOT cover: invariants that haven't been ratified yet. A new architectural rule lives in `CLAUDE.md` until somebody writes the pattern test that enforces it. `CLAUDE.md` documents that the BoS-rule graduation in D4 will catch some of these one step earlier in the pipeline.
+What this does NOT cover: invariants that haven't been ratified yet. A new architectural rule lives in `CLAUDE.md` until somebody writes the pattern test that enforces it. As of D4, the Bureau of Standards rule pack (BOS-001..011) catches commit-time violations of CLAUDE.md invariants one step earlier than the CI-time Pattern tests — graduating BOS-011 from D0's CI-time Pattern P16 to commit-time block is the worked example.
 
 ### What this isn't
 
@@ -990,6 +1024,9 @@ This starts all agents in the background:
 - 1 Auditor (configure with `force config set num_auditors 2`)
 - 1 Pilot (configure with `force config set num_pilots 2`)
 - 1 Diplomat (configure with `force config set num_diplomats 2`)
+- 1 BoS — Bureau of Standards reviewer (configure with `force config set num_bos 2`)
+- 1 ISB — Imperial Security Bureau reviewer (configure with `force config set num_isb 2`)
+- 1 Senate — repo-scoped advisory layer (configure with `force config set num_senate 2`)
 - 1 Inquisitor
 
 The daemon writes a `fleet.pid` file and logs to `fleet.log`. It handles `SIGINT`/`SIGTERM` with a 30-second graceful drain.
@@ -1258,6 +1295,9 @@ Set with `force config set <key> <value>`.
 | `num_medics` | `1` | How many Medic failure-triage agents to run. Takes effect on restart. |
 | `num_pilots` | `1` | How many Pilot agents (PR-flow git ops) to run. Takes effect on restart. |
 | `num_diplomats` | `1` | How many Diplomat agents (draft-PR opener + ConvoyReview / PRReviewTriage claimer) to run. Takes effect on restart. |
+| `num_bos` | `1` | How many Bureau of Standards reviewers (BoSReview claim loop — pure Go AST checks against BOS-001..011) to run. Takes effect on restart. |
+| `num_isb` | `1` | How many Imperial Security Bureau reviewers (ISBReview claim loop — deterministic security checks against ISB-001..010) to run. Takes effect on restart. |
+| `num_senate` | `1` | How many Senate agents (repo-scoped advisory layer between ProposedConvoys and AwaitingChancellorReview) to run. Takes effect on restart. |
 | `max_concurrent` | `0` (unlimited) | Maximum tasks running simultaneously fleet-wide. |
 | `spawn_delay_ms` | `0` | Milliseconds to wait between each agent claiming a new task. Smooths thundering-herd on large backlogs. |
 | `batch_size` | `0` (unlimited) | Maximum tasks claimed fleet-wide in a 60-second window. |
@@ -1294,6 +1334,7 @@ Background maintenance tasks that run on a cooldown managed by the Inquisitor. V
 | `pr-review-poll` | 5 min | Reads bot + human review comments on the draft PR into `PRReviewComments`; queues `PRReviewTriage` per thread. |
 | `ship-it-nag` | 24 hours | Reminds the operator if a draft PR has sat unshipped for 24h / 72h / 1 week. |
 | `quarantined-repo-watch` | 1 hour | Alerts the operator while any `Repositories.mode='quarantined'` row remains; surfaces the persistent dashboard banner. |
+| `senate-refresh` | 7 days | For every active Senator, calls `librarian.RefreshSenatorMemoryDigest`, appends fresh `SenateMemory` entries, and bumps `SenateChambers.last_refreshed_at`. Weekly cadence — invariants don't drift daily, so the digest cost amortises. (D4 Phase 3) |
 
 If any dog fails, the operator receives an alert mail. All dogs short-circuit at the top when e-stop is active so an emergency halt actually halts.
 
