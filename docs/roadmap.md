@@ -1727,13 +1727,39 @@ ConvoyStages(
 
 ConvoyAskBranches.stage_id INTEGER  -- FK to ConvoyStages.id; default migration sets all existing rows to stage 1 of an implicit single-stage convoy
 Convoys.staging_mode TEXT NOT NULL DEFAULT 'single'  -- 'single' | 'staged'
+Convoys.staging_strategy TEXT NOT NULL DEFAULT 'strict'  -- 'strict' | 'merge_parallel' | 'stacked'; only meaningful when staging_mode='staged'
 ```
+
+**Staging strategies (forward-compat enum; only `strict` ships in D5.5).**
+
+The `staging_strategy` column captures *when* stage N's astromechs start working and *what* their base branch is. Three modes are recognized at the schema level so future deliverables can opt in without schema migration churn:
+
+| Strategy | When stage N opens | Stage N's base branch | Inter-stage rebase? | Status in D5.5 |
+|---|---|---|---|---|
+| `strict` | After stage N-1's PRs merge AND its gate passes (`Verified`) | `main` HEAD at stage-open time | No — stage N-1 already merged, no chain | **Implemented (default).** |
+| `merge_parallel` | As soon as stage N-1's PRs merge (gate may not have passed yet) | `main` HEAD at merge time | No — still branched off main | Schema-recognized; planner rejects. Add when needed. |
+| `stacked` | Concurrent with stage N-1 | Stage N-1's ask-branch tip | Yes — `convoy-stage-rebase` dog needed | Schema-recognized; planner rejects. Add when needed. |
+
+D5.5 implements only `strict`. The Commander's planner validates `staging_strategy` at convoy creation and emits a clear "not yet supported" error for `merge_parallel` or `stacked`. Schema migration in D5.5 sets all existing convoys to `staging_strategy='strict'` (it's a no-op for single-stage convoys).
+
+When future deliverables add `merge_parallel`, the runtime branches on `staging_strategy` to choose stage-open trigger; no schema change needed. When `stacked` lands, the schema may add `ConvoyStages.base_commit_sha` and `ConvoyStages.rebase_attempts` as nullable additions — those are forward-compat-clean ALTER ADD COLUMN ops.
+
+**Why include the strategy enum now even though only `strict` ships:**
+
+1. Avoids painting future deliverables into a corner where they'd need destructive schema migrations.
+2. Makes the Commander's planning prompt forward-compatible: it can already emit `"staging_strategy": "strict"` explicitly, and adding new values later is a prompt change + validator change, not a schema change.
+3. Serializes operator intent durably: a convoy that was planned-but-not-yet-executed when `merge_parallel` lands can be promoted with one column update, not a re-plan.
 
 **State machine:**
 - Convoy-level states stay flat (`DraftPROpen`, `Shipped`, `Abandoned`). Richer state lives in `ConvoyStages.status`.
 - Per-stage progression: `Pending → Open → AllPRsMerged → AwaitingGate → GatePassed → Verified`.
 - Convoy is `Shipped` only when ALL stages reach `Verified`.
-- Astromech work for stage N is gated: stage N's ask-branches are not opened, no worktrees dispatched, no astromechs claim work, until stage N-1 reports `GatePassed` (which transitions both: stage N-1 → `Verified`, stage N → `Open`).
+- Astromech work for stage N is gated by `staging_strategy`:
+  - `strict` (D5.5 default): stage N's ask-branches are not opened, no worktrees dispatched, no astromechs claim work, until stage N-1 reports `GatePassed` (which transitions both: stage N-1 → `Verified`, stage N → `Open`).
+  - `merge_parallel` (future): stage N opens on `AllPRsMerged`, not `GatePassed`. Stage N's astromechs work in parallel with stage N-1's gate evaluation. Stage N's PRs do NOT open for review until stage N-1 hits `GatePassed`.
+  - `stacked` (future): stage N opens at convoy-creation time alongside stage N-1. Astromechs work in parallel; stage N's ask-branch is based on stage N-1's tip; an inter-stage rebase dog propagates stage N-1 commits forward.
+
+**Stage N base branch (D5.5 strict mode):** stage N's ask-branches are created off `main` HEAD at the moment stage N transitions to `Open`. Because stage N-1 has already merged to main by definition, stage N's base contains stage N-1's commits — no inter-stage rebase chain is needed. Stage N's ask-branches still rebase to track main as unrelated convoys merge, using the existing `ConvoyAskBranches.failed_rebase_attempts` machinery from D2/D3.
 
 **Stage gate types (pluggable):**
 
@@ -1755,6 +1781,7 @@ When the Commander drafts a convoy from a Feature, its planning prompt is extend
 ```json
 {
   "staging_mode": "staged",
+  "staging_strategy": "strict",
   "stages": [
     {
       "stage_num": 1,
@@ -1806,8 +1833,9 @@ The Commander reasons about *why* each stage is independently safe, *what* the g
 
 ### Exit criteria
 
-1. Forward-compat: every existing convoy from D3/D4/D5 era continues to function with `staging_mode='single'`, one ConvoyStage row at stage 1, gate=null. No behavior change for single-stage convoys. Migration tests prove this.
-2. Schema parity: `createSchema` + `runMigrations` + `schema/schema.sql` agree on the new tables and columns. `TestSchemaParity` green.
+1. Forward-compat: every existing convoy from D3/D4/D5 era continues to function with `staging_mode='single'`, `staging_strategy='strict'`, one ConvoyStage row at stage 1, gate=null. No behavior change for single-stage convoys. Migration tests prove this.
+2. Schema parity: `createSchema` + `runMigrations` + `schema/schema.sql` agree on the new tables and columns including `Convoys.staging_strategy`. `TestSchemaParity` green. The `staging_strategy` enum is enforced at the agent layer, not via SQL CHECK constraint, so future values are accepted without migration.
+3. `staging_strategy` validator: convoy creation rejects `merge_parallel` and `stacked` with a clear "not yet supported in D5.5" error message that names the deliverable that will add support. Test coverage walks each unsupported value.
 3. All 6 gate types implemented with dedicated unit tests + at least one integration test per type that walks a staged convoy through advancement.
 4. `convoy-stage-watch` dog registered; `TestListDogs` count incremented; the dog correctly handles every stage status transition.
 5. Commander integration: planning prompt includes the multi-stage option; emitted JSON validated by `internal/agents/commander/staging_validator.go`; multi-stage convoys land in the schema correctly via `runCommanderTask`.
