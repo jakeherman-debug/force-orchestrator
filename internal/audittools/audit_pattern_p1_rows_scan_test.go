@@ -45,9 +45,9 @@ func TestPattern_P1_RowsScanErrorsChecked(t *testing.T) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".fix-worktrees" || name == ".force-worktrees" ||
-				name == "vendor" || name == ".git" || name == "node_modules" ||
-				name == "testdata" {
+			if name == ".fix-worktrees" || name == ".force-worktrees" || name == ".claude" ||
+				name == ".build-worktrees" || name == "vendor" || name == ".git" ||
+				name == "node_modules" || name == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil
