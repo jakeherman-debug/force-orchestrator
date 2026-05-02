@@ -39,7 +39,13 @@ import (
 	"force-orchestrator/internal/agents/capabilities"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/isb"
-	_ "force-orchestrator/internal/isb/rules" // register ISB-001..ISB-010
+	_ "force-orchestrator/internal/isb/rules" // register ISB-001..ISB-010 + SUPPLY-* (D5)
+	"force-orchestrator/internal/isb/scanners/manifests"
+	_ "force-orchestrator/internal/isb/scanners/manifests/gemfile" // register Ruby
+	_ "force-orchestrator/internal/isb/scanners/manifests/gomod"   // register Go
+	_ "force-orchestrator/internal/isb/scanners/manifests/maven"   // register Java/Kotlin
+	_ "force-orchestrator/internal/isb/scanners/manifests/npm"     // register JS/TS
+	_ "force-orchestrator/internal/isb/scanners/manifests/pip"     // register Python
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
@@ -143,6 +149,37 @@ func runISBReviewTask(ctx context.Context, db *sql.DB, agentName string, b *stor
 	gate := isb.DBFleetRulesGate(db)
 	res := isb.ReviewFiles(gate, inputs)
 
+	// D5 P0 — manifest-gating dispatch for SUPPLY-* rules. Only fires
+	// if the commit's diff includes at least one recognised manifest
+	// file; source-only commits skip this entirely (no network calls
+	// against AWS CodeArtifact). Findings flow into the same
+	// SecurityFindings rows as the AST rules above; deferral
+	// (token_expired) is handled by the rules themselves via
+	// internal/isb/rules.RecordDeferral. Per-rule errors are logged
+	// and DO NOT take the dispatcher down — one rule's failure must
+	// not silence another's finding.
+	mgInput, mgErr := buildManifestGatedInput(ctx, repoPath, &p)
+	if mgErr != nil {
+		// File-read errors are non-fatal here — surface them but
+		// don't block the AST verdict. Operator review path picks
+		// these up via the dashboard log surface.
+		logger.Printf("Task %d: ISB manifest-gating: %v", b.ID, mgErr)
+	}
+	if len(mgInput.ChangedManifests) > 0 {
+		logger.Printf("Task %d: ISB dispatching %d manifest-gated rule(s) over %d manifest file(s)",
+			b.ID, len(isb.AllManifestGated()), len(mgInput.ChangedManifests))
+		mgFindings, mgErrs := isb.DispatchManifestGated(ctx, db, gate, mgInput)
+		for ruleID, err := range mgErrs {
+			logger.Printf("Task %d: ISB manifest-gated rule %s: %v", b.ID, ruleID, err)
+		}
+		res.Findings = append(res.Findings, mgFindings...)
+		for _, f := range mgFindings {
+			if f.Severity == isb.SeverityBlock {
+				res.HasBlock = true
+			}
+		}
+	}
+
 	// Persist findings to SecurityFindings (bureau='ISB').
 	for _, f := range res.Findings {
 		_, insErr := store.InsertSecurityFinding(db, store.SecurityFinding{
@@ -228,6 +265,66 @@ func isbFinish(db *sql.DB, b *store.Bounty, p isbReviewPayload, agentName, sessi
 	if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
 		logger.Printf("Task %d: ISBReview Completed status transition failed: %v", b.ID, err)
 	}
+}
+
+// buildManifestGatedInput enumerates ALL changed files (not just .go)
+// and groups the recognised manifests by ecosystem. Each entry's
+// (added, removed) dep delta is computed via the per-ecosystem
+// parser; the before/after bytes are read from git so the rule can
+// re-parse if needed. Returns an empty input (no manifests) when the
+// commit doesn't touch any recognised manifest.
+//
+// Errors here are non-fatal — file-read failures on individual
+// manifests are dropped (with the manifest excluded from the input)
+// rather than failing the whole dispatch. The returned error is
+// non-nil only when the git invocation itself fails; the caller
+// logs and proceeds.
+func buildManifestGatedInput(ctx context.Context, repoPath string, p *isbReviewPayload) (isb.ManifestGatedInput, error) {
+	in := isb.ManifestGatedInput{
+		SourceTaskID: p.SourceTaskID,
+		TargetRepo:   p.TargetRepo,
+		Branch:       p.Branch,
+		CommitSHA:    p.CommitSHA,
+	}
+	if repoPath == "" || p.Branch == "" {
+		return in, nil
+	}
+	base := igit.GetDefaultBranch(ctx, repoPath)
+	files := igit.ChangedFilesFromBase(ctx, repoPath, base, p.Branch)
+	if len(files) == 0 {
+		return in, nil
+	}
+	registry := manifests.Default()
+	for _, rel := range files {
+		parser, ok := registry.Detect(rel)
+		if !ok {
+			continue
+		}
+		eco, _ := registry.EcosystemFor(rel)
+
+		full := filepath.Join(repoPath, rel)
+		afterBytes, err := os.ReadFile(full)
+		if err != nil && !strings.Contains(err.Error(), "no such file") {
+			// Real read error (perm, etc.) — skip with a non-fatal
+			// trail. The manifest stays out of the input.
+			continue
+		}
+		// `before` = the manifest as it was at the base ref. Empty
+		// (newly added file) → nil. We tolerate ReadFileAtRef errors
+		// silently because they typically mean "not present."
+		beforeBytes, _ := igit.ReadFileAtRef(ctx, repoPath, base, rel)
+
+		added, removed, _ := parser.ParseDiff(rel, beforeBytes, afterBytes)
+		in.ChangedManifests = append(in.ChangedManifests, isb.ChangedManifest{
+			Path:        rel,
+			Ecosystem:   eco,
+			DepsAdded:   added,
+			DepsRemoved: removed,
+			BeforeBytes: beforeBytes,
+			AfterBytes:  afterBytes,
+		})
+	}
+	return in, nil
 }
 
 // loadISBReviewInputs enumerates the changed Go files between

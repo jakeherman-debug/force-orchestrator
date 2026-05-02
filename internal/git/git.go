@@ -554,6 +554,48 @@ func ChangedGoFilesFromBase(ctx context.Context, repoPath, baseRef, branch strin
 	return goFiles
 }
 
+// ChangedFilesFromBase returns the FULL list of files changed
+// between baseRef and branch (three-dot range), without any suffix
+// filter. Used by the D5 manifest-gating dispatch to discover which
+// changed files correspond to recognised manifest filenames (Gemfile,
+// package.json, pom.xml, ...). Returns an empty slice on git errors.
+func ChangedFilesFromBase(ctx context.Context, repoPath, baseRef, branch string) []string {
+	if baseRef == "" || branch == "" || repoPath == "" {
+		return nil
+	}
+	out, err := runGitCtx(ctx, "-C", repoPath, "diff", "--name-only", baseRef+"..."+branch, "--")
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		files = append(files, line)
+	}
+	return files
+}
+
+// ReadFileAtRef returns the content of `path` at the supplied ref. If
+// the file did not exist at that ref, returns (nil, nil). Used by
+// the manifest-gating dispatcher to compute the (added, removed) dep
+// delta for a manifest file across a branch.
+func ReadFileAtRef(ctx context.Context, repoPath, ref, path string) ([]byte, error) {
+	if repoPath == "" || ref == "" || path == "" {
+		return nil, fmt.Errorf("ReadFileAtRef: empty arg")
+	}
+	out, err := runGitCtxOutput(ctx, "-C", repoPath, "show", ref+":"+path)
+	if err != nil {
+		// git show exits non-zero when the file doesn't exist at
+		// the ref — treat that as (nil, nil) so the caller handles
+		// "newly added file" cleanly.
+		return nil, nil
+	}
+	return out, nil
+}
+
 // MergeAndCleanup merges the branch into the default branch of the repo, then resets
 // the agent worktree to detached HEAD. Serialized with a mutex to prevent concurrent
 // council members from racing on the same main worktree. Returns error if merge fails.

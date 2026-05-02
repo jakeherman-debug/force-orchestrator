@@ -1,0 +1,17 @@
+lockfileVersion: '6.0'
+
+packages:
+
+  /react@18.2.0:
+    resolution: {integrity: sha512-foo}
+    dependencies:
+      loose-envify: 1.4.0
+    dev: false
+
+  /lodash@4.17.21:
+    resolution: {integrity: sha512-bar}
+    dev: false
+
+  /@babel/core@7.23.7:
+    resolution: {integrity: sha512-baz}
+    dev: true

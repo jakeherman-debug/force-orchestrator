@@ -1,0 +1,25 @@
+{
+  "name": "myapp",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "myapp",
+      "version": "1.0.0",
+      "dependencies": {
+        "react": "^18.2.0"
+      }
+    },
+    "node_modules/react": {
+      "version": "18.2.0",
+      "resolved": "https://registry.npmjs.org/react/-/react-18.2.0.tgz"
+    },
+    "node_modules/loose-envify": {
+      "version": "1.4.0"
+    },
+    "node_modules/@babel/core": {
+      "version": "7.23.7"
+    }
+  }
+}
