@@ -1728,6 +1728,7 @@ ConvoyStages(
 ConvoyAskBranches.stage_id INTEGER  -- FK to ConvoyStages.id; default migration sets all existing rows to stage 1 of an implicit single-stage convoy
 Convoys.staging_mode TEXT NOT NULL DEFAULT 'single'  -- 'single' | 'staged'
 Convoys.staging_strategy TEXT NOT NULL DEFAULT 'strict'  -- 'strict' | 'merge_parallel' | 'stacked'; only meaningful when staging_mode='staged'
+Repositories.release_label_pattern TEXT NOT NULL DEFAULT ''  -- per-repo regex; empty means repo doesn't use release labels
 ```
 
 **Staging strategies (forward-compat enum; only `strict` ships in D5.5).**
@@ -1761,18 +1762,70 @@ When future deliverables add `merge_parallel`, the runtime branches on `staging_
 
 **Stage N base branch (D5.5 strict mode):** stage N's ask-branches are created off `main` HEAD at the moment stage N transitions to `Open`. Because stage N-1 has already merged to main by definition, stage N's base contains stage N-1's commits — no inter-stage rebase chain is needed. Stage N's ask-branches still rebase to track main as unrelated convoys merge, using the existing `ConvoyAskBranches.failed_rebase_attempts` machinery from D2/D3.
 
-**Stage gate types (pluggable):**
+**Stage gate types (pluggable, registry-based):**
+
+The gate plug interface (P1) uses a registry pattern: any registered gate type can appear inside compounds. Eight gate types ship across P1 (baseline) and P3 (advanced), plus two compound gates available from P1.
+
+**Baseline gates (P1):**
 
 | Gate type | Config | Mechanism |
 |---|---|---|
 | `soak_minutes` | `{minutes: int}` | Wait N minutes after `all_prs_merged_at` before flipping `GatePassed`. |
 | `operator_confirm` | `{prompt: string}` | Operator clicks "advance" in the dashboard; stage transitions on operator action. |
-| `release_label_present` | `{pattern: regex, polling_interval_minutes: int}` | Polls `gh pr view --json labels` for each merged PR in stage N-1; gate passes when ALL merged PRs carry a label matching the pattern. Aligns with Upstart's external deploy system that labels PRs post-build per release. |
-| `probe_endpoint` | `{url: string, method: GET\|POST, expected_status: int, body_match_regex: optional string, timeout_seconds: int, target_env: prod\|staging}` | Calls the configured URL after the prior gate (typically `release_label_present`) passes; verifies the change is actually working in the target environment. Use cases: new endpoint exists and returns 200, existing endpoint now returns a new field, admin endpoint lists a newly registered consumer. |
-| `metric_threshold` | `{metric_query: string, comparator: lt\|gt\|eq, threshold: float, sample_window_minutes: int}` | Queries metrics backend (Datadog or similar); gate passes when metric satisfies comparator vs threshold over the sample window. Useful for "error rate stayed below 0.1% after stage 1 deployed." |
 | `null` | `{}` | No gate; transitions immediately on `AllPRsMerged → Verified`. Allowed only on the terminal stage of a convoy. |
+| `all_of` | `{gates: [Gate]}` | Compound: passes when ALL children pass. Fails when ANY child fails (short-circuit). Stays `AwaitingGate` while any child is pending. |
+| `any_of` | `{gates: [Gate]}` | Compound: passes when ANY child passes. Fails only when ALL children fail. |
 
-Gates can compose in a future phase via `all_of` / `any_of` aggregator gates. P3 ships only the singletons above.
+**Advanced leaf gates (P3):**
+
+| Gate type | Config | Mechanism |
+|---|---|---|
+| `release_label_present` | `{polling_interval_minutes: int}` (the regex pattern lives on `Repositories.release_label_pattern`, not here) | For each merged PR in the stage, polls `gh pr view --json labels` and checks against the PR's repo's `Repositories.release_label_pattern`. Gate passes when ALL merged PRs carry a matching label per their repo's pattern. **Repo-specific:** if any repo touched by the stage has no `release_label_pattern` configured, the planner rejects the gate at convoy creation with an explicit "configure pattern or pick a different gate" error — no silent fallback. |
+| `probe_endpoint` | `{url: string, method: GET\|POST, expected_status: int, body_match_regex: optional string, timeout_seconds: int, target_env: prod\|staging, headers: optional map}` | Calls the configured URL; verifies the change is actually working in the target environment. Use cases: new endpoint exists and returns 200, existing endpoint now returns a new field, admin endpoint lists a newly registered consumer. |
+| `datadog_metric_threshold` | `{metric_query: string, comparator: lt\|gt\|eq\|lte\|gte, threshold: float, sample_window_minutes: int}` | Queries Datadog API for time-series metrics. Use cases: "error rate stayed below 0.1% for 30 min," "p95 latency didn't increase by >10% over baseline," "request throughput stayed flat after stage 1 merged." |
+| `databricks_query_threshold` | `{sql_query: string, comparator: lt\|gt\|eq\|lte\|gte, threshold: float, warehouse_id: string, timeout_seconds: int}` | Executes a SQL query against the configured Databricks warehouse, comparing scalar result to threshold. Use cases: "backfill complete: count of rows with new column populated == total count," "no data drift: distribution match within tolerance," "all migration shards reported success." |
+
+**Compound gate semantics:**
+
+Compound gates support arbitrary boolean expressions over leaf gates. Children can themselves be compounds, allowing nested logic. Validation rules:
+
+- Maximum nesting depth: 5 levels (planner rejects deeper). Prevents pathological configs.
+- Empty children: `all_of: []` and `any_of: []` rejected at planning time.
+- Single-child compound: allowed but emits a planner warning ("compound with single child is equivalent to that child").
+- Per-child timeouts NOT supported; the convoy stage's `gate_timeout_minutes` applies to the whole compound.
+- Compound gates implement the same `Gate` interface as leaf gates; the registry treats them uniformly.
+
+Example — ZDM phase 2→3 gate (after backfill, before reading from new column):
+
+```json
+{
+  "type": "all_of",
+  "gates": [
+    {"type": "soak_minutes", "config": {"minutes": 60}},
+    {
+      "type": "databricks_query_threshold",
+      "config": {
+        "sql_query": "SELECT COUNT(*) FROM users WHERE user_account_status IS NULL",
+        "comparator": "eq",
+        "threshold": 0,
+        "warehouse_id": "...",
+        "timeout_seconds": 60
+      }
+    },
+    {
+      "type": "datadog_metric_threshold",
+      "config": {
+        "metric_query": "avg:trace.http.request.errors{service:user-service}",
+        "comparator": "lt",
+        "threshold": 0.001,
+        "sample_window_minutes": 30
+      }
+    }
+  ]
+}
+```
+
+Reads as: *"wait at least 60 minutes AND every user row has the new column populated AND error rate stayed below 0.1% over the last 30 minutes."* All three signals must pass; any failure fails the gate.
 
 **Commander integration:**
 
@@ -1824,10 +1877,10 @@ The Commander reasons about *why* each stage is independently safe, *what* the g
 
 | Phase | Scope |
 |---|---|
-| P0 | Schema (`ConvoyStages` + `ConvoyAskBranches.stage_id` + `Convoys.staging_mode`); forward-compat migration (all existing convoys → `staging_mode='single'`, single ConvoyStage at stage 1, gate=null); store helpers (CreateStage, AdvanceStage, ListStages, GetStage); baseline tests including the forward-compat path. |
-| P1 | Gate plug interface (`type Gate interface { Evaluate(ctx, stage) (passed bool, reason string, err error) }`); 3 baseline gates (`soak_minutes`, `operator_confirm`, `null`); `convoy-stage-watch` dog skeleton with stage advancement transitions. |
-| P2 | Commander integration: planning-prompt extension + multi-stage JSON output validator + ConvoyReview per-stage scoping + per-stage Senate review hook. Astromech dispatch gated on stage status. |
-| P3 | 3 advanced gates (`probe_endpoint`, `release_label_present`, `metric_threshold`); gate-timeout escalation surface. |
+| P0 | Schema (`ConvoyStages` + `ConvoyAskBranches.stage_id` + `Convoys.staging_mode` + `Convoys.staging_strategy` + `Repositories.release_label_pattern`); forward-compat migration (all existing convoys → `staging_mode='single'`, `staging_strategy='strict'`, single ConvoyStage at stage 1, gate=null); store helpers (CreateStage, AdvanceStage, ListStages, GetStage, GetRepositoryReleaseLabelPattern); baseline tests including the forward-compat path. |
+| P1 | Gate plug interface (`type Gate interface { Evaluate(ctx, stage) (passed bool, reason string, err error) }`); 5 baseline gates (`soak_minutes`, `operator_confirm`, `null`, plus compounds `all_of` and `any_of`); registry pattern such that future leaf gates plug in without re-architecting; nesting-depth + empty-children + single-child validation; `convoy-stage-watch` dog skeleton with stage advancement transitions. |
+| P2 | Commander integration: planning-prompt extension + multi-stage JSON output validator + ConvoyReview per-stage scoping + per-stage Senate review hook. Astromech dispatch gated on stage status. `staging_strategy` validator rejects `merge_parallel` and `stacked` with explicit "not yet supported" errors. |
+| P3 | 4 advanced leaf gates (`probe_endpoint`, `release_label_present`, `datadog_metric_threshold`, `databricks_query_threshold`); per-repo `release_label_pattern` enforcement at planning time (planner errors when stage touches a repo without a pattern); gate-timeout escalation surface; clients/datadog and clients/databricks Go interfaces (per CLAUDE.md cross-agent service-interface convention). |
 | P4 | Dashboard view (stages list per convoy, gate status, advance/skip/abort buttons), notify-after on stage transitions, stage audit trail surface. |
 | P5 | D5.5 strict verifier — Static + Heavy + Race shards, fresh-context cross-walk against this section. Emphasis on anti-cheat directives + forward-compat regression for existing single-stage convoys. |
 
@@ -1836,7 +1889,7 @@ The Commander reasons about *why* each stage is independently safe, *what* the g
 1. Forward-compat: every existing convoy from D3/D4/D5 era continues to function with `staging_mode='single'`, `staging_strategy='strict'`, one ConvoyStage row at stage 1, gate=null. No behavior change for single-stage convoys. Migration tests prove this.
 2. Schema parity: `createSchema` + `runMigrations` + `schema/schema.sql` agree on the new tables and columns including `Convoys.staging_strategy`. `TestSchemaParity` green. The `staging_strategy` enum is enforced at the agent layer, not via SQL CHECK constraint, so future values are accepted without migration.
 3. `staging_strategy` validator: convoy creation rejects `merge_parallel` and `stacked` with a clear "not yet supported in D5.5" error message that names the deliverable that will add support. Test coverage walks each unsupported value.
-3. All 6 gate types implemented with dedicated unit tests + at least one integration test per type that walks a staged convoy through advancement.
+3. All 9 gate types implemented (5 baseline in P1 + 4 advanced leaves in P3) with dedicated unit tests + at least one integration test per leaf type that walks a staged convoy through advancement. Compound gates (`all_of`, `any_of`) covered by tests that nest at least 3 levels deep + edge cases (empty children rejected, single-child warning, depth-cap enforcement).
 4. `convoy-stage-watch` dog registered; `TestListDogs` count incremented; the dog correctly handles every stage status transition.
 5. Commander integration: planning prompt includes the multi-stage option; emitted JSON validated by `internal/agents/commander/staging_validator.go`; multi-stage convoys land in the schema correctly via `runCommanderTask`.
 6. ConvoyReview runs per-stage with stage-N main = post-stage-(N-1) main. End-to-end test walks a 3-stage convoy through ConvoyReview at each stage.
