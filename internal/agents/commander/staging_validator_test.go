@@ -1,9 +1,11 @@
 package commander
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
@@ -704,5 +706,200 @@ func TestValidateStagingPlan_ReleaseLabelGate_NilDB_Errors(t *testing.T) {
 	plan := StagingPlan{StagingMode: string(store.StagingModeStaged)}
 	if err := ValidateReleaseLabelGateForRepos(plan, nil); err == nil {
 		t.Fatal("expected error on nil db; got nil")
+	}
+}
+
+// p3FullRegistry returns a registry pre-loaded with baseline + all four
+// P3 advanced gates (with stub clients), used by the D5.5 P3 ζ tests
+// that verify the validator accepts the full P3 vocabulary.
+func p3FullRegistry(t *testing.T) *stagegate.Registry {
+	t.Helper()
+	r := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(r)
+	stagegate.RegisterAllP3Gates(r,
+		noopLabelFetcher{},
+		validatorStubDDClient{},
+		validatorStubDBXClient{},
+	)
+	return r
+}
+
+// validatorStubDDClient is a no-op datadog.Client for validator tests.
+// The validator never calls QueryMetric; only the runtime dispatcher does.
+type validatorStubDDClient struct{}
+
+func (validatorStubDDClient) QueryMetric(_ context.Context, _ string, _ time.Duration) (float64, time.Time, error) {
+	return 0, time.Time{}, nil
+}
+func (validatorStubDDClient) Health(_ context.Context) error { return nil }
+
+// validatorStubDBXClient is the databricks.Client equivalent.
+type validatorStubDBXClient struct{}
+
+func (validatorStubDBXClient) ExecuteQuery(_ context.Context, _, _ string, _ time.Duration) (float64, error) {
+	return 0, nil
+}
+func (validatorStubDBXClient) Health(_ context.Context) error { return nil }
+
+// TestValidateStagingPlan_ProbeEndpointGate_OK — D5.5 P3 ζ contract: a
+// staged plan whose stage uses probe_endpoint validates structurally
+// when the registry has the gate registered.
+func TestValidateStagingPlan_ProbeEndpointGate_OK(t *testing.T) {
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "probe the /health endpoint to confirm rollout",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "probe_endpoint",
+					Config: map[string]interface{}{
+						"url":              "https://api.example.com/health",
+						"expected_status":  200,
+						"polling_interval": 30,
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3FullRegistry(t)); err != nil {
+		t.Fatalf("probe_endpoint gate plan should validate: %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_RegistersInRegistry — proves
+// the P3 wiring actually exposes release_label_present at the validator's
+// Lookup boundary (a guard against accidental regression of
+// RegisterAllP3Gates skipping the release-label gate).
+func TestValidateStagingPlan_ReleaseLabelGate_RegistersInRegistry(t *testing.T) {
+	r := p3FullRegistry(t)
+	if _, ok := r.Lookup("release_label_present"); !ok {
+		t.Fatal("release_label_present must be registered by p3FullRegistry; RegisterAllP3Gates regression?")
+	}
+}
+
+// TestValidateStagingPlan_DatadogMetricGate_OK — staged plan whose stage
+// uses datadog_metric_threshold validates structurally when the gate is
+// registered with a non-nil ddClient.
+func TestValidateStagingPlan_DatadogMetricGate_OK(t *testing.T) {
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "confirm error rate stayed below 0.1% for 30min",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "datadog_metric_threshold",
+					Config: map[string]interface{}{
+						"metric_query":          "avg:trace.http.request.errors{env:prod}.as_rate()",
+						"comparator":            "lt",
+						"threshold":             0.001,
+						"sample_window_minutes": 30,
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3FullRegistry(t)); err != nil {
+		t.Fatalf("datadog_metric_threshold gate plan should validate: %v", err)
+	}
+}
+
+// TestValidateStagingPlan_DatabricksQueryGate_OK — staged plan whose
+// stage uses databricks_query_threshold validates structurally.
+func TestValidateStagingPlan_DatabricksQueryGate_OK(t *testing.T) {
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "confirm backfill row count >= total expected",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "databricks_query_threshold",
+					Config: map[string]interface{}{
+						"sql_query":       "SELECT COUNT(*) FROM users WHERE col IS NOT NULL",
+						"comparator":      "gte",
+						"threshold":       1000000,
+						"warehouse_id":    "abc123def456",
+						"timeout_seconds": 60,
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3FullRegistry(t)); err != nil {
+		t.Fatalf("databricks_query_threshold gate plan should validate: %v", err)
+	}
+}
+
+// TestValidateStagingPlan_DatadogGate_UnregisteredInRegistry_ValidatorFlags
+// — when the registry was built WITHOUT a datadog client (operator hasn't
+// configured Datadog), a plan referencing datadog_metric_threshold MUST
+// be rejected at planning time, not silently dispatched. This is the
+// "no half-wired gate" anti-cheat — without this rejection a stage would
+// sit forever waiting for a gate that can never resolve.
+func TestValidateStagingPlan_DatadogGate_UnregisteredInRegistry_ValidatorFlags(t *testing.T) {
+	// Build a registry with everything EXCEPT datadog (operator hasn't
+	// configured the integration → ddClient was nil at startup → gate
+	// not registered).
+	r := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(r)
+	stagegate.RegisterAllP3Gates(r,
+		noopLabelFetcher{},
+		nil, // no datadog client
+		validatorStubDBXClient{},
+	)
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "datadog gate planned but not configured at runtime",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "datadog_metric_threshold",
+					Config: map[string]interface{}{
+						"metric_query":          "avg:errors{*}.as_rate()",
+						"comparator":            "lt",
+						"threshold":             0.001,
+						"sample_window_minutes": 30,
+					},
+				},
+			},
+			{StageNum: 2, Intent: "terminal", Tasks: []store.TaskPlan{taskN(2, "api")}, Gate: nil},
+		},
+	}
+	err := ValidateStagingPlan(plan, r)
+	if err == nil {
+		t.Fatal("expected validator to reject datadog gate when not in registry; got nil")
+	}
+	if !strings.Contains(err.Error(), "datadog_metric_threshold") {
+		t.Errorf("error must name the unregistered gate type, got %q", err.Error())
 	}
 }

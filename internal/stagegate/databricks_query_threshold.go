@@ -117,3 +117,21 @@ func (d DatabricksQueryThreshold) Evaluate(ctx context.Context, _ *sql.DB, stage
 	}
 	return true, fmt.Sprintf("databricks: query → %.4f; %s %.4f passed", value, cfg.Comparator, cfg.Threshold), nil
 }
+
+// RegisterDatabricksGate registers the databricks_query_threshold gate
+// against the provided registry. Mirrors RegisterDatadogGate from slice δ
+// so Wave 3 ζ can compose both behind RegisterAllP3Gates at the daemon
+// registration site.
+//
+// If client is nil (e.g., environments without Databricks config) we skip
+// registration silently — the daemon's registration site is responsible
+// for logging that observation; this helper just no-ops to keep the
+// downstream registry clean of a half-wired gate.
+//
+// Panics on duplicate registration (Registry.Register's contract).
+func RegisterDatabricksGate(r *Registry, client databricks.Client) {
+	if client == nil {
+		return
+	}
+	r.Register(NewDatabricksQueryThreshold(client))
+}
