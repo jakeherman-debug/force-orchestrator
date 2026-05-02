@@ -284,6 +284,165 @@ func TestAdvanceStageHandler_Idempotent_OverwritesTimestamp(t *testing.T) {
 	}
 }
 
+// ── Bypass (D5.5 exit criterion #10) ───────────────────────────────────────
+
+// TestAdvanceStageHandler_Bypass_HappyPath — emergency bypass with a valid
+// AUDIT-NNN reference flips the stage to GatePassed regardless of gate state
+// and lands a stage_bypass audit row carrying the AUDIT id.
+func TestAdvanceStageHandler_Bypass_HappyPath(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, sids := sscNewStagedConvoy(t, db)
+	// Seed stage 1 mid-soak: AwaitingGate with a soak_minutes gate that
+	// would normally need to wait. Bypass should cut through.
+	if _, err := db.Exec(
+		`UPDATE ConvoyStages SET status='AwaitingGate', all_prs_merged_at=datetime('now')
+		 WHERE convoy_id=? AND stage_num=1`, cid); err != nil {
+		t.Fatalf("set AwaitingGate: %v", err)
+	}
+
+	rec := sscDispatch(t, db, http.MethodPost, urlAdvance(cid, 1),
+		`{"operator":"jake","reason":"prod outage; full soak unsafe","audit_id":"AUDIT-411"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Stage advanced to GatePassed despite the soak window.
+	stage, err := store.GetStage(db, sids[0])
+	if err != nil {
+		t.Fatalf("GetStage: %v", err)
+	}
+	if stage.Status != store.StageStatusGatePassed {
+		t.Errorf("stage status = %q, want GatePassed", stage.Status)
+	}
+	if stage.GatePassedAt == "" {
+		t.Errorf("gate_passed_at not stamped")
+	}
+
+	// Audit row uses the bypass action and carries the AUDIT id.
+	logs, alErr := store.ListStageAuditLog(db, cid, 1)
+	if alErr != nil {
+		t.Fatalf("ListStageAuditLog: %v", alErr)
+	}
+	if len(logs) != 1 || logs[0].Action != store.AuditActionStageBypass {
+		t.Fatalf("expected 1 stage_bypass row, got %+v", logs)
+	}
+	if !strings.Contains(logs[0].Detail, "AUDIT-411") {
+		t.Errorf("audit detail missing AUDIT-411: %q", logs[0].Detail)
+	}
+	if !strings.Contains(logs[0].Detail, "prod outage") {
+		t.Errorf("audit detail missing reason: %q", logs[0].Detail)
+	}
+	if logs[0].Actor != "jake" {
+		t.Errorf("audit actor = %q, want jake", logs[0].Actor)
+	}
+
+	// Response carries bypass=true so SPA can render distinct visuals.
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got, _ := resp["bypass"].(bool); !got {
+		t.Errorf("response missing bypass=true: %v", resp)
+	}
+}
+
+// TestAdvanceStageHandler_Bypass_FromPending — bypass works even from
+// Pending (skipping multiple intermediate states), proving the bypass
+// is not constrained by validateStageTransition's linear progression.
+func TestAdvanceStageHandler_Bypass_FromPending(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, sids := sscNewStagedConvoy(t, db)
+	// Stage 1 starts at Pending after the seed (Pending = default status).
+	stage, _ := store.GetStage(db, sids[0])
+	if stage.Status != store.StageStatusPending {
+		t.Fatalf("seed precondition: expected Pending, got %q", stage.Status)
+	}
+
+	rec := sscDispatch(t, db, http.MethodPost, urlAdvance(cid, 1),
+		`{"operator":"jake","reason":"emergency cutover","audit_id":"AUDIT-001"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	stage, _ = store.GetStage(db, sids[0])
+	if stage.Status != store.StageStatusGatePassed {
+		t.Errorf("stage status = %q, want GatePassed", stage.Status)
+	}
+	// all_prs_merged_at should now be stamped (BypassStage backfills it
+	// when the stage skipped the AllPRsMerged transition).
+	if stage.AllPRsMergedAt == "" {
+		t.Errorf("BypassStage should backfill all_prs_merged_at when skipped")
+	}
+}
+
+// TestAdvanceStageHandler_Bypass_MalformedAuditID_400 — wrong-shape AUDIT
+// ids must be rejected at the boundary so they never land in the audit
+// trail. Mirrors internal/isb/bypass.go's strict regex.
+func TestAdvanceStageHandler_Bypass_MalformedAuditID_400(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, _ := sscNewStagedConvoy(t, db)
+
+	cases := []string{
+		`AUDIT-FOO`,    // non-digit
+		`audit-123`,    // lowercase
+		`AUDIT_123`,    // wrong separator
+		`AUDIT-`,       // missing number
+		`AUDIT-123-X`,  // trailing junk
+		`A-123`,        // wrong prefix
+	}
+	for _, badID := range cases {
+		body := `{"operator":"jake","reason":"x","audit_id":"` + badID + `"}`
+		rec := sscDispatch(t, db, http.MethodPost, urlAdvance(cid, 1), body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("audit_id=%q: expected 400, got %d body=%s", badID, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Stage status untouched.
+	stage, _ := store.GetStageByNum(db, cid, 1)
+	if stage.Status != store.StageStatusPending {
+		t.Errorf("malformed bypass should not move stage; got status=%q", stage.Status)
+	}
+	logs, _ := store.ListStageAuditLog(db, cid, 1)
+	if len(logs) != 0 {
+		t.Errorf("malformed bypass should not write audit row; got %d", len(logs))
+	}
+}
+
+// TestAdvanceStageHandler_Bypass_RequiresReason — bypass without reason is
+// still rejected; the audit trail is the operator's primary post-incident
+// artifact and an empty reason defeats it.
+func TestAdvanceStageHandler_Bypass_RequiresReason(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, _ := sscNewStagedConvoy(t, db)
+
+	rec := sscDispatch(t, db, http.MethodPost, urlAdvance(cid, 1),
+		`{"operator":"jake","reason":"","audit_id":"AUDIT-7"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on bypass with empty reason, got %d", rec.Code)
+	}
+}
+
+// TestAdvanceStageHandler_Bypass_TerminalRejected — bypass on already-Failed
+// stage rejected (same terminal-status check that protects normal advance).
+func TestAdvanceStageHandler_Bypass_TerminalRejected(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, sids := sscNewStagedConvoy(t, db)
+	if err := store.AdvanceStage(db, sids[0], store.StageStatusFailed); err != nil {
+		t.Fatalf("seed Failed: %v", err)
+	}
+
+	rec := sscDispatch(t, db, http.MethodPost, urlAdvance(cid, 1),
+		`{"operator":"jake","reason":"x","audit_id":"AUDIT-9"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on bypass of terminal stage, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // ── Abort ──────────────────────────────────────────────────────────────────
 
 func TestAbortStageHandler_HappyPath_TransitionsToFailed(t *testing.T) {

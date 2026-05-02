@@ -392,6 +392,110 @@ func TestAdvanceStage_BadInput_Errors(t *testing.T) {
 	}
 }
 
+// ── BypassStage (D5.5 exit criterion #10) ───────────────────────────────────
+
+// TestBypassStage_FromAwaitingGate — bypass mid-soak: stage transitions to
+// GatePassed and gate_passed_at is stamped, even though no gate evaluator
+// was consulted. Reuses the existing all_prs_merged_at stamp.
+func TestBypassStage_FromAwaitingGate(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, err := CreateConvoy(db, "convoy-bypass-1")
+	if err != nil {
+		t.Fatalf("CreateConvoy: %v", err)
+	}
+	sid, err := CreateStage(db, cid, 2, "soak phase", "soak_minutes", `{"minutes":1440}`)
+	if err != nil {
+		t.Fatalf("CreateStage: %v", err)
+	}
+	if err := AdvanceStage(db, sid, StageStatusOpen); err != nil {
+		t.Fatalf("seed Open: %v", err)
+	}
+	if err := AdvanceStage(db, sid, StageStatusAllPRsMerged); err != nil {
+		t.Fatalf("seed AllPRsMerged: %v", err)
+	}
+	if err := AdvanceStage(db, sid, StageStatusAwaitingGate); err != nil {
+		t.Fatalf("seed AwaitingGate: %v", err)
+	}
+	prevMerged, _ := GetStage(db, sid)
+
+	if err := BypassStage(db, sid); err != nil {
+		t.Fatalf("BypassStage: %v", err)
+	}
+	got, _ := GetStage(db, sid)
+	if got.Status != StageStatusGatePassed {
+		t.Errorf("status = %q, want GatePassed", got.Status)
+	}
+	if got.GatePassedAt == "" {
+		t.Errorf("gate_passed_at not stamped")
+	}
+	if got.AllPRsMergedAt != prevMerged.AllPRsMergedAt {
+		t.Errorf("BypassStage clobbered an existing all_prs_merged_at: was=%q now=%q",
+			prevMerged.AllPRsMergedAt, got.AllPRsMergedAt)
+	}
+}
+
+// TestBypassStage_FromPending — bypass from Pending: skips Open, AllPRsMerged,
+// AwaitingGate. all_prs_merged_at is backfilled because it was empty.
+func TestBypassStage_FromPending(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, err := CreateConvoy(db, "convoy-bypass-2")
+	if err != nil {
+		t.Fatalf("CreateConvoy: %v", err)
+	}
+	sid, err := CreateStage(db, cid, 2, "ad hoc", "operator_confirm", `{"prompt":"x"}`)
+	if err != nil {
+		t.Fatalf("CreateStage: %v", err)
+	}
+
+	if err := BypassStage(db, sid); err != nil {
+		t.Fatalf("BypassStage: %v", err)
+	}
+	got, _ := GetStage(db, sid)
+	if got.Status != StageStatusGatePassed {
+		t.Errorf("status = %q, want GatePassed", got.Status)
+	}
+	if got.AllPRsMergedAt == "" {
+		t.Errorf("all_prs_merged_at should be backfilled when bypass skips the merge transition")
+	}
+	if got.GatePassedAt == "" {
+		t.Errorf("gate_passed_at not stamped")
+	}
+}
+
+// TestBypassStage_TerminalRejected — Verified and Failed stages reject bypass.
+func TestBypassStage_TerminalRejected(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, err := CreateConvoy(db, "convoy-bypass-3")
+	if err != nil {
+		t.Fatalf("CreateConvoy: %v", err)
+	}
+	sid, err := CreateStage(db, cid, 2, "x", "soak_minutes", `{"minutes":1}`)
+	if err != nil {
+		t.Fatalf("CreateStage: %v", err)
+	}
+	if err := AdvanceStage(db, sid, StageStatusFailed); err != nil {
+		t.Fatalf("seed Failed: %v", err)
+	}
+	if err := BypassStage(db, sid); err == nil {
+		t.Errorf("BypassStage on Failed: want error, got nil")
+	}
+}
+
+// TestBypassStage_BadInput_Errors — guard rails for nonsense ids.
+func TestBypassStage_BadInput_Errors(t *testing.T) {
+	db := InitHolocronDSN(":memory:")
+	defer db.Close()
+	if err := BypassStage(db, 0); err == nil {
+		t.Errorf("BypassStage(stageID=0): want error, got nil")
+	}
+	if err := BypassStage(db, 999999); err == nil {
+		t.Errorf("BypassStage(missing stage): want error, got nil")
+	}
+}
+
 // ── GetRepositoryReleaseLabelPattern / Set ───────────────────────────────────
 
 func TestGetRepositoryReleaseLabelPattern_DefaultEmpty(t *testing.T) {

@@ -14,12 +14,22 @@
 //        "view history" panel.
 //
 //   POST /api/convoys/<id>/stages/<stage_num>/advance
-//        Body: {"operator":"<name>","reason":"<text>"}
-//        Writes SystemConfig.stage_advance_<convoy>_<stage_num> = "<name>:<rfc3339>"
-//        — that's the operator-confirm gate's rendezvous key. Idempotent:
-//        repeated POSTs overwrite the timestamp; the gate evaluator only
-//        checks "non-empty" so a fast double-click is safe.
-//        Audit row is appended via store.LogStageAudit.
+//        Body: {"operator":"<name>","reason":"<text>","audit_id":"AUDIT-NNN"?}
+//        Two modes:
+//
+//          - Normal advance (no audit_id): writes
+//            SystemConfig.stage_advance_<convoy>_<stage_num> = "<name>:<rfc3339>"
+//            — the operator-confirm gate's rendezvous key. Idempotent:
+//            repeated POSTs overwrite the timestamp; the gate evaluator
+//            only checks "non-empty" so a fast double-click is safe.
+//            Audit row appended via store.LogStageAudit (action=stage_advance).
+//
+//          - Emergency bypass (audit_id matches `^AUDIT-\d+$`): skips gate
+//            evaluation entirely, transitions the stage directly to
+//            GatePassed via store.BypassStage. Audit row appended with
+//            action=stage_bypass and the AUDIT id + reason in detail.
+//            Required for D5.5 exit criterion #10 (production-on-fire
+//            cut-through for soak / threshold gates that can't wait).
 //
 //   POST /api/convoys/<id>/stages/<stage_num>/abort
 //        Body: {"operator":"<name>","reason":"<text>"}
@@ -37,6 +47,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -92,10 +103,22 @@ type StageDetailResponse struct {
 }
 
 // stageAdvanceBody is the JSON body for POST /advance and /abort.
+//
+// AuditID is the optional emergency-bypass key (D5.5 exit criterion #10).
+// When non-empty, the advance handler validates the value matches
+// `^AUDIT-\d+$`, then bypasses the gate evaluation entirely and lands the
+// stage in GatePassed. The reason field remains required so the audit
+// trail captures human context, not just the AUDIT id.
 type stageAdvanceBody struct {
 	Operator string `json:"operator"`
 	Reason   string `json:"reason"`
+	AuditID  string `json:"audit_id,omitempty"`
 }
+
+// stageBypassAuditIDRe is the strict shape required of the bypass key.
+// Mirrors internal/isb/bypass.go's `AUDIT-\d+` discipline so a typo'd id
+// (e.g. AUDIT-FOO, audit-12) fails parse rather than slipping through.
+var stageBypassAuditIDRe = regexp.MustCompile(`^AUDIT-\d+$`)
 
 // handleConvoyStages dispatches the four staged-convoy routes off the
 // /api/convoys/<id>/stages... path. Returns ok=true if it handled the
@@ -263,12 +286,20 @@ func getStageDetail(db *sql.DB, w http.ResponseWriter, convoyID, stageNum int) {
 	})
 }
 
-// advanceStageHandler is the operator-confirm action. Writes the rendezvous
-// key in SystemConfig that the operator_confirm gate evaluator reads, and
-// records an AuditLog entry.
+// advanceStageHandler is the operator advance endpoint. Two modes:
 //
-// Idempotent: re-posting overwrites the SystemConfig timestamp. The gate
-// evaluator's "any non-empty value" check makes a re-click safe.
+//   - Normal advance (no audit_id): writes the rendezvous key in
+//     SystemConfig that the operator_confirm gate evaluator reads, and
+//     records an AuditLog entry. Stage transitions on the dog's next
+//     tick. Idempotent: re-posting overwrites the SystemConfig timestamp.
+//
+//   - Emergency bypass (audit_id set, must match `^AUDIT-\d+$`): skips
+//     gate evaluation entirely, transitions the stage directly to
+//     GatePassed via store.BypassStage, and records the bypass in the
+//     audit trail with the AUDIT id and reason in the detail blob. This
+//     is the operator-only "production is on fire, cut through the
+//     gate" path required by D5.5 exit criterion #10. Works regardless
+//     of the stage's gate type (soak_minutes, threshold gates, etc.).
 func advanceStageHandler(db *sql.DB, w http.ResponseWriter, r *http.Request, convoyID, stageNum int) {
 	body, ok := decodeStageActionBody(w, r)
 	if !ok {
@@ -280,6 +311,15 @@ func advanceStageHandler(db *sql.DB, w http.ResponseWriter, r *http.Request, con
 	}
 	if strings.TrimSpace(body.Reason) == "" {
 		http.Error(w, `{"error":"reason required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Bypass shape: operator provided an audit_id. Validate it strictly
+	// before doing anything else so a malformed key never lands in the
+	// audit trail (a "AUDIT-FOO" row would be worse than no row).
+	bypass := strings.TrimSpace(body.AuditID) != ""
+	if bypass && !stageBypassAuditIDRe.MatchString(body.AuditID) {
+		http.Error(w, `{"error":"audit_id must match ^AUDIT-\\d+$"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -296,6 +336,32 @@ func advanceStageHandler(db *sql.DB, w http.ResponseWriter, r *http.Request, con
 	}
 	if stage.Status == store.StageStatusVerified || stage.Status == store.StageStatusFailed {
 		http.Error(w, fmt.Sprintf(`{"error":"stage in terminal status %q; cannot advance"}`, stage.Status), http.StatusBadRequest)
+		return
+	}
+
+	if bypass {
+		prevStatus := stage.Status
+		if bErr := store.BypassStage(db, stage.ID); bErr != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, bErr.Error()), http.StatusInternalServerError)
+			return
+		}
+		// Reason carries audit_id + free-text so the durable trail is
+		// searchable post-incident. Action discriminator separates this
+		// from the normal advance row in dashboard / Slack rollups.
+		auditReason := fmt.Sprintf("%s %s", body.AuditID, body.Reason)
+		if alErr := store.LogStageAudit(db, body.Operator, store.AuditActionStageBypass,
+			convoyID, stageNum, prevStatus, store.StageStatusGatePassed, auditReason, ""); alErr != nil {
+			// State already moved; surface the audit-write failure so the
+			// operator can replay (the bypass itself is durable).
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, alErr.Error()), http.StatusInternalServerError)
+			return
+		}
+		updated, _ := store.GetStageByNum(db, convoyID, stageNum)
+		writeJSON(w, map[string]any{
+			"ok":     true,
+			"bypass": true,
+			"stage":  stageToResponse(updated),
+		})
 		return
 	}
 

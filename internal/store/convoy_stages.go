@@ -185,6 +185,66 @@ func AdvanceStage(db *sql.DB, stageID int, newStatus string) error {
 	return nil
 }
 
+// BypassStage forces a non-terminal stage directly to GatePassed, skipping
+// the linear progression validator and the gate evaluation entirely. It
+// exists for the operator-only emergency bypass path (D5.5 exit criterion
+// #10): when production is on fire and the operator has an `AUDIT-NNN`
+// reference to justify cutting through (soak window, threshold gate,
+// release-label wait, etc.), this helper is how the dashboard advances
+// the stage without lying that a gate "passed."
+//
+// Behavior:
+//   - Rejects terminal stages (Verified, Failed) — same as AdvanceStage.
+//   - Stamps gate_passed_at = now (so the dog's downstream logic sees a
+//     real GatePassed timestamp).
+//   - Stamps all_prs_merged_at = now if it isn't already set, so the
+//     audit trail is internally consistent (a stage that bypassed gate
+//     evaluation must, by construction, also have implicitly bypassed
+//     the AllPRsMerged → AwaitingGate transition).
+//   - Does NOT write to AuditLog itself — the caller is responsible for
+//     calling LogStageAudit with action=AuditActionStageBypass and the
+//     `AUDIT-NNN` reference + reason in the detail blob. Splitting the
+//     audit out keeps the store helper composable (the handler also
+//     records the reason / actor / convoy id which are not load-bearing
+//     for the state transition).
+//
+// This helper is the ONLY production path that flips gate_passed_at
+// without a real gate evaluation. Audit Pattern P-StagingGateBypass-Audit
+// (which lives next to the dispatcher tests) ensures every call site is
+// preceded by an `AUDIT-NNN` regex check.
+func BypassStage(db *sql.DB, stageID int) error {
+	if stageID <= 0 {
+		return fmt.Errorf("BypassStage: stageID must be > 0 (got %d)", stageID)
+	}
+	cur, err := GetStage(db, stageID)
+	if err != nil {
+		return fmt.Errorf("BypassStage: load stage %d: %w", stageID, err)
+	}
+	if cur.Status == StageStatusVerified || cur.Status == StageStatusFailed {
+		return fmt.Errorf("BypassStage: cannot bypass terminal stage (status=%q)", cur.Status)
+	}
+	// Stamp all_prs_merged_at if missing so the timeline reads
+	// monotonically; otherwise leave the existing stamp alone.
+	if cur.AllPRsMergedAt == "" {
+		_, err = db.Exec(
+			`UPDATE ConvoyStages
+			 SET status = ?, all_prs_merged_at = datetime('now'),
+			     gate_passed_at = datetime('now')
+			 WHERE id = ?`,
+			StageStatusGatePassed, stageID)
+	} else {
+		_, err = db.Exec(
+			`UPDATE ConvoyStages
+			 SET status = ?, gate_passed_at = datetime('now')
+			 WHERE id = ?`,
+			StageStatusGatePassed, stageID)
+	}
+	if err != nil {
+		return fmt.Errorf("BypassStage: update stage %d → GatePassed: %w", stageID, err)
+	}
+	return nil
+}
+
 // validateStageTransition enforces the linear progression rule. From any
 // non-terminal status, only the immediate next status (or Failed) is allowed.
 // Verified and Failed are terminal — no further transition is permitted.
@@ -347,6 +407,12 @@ const (
 	// AuditActionStageAutoAdvance — convoy-stage-watch dog advanced the stage
 	// based on a gate evaluation outcome.
 	AuditActionStageAutoAdvance = "stage_auto_advance"
+	// AuditActionStageBypass — operator emergency-bypassed the stage gate
+	// using an `AUDIT-NNN` reference. The bypass skips gate evaluation
+	// entirely and lands the stage in GatePassed; the audit row carries
+	// the AUDIT-NNN id and the operator's free-text reason in the detail
+	// JSON so the durable trail is searchable post-incident.
+	AuditActionStageBypass = "stage_bypass"
 )
 
 // stageActionPrefix is the SQL LIKE prefix that matches every stage-related
