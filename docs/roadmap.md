@@ -1630,15 +1630,17 @@ go test -tags sqlite_fts5 -race -count=5 ./...                             # ful
 sqlite3 holocron.db "SELECT COUNT(*) FROM FleetRules WHERE category='isb' AND rule_key LIKE 'SUPPLY-%'"  # expect 5
 sqlite3 holocron.db "SELECT COUNT(*) FROM Repositories WHERE license IS NULL OR license=''"               # expect 0 after backfill
 
-# Renderers
-ls isb/finders/supply_*.yaml          # expect 5
+# Renderers — N/A: SUPPLY rules use RenderTo='discard' + DBFleetRulesGate (matching D4 ISB-001..010);
+# the rule body is selected at review time from the live FleetRules table, no on-disk YAML render.
+# See docs/closures/DELIVERABLE-5-CLOSURE.md residual #3 for the divergence rationale.
+sqlite3 holocron.db "SELECT COUNT(*) FROM FleetRules WHERE rule_key LIKE 'SUPPLY-%' AND render_to='discard'"  # expect 5
 
 # Dogs
 ./force daemon --dry-run | grep -E "supply-(allowlist-refresh|token-recheck)"   # both registered
 
 # Deferral path (manual)
 unset AWS_ACCESS_KEY_ID                 # simulate token-expired
-go test -tags sqlite_fts5 -run TestSupplyDeferral_TokenExpired ./internal/isb/...  # expect deferred-finding written
+go test -tags sqlite_fts5 -run 'TestSUPPLY00._TokenExpired_DeferralLogged' ./internal/isb/...  # expect deferred-finding written (per-rule: SUPPLY-001/003/004)
 ```
 
 ### Closure report

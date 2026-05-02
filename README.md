@@ -619,6 +619,8 @@ The Imperial Security Bureau (ISB) is the post-commit security gate, sibling to 
 
 All 10 ISB rules ship at `severity=advise` per the D4 anti-cheat directive (no block-default on new rules; 30-clean-firings warm-up window precedes promotion to block). Context-sensitive rules (ISB-005, ISB-008, ISB-010) attempt a deterministic check first and only fall through to the LLM layer when the deterministic gate cannot resolve — per the "no LLM-layer ISB rule without a deterministic fallback attempt" directive.
 
+ISB also hosts the **SUPPLY rule pack** (SUPPLY-001..005, D5) for supply-chain hygiene. SUPPLY rules ride the same ISBReview claim loop with `category='isb'` FleetRules gating and a manifest-gating dispatch that filters out source-only commits before any registry hit. Coverage: SUPPLY-001 (hallucinated package via CodeArtifact `DescribePackageVersion`), SUPPLY-002 (typosquat against per-ecosystem CodeArtifact-derived allowlist), SUPPLY-003 (stale package via `PublishedAt` threshold), SUPPLY-004 (SPDX license-compatibility against the hand-authored matrix at `internal/isb/rules/license_matrix.yaml`), and SUPPLY-005 (known-CVE blocking via vendored osv-scanner against the lock file — covers Go natively where SUPPLY-001..004 silently skip). Auth errors against AWS CodeArtifact route through the deferral path (`disposition='token_expired'`) and are replayed by the `supply-token-recheck` dog plus the convoy-level `AwaitingSupplyRecheck` gate; see `docs/closures/DELIVERABLE-5-CLOSURE.md` for the full design + anti-cheat self-check. SUPPLY rules use `// SUPPLY-BYPASS: <AUDIT-NNNN> <reason>` (or `# SUPPLY-BYPASS:` for Ruby/Python, `<!-- -->` for XML) — the parser is comment-prefix-agnostic and rejects bypasses with `< 10`-char reasons.
+
 ### Senate — Repo-Scoped Advisory Layer
 
 **File:** `senate.go`
@@ -755,7 +757,7 @@ What this does NOT cover: structured log analysis. Force ships the signals; the 
 
 ### Pattern-test enforcement layer
 
-Force ships 33 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P18, P20–P34) that fail CI if specific invariants regress. They convert architectural rules from prose-in-`CLAUDE.md` to mechanical enforcement:
+Force ships 34 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P18, P20–P34, P-SupplyDeferral) that fail CI if specific invariants regress. They convert architectural rules from prose-in-`CLAUDE.md` to mechanical enforcement:
 
 | Pattern | What it enforces |
 |---|---|
@@ -792,6 +794,7 @@ Force ships 33 grep / AST-based pattern tests (P1, P1.1, P2, P3, P4, P6–P18, P
 | `TestPattern_P32_GitOpsLogged` | Every `exec.CommandContext(ctx, "git", …)` / `"gh"` routes through `internal/git` helpers (writes `GitOperationLog`) |
 | `TestPattern_P33_AgentMemoryInjectionViaLibrarianClient` | Agent prompt-assembly fetches Fleet Memory via the `librarian.Client` interface, never via direct `store.GetFleetMemories` — keeps the memory-rerank ingress pure (D4 Phase 0) |
 | `TestPattern_P34_SenateNoSelfPromote` | Senate package contains no direct `INSERT INTO FleetRules` — Senator rules promote only via the operator-ratified Librarian → Engineering Corps → operator pipeline (D4 Phase 3 anti-cheat) |
+| `TestPattern_P_SupplyDeferral_*` | Every `ErrTokenExpired` branch in `internal/isb/rules/supply_*.go` calls `supplydeferral.RecordDeferral` before returning — no silent token-expired passthroughs (D5 anti-cheat) |
 
 Pattern tests are not "nice-to-have." Each regression they catch is documented with an AUDIT ID in `FIX-LOG.md` describing the original bug. CI failure here means the production code has drifted off an invariant the project earned the hard way.
 
@@ -1308,6 +1311,11 @@ Set with `force config set <key> <value>`.
 | `per_task_spend_escalate_usd` | `15` | When a single task's trailing-10-min spend crosses this threshold, the task is escalated and `BountyBoard.spend_suspended` is set to `1` so claim queries skip it. |
 | `agent_max_prompt_bytes_default` | `200000` | Default per-agent prompt-byte cap. Per-agent overrides via `agent_max_prompt_bytes_<agent>`. Overflow invokes `librarian.SummarizeForContextOverflow`; if the summary still exceeds the cap, `ErrContextOverflow` is returned and the caller routes to `handleInfraFailure`. |
 | `bash_guard_curl_hosts` | _(empty)_ | Comma-separated allowlist of hosts the astromech Bash guard permits for `curl` / `wget`. Default empty — operator must populate before astromechs can fetch over the network. |
+| `supply_allowlist_<eco>` | _(empty)_ | Newline-joined per-ecosystem allowlist (`<eco>` ∈ `pypi`, `npm`, `rubygems`, `maven`) populated by the `supply-allowlist-refresh` dog from `aws codeartifact list-packages`. SUPPLY-002 reads this set for typosquat-distance comparison. Empty → SUPPLY-002 inert + log. (D5) |
+| `supply_allowlist_<eco>_last_refresh` | _(empty)_ | Last-refresh timestamp written by the `supply-allowlist-refresh` dog after a successful per-ecosystem `ListPackages` call. (D5) |
+| `supply_typosquat_preapproved` | _(empty)_ | Operator-preapproved typosquat-bypass list (comma-separated `<ecosystem>:<name>` entries). SUPPLY-002 skips findings for matches. Used in lieu of the un-shipped `force supply preapprove` CLI. (D5) |
+| `supply_stale_threshold_days` | `730` | SUPPLY-003 staleness threshold. Packages whose CodeArtifact `PublishedAt` is older than `now() - threshold` advise. (D5) |
+| `supply_token_expired_notified` | _(empty)_ | Debounce flag. The `supply-token-recheck` dog sets it to `'1'` after firing the first "umt artifacts token expired" Slack ping; clears it on next successful `DescribeDomain`. Prevents notify-after flood. (D5) |
 
 **Note:** Rate-limit backoff state is tracked automatically under `rl_hits_<agent>` keys. You can inspect these with `force config list` to see if agents are currently throttled.
 
@@ -1335,6 +1343,8 @@ Background maintenance tasks that run on a cooldown managed by the Inquisitor. V
 | `ship-it-nag` | 24 hours | Reminds the operator if a draft PR has sat unshipped for 24h / 72h / 1 week. |
 | `quarantined-repo-watch` | 1 hour | Alerts the operator while any `Repositories.mode='quarantined'` row remains; surfaces the persistent dashboard banner. |
 | `senate-refresh` | 7 days | For every active Senator, calls `librarian.RefreshSenatorMemoryDigest`, appends fresh `SenateMemory` entries, and bumps `SenateChambers.last_refreshed_at`. Weekly cadence — invariants don't drift daily, so the digest cost amortises. (D4 Phase 3) |
+| `supply-allowlist-refresh` | 24 hours | Walks per-ecosystem AWS CodeArtifact (`pypi-prod`, `npm-prod`, `rubygems-prod`, `maven-prod`) via `ListPackages`, writes the dedup-flattened name set into `SystemConfig.supply_allowlist_<eco>` (the source SUPPLY-002 typosquat-distance reads from). Stamps `SystemConfig.supply_allowlist_<eco>_last_refresh`. Skips on `ErrTokenExpired` (the supply-token-recheck dog handles operator notification). (D5 Phase 4) |
+| `supply-token-recheck` | 30 min | Probes CodeArtifact via `DescribeDomain`. On 401: sets debounce flag + fires one "umt artifacts token expired" notify-after Slack ping. On 200 with flag set: clears flag + fires "token recovered" ping + replays every `disposition='token_expired'` SecurityFinding via the per-rule `ReplayAdapter` map. Successful replay → `disposition='resolved_late'` / `superseded` / `branch_gone`; new violations → `disposition='block'` rows. (D5 Phase 4) |
 
 If any dog fails, the operator receives an alert mail. All dogs short-circuit at the top when e-stop is active so an emergency halt actually halts.
 
