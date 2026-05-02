@@ -163,6 +163,20 @@ func cmdDaemon(db *sql.DB) {
 	}
 	isbRoster := []string{"ISB-Tarkin", "ISB-Krennic", "ISB-Yularen"}
 
+	// D4 Phase 3 — Senate. Repo-scoped LLM advisors consulted between
+	// ProposedConvoys write and AwaitingChancellorReview. One agent is
+	// sufficient at launch (parallel Senator reviews fan out per active
+	// SenateChambers row, not per spawned goroutine). Operators can scale
+	// via num_senate.
+	numSenate := 1
+	if n := store.GetConfig(db, "num_senate", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numSenate)
+	}
+	if numSenate < 1 {
+		numSenate = 1
+	}
+	senateRoster := []string{"Senate-Mothma", "Senate-Bail", "Senate-Padme"}
+
 	// Recover any Failed convoys whose tasks were manually reset (e.g. via `force reset` or
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
@@ -384,6 +398,19 @@ func cmdDaemon(db *sql.DB) {
 		}
 		go agents.SpawnISB(ctx, db, name)
 	}
+	// D4 Phase 3 — Senate. Sits BETWEEN Commander's ProposedConvoys
+	// write and the Chancellor's claim of AwaitingChancellorReview.
+	// Each SenateReview task fans out across every active Senator
+	// (one row per SenateChambers entry) and either advances the
+	// Feature to AwaitingChancellorReview (all concur) or returns it
+	// to Pending (any high-confidence dissent / block-severity concern).
+	for i := 0; i < numSenate; i++ {
+		name := fmt.Sprintf("Senate-%d", i+1)
+		if i < len(senateRoster) {
+			name = senateRoster[i]
+		}
+		go agents.SpawnSenate(ctx, db, name, libClient)
+	}
 	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient})
 
 	// D3 Phase 3 — Engineering Corps. Spawned AFTER the review-agent
@@ -398,6 +425,25 @@ func cmdDaemon(db *sql.DB) {
 		Librarian: libClient,
 		Metrics:   metrics.NewInProcess(),
 	})
+
+	// D4 Phase 3 — force-orchestrator self-onboarding. Per
+	// docs/roadmap.md § Deliverable 4 exit criterion 3, the shakedown
+	// Senator is force-orchestrator itself. At daemon start, if no
+	// chamber row exists for "force-orchestrator", queue one
+	// SenatorOnboarding task. The handler in internal/agents/senate.go
+	// reads the repo, calls librarian.BootstrapSenatorRules, emits
+	// candidate FleetRules rows through the standard PromotionProposal
+	// pipeline (operator must ratify before activation), and seeds
+	// initial SenateMemory entries.
+	//
+	// Idempotent: SpawnQueueOnce-style guard via GetSenateChamber.
+	if chamber, _ := store.GetSenateChamber(db, "force-orchestrator"); chamber == nil {
+		if _, qErr := store.QueueSenatorOnboarding(db, "force-orchestrator", "daemon-start"); qErr != nil {
+			fmt.Printf("(warn) self-onboarding queue failed: %v — Senate will be offline until queued manually via `force senate onboard`\n", qErr)
+		} else {
+			fmt.Println("D4-P3: queued SenatorOnboarding for force-orchestrator (recursive first Senator)")
+		}
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
@@ -834,6 +880,19 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 			if _, err := agents.QueueFindPRTemplate(db, name, absPath); err == nil {
 				fmt.Printf("  queued FindPRTemplate task to locate the repo's PR template.\n")
 			}
+		}
+	}
+
+	// D4 Phase 3 — queue a SenatorOnboarding for the new repo so the
+	// Librarian bootstraps candidate Senator rules + initial memory
+	// entries. Idempotent: skipped when a chamber already exists for
+	// this repo (the operator-friendly path is to delete the chamber +
+	// re-add the repo if a re-onboard is needed).
+	if chamber, _ := store.GetSenateChamber(db, name); chamber == nil {
+		if _, qErr := store.QueueSenatorOnboarding(db, name, "operator-add-repo"); qErr != nil {
+			fmt.Printf("  (warn) SenatorOnboarding queue failed: %v\n", qErr)
+		} else {
+			fmt.Printf("  queued SenatorOnboarding for %s (Librarian will bootstrap candidate Senator rules).\n", name)
 		}
 	}
 }

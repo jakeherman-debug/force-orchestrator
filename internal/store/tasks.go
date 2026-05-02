@@ -659,6 +659,64 @@ func QueueISBReview(db *sql.DB, b *Bounty, branchName, commitSHA string) (int, e
 	return int(id), nil
 }
 
+// QueueSenateReview spawns a SenateReview task for a Feature whose
+// Commander-emitted plan is sitting in ProposedConvoys. D4 Phase 3 —
+// queued by the Senate-router hook (agents.QueueSenateReviewHook)
+// AFTER StoreProposedConvoy and BEFORE the Feature transitions to
+// AwaitingSenateReview. The Senate reviewer's runSenateReviewTask
+// handler aggregates per-Senator verdicts and either advances the
+// Feature to AwaitingChancellorReview (all concur) or returns it to
+// Pending (any high-confidence dissent).
+//
+// Returns the new SenateReview task id and any insertion error.
+func QueueSenateReview(db *sql.DB, featureID int, targetRepo string) (int, error) {
+	if featureID == 0 {
+		return 0, fmt.Errorf("QueueSenateReview: featureID required")
+	}
+	payload := fmt.Sprintf(`{"feature_id":%d,"target_repo":%q}`, featureID, targetRepo)
+	res, err := db.Exec(
+		`INSERT INTO BountyBoard
+		   (parent_id, target_repo, type, status, payload, priority, created_at)
+		 VALUES (?, ?, 'SenateReview', 'Pending', ?, 0, datetime('now'))`,
+		featureID, targetRepo, payload)
+	if err != nil {
+		return 0, fmt.Errorf("QueueSenateReview(feature=%d): %w", featureID, err)
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
+// QueueSenatorOnboarding spawns a SenatorOnboarding task for the named
+// repo. D4 Phase 3 — queued by `force add-repo` and at daemon start for
+// force-orchestrator (the recursive first Senator). The handler
+// (agents.runSenatorOnboardingTask) seeds the SenateChambers row in
+// 'onboarding' status, calls librarian.BootstrapSenatorRules, emits
+// each candidate as a PromotionProposal, and seeds initial
+// SenateMemory entries.
+//
+// triggeredBy is a free-form provenance string ("daemon-start",
+// "operator-add-repo", "test"). It lands in the payload for audit
+// purposes only; the handler does not act on it.
+//
+// Returns the new SenatorOnboarding task id and any insertion error.
+func QueueSenatorOnboarding(db *sql.DB, repoID, triggeredBy string) (int, error) {
+	if repoID == "" {
+		return 0, fmt.Errorf("QueueSenatorOnboarding: repoID required")
+	}
+	payload := fmt.Sprintf(`{"repo_id":%q,"scope":%q,"triggered_by":%q}`,
+		repoID, "repo:"+repoID, triggeredBy)
+	res, err := db.Exec(
+		`INSERT INTO BountyBoard
+		   (parent_id, target_repo, type, status, payload, priority, created_at)
+		 VALUES (0, ?, 'SenatorOnboarding', 'Pending', ?, 0, datetime('now'))`,
+		repoID, payload)
+	if err != nil {
+		return 0, fmt.Errorf("QueueSenatorOnboarding(repo=%s): %w", repoID, err)
+	}
+	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
 // AddConvoyTask creates a CodeEdit subtask within a convoy. status should be
 // 'Pending' or 'Planned'. Returns the new task ID and any insertion error.
 func AddConvoyTask(db *sql.DB, parentID int, repo, payload string, convoyID, priority int, status string) (int, error) {

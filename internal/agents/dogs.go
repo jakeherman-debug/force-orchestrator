@@ -125,6 +125,13 @@ var dogCooldowns = map[string]time.Duration{
 	// and emits drift candidates. Weekly — invariants don't change
 	// daily and the scan reads CLAUDE.md + walks FleetRules.
 	"claude-md-drift-watch": 7 * 24 * time.Hour,
+	// D4 Phase 3 — senate-refresh. For every active Senator, call
+	// librarian.RefreshSenatorMemoryDigest, append fresh
+	// SenateMemory entries, and bump SenateChambers.last_refreshed_at.
+	// Weekly cadence per docs/next-gen-agents.md § "Bootstrap +
+	// refresh" — invariants don't drift daily, so the digest cost
+	// amortises well at one pass per week.
+	"senate-refresh": 7 * 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -172,6 +179,10 @@ var dogOrder = []string{
 	"librarian-conflict-watch",
 	"librarian-hypothesis-emit",
 	"claude-md-drift-watch",
+	// D4 Phase 3 — senate-refresh runs after the librarian-evolution
+	// dogs so the digest reads from the post-dedup, post-quality view
+	// of FleetMemory. Independent of the per-Senator review path.
+	"senate-refresh",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -352,9 +363,66 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogLibrarianHypothesisEmit(ctx, db, logger)
 	case "claude-md-drift-watch":
 		return dogClaudeMDDriftWatch(ctx, db, lib, logger)
+	case "senate-refresh":
+		return dogSenateRefresh(ctx, db, lib, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
+}
+
+// dogSenateRefresh iterates every active Senator chamber, calls
+// librarian.RefreshSenatorMemoryDigest, appends new SenateMemory
+// entries derived from the digest, and bumps last_refreshed_at on the
+// chamber row. D4 Phase 3.
+//
+// Errors per-Senator are logged and the loop continues — a single
+// unreadable repo doesn't sink the whole sweep. Returns nil unless
+// the chamber-list query itself fails (which is a structural rather
+// than transient problem and surfaces via the standard dog mail path).
+func dogSenateRefresh(ctx context.Context, db *sql.DB, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
+	chambers, err := store.ListActiveSenateChambers(db)
+	if err != nil {
+		return fmt.Errorf("senate-refresh: ListActiveSenateChambers: %w", err)
+	}
+	if len(chambers) == 0 {
+		logger.Printf("Dog senate-refresh: no active Senators — nothing to refresh")
+		return nil
+	}
+	for _, c := range chambers {
+		digest, dErr := lib.RefreshSenatorMemoryDigest(ctx, c.SenatorName)
+		if dErr != nil {
+			logger.Printf("Dog senate-refresh: digest for %s failed (%v) — skipping", c.SenatorName, dErr)
+			continue
+		}
+		if digest.APISurfaceSummary != "" {
+			if _, mErr := store.InsertSenateMemory(db, store.SenateMemoryEntry{
+				Senator: c.SenatorName,
+				Topic:   "weekly-refresh-api",
+				Summary: digest.APISurfaceSummary,
+				Source:  "commit",
+				Weight:  0.9,
+			}); mErr != nil {
+				logger.Printf("Dog senate-refresh: insert api memory for %s failed: %v", c.SenatorName, mErr)
+			}
+		}
+		if digest.NotesForOperator != "" {
+			if _, mErr := store.InsertSenateMemory(db, store.SenateMemoryEntry{
+				Senator: c.SenatorName,
+				Topic:   "weekly-refresh-notes",
+				Summary: digest.NotesForOperator,
+				Source:  "commit",
+				Weight:  0.7,
+			}); mErr != nil {
+				logger.Printf("Dog senate-refresh: insert notes memory for %s failed: %v", c.SenatorName, mErr)
+			}
+		}
+		if mErr := store.MarkSenateChamberRefreshed(db, c.SenatorName); mErr != nil {
+			logger.Printf("Dog senate-refresh: MarkSenateChamberRefreshed(%s): %v", c.SenatorName, mErr)
+		}
+		logger.Printf("Dog senate-refresh: refreshed %s (commits=%d rules_active=%d)",
+			c.SenatorName, len(digest.RecentCommits.Commits), digest.OutstandingRulesK)
+	}
+	return nil
 }
 
 // dogProposedFeaturesDecay decays stale ProposedFeatures value_score

@@ -1201,4 +1201,49 @@ CREATE INDEX IF NOT EXISTS idx_sec_findings_task      ON SecurityFindings(task_i
 CREATE INDEX IF NOT EXISTS idx_sec_findings_rule      ON SecurityFindings(rule_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_sec_findings_dashboard ON SecurityFindings(rule_id, severity, disposition);
 
+-- D4 Phase 3 — Senate. Three tables back the Senator review layer
+-- (docs/next-gen-agents.md § "Senate" / § "Storage"). The Senator is the
+-- repo-aware advisor consulted by the Chancellor between the
+-- ProposedConvoys write and the AwaitingChancellorReview transition.
+--   SenateChambers — one row per Senator (keyed by senator_name).
+--   SenateMemory   — append-only memory store the Senator reads in its
+--                    prompt context (ranked by weight desc).
+--   SenateReview   — one row per (Feature, Senator) verdict.
+CREATE TABLE IF NOT EXISTS SenateChambers (
+    senator_name      TEXT PRIMARY KEY,                  -- 'force-orchestrator' | 'billing' | ...
+    scope             TEXT NOT NULL,                     -- 'repo:<name>' | 'team:<name>'
+    senate_md_path    TEXT NOT NULL DEFAULT '',          -- path to SENATE.md in the repo
+    status            TEXT NOT NULL DEFAULT 'active',    -- 'onboarding' | 'active' | 'suspended' | 'retired'
+    onboarded_at      TEXT NOT NULL DEFAULT '',
+    last_refreshed_at TEXT NOT NULL DEFAULT '',
+    retired_at        TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS SenateMemory (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    senator           TEXT NOT NULL,
+    topic             TEXT NOT NULL DEFAULT '',
+    summary           TEXT NOT NULL,
+    source            TEXT NOT NULL DEFAULT 'manual',    -- 'rejection' | 'commit' | 'escalation' | 'manual' | 'bootstrap'
+    weight            REAL NOT NULL DEFAULT 1.0,         -- curated by Librarian
+    retrieval_count   INTEGER NOT NULL DEFAULT 0,
+    last_consulted_at TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_senate_memory_senator ON SenateMemory(senator, weight DESC);
+
+CREATE TABLE IF NOT EXISTS SenateReview (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature_id  INTEGER NOT NULL,                        -- references BountyBoard.id (Feature type)
+    senator     TEXT    NOT NULL,
+    position    TEXT    NOT NULL,                        -- 'concur' | 'amend' | 'dissent'
+    concerns    TEXT    NOT NULL DEFAULT '[]',           -- JSON array of {task_id, concern, severity}
+    amendments  TEXT    NOT NULL DEFAULT '[]',           -- JSON array of {task_id, new_task}
+    rationale   TEXT    NOT NULL DEFAULT '',             -- one-paragraph rationale
+    confidence  REAL    NOT NULL DEFAULT 0,              -- LLM-reported confidence; teeth at >=0.8
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_senate_review_feature ON SenateReview(feature_id);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────

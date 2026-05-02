@@ -20,11 +20,13 @@ package librarian
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/claude"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
@@ -221,12 +223,145 @@ func (c *inProcessClient) BootstrapSenatorRules(ctx context.Context, repo string
 	if !liveHaikuEnabled() {
 		return bootstrapSenatorRulesStub(c, ctx, repo)
 	}
-	// Production path placeholder: route through CallWithTranscript +
-	// librarian capability profile. Phase 3 fills in the actual prompt;
-	// here we surface a clear "wired but not implemented" error so a
-	// daemon that turns off LIVE_HAIKU_DISABLED prematurely fails
-	// loudly rather than silently returning empty.
-	return nil, fmt.Errorf("librarian: BootstrapSenatorRules live-Haiku path not yet wired (Phase 3); set LIVE_HAIKU_DISABLED=1 for the deterministic stub")
+	// Production path (D4 Phase 3 wiring). Assemble the per-Senator
+	// onboarding prompt — recent-commits digest + README sample +
+	// repo-name — and call Claude through the transcript-capturing
+	// wrapper. The librarian's capability profile is empty (pure
+	// reasoning), so the AllowedTools/DisallowedTools/MCPConfig args
+	// are empty by design (Pattern P13 allowlist for this very file).
+	digest, _ := c.RecentCommitsDigest(ctx, repo, 30*24*time.Hour)
+	readmeSample := readRepoREADMESample(c.db, repo)
+	systemPrompt := bootstrapSenatorRulesSystemPrompt
+	userPrompt := buildBootstrapSenatorRulesUserPrompt(repo, digest, readmeSample)
+	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
+		Agent:         "librarian",
+		PromptVersion: "bootstrap-senator-rules-v1",
+	}, systemPrompt, userPrompt, "", "", "", 1)
+	if err != nil {
+		// Fail closed — never silently fall back to the stub on a real
+		// LLM error in production. Tests pin LIVE_HAIKU_DISABLED so
+		// they never reach this branch.
+		return nil, fmt.Errorf("librarian: BootstrapSenatorRules live-Haiku call failed: %w", err)
+	}
+	candidates, parseErr := parseBootstrapSenatorRulesResponse(out, repo)
+	if parseErr != nil {
+		return nil, fmt.Errorf("librarian: BootstrapSenatorRules parse: %w (raw=%.300s)", parseErr, out)
+	}
+	if len(candidates) == 0 {
+		// Defence in depth: a parseable but empty response is a no-op
+		// rather than a hard error. Surface it so the operator can
+		// re-trigger; downstream code treats len(0) as "Senator was
+		// onboarded but no candidates found this pass."
+		return nil, fmt.Errorf("librarian: BootstrapSenatorRules returned zero candidates for repo %q", repo)
+	}
+	return candidates, nil
+}
+
+// bootstrapSenatorRulesSystemPrompt anchors the Librarian's Senator-
+// onboarding LLM call. The output contract is documented inline so the
+// parser (parseBootstrapSenatorRulesResponse) and the prompt stay in
+// sync — a model that emits an unexpected shape is rejected by the
+// parser rather than silently miscoded into a candidate.
+const bootstrapSenatorRulesSystemPrompt = `You are the Fleet Librarian's Senator-bootstrap analyst. Read the supplied repo digest + README sample and emit candidate domain rules ("Senate rules") for that repo's Senator. Each rule should capture an architectural / consumer-impact / repo-invariant directive that the operator should ratify before activation.
+
+Output ONLY a JSON object of the shape:
+{
+  "candidates": [
+    {
+      "rule_key":   "senate-<repo>-<slug>",
+      "category":   "senate",
+      "agent_scope": "senate:<repo>",
+      "body":       "<one-paragraph rule body>",
+      "rationale":  "<one-sentence WHY (cite README anchor / commit subject)>",
+      "evidence":   "<comma-separated free-form citations>"
+    }
+  ]
+}
+
+Emit 1 to 5 candidates. Every candidate must be operator-ratifiable as written — no placeholders, no TODOs.`
+
+// buildBootstrapSenatorRulesUserPrompt is the user-prompt shape sent
+// to Claude. Kept short; the Librarian's per-agent prompt cap bounds
+// the README sample to ~4 KB and the digest to recentCommitsDigestMaxCommits.
+func buildBootstrapSenatorRulesUserPrompt(repo string, digest CommitsDigest, readmeSample string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "REPO: %s\n\n", repo)
+	if readmeSample != "" {
+		b.WriteString("README SAMPLE (first 4 KB):\n")
+		b.WriteString(readmeSample)
+		b.WriteString("\n\n")
+	}
+	if len(digest.Commits) > 0 {
+		b.WriteString("RECENT COMMITS (last 30 days):\n")
+		for _, c := range digest.Commits {
+			fmt.Fprintf(&b, "  - %s %s — %s (%s)\n", c.SHA[:min(7, len(c.SHA))], c.Subject, c.Author, c.Diffstat)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("Emit candidate Senator rules for this repo per the system-prompt contract.")
+	return b.String()
+}
+
+// readRepoREADMESample reads up to 4 KB of the repo's README for
+// inclusion in the bootstrap prompt. Tolerates a missing README — an
+// empty sample is a perfectly fine prompt (the digest carries the
+// rest of the signal).
+func readRepoREADMESample(db *sql.DB, repo string) string {
+	localPath := store.GetRepoPath(db, repo)
+	if localPath == "" {
+		return ""
+	}
+	for _, name := range []string{"README.md", "README.rst", "README.txt", "README"} {
+		path := localPath + "/" + name
+		body, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		const cap = 4 * 1024
+		if len(body) > cap {
+			body = body[:cap]
+		}
+		return string(body)
+	}
+	return ""
+}
+
+// parseBootstrapSenatorRulesResponse parses the JSON-shaped response
+// described in bootstrapSenatorRulesSystemPrompt. Defends against
+// extra surrounding text by extracting the first { ... } block; rejects
+// candidates whose required fields are blank.
+func parseBootstrapSenatorRulesResponse(raw, repo string) ([]CandidateRule, error) {
+	jsonStr := claude.ExtractJSON(raw)
+	if jsonStr == "" {
+		jsonStr = raw
+	}
+	var resp struct {
+		Candidates []CandidateRule `json:"candidates"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &resp); err != nil {
+		return nil, err
+	}
+	out := make([]CandidateRule, 0, len(resp.Candidates))
+	for i, c := range resp.Candidates {
+		if strings.TrimSpace(c.RuleKey) == "" || strings.TrimSpace(c.Body) == "" {
+			return nil, fmt.Errorf("candidate[%d] missing rule_key or body", i)
+		}
+		if c.Category == "" {
+			c.Category = "senate"
+		}
+		if c.AgentScope == "" {
+			c.AgentScope = "senate:" + repo
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // bootstrapSenatorRulesStub is the deterministic fallback used in
