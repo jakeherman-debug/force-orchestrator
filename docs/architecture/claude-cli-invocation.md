@@ -4,12 +4,16 @@ This document is the durable reference for how Force agents invoke
 `claude -p`, what working directory each invocation runs from, what
 `CLAUDE.md` files Claude Code auto-loads as a result, and where the
 fleet's coordination invariants reach the model. It reflects the
-post-D3 state of the world: D3 Phase 1 (FleetRules bootstrap,
+post-D4 state of the world: D3 Phase 1 (FleetRules bootstrap,
 `render_to`-categorised rule registry, per-agent rule injection,
 auto-rendered ≤ 20 KB CLAUDE.md) is shipped; D3 Phase 6B added
 the `claude.CallWithTranscript*` capture wrapper layered on top of
 `AskClaudeCLI` / `RunCLI*` so every LLM call lands a
-`LLMCallTranscripts` row (Pattern P31).
+`LLMCallTranscripts` row (Pattern P31); D4 added the Bureau of
+Standards (BoS) and Imperial Security Bureau (ISB) — both are
+*non-LLM* commit-time reviewers (pure Go AST / regex / scanner-library
+checks, no `claude -p` call) — and the Senate, a repo-scoped
+LLM-backed advisory layer with an empty tool surface.
 
 ## The two invocation patterns
 
@@ -73,9 +77,12 @@ Reference call sites:
 | Retro generator (Phase 6B.13) | `CallWithTranscript` (Haiku) | `""` | force-orchestrator/ |
 | Transcript archive (Phase 6B.3) | `CallWithTranscript` (optional Haiku summarisation) | `""` | force-orchestrator/ |
 | Model-availability dog (D3 fix-loop-2 ε.4) | `CallWithTranscript` (one-shot ping) | `""` | force-orchestrator/ |
+| Senate (D4 Phase 3 — repo-scoped Senator review) | `CallWithTranscript` (Haiku-gated; deterministic-stub fallback) | `""` | force-orchestrator/ |
+
+**Non-LLM reviewers (D4).** BoS (`internal/agents/bos.go` + capability profile `agents/capabilities/bos.yaml`) and ISB (`internal/agents/isb.go` + capability profile `agents/capabilities/isb.yaml`) are commit-time reviewers that do **not** invoke `claude -p`. Their work is pure Go AST / regex / scanner-library analysis against the post-commit diff. Their capability profiles grant minimal tool surfaces (Read / Grep / Glob / Bash) for parity with the foreground `force bos review --file <path>` use case — the in-process reviewer doesn't actually shell out at runtime. They are listed here for completeness so the table is comprehensive; they sit outside the per-agent invocation matrix because there is no Claude invocation to characterise. The Senate (`agents/capabilities/senate.yaml`) is the LLM-backed counterpart and appears as a regular row above; its capability profile is `builtin_tools: []` — the Senator review is a pure-reasoning LLM call with no Read / Edit / Write / Bash surface, and the per-Senator context is assembled in-process from FleetRules + `SenateMemory` + `librarian.RecentCommitsDigest`.
 
 The split is binary: only Astromech runs inside a target-repo worktree.
-Every other agent inherits the daemon's CWD.
+Every other Claude-invoking agent inherits the daemon's CWD.
 
 **Live Haiku gating.** Every Phase-6 renderer (narrative / briefing /
 learning-panel / replay / ask / retro / transcript-archive) plus the
@@ -197,3 +204,10 @@ be confusing noise.
   `SanitizeLLMPayload`)
 - D3 Phase 1 plan: `docs/roadmap.md` § "Phase 1 — Foundations + Rule
   Audit"
+- D4 BoS / ISB / Senate plan: `docs/roadmap.md` § "Deliverable 4 —
+  Bureau of Standards + Imperial Security Bureau + Senate"; closure
+  in `docs/closures/DELIVERABLE-4-CLOSURE.md`. BoS rule pack:
+  `internal/bos/rules/bos_001..011.go`; ISB rule pack:
+  `internal/isb/rules/isb_001..010.go`; Senate package:
+  `internal/agents/senate.go`. Capability profiles: `bos.yaml`,
+  `isb.yaml`, `senate.yaml`.

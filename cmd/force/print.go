@@ -646,6 +646,7 @@ Agent control:
   config set <key> <value>       Write a system config value
                                    Keys: num_astromechs, num_captain, num_council,
                                          num_commanders, num_investigators, num_auditors,
+                                         num_bos, num_isb, num_senate (D4),
                                          max_concurrent, spawn_delay_ms, batch_size, max_turns
 Logs written to fleet.log | Telemetry written to holonet.jsonl
 
