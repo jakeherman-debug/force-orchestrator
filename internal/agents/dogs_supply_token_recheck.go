@@ -98,6 +98,15 @@ func getSupplyRecheckDeps() *SupplyRecheckDeps {
 	return supplyDeps
 }
 
+// GetSupplyRecheckDeps is the exported read-only accessor used by the
+// daemon-side wiring regression tests (D5 fix-loop iter 1 slice α). It
+// returns the same value as the internal getSupplyRecheckDeps; tests
+// that only need to assert "the daemon registered the deps" use this
+// instead of reaching into the package var directly.
+func GetSupplyRecheckDeps() *SupplyRecheckDeps {
+	return getSupplyRecheckDeps()
+}
+
 // DefaultRepoResolver is the production RepoResolver: BountyBoard
 // row → target_repo → Repositories.local_path. Returns ("", nil) when
 // the task or repo isn't registered (treated as "skip" by the replay
