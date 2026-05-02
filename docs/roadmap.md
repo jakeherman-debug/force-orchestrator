@@ -1470,118 +1470,190 @@ make smoke && make fuzz && make test-audit
 
 ### Mission
 
-Ship five ISB rules that prevent hallucinated / typosquatted / stale / license-incompatible / known-vulnerable dependency introductions.
+Ship five ISB rules that prevent hallucinated / typosquatted / stale / license-incompatible / known-vulnerable dependency introductions across the polyglot fleet (Ruby, Python, JavaScript/TypeScript, Java/Kotlin, plus Go for Force itself).
 
 ### Classification
 
-Risk closure, implemented as an ISB rule pack.
+Risk closure, implemented as an ISB rule pack with cross-ecosystem manifest scanning.
 
 ### Required reading
 
 1. `/Users/jake.herman/code/force-orchestrator/docs/next-gen-agents.md` — §"Imperial Security Bureau" + §"Rules at launch."
 2. `/Users/jake.herman/code/force-orchestrator/docs/closures/DELIVERABLE-4-CLOSURE.md` — for ISB state.
-3. `https://github.com/google/osv-scanner` — OSV-scanner as the vuln-check mechanism.
+3. `https://github.com/google/osv-scanner` — OSV-scanner as the vuln-check mechanism (vendored as Go lib per D4 pattern).
+4. `https://docs.aws.amazon.com/codeartifact/latest/ug/welcome.html` — AWS CodeArtifact registry layer Upstart uses as the canonical proxy for upstream registries.
 
 ### Prerequisites
 
 D4 complete: all three tracks merged to main AND `docs/closures/DELIVERABLE-4-CLOSURE.md` filed. ISB live with its initial rule set.
 
-### Merge order within D5
+### Registry layer: AWS CodeArtifact, not direct upstream
 
-Single track; no internal ordering.
+All registry queries route through Upstart's AWS CodeArtifact domain (`code-artifacts-prod`, account `801997600626`, region `us-east-1`). Per-ecosystem virtual repos:
+
+| Ecosystem | CodeArtifact endpoint |
+|---|---|
+| PyPI | `https://code-artifacts-prod-801997600626.d.codeartifact.us-east-1.amazonaws.com/pypi/pypi-prod/simple/` |
+| npm | `https://code-artifacts-prod-801997600626.d.codeartifact.us-east-1.amazonaws.com/npm/npm-prod/` |
+| RubyGems | `https://code-artifacts-prod-801997600626.d.codeartifact.us-east-1.amazonaws.com/ruby/rubygems-prod/` |
+| Maven/Gradle | `https://code-artifacts-prod-801997600626.d.codeartifact.us-east-1.amazonaws.com/maven/maven-prod/` |
+
+Force scans against CodeArtifact (not direct upstream) because (a) it's the canonical proxy, (b) internal-network reliability beats internet, and (c) `aws codeartifact list-packages` gives a much better typosquat signal than scraping external popularity feeds — it returns the set of packages the org has actually pulled.
+
+**Excluded:** the `grpc-generic-prod` repository. CodeArtifact's "generic" format is for arbitrary internal binary artifacts (e.g., protoc-gen build outputs); these have no upstream registry, no typosquat surface, and no public CVE feed. Different threat model — out of scope.
+
+### Auth model: AWS SDK Go default credential chain
+
+The Force daemon uses `aws-sdk-go-v2/config.LoadDefaultConfig` to read credentials from the same place the AWS CLI does (`~/.aws/credentials`, `~/.aws/sso/cache/`, env vars, instance profile). When the operator runs `umt artifacts` (Upstart's wrapper around `aws sso login` + `aws codeartifact get-authorization-token`), the resulting SSO credentials are picked up by the SDK on the next API call — no token caching inside Force.
+
+The `umt artifacts` flow requires interactive SSO + an 8-character authorize-code click, so it cannot be automated. Token TTL is 8 hours. Force must therefore be designed to **degrade gracefully when the token expires**, not block all SUPPLY checks. See "Manifest-gating + deferral path" below.
+
+### Manifest-gating + deferral path
+
+ISBReview already runs per-commit on every astromech commit (queued from `astromech.go` post-commit hook). Per-commit network calls would burn through the token TTL and fire too often, so SUPPLY-* rules apply a two-stage filter:
+
+1. **Manifest-gating** — SUPPLY-* rules only fire when the commit's diff actually touches a manifest file (`Gemfile`, `package.json`, `pom.xml`, `requirements.txt`, etc.). Source-file commits skip SUPPLY-* entirely. Most commits make no network calls.
+
+2. **Deferral on token expiration** — when SUPPLY-* needs to query CodeArtifact and the SDK call returns a credentials/auth error:
+   - Insert `SecurityFindings` row with `disposition='token_expired'` and a payload capturing `{rule_key, manifest_path, deps_added, branch, commit_sha, deferred_at}`.
+   - Advise-mode through; do NOT block the commit.
+   - Astromech keeps working at full speed.
+
+Recovery happens via two complementary layers:
+
+**Layer 1 — `supply-token-recheck` dog** (every 30 min):
+- Probe CodeArtifact (`DescribeDomain`) with cached creds.
+- On 401: emit notify-after Slack ping "umt artifacts token expired — re-auth to enable supply-chain checks." Done.
+- On 200: walk all `SecurityFindings` with `disposition='token_expired'` AND `bureau='isb'` AND `rule_key LIKE 'SUPPLY-%'`. Group by branch.
+  - For each branch: read the **current tip's** manifest files (latest state, not historical commit — current tip subsumes intermediate churn). If branch deleted/rebased, fall back to the SecurityFinding payload.
+  - Re-run SUPPLY-* against the resolved dep set.
+  - **Now clean** → flip original row to `disposition='resolved_late'`. Batched Slack ping per branch.
+  - **Now flagged** → insert new `disposition='block'` row + flip original to `disposition='superseded'`. Slack ping with rule + dep + branch.
+
+**Layer 2 — ConvoyReview gate**:
+- `runConvoyReview` is extended: at DraftPROpen, if any branch in the convoy has `disposition='token_expired'` SUPPLY findings:
+  - If CodeArtifact is callable: re-run the recheck loop inline (same logic as the dog).
+  - If not: mark convoy `AwaitingSupplyRecheck` and fire Slack "Convoy #N has N deferred supply-chain checks. Run umt artifacts to unblock."
+  - Operator's "Ship It" surface refuses to advance until findings are resolved (clean or escalated).
+
+This makes "we could be 10 commits past the manifest change" a non-issue: the dog catches up automatically once the token recovers, and the convoy gate is the last-resort safety net before merge.
+
+### Merge order within D5
 
 | Order | Track | Branch | Depends on |
 |---|---|---|---|
 | 1 | D5-SupplyRules | `deliverable/5/supply-rules` | — |
 
-### Work tracks
+### Phases
 
-Single track — five rules land together as a pack since they share the manifest-file-detection machinery.
+Single track, six phases; each phase test-green before the next starts.
 
-**File detection:** ISB's pre-commit hook scans the commit's diff for changes to:
-- `go.mod` / `go.sum`
-- `package.json` / `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml`
-- `requirements.txt` / `Pipfile` / `poetry.lock` / `pyproject.toml`
-- `Cargo.toml` / `Cargo.lock`
-- `Gemfile` / `Gemfile.lock`
-- `pom.xml` / `build.gradle` / `build.gradle.kts`
-- `composer.json` / `composer.lock`
+| Phase | Scope |
+|---|---|
+| P0 | Foundation — AWS SDK CodeArtifact client (default cred chain, expiry-aware error mapping); manifest parsers per-ecosystem (Ruby, Python, JS/TS, Java/Kotlin, Go); `Repositories.license` column + LICENSE backfill migration; manifest-gating dispatch in ISBReview; `SecurityFindings.disposition='token_expired'` payload schema. |
+| P1 | SUPPLY-001 (hallucinated package) + SUPPLY-002 (typosquat) — both registry-hit + deferral-path-aware. |
+| P2 | SUPPLY-003 (stale) + SUPPLY-004 (license matrix) — registry-hit + hand-authored compatibility matrix at `internal/isb/rules/license_matrix.yaml`. |
+| P3 | SUPPLY-005 (known-CVE blocking) — osv-scanner vendored as Go lib (D4 gosec/gitleaks pattern); independent of CodeArtifact. |
+| P4 | `supply-allowlist-refresh` dog (daily `aws codeartifact list-packages` per ecosystem → typosquat allowlist) + `supply-token-recheck` dog (30-min health check + deferral replay) + ConvoyReview `AwaitingSupplyRecheck` gate + e2e fixture sweep across Ruby/Python/JS/Java/Go. |
+| P5 | D5 strict verifier — Static + Heavy + Race shards, fresh-context cross-walk against this section. |
 
-For each, parse the diff to extract added/changed dependencies. Run all applicable rules:
+### Rule details
 
 **`SUPPLY-001` — Hallucinated package rejection.**
-- For each added dep, query the authoritative registry API:
-  - Go: `go list -m -json <module>@<version>` or `https://proxy.golang.org/<module>/@v/<version>.info`
-  - Node: `https://registry.npmjs.org/<package>/<version>`
-  - Python: `https://pypi.org/pypi/<package>/<version>/json`
-  - Rust: `https://crates.io/api/v1/crates/<crate>/<version>`
-- If the endpoint returns 404, the package doesn't exist → reject with `[SUPPLY-001]`.
-- Cache results locally with short TTL to avoid rate-limit issues.
+- For each added dep, query CodeArtifact via AWS SDK: `codeartifact.DescribePackageVersion(domain, repository, format, package, version)`.
+- 404 (`ResourceNotFoundException`) → reject with `[SUPPLY-001]` + ecosystem + name@version.
+- Auth error → deferral path (token_expired).
+- Cache valid responses ≤24h with the SDK's response cache; never cache `not-found` responses (a package that 404'd today might exist tomorrow).
 
 **`SUPPLY-002` — Typosquat detection.**
-- Per-ecosystem allowlist of top-500-popular packages (static file, periodically updated via a separate dog).
-- For each added dep not already in the allowlist, compute Levenshtein distance to every allowlist entry.
-- If `distance <= 2` AND the added dep is not pre-approved (via `SystemConfig.supply_typosquat_preapproved` set), reject with `[SUPPLY-002]` + the suspected-original-package suggestion.
-- Operator pre-approval lands in the preapproved set via durable audit.
+- Per-ecosystem allowlist source: `aws codeartifact list-packages --domain code-artifacts-prod --domain-owner 801997600626 --repository <ecosystem>-prod`. The result is the set of packages the org has ever pulled — better signal than external popularity.
+- For each added dep not already in the allowlist, compute Damerau–Levenshtein distance to every allowlist entry.
+- If `distance <= 2` AND the added dep is not in `SystemConfig.supply_typosquat_preapproved`, reject with `[SUPPLY-002]` + suspected-original-package suggestion.
+- Operator pre-approval lands in the preapproved set via durable audit (force CLI: `force supply preapprove <ecosystem> <name>`).
 
 **`SUPPLY-003` — Stale package detection.**
-- For each added dep, fetch last-published date from the registry API.
-- If `last_published < now() - supply_stale_threshold_days` (default 730 = ~2 years), reject with `[SUPPLY-003]` + suggestion to check for a maintained alternative.
+- For each added dep, `DescribePackageVersion` returns metadata including `publishedTime`. (Where missing, fetch from upstream-mirror metadata via the same SDK call's response payload.)
+- If `published < now() - supply_stale_threshold_days` (default 730 ≈ 2 years), reject with `[SUPPLY-003]` + suggestion to check for a maintained alternative.
 
 **`SUPPLY-004` — License compatibility.**
-- Repo's declared license lives in `Repositories.license` (new column; seeded from repo's LICENSE file at `AddRepo` time).
-- For each added dep, fetch its license from the registry.
-- Static compatibility matrix: permissive-with-permissive OK; GPL-into-permissive rejected; etc.
-- If incompatible, reject with `[SUPPLY-004]` + citation of the license.
+- Repo's declared license lives in `Repositories.license` (new column; backfilled from each repo's `LICENSE` / `LICENSE.md` / `LICENSE.txt` at `AddRepo` time using SPDX-license-id detection).
+- For each added dep, license metadata comes from `DescribePackageVersion` (CodeArtifact preserves upstream license fields). If absent, advise-mode + log for operator review (don't auto-block on uncertainty).
+- Static compatibility matrix at `internal/isb/rules/license_matrix.yaml` keyed by SPDX IDs (~10 rows covers ~95% of cases). PR-reviewable when matrix changes.
+- If incompatible per matrix, reject with `[SUPPLY-004]` + citation of dep license + repo license.
+- Pairs not in the matrix → advise-mode + operator review (no LLM-decides-licenses, per anti-cheat).
 
 **`SUPPLY-005` — Known vulnerability blocking.**
-- On each manifest change, invoke `osv-scanner` on the lock file (already lockfile-aware).
-- If any High or Critical severity finding: reject with `[SUPPLY-005]` + finding details.
-- Medium/Low findings: advise-mode for now (operator can promote to block via FleetRules edit).
+- On each manifest change, invoke vendored `osv-scanner` Go lib on the lock file (already supports Ruby, Python, npm, Maven, Go, etc.).
+- High or Critical severity → reject with `[SUPPLY-005]` + finding details.
+- Medium/Low → advise-mode (operator can promote to block via FleetRules edit).
+- Independent of CodeArtifact / AWS auth; works during token-expired windows.
 
 ### Rule configuration
 
-All five are FleetRules (category `isb`, agent_scope `all`). Bootstrap migration seeds them. Promotion paths for rule changes go through D3.
+All five are FleetRules (category `isb`, agent_scope `all`). Bootstrap migration seeds them at `advise` severity. Promotion to `block` goes through D3's paired-run mechanism.
 
 ### Exit criteria
 
-1. `Repositories.license` column present; backfill populated from LICENSE files via a one-time migration.
-2. Five rules present in `FleetRules`, active, `rule-renderer` has written `isb/finders/supply_*.yaml`.
-3. Integration tests for each rule using fixture repos:
-   - `TestSupply001_HallucinatedGoPackage_Rejected` (fixture adds `github.com/totally-fake-pkg/nonexistent@v1.0.0` to go.mod).
-   - `TestSupply002_NpmTyposquat_Rejected` (fixture adds `expres@4.19.0` instead of `express`).
-   - `TestSupply003_StalePackage_Rejected` (fixture adds a package last published 3 years ago).
-   - `TestSupply004_LicenseIncompatible_Rejected` (fixture: repo is MIT, adds a GPL-3.0 dep).
-   - `TestSupply005_KnownCVE_Rejected` (fixture adds a package with a known High CVE).
-4. Bypass mechanism: `// SUPPLY-BYPASS: <AUDIT-NNN> <reason>` → lands in `SecurityFindings` with `disposition='overridden'`.
-5. Rate-limit handling: registry API queries backoff gracefully; rule doesn't spuriously block on transient API failure (falls back to `advise` mode with a warning).
+1. `Repositories.license` column present; backfill populated from each repo's LICENSE file (SPDX-detected) via a one-time migration that runs at `runMigrations`.
+2. Five rules present in `FleetRules`, active, `rule-renderer` has written `isb/finders/supply_*.yaml` (one per rule) into the appropriate target-repo location during `force render-rules`.
+3. AWS SDK CodeArtifact client wired with default credential chain. `SecurityFindings.disposition='token_expired'` path covered: when AWS calls return auth error, ISBReview logs the deferred finding and proceeds in advise-mode without blocking.
+4. Manifest-gating: SUPPLY-* rules only fire when commit diff includes one of the recognized manifest files; source-only commits make zero network calls. AST/parser-based detection in `internal/isb/scanners/manifests/` covers Ruby (`Gemfile`, `Gemfile.lock`, `*.gemspec`), Python (`requirements.txt`, `Pipfile`, `Pipfile.lock`, `pyproject.toml`, `poetry.lock`, `setup.py`), JS/TS (`package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`), Java/Kotlin (`pom.xml`, `build.gradle`, `build.gradle.kts`), Go (`go.mod`, `go.sum`).
+5. Integration tests per rule per ecosystem (5 rules × 5 ecosystems = 25 fixture-driven test cases). Minimum coverage:
+   - `TestSupply001_HallucinatedRubyGem_Rejected`, `..._HallucinatedNpmPackage_Rejected`, `..._HallucinatedPyPI_Rejected`, `..._HallucinatedMaven_Rejected`, `..._HallucinatedGoModule_Rejected`.
+   - `TestSupply002_NpmTyposquat_Rejected` (`expres` instead of `express`), `..._RubyTyposquat_Rejected`, etc.
+   - `TestSupply003_StalePackage_Rejected` per ecosystem.
+   - `TestSupply004_LicenseIncompatible_Rejected` (fixture: repo MIT, adds GPL-3.0 dep) per ecosystem.
+   - `TestSupply005_KnownCVE_Rejected` per ecosystem.
+6. Bypass mechanism: `// SUPPLY-BYPASS: <AUDIT-NNN> <reason>` (or `# SUPPLY-BYPASS:` for Ruby/Python) → lands in `SecurityFindings` with `disposition='overridden'`. Bypass parser handles per-language comment syntax.
+7. `supply-allowlist-refresh` dog (daily) populates `SystemConfig.supply_allowlist_<ecosystem>` from `aws codeartifact list-packages`.
+8. `supply-token-recheck` dog (every 30 min) probes CodeArtifact health, replays deferred findings on recovery, fires notify-after Slack on first expiry detection (debounced).
+9. ConvoyReview extension: convoys with `disposition='token_expired'` SUPPLY findings on any ask-branch are gated `AwaitingSupplyRecheck` until resolved. Operator Ship-It surface honors the gate.
+10. `TestListDogs` count matches new total (+2 from D4).
 
 ### Anti-cheat directives
 
-- **No hardcoded allowlists for popular packages.** The top-500 list comes from a maintained source (e.g., npmjs.org's download counts for npm, pkg.go.dev's popularity for Go). Static fallback is OK but must have a refresh path.
-- **No registry-hit caching > 24h.** A package that was fake yesterday might not be fake today (actually that's fine), but a package that was real yesterday might be yanked. Stale "approved" caches are the failure mode.
-- **No bypass-by-default.** Every bypass requires a reason string; tests enforce.
-- **No license matrix shortcut.** The incompatibility matrix is reviewed and committed; don't use an LLM to "decide" license compatibility at check time.
+- **No hardcoded allowlists for popular packages.** Allowlist comes from `aws codeartifact list-packages` (org-actual usage). Static fallback is OK only when CodeArtifact is unreachable, and must be timestamped + clearly marked stale.
+- **No registry-hit caching of `not-found` responses.** A package that 404'd yesterday might be real today; a "false ham" cache of negative results is the worst failure mode. Positive caches OK ≤24h.
+- **No bypass-by-default.** Every bypass requires a reason string + AUDIT-NNN; tests enforce.
+- **No license matrix shortcut.** The compatibility matrix is hand-authored YAML, reviewed and committed; do not use an LLM to "decide" license compatibility at check time. Pairs absent from the matrix → advise-mode + operator review, never auto-allow or auto-deny.
+- **No silent token-expired passthroughs.** Every auth-error path must emit a `SecurityFindings` row with `disposition='token_expired'`. Pattern P-SupplyDeferral (new audittools test) walks `internal/isb/rules/supply_*.go` and rejects any registry-call site that catches an auth error without logging.
+- **No Slack-message-triggers-merge.** Per the D4 retrospective: the operator's `umt artifacts` recovery does not authorize any code-modifying action; it only re-enables the read-only SUPPLY checks.
 
 ### Verification procedure
 
 ```
-go test -tags sqlite_fts5 -run TestSupply00 -race -count=3 ./internal/isb/...  # all 5 green
+# Build + suite
+go test -tags sqlite_fts5 -run TestSupply00 -count=3 ./internal/isb/...   # 25 fixtures green
+go test -tags sqlite_fts5 -race -count=5 ./...                             # full suite green under -race
+
+# Schema + seeding
 sqlite3 holocron.db "SELECT COUNT(*) FROM FleetRules WHERE category='isb' AND rule_key LIKE 'SUPPLY-%'"  # expect 5
-ls isb/finders/supply_*.yaml  # expect 5 rendered files
-go test -tags sqlite_fts5 -race -count=5 ./...  # full suite green
+sqlite3 holocron.db "SELECT COUNT(*) FROM Repositories WHERE license IS NULL OR license=''"               # expect 0 after backfill
+
+# Renderers
+ls isb/finders/supply_*.yaml          # expect 5
+
+# Dogs
+./force daemon --dry-run | grep -E "supply-(allowlist-refresh|token-recheck)"   # both registered
+
+# Deferral path (manual)
+unset AWS_ACCESS_KEY_ID                 # simulate token-expired
+go test -tags sqlite_fts5 -run TestSupplyDeferral_TokenExpired ./internal/isb/...  # expect deferred-finding written
 ```
 
 ### Closure report
 
 `docs/closures/DELIVERABLE-5-CLOSURE.md` with:
 
-- Five rule-IDs with FleetRules row-ids.
-- Registry endpoints used + caching policy.
-- Top-500 allowlist source + refresh mechanism.
-- Integration test results.
-- Anti-cheat self-check.
-- Residual list.
+- Per-rule status (BoS-style table): rule-id × ecosystems supported × test names × FleetRules row-id × default severity.
+- AWS CodeArtifact endpoints used + which AWS SDK service operations are called per rule.
+- `Repositories.license` backfill: row count populated, SPDX-ids detected, ambiguous-license rows surfaced for operator review.
+- Allowlist source per ecosystem + refresh dog cadence + last-refresh timestamp at closure time.
+- License compatibility matrix: matrix file path, row count, anything-not-in-matrix → advise-mode count.
+- Deferral-path coverage: count of `disposition='token_expired'` rows resolved during D5 testing, count escalated to `block` on recheck.
+- Integration test results (25 cases × ecosystem matrix).
+- Anti-cheat self-check (one line per directive above + evidence file:line).
+- Residual list — explicitly NONE blocking.
 
 ---
 
