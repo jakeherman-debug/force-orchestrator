@@ -61,7 +61,44 @@ import (
 
 var (
 	stageGateRegistry *stagegate.Registry
+
+	// gateTimeoutBudgetCheck is the indirection seam through which
+	// emitGateTimeoutEscalation calls RespectNotificationBudget. Tests
+	// override this to drive the allowed=true and allowed=false branches
+	// without writing budget rows that StakesHigh would punch through
+	// anyway. Default points at the production helper; SetGateTimeoutBudgetCheckForTest
+	// returns a restore function so tests don't leak state.
+	gateTimeoutBudgetCheck = store.RespectNotificationBudget
+
+	// gateTimeoutSendMail is the indirection for store.SendMail so tests
+	// can assert call vs no-call without inspecting Fleet_Mail rows.
+	// Production points at store.SendMail.
+	gateTimeoutSendMail = store.SendMail
 )
+
+// SetGateTimeoutBudgetCheckForTest swaps the budget-check seam and
+// returns a restore closure. Tests use this to force allowed=false
+// (the StakesHigh-punches-through real helper makes that branch
+// unreachable in production today, but Wave 3 ζ tightened the call
+// site to gate on allowed so the regression slot exists).
+func SetGateTimeoutBudgetCheckForTest(
+	fn func(ctx context.Context, db *sql.DB, operatorEmail, source, channel, payloadJSON string, stakes store.NotificationStakes) (bool, error),
+) (restore func()) {
+	prev := gateTimeoutBudgetCheck
+	gateTimeoutBudgetCheck = fn
+	return func() { gateTimeoutBudgetCheck = prev }
+}
+
+// SetGateTimeoutSendMailForTest swaps the SendMail seam and returns a
+// restore closure. Tests use this to count calls without scanning
+// Fleet_Mail.
+func SetGateTimeoutSendMailForTest(
+	fn func(db *sql.DB, from, to, subject, body string, taskID int, msgType store.MailType) int64,
+) (restore func()) {
+	prev := gateTimeoutSendMail
+	gateTimeoutSendMail = fn
+	return func() { gateTimeoutSendMail = prev }
+}
 
 // RegisterStageGateRegistry is the daemon-side seam for installing
 // the Phase-1 baseline registry. P2 will call this from boot.go
@@ -99,10 +136,17 @@ func dogConvoyStageWatch(ctx context.Context, db *sql.DB, logger interface{ Prin
 // activeStage carries just the columns the dog needs from
 // ConvoyStages for evaluation. We materialise the slice up front so
 // the dog can run AdvanceStage without holding the rows cursor.
+//
+// intentText + convoyName are surfaced for the gate-timeout
+// escalation message (D5.5 P3 ζ): operators reading the
+// "[STAGE GATE TIMEOUT]" mail need to identify which convoy + which
+// stage failed without clicking through to a separate dashboard.
 type activeStage struct {
 	id                 int
 	convoyID           int
+	convoyName         string // joined from Convoys.name
 	stageNum           int
+	intentText         string // ConvoyStages.intent_text
 	status             string
 	gateType           string // empty if NULL
 	gateTypeIsNull     bool
@@ -126,13 +170,20 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 		return errors.New("convoy-stage-watch: registry is nil")
 	}
 
+	// LEFT JOIN against Convoys for the human-readable convoy name; we
+	// surface it in escalation mail (D5.5 P3 ζ) so the operator doesn't
+	// have to cross-reference a numeric convoy id. Test-only convoys
+	// without a Convoys row degrade gracefully: convoyName is empty and
+	// the escalation message falls back to the numeric id.
 	rows, err := db.Query(`
-		SELECT id, convoy_id, stage_num, status,
-		       gate_type, IFNULL(gate_config_json, '{}'),
-		       gate_timeout_minutes,
-		       IFNULL(opened_at, ''), IFNULL(all_prs_merged_at, '')
-		FROM ConvoyStages
-		WHERE status IN ('Open', 'AllPRsMerged', 'AwaitingGate')`)
+		SELECT cs.id, cs.convoy_id, IFNULL(c.name, ''),
+		       cs.stage_num, IFNULL(cs.intent_text, ''), cs.status,
+		       cs.gate_type, IFNULL(cs.gate_config_json, '{}'),
+		       cs.gate_timeout_minutes,
+		       IFNULL(cs.opened_at, ''), IFNULL(cs.all_prs_merged_at, '')
+		FROM ConvoyStages cs
+		LEFT JOIN Convoys c ON c.id = cs.convoy_id
+		WHERE cs.status IN ('Open', 'AllPRsMerged', 'AwaitingGate')`)
 	if err != nil {
 		return fmt.Errorf("convoy-stage-watch: query active stages: %w", err)
 	}
@@ -142,7 +193,8 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 	for rows.Next() {
 		var s activeStage
 		var gateType sql.NullString
-		if sErr := rows.Scan(&s.id, &s.convoyID, &s.stageNum, &s.status,
+		if sErr := rows.Scan(&s.id, &s.convoyID, &s.convoyName,
+			&s.stageNum, &s.intentText, &s.status,
 			&gateType, &s.gateConfigJSON, &s.gateTimeoutMinutes,
 			&s.openedAt, &s.allPRsMergedAt); sErr != nil {
 			logger.Printf("convoy-stage-watch: scan failed: %v", sErr)
@@ -202,7 +254,7 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 					continue
 				}
 				transitioned++
-				emitGateTimeoutEscalation(db, s, logger)
+				emitGateTimeoutEscalation(ctx, db, s, logger)
 				logger.Printf("convoy-stage-watch: stage %d (convoy=%d num=%d) AwaitingGate→Failed (gate timeout %dmin exceeded)",
 					s.id, s.convoyID, s.stageNum, s.gateTimeoutMinutes)
 				continue
@@ -352,25 +404,84 @@ func evaluateGate(ctx context.Context, db *sql.DB, registry *stagegate.Registry,
 // stale-convoys-report shape so dashboards filter/group these the
 // same way as other auto-escalations.
 //
-// Pattern P27: budget-gate the operator emit. On allowed=false the
-// helper has already drop/digested per the configured budget;
-// fail-open on err so a transient SQLite glitch never silences a
-// gate-timeout alert.
-func emitGateTimeoutEscalation(db *sql.DB, s activeStage, logger interface{ Printf(string, ...any) }) {
-	subject := fmt.Sprintf("[STAGE GATE TIMEOUT] convoy=%d stage=%d", s.convoyID, s.stageNum)
-	body := fmt.Sprintf(
-		"Stage %d of convoy %d has been AwaitingGate longer than its configured gate_timeout_minutes=%d.\n"+
-			"Gate type: %s\nThe convoy-stage-watch dog has transitioned the stage to Failed.\n\n"+
-			"Inspect: force convoy show %d\n",
-		s.stageNum, s.convoyID, s.gateTimeoutMinutes, s.gateType, s.convoyID)
-	if allowed, _ := store.RespectNotificationBudget(
-		context.Background(), db, "operator", "inquisitor", "email", "{}",
-		store.StakesHigh,
-	); !allowed {
-		// budget exhausted (StakesHigh always punches through, so
-		// this branch only fires on a real config-set 0-cap row).
-	} else {
-		_ = allowed
+// Pattern P27: budget-gate the operator emit through
+// RespectNotificationBudget. The wave-3-ζ tightening: previously the
+// `allowed` return was discarded and SendMail ran unconditionally.
+// StakesHigh always punches through today, so the bug was latent —
+// but a future budget-semantics change (e.g. high-stakes routed
+// through digest rather than always allowed) would silently re-enable
+// emission. Gating on `allowed` makes the contract self-describing
+// and surfaces the regression at compile time if RespectNotificationBudget
+// ever changes signature.
+//
+// Fail-open on err so a transient SQLite glitch never silences a
+// gate-timeout alert (a stuck stage is operator-actionable; over-
+// emission is preferable to under-emission for high-stakes signals).
+//
+// Escalation message (D5.5 P3 ζ contract):
+//   - Convoy ID + name (the human-readable handle the operator stored)
+//   - Stage number + intent_text (so the operator knows WHICH stage
+//     failed without dashboard click-through)
+//   - Gate type + gate config JSON (so the operator can re-evaluate
+//     the gate spec or operator-confirm to advance)
+//   - How long the stage was in AwaitingGate before timeout
+//   - Recommendation pointing at `force convoy show` + the two
+//     resolution paths (re-evaluate gate config or operator-confirm)
+func emitGateTimeoutEscalation(ctx context.Context, db *sql.DB, s activeStage, logger interface{ Printf(string, ...any) }) {
+	convoyLabel := fmt.Sprintf("%d", s.convoyID)
+	if s.convoyName != "" {
+		convoyLabel = fmt.Sprintf("%d (%s)", s.convoyID, s.convoyName)
 	}
-	store.SendMail(db, "inquisitor", "operator", subject, body, 0, store.MailTypeAlert)
+	intentLine := s.intentText
+	if intentLine == "" {
+		intentLine = "(no intent_text recorded)"
+	}
+
+	// Compute how long the stage sat in AwaitingGate before the dog
+	// flipped it to Failed. Fall back to "unknown" if all_prs_merged_at
+	// is missing or malformed; the operator still gets the rest of the
+	// message and the timeout alert isn't blocked by a parse hiccup.
+	awaitingFor := "unknown"
+	if t, err := store.ParseSQLiteTime(s.allPRsMergedAt); err == nil {
+		awaitingFor = time.Since(t).Round(time.Minute).String()
+	}
+
+	subject := fmt.Sprintf("[STAGE GATE TIMEOUT] convoy=%d stage=%d gate=%s",
+		s.convoyID, s.stageNum, s.gateType)
+	body := fmt.Sprintf(
+		"Stage %d of convoy %s has been AwaitingGate longer than its configured\n"+
+			"gate_timeout_minutes=%d. The convoy-stage-watch dog has transitioned\n"+
+			"the stage to Failed.\n\n"+
+			"Stage intent: %s\n"+
+			"Gate type:    %s\n"+
+			"Gate config:  %s\n"+
+			"Awaiting for: %s (timeout: %d minutes)\n\n"+
+			"Recommendation:\n"+
+			"  Re-evaluate the gate config (the threshold may be too tight, the\n"+
+			"  metric query may be stale, or the soak window may be unrealistic),\n"+
+			"  or operator-confirm to advance the stage manually.\n\n"+
+			"Inspect: force convoy show %d\n",
+		s.stageNum, convoyLabel, s.gateTimeoutMinutes,
+		intentLine, s.gateType, s.gateConfigJSON,
+		awaitingFor, s.gateTimeoutMinutes, s.convoyID)
+
+	allowed, budgetErr := gateTimeoutBudgetCheck(
+		ctx, db, "operator", "inquisitor", "email", "{}",
+		store.StakesHigh,
+	)
+	if budgetErr != nil {
+		// Fail-open: a budget-table glitch must not silence a
+		// high-stakes timeout alert. Log + emit anyway.
+		logger.Printf("convoy-stage-watch: gate-timeout budget check failed (fail-open): %v", budgetErr)
+		allowed = true
+	}
+	if !allowed {
+		// Budget exhausted (StakesHigh punches through today, so this
+		// only fires on a 0-cap config row). Log so the operator can
+		// see the suppression in stdout when it matters.
+		logger.Printf("convoy-stage-watch: gate-timeout escalation suppressed by notification budget (convoy=%d stage=%d)",
+			s.convoyID, s.stageNum)
+		return
+	}
+	gateTimeoutSendMail(db, "inquisitor", "operator", subject, body, 0, store.MailTypeAlert)
 }
