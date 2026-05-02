@@ -154,6 +154,15 @@ var dogCooldowns = map[string]time.Duration{
 	// outage" — debounce in dogSupplyTokenRecheck handles repeated
 	// failures across cycles without spamming the operator.
 	"supply-token-recheck": 30 * time.Minute,
+	// D5.5 Phase 1 — convoy-stage-watch. Walks active ConvoyStages rows
+	// (status IN Open/AllPRsMerged/AwaitingGate) and advances the
+	// per-stage state machine: flips Open→AllPRsMerged when every
+	// stage's PR has merged, AllPRsMerged→AwaitingGate immediately
+	// after, evaluates the gate via the stagegate.Registry on
+	// AwaitingGate, and sinks to Failed on gate-timeout. 5-min cadence
+	// matches sub-pr-ci-watch / draft-pr-watch — staged-convoy signal
+	// shares the same operator-facing dashboard refresh granularity.
+	"convoy-stage-watch": 5 * time.Minute,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -211,6 +220,12 @@ var dogOrder = []string{
 	// in-flight ISBReview deferrals once token health recovers.
 	"supply-allowlist-refresh",
 	"supply-token-recheck",
+	// D5.5 Phase 1 — convoy-stage-watch advances the per-stage state
+	// machine for staged convoys. Ordered last because it operates on
+	// ConvoyStages — a table that's downstream of every other dog's
+	// touched-table set, so this dog can't block earlier work but
+	// reads the freshest post-tick state.
+	"convoy-stage-watch",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -408,6 +423,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogSupplyAllowlistRefresh(ctx, db, ca, logger)
 	case "supply-token-recheck":
 		return dogSupplyTokenRecheck(ctx, db, logger)
+	case "convoy-stage-watch":
+		return dogConvoyStageWatch(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
