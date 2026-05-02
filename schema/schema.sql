@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     spawning_at_id            TEXT    DEFAULT '',  -- concern #9: which AT a ConvoyReview-spawned fix task targets
     deferred_revert           INTEGER DEFAULT 0,   -- concern #7: row scheduled to revert when its dependents complete
     revert_target_task_id     INTEGER DEFAULT 0,   -- concern #7: the task this row reverts (cascade-revert flow)
+    stage_id                  INTEGER DEFAULT NULL, -- D5.5 P2: FK → ConvoyStages.id; NULL = legacy/single-mode (task not bound to a specific stage); non-NULL = multi-stage convoy task
     created_at                TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty
@@ -52,6 +53,10 @@ CREATE INDEX IF NOT EXISTS idx_bounty_status_type    ON BountyBoard (status, typ
 CREATE INDEX IF NOT EXISTS idx_bounty_convoy_status  ON BountyBoard (convoy_id, status);
 CREATE INDEX IF NOT EXISTS idx_bounty_parent_id      ON BountyBoard (parent_id);
 CREATE INDEX IF NOT EXISTS idx_bounty_created_at     ON BountyBoard (created_at);
+-- D5.5 P2 — partial index over populated stage_id rows; per-stage dispatch /
+-- convoy-stage-watch dog filter on stage_id. NULL rows excluded by the
+-- predicate so legacy single-stage convoys don't bloat the index.
+CREATE INDEX IF NOT EXISTS idx_bounty_stage_id ON BountyBoard (stage_id) WHERE stage_id IS NOT NULL;
 
 -- Fix #3 (AUDIT-008/034/035/036): partial UNIQUE index on idempotency_key.
 -- Scoped to non-empty keys AND non-terminal statuses so:

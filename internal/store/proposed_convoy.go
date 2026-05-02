@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 )
 
@@ -13,13 +14,87 @@ func StoreProposedConvoy(db *sql.DB, featureID int, tasks []TaskPlan) (int, erro
 	if err != nil {
 		return 0, err
 	}
+	return storeProposedConvoyJSON(db, featureID, string(planJSON))
+}
+
+// StoreProposedConvoyRaw upserts a pre-marshalled plan envelope. Used by
+// the D5.5 P2 staged-convoy path to persist the full staging envelope
+// (`{"staging_mode":"staged",...}`) under the same ProposedConvoys.plan_json
+// column without forcing it through the legacy []TaskPlan shape.
+//
+// rawPlanJSON must already be valid JSON; the caller is responsible for
+// marshalling. The same upsert-on-feature_id semantics apply — re-running
+// the Commander on the same Feature replaces the prior proposal.
+func StoreProposedConvoyRaw(db *sql.DB, featureID int, rawPlanJSON string) (int, error) {
+	if rawPlanJSON == "" {
+		return 0, fmt.Errorf("StoreProposedConvoyRaw: rawPlanJSON must be non-empty")
+	}
+	return storeProposedConvoyJSON(db, featureID, rawPlanJSON)
+}
+
+// parseProposedPlanFlexible decodes a ProposedConvoys.plan_json blob that
+// may be either the legacy bare-array shape or the D5.5 P2 staged envelope.
+// Returns the flattened []TaskPlan; the staged-envelope metadata (mode,
+// strategy, per-stage gates) is read separately by GetProposedStagingPlan
+// when the Chancellor approval path needs to create ConvoyStages rows.
+//
+// Errors only on JSON syntax errors. An empty/null plan_json yields an
+// empty TaskPlan slice — the existing single-stage callers treat that as
+// a benign "no proposal yet."
+func parseProposedPlanFlexible(planJSON string) []TaskPlan {
+	trimmed := planJSON
+	if trimmed == "" {
+		return nil
+	}
+	// Bare-array shape (legacy single-mode): unmarshal directly.
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var tasks []TaskPlan
+		_ = json.Unmarshal([]byte(trimmed), &tasks)
+		return tasks
+	}
+	// Staged envelope: peek at staging_mode, then flatten per-stage tasks.
+	var envelope struct {
+		StagingMode string `json:"staging_mode"`
+		Stages      []struct {
+			Tasks []TaskPlan `json:"tasks"`
+		} `json:"stages"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+		return nil
+	}
+	var out []TaskPlan
+	for _, s := range envelope.Stages {
+		out = append(out, s.Tasks...)
+	}
+	return out
+}
+
+// GetProposedStagingPlan returns the raw plan_json for a feature so callers
+// that need the full staged envelope (mode, strategy, per-stage gates) can
+// re-parse via internal/agents/commander.ParseStagingPlan. Returns "" if no
+// pending proposal exists. The store package itself does not depend on the
+// commander package, so the typed StagingPlan struct lives there; this
+// helper is the byte bridge.
+func GetProposedStagingPlan(db *sql.DB, featureID int) (string, error) {
+	var planJSON string
+	err := db.QueryRow(`SELECT plan_json FROM ProposedConvoys WHERE feature_id = ? AND status = 'pending'`, featureID).Scan(&planJSON)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("GetProposedStagingPlan: query feature %d: %w", featureID, err)
+	}
+	return planJSON, nil
+}
+
+func storeProposedConvoyJSON(db *sql.DB, featureID int, planJSON string) (int, error) {
 	var id int
-	err = db.QueryRow(
+	err := db.QueryRow(
 		`INSERT INTO ProposedConvoys (feature_id, plan_json)
 		 VALUES (?, ?)
 		 ON CONFLICT(feature_id) DO UPDATE SET plan_json = excluded.plan_json, status = 'pending'
 		 RETURNING id`,
-		featureID, string(planJSON)).Scan(&id)
+		featureID, planJSON).Scan(&id)
 	return id, err
 }
 
@@ -54,8 +129,11 @@ func ClaimChancellorTask(db *sql.DB, agentName string) (*Bounty, []TaskPlan, boo
 	b.Status = "Locked"
 	b.Owner = agentName
 
-	var tasks []TaskPlan
-	json.Unmarshal([]byte(planJSON), &tasks)
+	// D5.5 P2: tolerate either the legacy bare-array plan_json shape or
+	// the staged envelope. parseProposedPlanFlexible flattens per-stage
+	// tasks; staged metadata is fetched separately via
+	// GetProposedStagingPlan when the Chancellor approval path needs it.
+	tasks := parseProposedPlanFlexible(planJSON)
 	return &b, tasks, true
 }
 
@@ -88,8 +166,7 @@ func ClaimMergeTarget(db *sql.DB, featureID int, agentName string) (*Bounty, []T
 	b.Status = "Locked"
 	b.Owner = agentName
 
-	var tasks []TaskPlan
-	json.Unmarshal([]byte(planJSON), &tasks)
+	tasks := parseProposedPlanFlexible(planJSON)
 	return &b, tasks, true
 }
 

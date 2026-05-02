@@ -1043,6 +1043,28 @@ func AddConvoyTaskTx(tx *sql.Tx, parentID int, repo, payload string, convoyID, p
 	return int(id), nil
 }
 
+// AddConvoyTaskWithStageTx creates a CodeEdit subtask within a convoy, stamping
+// BountyBoard.stage_id at insert time. stageID must be > 0 — callers that don't
+// have a stage assignment use AddConvoyTaskTx instead and let stage_id default
+// to NULL. (D5.5 P2: multi-stage convoy task creation path.)
+func AddConvoyTaskWithStageTx(tx *sql.Tx, parentID int, repo, payload string, convoyID, priority, stageID int, status string) (int, error) {
+	if stageID <= 0 {
+		return 0, fmt.Errorf("AddConvoyTaskWithStageTx: stageID must be > 0 (got %d) — use AddConvoyTaskTx for stage-less tasks", stageID)
+	}
+	res, err := tx.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, stage_id, created_at)
+		 VALUES (?, ?, 'CodeEdit', ?, ?, ?, ?, ?, datetime('now'))`,
+		parentID, repo, status, payload, convoyID, priority, stageID)
+	if err != nil {
+		return 0, fmt.Errorf("AddConvoyTaskWithStageTx: insert convoy=%d stage=%d: %w", convoyID, stageID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("AddConvoyTaskWithStageTx: LastInsertId: %w", err)
+	}
+	return int(id), nil
+}
+
 // AddDependencyTx records that taskID depends on dependsOn using an existing transaction.
 // Returns an error so callers can roll back on failure.
 func AddDependencyTx(tx *sql.Tx, taskID, dependsOn int) error {

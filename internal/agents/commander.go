@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents/capabilities"
+	"force-orchestrator/internal/agents/commander"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/repo"
+	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/util"
@@ -436,14 +438,60 @@ DEPENDENCY RULES:
 - "blocked_by" elements must reference an "id" from within this same response.
 - Number tasks starting from 1, incrementing by 1.
 
-OUTPUT FORMAT:
-Respond with ONLY a raw JSON array — no explanation, no markdown, no code fences.
+STAGED-CONVOY OPTION (D5.5 — opt-in for risky multi-step rollouts):
+For changes that need to land in a specific order with a verification gate
+between phases (zero-downtime DB migrations, dual-write/cutover sequences,
+risky refactors that must soak in production before the next step) you may
+emit a staged plan instead of a flat task array. Each stage's gate verifies
+stage N is safe before stage N+1's astromechs begin work. Use staging ONLY
+when the work genuinely needs phased rollout — most features are single-stage
+and should keep emitting the flat array shape.
 
-EXAMPLE:
+When you choose to stage:
+- Number stages starting from 1, incrementing by 1 (no gaps).
+- Every non-terminal stage MUST declare a gate. The terminal (last) stage
+  may have "gate": null (no gate needed; nothing follows it).
+- Each stage's intent must explain WHY that stage is independently safe and
+  what the rollback story is. ConvoyReview surfaces this at each stage's
+  DraftPROpen.
+- Tasks within a stage use the same shape as the flat-array path.
+- staging_strategy MUST be "strict" — "merge_parallel" and "stacked" are
+  forward-compat-recognised but not yet implemented in D5.5; emitting them
+  produces an explicit "not yet supported" rejection.
+- Allowed gate types in D5.5 P2: "soak_minutes" {"minutes":N},
+  "operator_confirm" (no config), and the compounds "all_of"/"any_of"
+  whose "gates" array nests further specs. P3 adds 4 advanced leaves.
+
+OUTPUT FORMAT:
+Respond with ONLY raw JSON — no explanation, no markdown, no code fences.
+Single-stage (the default): emit a JSON ARRAY of task objects.
+Staged: emit a JSON OBJECT with "staging_mode": "staged".
+
+SINGLE-STAGE EXAMPLE (the default):
 [
   {"id": 1, "repo": "api-server", "task": "Add POST /users endpoint with email/password validation", "blocked_by": []},
   {"id": 2, "repo": "frontend", "task": "Add registration form that calls POST /users", "blocked_by": [1]}
-]`, directiveSection, repoContext)
+]
+
+STAGED EXAMPLE (only when phased rollout is genuinely required):
+{
+  "staging_mode": "staged",
+  "staging_strategy": "strict",
+  "stages": [
+    {
+      "stage_num": 1,
+      "intent": "Add nullable user_account_status column + migration (rollback: drop column)",
+      "tasks": [{"id": 1, "repo": "api-server", "task": "Migration adding nullable column", "blocked_by": []}],
+      "gate": {"type": "soak_minutes", "config": {"minutes": 60}}
+    },
+    {
+      "stage_num": 2,
+      "intent": "Read from new column with fallback (rollback: revert read path)",
+      "tasks": [{"id": 1, "repo": "api-server", "task": "Switch reads to new column", "blocked_by": []}],
+      "gate": null
+    }
+  ]
+}`, directiveSection, repoContext)
 
 	userPrompt := bounty.Payload + inboxContext
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
@@ -491,12 +539,53 @@ EXAMPLE:
 
 	cleanJSON := claude.ExtractJSON(response)
 
-	var tasks []store.TaskPlan
-	if err := json.Unmarshal([]byte(cleanJSON), &tasks); err != nil {
-		msg := fmt.Sprintf("JSON Parse Err: %v | Raw output: %.500s", err, cleanJSON)
-		logger.Printf("Task %d: Commander JSON parse failed — %s", bounty.ID, msg)
+	// D5.5 P2 — staged-mode peek. If the LLM emitted the staged-convoy
+	// envelope (`{"staging_mode":"staged",...}`) we route through the
+	// staging validator instead of the legacy bare-array path. Single-mode
+	// (bare array OR explicit `{"staging_mode":"single"}`) falls through to
+	// the existing []TaskPlan unmarshal — zero behavior change for
+	// non-staged convoys.
+	stagingPlan, isStaged, peekErr := commander.ParseStagingPlan([]byte(cleanJSON))
+	if peekErr != nil {
+		msg := fmt.Sprintf("Staged-Plan Parse Err: %v | Raw output: %.500s", peekErr, cleanJSON)
+		logger.Printf("Task %d: Commander staged-plan parse failed — %s", bounty.ID, msg)
 		handleInfraFailure(db, agentName, "commander", bounty, sessionID, msg, "Pending", false, logger)
 		return
+	}
+
+	var tasks []store.TaskPlan
+	if isStaged {
+		// Validate against the baseline gate registry (D5.5 P1: 5 baseline
+		// gates). The validator rejects merge_parallel + stacked with
+		// explicit "not yet supported" errors per spec.
+		registry := stagegate.NewRegistry()
+		stagegate.RegisterBaselineGates(registry)
+		if err := commander.ValidateStagingPlan(*stagingPlan, registry); err != nil {
+			// Validation failures are deterministic and not infra
+			// flakes — surface to the operator via FailBounty so the
+			// LLM doesn't get a free retry on a structural bug.
+			if ferr := store.FailBounty(db, bounty.ID, "Commander Err (staged-plan validation): "+err.Error()); ferr != nil {
+				logger.Printf("Commander task %d: FailBounty(staged-plan validation: %v) failed (%v); stale-lock detector will recover", bounty.ID, err, ferr)
+			}
+			return
+		}
+		// Flatten staged tasks into a single []TaskPlan for plan-cycle +
+		// known-repo validation reuse. The stage_num metadata is
+		// preserved for downstream wiring via the StagingPlan envelope
+		// stored alongside in ProposedConvoys. Cycle detection across
+		// stages is intentional: a stage-2 task that depends on a
+		// stage-1 task is fine because stage 1 always lands first;
+		// circular deps within a stage still need to be caught.
+		for _, s := range stagingPlan.Stages {
+			tasks = append(tasks, s.Tasks...)
+		}
+	} else {
+		if err := json.Unmarshal([]byte(cleanJSON), &tasks); err != nil {
+			msg := fmt.Sprintf("JSON Parse Err: %v | Raw output: %.500s", err, cleanJSON)
+			logger.Printf("Task %d: Commander JSON parse failed — %s", bounty.ID, msg)
+			handleInfraFailure(db, agentName, "commander", bounty, sessionID, msg, "Pending", false, logger)
+			return
+		}
 	}
 
 	if len(tasks) == 0 {
@@ -538,7 +627,25 @@ EXAMPLE:
 	}
 
 	// Submit plan to the Supreme Chancellor for conflict review before creating a convoy.
-	if _, storeErr := store.StoreProposedConvoy(db, bounty.ID, tasks); storeErr != nil {
+	// D5.5 P2: when the Commander emitted a staged plan, persist the full
+	// envelope so the Chancellor approval path can read staging metadata
+	// (mode + strategy + per-stage gate specs) when creating the convoy.
+	// Single-mode plans continue to flow through the legacy []TaskPlan
+	// shape — zero behavior change for non-staged convoys.
+	var storeErr error
+	if isStaged {
+		envelope, mErr := json.Marshal(stagingPlan)
+		if mErr != nil {
+			if ferr := store.FailBounty(db, bounty.ID, "Commander Err: marshal staged plan: "+mErr.Error()); ferr != nil {
+				logger.Printf("Commander task %d: FailBounty(marshal staged plan) failed (%v); stale-lock detector will recover", bounty.ID, ferr)
+			}
+			return
+		}
+		_, storeErr = store.StoreProposedConvoyRaw(db, bounty.ID, string(envelope))
+	} else {
+		_, storeErr = store.StoreProposedConvoy(db, bounty.ID, tasks)
+	}
+	if storeErr != nil {
 		if ferr := store.FailBounty(db, bounty.ID, "DB Err: could not store proposed convoy: "+storeErr.Error()); ferr != nil {
 			logger.Printf("Commander task %d: FailBounty(StoreProposedConvoy: %v) failed (%v); stale-lock detector will recover", bounty.ID, storeErr, ferr)
 		}
