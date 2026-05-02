@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
 )
 
@@ -68,7 +69,15 @@ func handleDogsRun(db *sql.DB) http.HandlerFunc {
 		// dog invocation. The dashboard is single-user / single-tenant, so
 		// short-lived clients are fine — they share the same *sql.DB pool.
 		libClient := librarian.NewInProcess(db)
-		runErr := agents.RunDogByName(r.Context(), db, name, libClient, logger)
+		// D5 Phase 4 (slice α): construct the CodeArtifact client too.
+		// On constructor failure (no AWS config) keep nil — the supply-*
+		// dogs detect nil and log/skip rather than crash, so dashboard
+		// invocations of unrelated dogs still succeed.
+		caClient, caErr := codeartifact.NewInProcess(r.Context(), db)
+		if caErr != nil {
+			caClient = nil
+		}
+		runErr := agents.RunDogByName(r.Context(), db, name, libClient, caClient, logger)
 
 		resp := map[string]any{
 			"dog":    name,
