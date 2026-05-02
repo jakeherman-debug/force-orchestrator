@@ -57,6 +57,11 @@ var p6bEndpointsRequired = map[string]string{
 	"/api/override-audit":     "Bypass-comment audit log",
 	"/api/senate/chambers":    "Senate chambers (Senator roster)",
 	"/api/senate/reviews":     "Senate review log per feature",
+
+	// NB: D5.5 P4 staged-convoy routes (/api/convoys/<id>/stages...)
+	// share the existing handleConvoysSubroutes mux entry registered at
+	// `/api/convoys/`. Path fragments (`/stages`, `/advance`, `/abort`)
+	// are asserted separately below since URL IDs are templated.
 }
 
 func TestSPAWiring_ReflectionSurfaceReferencesAllP6BEndpoints(t *testing.T) {
@@ -66,6 +71,20 @@ func TestSPAWiring_ReflectionSurfaceReferencesAllP6BEndpoints(t *testing.T) {
 		t.Fatalf("read app.js: %v", err)
 	}
 	appJS := string(appJSBytes)
+
+	// D5.5 P4 — stage operator surface routes are templated in app.js
+	// (the convoy ID + stage_num are substituted at call time). The map
+	// entry above asserts the prefix is registered server-side; this
+	// extra assertion confirms app.js actually reaches the new routes.
+	for _, marker := range []string{
+		"/stages",        // GET list per convoy
+		"/advance",       // POST operator-confirm
+		"/abort",         // POST force-Failed
+	} {
+		if !strings.Contains(appJS, marker) {
+			t.Errorf("SPA wiring (D5.5 P4): app.js does not reference stage route fragment %q — staged-convoy modal will not function", marker)
+		}
+	}
 
 	indexHTMLBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/index.html"))
 	if err != nil {

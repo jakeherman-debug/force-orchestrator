@@ -74,7 +74,25 @@ var (
 	// can assert call vs no-call without inspecting Fleet_Mail rows.
 	// Production points at store.SendMail.
 	gateTimeoutSendMail = store.SendMail
+
+	// stageTransitionNotifyFn is the seam used by stage-transition pings.
+	// Default points at notifyAfterFn (the package-wide notify-after seam),
+	// but a per-feature seam lets tests instrument stage pings without
+	// also affecting supply-token-recheck. See onStageTransition.
+	stageTransitionNotifyFn = func(ctx context.Context, label string) error {
+		return notifyAfterFn(ctx, label)
+	}
 )
+
+// SetStageTransitionNotifyForTest swaps the notify-after seam used by
+// stage-transition pings and returns a restore closure. Tests assert
+// that each transition fires (or doesn't, on debounce) by counting
+// invocations on the captured stub.
+func SetStageTransitionNotifyForTest(fn func(ctx context.Context, label string) error) (restore func()) {
+	prev := stageTransitionNotifyFn
+	stageTransitionNotifyFn = fn
+	return func() { stageTransitionNotifyFn = prev }
+}
 
 // SetGateTimeoutBudgetCheckForTest swaps the budget-check seam and
 // returns a restore closure. Tests use this to force allowed=false
@@ -232,6 +250,7 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 				}
 				transitioned++
 				logger.Printf("convoy-stage-watch: stage %d (convoy=%d num=%d) Open→AllPRsMerged", s.id, s.convoyID, s.stageNum)
+				onStageTransition(ctx, db, s, store.StageStatusOpen, store.StageStatusAllPRsMerged, "all sub-PRs merged", logger)
 			}
 
 		case store.StageStatusAllPRsMerged:
@@ -241,6 +260,7 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 			}
 			transitioned++
 			logger.Printf("convoy-stage-watch: stage %d (convoy=%d num=%d) AllPRsMerged→AwaitingGate", s.id, s.convoyID, s.stageNum)
+			onStageTransition(ctx, db, s, store.StageStatusAllPRsMerged, store.StageStatusAwaitingGate, "ready for gate evaluation", logger)
 
 		case store.StageStatusAwaitingGate:
 			// Pre-flight: enforce gate timeout. If the stage has been
@@ -257,6 +277,8 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 				emitGateTimeoutEscalation(ctx, db, s, logger)
 				logger.Printf("convoy-stage-watch: stage %d (convoy=%d num=%d) AwaitingGate→Failed (gate timeout %dmin exceeded)",
 					s.id, s.convoyID, s.stageNum, s.gateTimeoutMinutes)
+				onStageTransition(ctx, db, s, store.StageStatusAwaitingGate, store.StageStatusFailed,
+					fmt.Sprintf("gate timeout %dmin exceeded", s.gateTimeoutMinutes), logger)
 				continue
 			}
 
@@ -279,6 +301,7 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 				transitioned++
 				logger.Printf("convoy-stage-watch: stage %d (convoy=%d num=%d) AwaitingGate→GatePassed (gate %q: %s)",
 					s.id, s.convoyID, s.stageNum, s.gateType, reason)
+				onStageTransition(ctx, db, s, store.StageStatusAwaitingGate, store.StageStatusGatePassed, reason, logger)
 			} else {
 				if aErr := store.AdvanceStage(db, s.id, store.StageStatusFailed); aErr != nil {
 					logger.Printf("convoy-stage-watch: stage %d AwaitingGate→Failed failed: %v", s.id, aErr)
@@ -287,6 +310,7 @@ func runConvoyStageWatch(ctx context.Context, db *sql.DB, registry *stagegate.Re
 				transitioned++
 				logger.Printf("convoy-stage-watch: stage %d (convoy=%d num=%d) AwaitingGate→Failed (gate %q: %s)",
 					s.id, s.convoyID, s.stageNum, s.gateType, reason)
+				onStageTransition(ctx, db, s, store.StageStatusAwaitingGate, store.StageStatusFailed, reason, logger)
 			}
 		}
 	}
@@ -484,4 +508,72 @@ func emitGateTimeoutEscalation(ctx context.Context, db *sql.DB, s activeStage, l
 		return
 	}
 	gateTimeoutSendMail(db, "inquisitor", "operator", subject, body, 0, store.MailTypeAlert)
+}
+
+// onStageTransition is the side-effect helper invoked after every state
+// flip the dog performs. Two concerns:
+//
+//   1. notify-after Slack ping — short, factual; debounced via SystemConfig
+//      so a re-tick doesn't re-ping. The ping is best-effort: a missing
+//      `notify-after` binary degrades to a no-op.
+//
+//   2. AuditLog row — durable record of "convoy-stage-watch-dog moved
+//      stage X from Y to Z because <reason>". The dashboard's per-stage
+//      history pane reads these via store.ListStageAuditLog.
+//
+// Debounce key shape:
+//
+//   stage_transition_notified_<convoy>_<stage>_<new_status>
+//
+// We key on the post-transition status because each transition has a
+// unique `new_status` (the dog only moves forward in the linear lifecycle).
+// A re-evaluation that would re-emit the same transition writes the same
+// key — no second ping.
+//
+// The audit log itself is NOT debounced: every actual state flip records.
+// Debounce only applies to the operator-facing Slack ping.
+func onStageTransition(ctx context.Context, db *sql.DB, s activeStage, oldStatus, newStatus, reason string,
+	logger interface{ Printf(string, ...any) }) {
+	// 1. AuditLog row — always record. The dog's actor identity is the
+	//    string the dashboard surfaces in the per-stage history pane.
+	if alErr := store.LogStageAudit(db, "convoy-stage-watch-dog", store.AuditActionStageAutoAdvance,
+		s.convoyID, s.stageNum, oldStatus, newStatus, reason, reason); alErr != nil {
+		logger.Printf("convoy-stage-watch: stage audit insert failed (convoy=%d stage=%d): %v",
+			s.convoyID, s.stageNum, alErr)
+		// Non-fatal: the state transition itself is durable. We log and
+		// proceed to the notify path so a transient AuditLog write
+		// failure doesn't also silence the operator ping.
+	}
+
+	// 2. notify-after ping — debounced per (convoy, stage, new_status).
+	debounceKey := fmt.Sprintf("stage_transition_notified_%d_%d_%s", s.convoyID, s.stageNum, newStatus)
+	if existing := store.GetConfig(db, debounceKey, ""); existing != "" {
+		// Already pinged for this transition. Skip.
+		return
+	}
+
+	gateLabel := s.gateType
+	if gateLabel == "" {
+		gateLabel = "(none)"
+	}
+	intent := s.intentText
+	if intent == "" {
+		intent = "(no intent)"
+	}
+	convoyLabel := fmt.Sprintf("#%d", s.convoyID)
+	if s.convoyName != "" {
+		convoyLabel = fmt.Sprintf("#%d \"%s\"", s.convoyID, s.convoyName)
+	}
+	label := fmt.Sprintf("Convoy %s stage %d \"%s\": %s → %s (gate: %s)",
+		convoyLabel, s.stageNum, intent, oldStatus, newStatus, gateLabel)
+
+	if nErr := stageTransitionNotifyFn(ctx, label); nErr != nil {
+		logger.Printf("convoy-stage-watch: notify-after stage-transition ping failed (convoy=%d stage=%d): %v",
+			s.convoyID, s.stageNum, nErr)
+		// Don't write the debounce key on failure — we want a retry on
+		// the next tick. notify-after is best-effort but a transient
+		// failure shouldn't permanently suppress the ping.
+		return
+	}
+	store.SetConfig(db, debounceKey, time.Now().UTC().Format(time.RFC3339))
 }

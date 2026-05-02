@@ -775,6 +775,51 @@
   </div>
 </div>
 
+<!-- ── D5.5 P4 — Staged-convoys view modal ────────────────────────────────
+     Shows the per-stage table for one convoy with gate status, timestamps,
+     and operator advance/abort buttons. Single-mode convoys render a
+     simplified one-row view. The "View history" link expands the per-stage
+     audit-log fetched from /api/convoys/<id>/stages/<num>. -->
+<div class="modal-backdrop hidden" id="stages-modal">
+  <div class="modal-box" style="width:840px;max-height:80vh;overflow:auto">
+    <div class="modal-header">
+      <h2>Stages — Convoy <span id="stages-modal-convoy"></span></h2>
+      <button class="modal-close" onclick="closeModal('stages-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="stages-modal-content"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('stages-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── D5.5 P4 — Stage advance/abort confirmation modal ──────────────────── -->
+<div class="modal-backdrop hidden" id="stage-action-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2 id="stage-action-modal-title">Advance Stage</h2>
+      <button class="modal-close" onclick="closeModal('stage-action-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p id="stage-action-modal-summary"></p>
+      <div>
+        <label class="field-label" for="stage-action-operator">Operator</label>
+        <input class="field-input" type="text" id="stage-action-operator" placeholder="your name or email">
+      </div>
+      <div style="margin-top:10px">
+        <label class="field-label" for="stage-action-reason">Reason</label>
+        <textarea class="field-textarea" id="stage-action-reason" rows="3" placeholder="Why this action?"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('stage-action-modal')">Cancel</button>
+      <button class="btn btn-primary" id="stage-action-confirm" onclick="confirmStageAction()">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Ship-it confirmation modal ──────────────────────────────────────────── -->
 <div class="modal-backdrop hidden" id="ship-modal">
   <div class="modal-box" style="width:640px">
