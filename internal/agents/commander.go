@@ -544,14 +544,25 @@ EXAMPLE:
 		}
 		return
 	}
-	if uerr := store.UpdateBountyStatus(db, bounty.ID, "AwaitingChancellorReview"); uerr != nil {
-		logger.Printf("Commander task %d: UpdateBountyStatus(AwaitingChancellorReview) failed (%v); stale-lock detector will recover", bounty.ID, uerr)
+
+	// D4 Phase 3 — Senate review hook. Routes the Feature through
+	// 'AwaitingSenateReview' when at least one active Senator exists;
+	// otherwise the original 'AwaitingChancellorReview' transition is
+	// preserved (zero-cost path per docs/next-gen-agents.md § "Senate"
+	// trigger). The hook returns the chosen status so the rest of this
+	// function (RecordTaskHistory + telemetry + operator mail) reflects
+	// the actual landing state.
+	chosenStatus, hookErr := QueueSenateReviewHook(db, bounty.ID, bounty.TargetRepo)
+	if hookErr != nil {
+		if ferr := store.FailBounty(db, bounty.ID, "DB Err: could not queue Senate review: "+hookErr.Error()); ferr != nil {
+			logger.Printf("Commander task %d: FailBounty(QueueSenateReviewHook: %v) failed (%v); stale-lock detector will recover", bounty.ID, hookErr, ferr)
+		}
 		return
 	}
 
-	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, "AwaitingChancellorReview")
+	histID := store.RecordTaskHistory(db, bounty.ID, agentName, sessionID, response, chosenStatus)
 	RecordUsageAndCost(db, histID, response)
-	logger.Printf("Task %d: plan (%d task(s)) submitted to Chancellor for review", bounty.ID, len(tasks))
+	logger.Printf("Task %d: plan (%d task(s)) submitted; status=%s", bounty.ID, len(tasks), chosenStatus)
 	telemetry.EmitEvent(telemetry.TelemetryEvent{
 		SessionID: sessionID, Agent: agentName, TaskID: bounty.ID,
 		EventType: "task_proposed",

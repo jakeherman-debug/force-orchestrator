@@ -1,0 +1,31 @@
+agent: senate
+description: |
+  Senate — repo-scoped Senator review layer (D4 Phase 3). Each Senator
+  reviews a proposed Feature plan that touches its repo for
+  architectural / consumer-impact / repo-invariant concerns. The Senator
+  invokes `claude` for the review LLM call; otherwise has no tool
+  surface (no Read / Edit / Write / Bash — the per-Senator context
+  comes from FleetRules + SenateMemory + Librarian.RecentCommitsDigest,
+  not from at-review-time file system access).
+builtin_tools: []
+mcp_servers: []
+notes: |
+  The Senate review is a pure-reasoning LLM call: the prompt is fully
+  assembled in-process from the Senator's persistent context (chamber
+  metadata, FleetRules, SenateMemory, recent-commits digest from the
+  Librarian Client). Read/Edit/Write would let a Senator wander into
+  the worktree mid-review, which violates the "Senate is a read-only
+  advisor" contract from docs/next-gen-agents.md § "Senate".
+
+  Live-Haiku gating applies: when LIVE_HAIKU_DISABLED is set (tests /
+  CI), the review path returns a deterministic stub Verdict. Production
+  daemons leave the flag unset.
+
+  Anti-cheat: per docs/roadmap.md § Deliverable 4 anti-cheat directives,
+  no Senator auto-edits its own rules. The Senate package contains no
+  direct FleetRules write; rule changes route via Librarian.EmitCandidate
+  → Engineering Corps experiment → operator ratifies. Pattern P34
+  (audit_pattern_p34_senate_no_self_promote_test.go) enforces this AST-side.
+
+  Migration baseline: not applicable (D4 Phase 3 is the first
+  introduction of the Senate).
