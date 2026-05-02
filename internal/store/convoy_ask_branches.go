@@ -103,11 +103,12 @@ func GetConvoyAskBranch(db *sql.DB, convoyID int, repo string) *ConvoyAskBranch 
 		convoy_id, repo, ask_branch, ask_branch_base_sha,
 		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
 		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
-		IFNULL(last_rebased_at, ''), IFNULL(created_at, '')
+		IFNULL(last_rebased_at, ''), IFNULL(created_at, ''),
+		IFNULL(stage_id, 0)
 		FROM ConvoyAskBranches WHERE convoy_id = ? AND repo = ?`, convoyID, repo).
 		Scan(&c.ConvoyID, &c.Repo, &c.AskBranch, &c.AskBranchBaseSHA,
 			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
-			&c.LastRebasedAt, &c.CreatedAt)
+			&c.LastRebasedAt, &c.CreatedAt, &c.StageID)
 	if err != nil {
 		return nil
 	}
@@ -120,7 +121,8 @@ func ListConvoyAskBranches(db *sql.DB, convoyID int) []ConvoyAskBranch {
 		convoy_id, repo, ask_branch, ask_branch_base_sha,
 		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
 		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
-		IFNULL(last_rebased_at, ''), IFNULL(created_at, '')
+		IFNULL(last_rebased_at, ''), IFNULL(created_at, ''),
+		IFNULL(stage_id, 0)
 		FROM ConvoyAskBranches WHERE convoy_id = ? ORDER BY repo ASC`, convoyID)
 	if err != nil {
 		return nil
@@ -131,12 +133,48 @@ func ListConvoyAskBranches(db *sql.DB, convoyID int) []ConvoyAskBranch {
 		var c ConvoyAskBranch
 		if err := rows.Scan(&c.ConvoyID, &c.Repo, &c.AskBranch, &c.AskBranchBaseSHA,
 			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
-			&c.LastRebasedAt, &c.CreatedAt); err == nil {
+			&c.LastRebasedAt, &c.CreatedAt, &c.StageID); err == nil {
 			out = append(out, c)
 		}
 	}
 	if rErr := rows.Err(); rErr != nil {
 		log.Printf("convoy_ask_branches.go:ListConvoyAskBranches: rows iter error: %v", rErr)
+	}
+	return out
+}
+
+// ListConvoyAskBranchesByStage returns all ask-branch rows scoped to a single
+// stage of a convoy. Used by D5.5 P2 β ConvoyReview per-stage scoping: a
+// staged convoy's review at stage N walks only stage-N's ask-branches, never
+// the cross-stage union. Returns an empty slice if stageID is zero or no
+// matching rows exist.
+func ListConvoyAskBranchesByStage(db *sql.DB, convoyID, stageID int) []ConvoyAskBranch {
+	if stageID <= 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT
+		convoy_id, repo, ask_branch, ask_branch_base_sha,
+		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
+		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
+		IFNULL(last_rebased_at, ''), IFNULL(created_at, ''),
+		IFNULL(stage_id, 0)
+		FROM ConvoyAskBranches WHERE convoy_id = ? AND stage_id = ?
+		ORDER BY repo ASC`, convoyID, stageID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []ConvoyAskBranch
+	for rows.Next() {
+		var c ConvoyAskBranch
+		if err := rows.Scan(&c.ConvoyID, &c.Repo, &c.AskBranch, &c.AskBranchBaseSHA,
+			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
+			&c.LastRebasedAt, &c.CreatedAt, &c.StageID); err == nil {
+			out = append(out, c)
+		}
+	}
+	if rErr := rows.Err(); rErr != nil {
+		log.Printf("convoy_ask_branches.go:ListConvoyAskBranchesByStage: rows iter error: %v", rErr)
 	}
 	return out
 }
@@ -148,7 +186,8 @@ func ListAllConvoyAskBranches(db *sql.DB) []ConvoyAskBranch {
 		convoy_id, repo, ask_branch, ask_branch_base_sha,
 		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
 		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
-		IFNULL(last_rebased_at, ''), IFNULL(created_at, '')
+		IFNULL(last_rebased_at, ''), IFNULL(created_at, ''),
+		IFNULL(stage_id, 0)
 		FROM ConvoyAskBranches ORDER BY convoy_id, repo`)
 	if err != nil {
 		return nil
@@ -159,7 +198,7 @@ func ListAllConvoyAskBranches(db *sql.DB) []ConvoyAskBranch {
 		var c ConvoyAskBranch
 		if err := rows.Scan(&c.ConvoyID, &c.Repo, &c.AskBranch, &c.AskBranchBaseSHA,
 			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
-			&c.LastRebasedAt, &c.CreatedAt); err == nil {
+			&c.LastRebasedAt, &c.CreatedAt, &c.StageID); err == nil {
 			out = append(out, c)
 		}
 	}

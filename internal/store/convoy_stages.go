@@ -210,6 +210,80 @@ func validateStageTransition(curStatus, newStatus string) error {
 	return nil
 }
 
+// CurrentInFlightStage returns the convoy's currently-active stage — the one
+// whose ConvoyReview pass should run against. "In flight" means the stage is
+// past Pending (the planner has opened it for work) and before Verified
+// (the gate hasn't yet passed). For a single-stage convoy this is the
+// implicit stage 1 (which the forward-compat migration created in 'Open'
+// status). For staged convoys with multiple stages, exactly one stage at a
+// time is in flight under the strict strategy.
+//
+// Returns the stage with the lowest stage_num among rows whose status is in
+// {Open, AllPRsMerged, AwaitingGate, GatePassed}. If no such stage exists
+// (every stage already Verified, or every stage still Pending/Failed), the
+// fallback is the lowest-numbered non-terminal stage. Returns an error only
+// on DB failure; "no stages at all" returns an explicit error so callers can
+// log + degrade rather than silently choose an arbitrary scope.
+func CurrentInFlightStage(db *sql.DB, convoyID int) (ConvoyStage, error) {
+	if convoyID <= 0 {
+		return ConvoyStage{}, fmt.Errorf("CurrentInFlightStage: convoyID must be > 0 (got %d)", convoyID)
+	}
+	// Preferred: the lowest-numbered stage in an "in flight" status. The
+	// strict strategy guarantees at most one stage occupies these states at
+	// a time, but ORDER BY stage_num makes the choice deterministic if two
+	// rows ever co-occur (e.g. mid-transition, or under merge_parallel
+	// once it lands).
+	rows, err := db.Query(`SELECT
+		id, convoy_id, stage_num, IFNULL(intent_text, ''), status,
+		gate_type, IFNULL(gate_config_json, '{}'), gate_timeout_minutes,
+		IFNULL(opened_at, ''), IFNULL(all_prs_merged_at, ''),
+		IFNULL(gate_passed_at, ''), IFNULL(completed_at, '')
+		FROM ConvoyStages
+		WHERE convoy_id = ?
+		  AND status IN (?, ?, ?, ?)
+		ORDER BY stage_num ASC LIMIT 1`,
+		convoyID,
+		StageStatusOpen, StageStatusAllPRsMerged, StageStatusAwaitingGate, StageStatusGatePassed)
+	if err != nil {
+		return ConvoyStage{}, fmt.Errorf("CurrentInFlightStage: query convoy=%d: %w", convoyID, err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		s, scanErr := scanStage(rows)
+		if scanErr != nil {
+			return ConvoyStage{}, fmt.Errorf("CurrentInFlightStage: scan convoy=%d: %w", convoyID, scanErr)
+		}
+		return s, nil
+	}
+
+	// Fallback: lowest-numbered non-terminal stage (Pending). Convoys whose
+	// stage 1 is still Pending (planner just emitted them) need a scope too
+	// so a too-eager ConvoyReview doesn't crash; the per-stage scope still
+	// degrades correctly because the stage's ask-branches aren't open yet.
+	fallback, err := db.Query(`SELECT
+		id, convoy_id, stage_num, IFNULL(intent_text, ''), status,
+		gate_type, IFNULL(gate_config_json, '{}'), gate_timeout_minutes,
+		IFNULL(opened_at, ''), IFNULL(all_prs_merged_at, ''),
+		IFNULL(gate_passed_at, ''), IFNULL(completed_at, '')
+		FROM ConvoyStages
+		WHERE convoy_id = ?
+		  AND status NOT IN (?, ?)
+		ORDER BY stage_num ASC LIMIT 1`,
+		convoyID, StageStatusVerified, StageStatusFailed)
+	if err != nil {
+		return ConvoyStage{}, fmt.Errorf("CurrentInFlightStage: fallback query convoy=%d: %w", convoyID, err)
+	}
+	defer fallback.Close()
+	if fallback.Next() {
+		s, scanErr := scanStage(fallback)
+		if scanErr != nil {
+			return ConvoyStage{}, fmt.Errorf("CurrentInFlightStage: fallback scan convoy=%d: %w", convoyID, scanErr)
+		}
+		return s, nil
+	}
+	return ConvoyStage{}, fmt.Errorf("CurrentInFlightStage: convoy=%d has no in-flight or pending stages", convoyID)
+}
+
 // GetRepositoryReleaseLabelPattern returns the per-repo regex used by the
 // `release_label_present` gate (D5.5 P3), or '' if the repo doesn't use
 // release labels. Returns an error if the repo is not registered.

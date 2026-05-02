@@ -196,6 +196,12 @@ type ConvoyAskBranch struct {
 	ShippedAt        string
 	LastRebasedAt    string
 	CreatedAt        string
+	// StageID (D5.5) — points at the ConvoyStages.id this ask-branch belongs to.
+	// Pre-D5.5 rows are backfilled by runMigrations to the implicit single-stage
+	// stage 1 for that convoy. Zero means "stage_id IS NULL" — used on freshly-
+	// inserted rows that haven't yet been pinned to a stage. ConvoyReview's
+	// per-stage scoping (D5.5 P2 β) filters by this column for staged convoys.
+	StageID int
 }
 
 // ── Ask-branch sub-PR ────────────────────────────────────────────────────────

@@ -54,9 +54,19 @@ import (
 )
 
 // senateReviewPayload is the JSON shape QueueSenateReview emits.
+//
+// D5.5 P2 β extends this shape with optional convoy_id + stage_id fields,
+// emitted by store.QueueStageSenateReview for per-stage convoy reviews.
+// When stage_id is non-zero the runSenateReviewTask handler routes through
+// the stage-scoped path (read intent + diff for that stage) rather than
+// the Feature-scoped path. The shapes are mutually exclusive: feature_id
+// is set for Commander-emitted plan reviews; stage_id is set for
+// ConvoyReview-emitted per-stage reviews.
 type senateReviewPayload struct {
 	FeatureID  int    `json:"feature_id"`
 	TargetRepo string `json:"target_repo"`
+	ConvoyID   int    `json:"convoy_id,omitempty"`
+	StageID    int    `json:"stage_id,omitempty"`
 }
 
 // senatorOnboardingPayload is the JSON shape QueueSenatorOnboarding emits.
@@ -140,6 +150,20 @@ func runSenateReviewTask(ctx context.Context, db *sql.DB, agentName string, b *s
 		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
 		return
 	}
+
+	// D5.5 P2 β — per-stage Senate review path. Distinct from the
+	// Feature-scoped review below: this variant carries (convoy_id,
+	// stage_id) and is queued by ConvoyReview at each stage's
+	// DraftPROpen. The full per-Senator memory-driven advice surface
+	// is reserved for a follow-up slice; this path records the
+	// queueing event in the audit trail and completes without firing
+	// LLMs, so the hook is wired and observable end-to-end without
+	// burning budget on stub Senator content.
+	if p.StageID > 0 {
+		runStageScopedSenateReview(ctx, db, agentName, b, p, logger)
+		return
+	}
+
 	if p.FeatureID == 0 {
 		msg := "SenateReview payload missing feature_id"
 		if fbErr := store.FailBounty(db, b.ID, msg); fbErr != nil {
@@ -260,6 +284,50 @@ func runSenateReviewTask(ctx context.Context, db *sql.DB, agentName string, b *s
 	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
 	if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
 		logger.Printf("Task %d: SenateReview Completed status transition failed: %v", b.ID, err)
+	}
+}
+
+// runStageScopedSenateReview handles the D5.5 P2 β per-stage Senate review
+// path: a SenateReview task whose payload carries convoy_id + stage_id (no
+// feature_id) is one of these. The handler records the stage's intent in
+// the audit log and completes the task. Full per-Senator memory-driven
+// advice for stage scopes is reserved for a follow-up slice — wiring it
+// here would require fanning the affected-Senator router across stage-
+// scoped repo sets, which is a non-trivial extension. Today's contract is
+// "the hook fires, the task lands, the audit trail records the stage";
+// that's the minimum the per-stage Senate hook needs to be observable
+// end-to-end and to unblock the rest of D5.5.
+//
+// Errors are non-fatal — the bounty completes either way so the dog
+// doesn't loop on the SenateReview row.
+func runStageScopedSenateReview(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, p senateReviewPayload, logger interface{ Printf(string, ...any) }) {
+	_ = ctx
+	logger.Printf("Task %d: stage-scoped SenateReview claimed (convoy=%d stage=%d)",
+		b.ID, p.ConvoyID, p.StageID)
+
+	stage, err := store.GetStage(db, p.StageID)
+	if err != nil {
+		// Stage row missing — the convoy may have been cleaned up. Log,
+		// audit the anomaly, and complete; never fail the bounty since
+		// retrying won't help.
+		logger.Printf("Task %d: GetStage(%d) failed: %v — completing without action", b.ID, p.StageID, err)
+		store.LogAudit(db, agentName, "stage-senate-review-skipped",
+			b.ID, fmt.Sprintf("stage %d not found: %v", p.StageID, err))
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: SenateReview(stage) Completed status transition failed: %v", b.ID, upErr)
+		}
+		return
+	}
+
+	// Audit-trail the stage scope. Operator dashboards can join this
+	// against ConvoyReviewCycles + ConvoyStages to confirm the per-stage
+	// review hook actually fired at the expected moment.
+	store.LogAudit(db, agentName, "stage-senate-review",
+		b.ID, fmt.Sprintf("convoy=%d stage_num=%d intent=%q status=%s",
+			p.ConvoyID, stage.StageNum, stage.IntentText, stage.Status))
+
+	if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+		logger.Printf("Task %d: SenateReview(stage) Completed status transition failed: %v", b.ID, upErr)
 	}
 }
 
