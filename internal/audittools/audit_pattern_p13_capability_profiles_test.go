@@ -379,8 +379,9 @@ func collectLoadProfileNames(t *testing.T, root string) map[string]struct{} {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".build-worktrees" || name == ".force-worktrees" ||
-				name == "vendor" || name == ".git" || name == "node_modules" {
+			if name == ".build-worktrees" || name == ".force-worktrees" || name == ".claude" ||
+				name == ".fix-worktrees" || name == "vendor" || name == ".git" ||
+				name == "node_modules" {
 				return filepath.SkipDir
 			}
 			return nil

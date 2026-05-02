@@ -131,9 +131,9 @@ func TestPattern_P11_ExecCommandsUseContext(t *testing.T) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".build-worktrees" || name == ".force-worktrees" ||
-				name == "vendor" || name == ".git" || name == "node_modules" ||
-				name == "testdata" {
+			if name == ".build-worktrees" || name == ".force-worktrees" || name == ".claude" ||
+				name == ".fix-worktrees" || name == "vendor" || name == ".git" ||
+				name == "node_modules" || name == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -346,8 +346,9 @@ func TestPattern_P11_AgentCodeBackgroundCtx(t *testing.T) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".build-worktrees" || name == ".force-worktrees" ||
-				name == "vendor" || name == ".git" || name == "testdata" {
+			if name == ".build-worktrees" || name == ".force-worktrees" || name == ".claude" ||
+				name == ".fix-worktrees" || name == "vendor" || name == ".git" ||
+				name == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil
