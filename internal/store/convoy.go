@@ -22,13 +22,32 @@ func ConvoyProgress(db *sql.DB, convoyID int) (completed, total int) {
 }
 
 // CreateConvoy creates a named convoy and returns its ID.
+//
+// D5.5: every newly-created convoy is single-mode by default (legacy shape).
+// To keep the invariant "every convoy has at least one ConvoyStage row" true
+// at all times — not just after a daemon restart that re-runs the
+// forward-compat migration — we also insert a stage 1 row in status='Open'
+// with gate_type=NULL, mirroring exactly what runMigrations does for
+// pre-existing convoys.
 func CreateConvoy(db *sql.DB, name string) (int, error) {
 	res, err := db.Exec(`INSERT INTO Convoys (name, status) VALUES (?, 'Active')`, name)
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return int(id), nil
+	idRaw, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("CreateConvoy: LastInsertId: %w", err)
+	}
+	id := int(idRaw)
+	// Forward-compat invariant: every single-mode convoy carries a single
+	// Open stage 1 row with NULL gate. Future P2 staged-convoy constructors
+	// will use a different code path to insert their stage list explicitly.
+	if _, err := db.Exec(`INSERT INTO ConvoyStages
+		(convoy_id, stage_num, intent_text, status, gate_type, gate_config_json, opened_at)
+		VALUES (?, 1, '', 'Open', NULL, '{}', datetime('now'))`, id); err != nil {
+		return 0, fmt.Errorf("CreateConvoy: insert stage 1 for convoy %d: %w", id, err)
+	}
+	return id, nil
 }
 
 // ApproveConvoyTasks transitions all Planned tasks in a convoy to Pending.
@@ -115,6 +134,7 @@ func ListConvoys(db *sql.DB) []Convoy {
 		IFNULL(ask_branch, ''), IFNULL(ask_branch_base_sha, ''),
 		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
 		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
+		IFNULL(staging_mode, 'single'), IFNULL(staging_strategy, 'strict'),
 		created_at
 		FROM Convoys ORDER BY created_at DESC`)
 	if err != nil {
@@ -130,6 +150,7 @@ func ListConvoys(db *sql.DB) []Convoy {
 		if err := rows.Scan(&c.ID, &c.Name, &c.Status, &coordinated,
 			&c.AskBranch, &c.AskBranchBaseSHA,
 			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
+			&c.StagingMode, &c.StagingStrategy,
 			&c.CreatedAt); err != nil {
 			log.Printf("ListConvoys: scan error: %v", err)
 			return nil
@@ -154,11 +175,13 @@ func GetConvoy(db *sql.DB, convoyID int) *Convoy {
 		IFNULL(ask_branch, ''), IFNULL(ask_branch_base_sha, ''),
 		IFNULL(draft_pr_url, ''), IFNULL(draft_pr_number, 0),
 		IFNULL(draft_pr_state, ''), IFNULL(shipped_at, ''),
+		IFNULL(staging_mode, 'single'), IFNULL(staging_strategy, 'strict'),
 		created_at
 		FROM Convoys WHERE id = ?`, convoyID).
 		Scan(&c.ID, &c.Name, &c.Status, &coordinated,
 			&c.AskBranch, &c.AskBranchBaseSHA,
 			&c.DraftPRURL, &c.DraftPRNumber, &c.DraftPRState, &c.ShippedAt,
+			&c.StagingMode, &c.StagingStrategy,
 			&c.CreatedAt)
 	if err != nil {
 		return nil

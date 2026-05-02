@@ -70,6 +70,10 @@ func InitHolocronDSN(dsn string) *sql.DB {
 // any child rows that reference Repositories.name. UPSERT preserves row
 // identity, so Repositories.name is effectively immutable under
 // re-registration.
+//
+// release_label_pattern (D5.5) is naturally preserved by UPSERT because
+// the ON CONFLICT clause only updates local_path + description; any
+// operator-set pattern survives re-registration without explicit threading.
 func AddRepo(db *sql.DB, name, path, desc string) {
 	// D2 T1-4: New repos default to mode='read_only'. Operators promote to
 	// 'write' via the dashboard's promote-to-write button, which writes an
@@ -113,11 +117,12 @@ func GetRepo(db *sql.DB, name string) *Repository {
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
 		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
-		IFNULL(mode, 'read_only')
+		IFNULL(mode, 'read_only'), IFNULL(release_label_pattern, '')
 		FROM Repositories WHERE name = ?`, name).
 		Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
-			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason, &r.Mode)
+			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason,
+			&r.Mode, &r.ReleaseLabelPattern)
 	if err != nil {
 		return nil
 	}
@@ -132,7 +137,7 @@ func ListRepos(db *sql.DB) []Repository {
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
 		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
-		IFNULL(mode, 'read_only')
+		IFNULL(mode, 'read_only'), IFNULL(release_label_pattern, '')
 		FROM Repositories ORDER BY name`)
 	if err != nil {
 		return nil
@@ -146,7 +151,8 @@ func ListRepos(db *sql.DB) []Repository {
 		)
 		if err := rows.Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
-			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason, &r.Mode); err != nil {
+			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason,
+			&r.Mode, &r.ReleaseLabelPattern); err != nil {
 			log.Printf("ListRepos: scan error: %v", err)
 			continue
 		}
