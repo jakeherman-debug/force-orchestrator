@@ -545,6 +545,9 @@ func main() {
 	case "render-rules":
 		cmdRenderRules(ctx, db, os.Args[2:])
 
+	case "onboard":
+		cmdOnboard(ctx, db, os.Args[2:])
+
 	case "experiment":
 		cmdExperiment(ctx, db, os.Args[2:])
 

@@ -223,16 +223,17 @@ func (c *inProcessClient) BootstrapSenatorRules(ctx context.Context, repo string
 	if !liveHaikuEnabled() {
 		return bootstrapSenatorRulesStub(c, ctx, repo)
 	}
-	// Production path (D4 Phase 3 wiring). Assemble the per-Senator
-	// onboarding prompt — recent-commits digest + README sample +
-	// repo-name — and call Claude through the transcript-capturing
-	// wrapper. The librarian's capability profile is empty (pure
-	// reasoning), so the AllowedTools/DisallowedTools/MCPConfig args
-	// are empty by design (Pattern P13 allowlist for this very file).
-	digest, _ := c.RecentCommitsDigest(ctx, repo, 30*24*time.Hour)
-	readmeSample := readRepoREADMESample(c.db, repo)
+	// Production path (D4 Phase 3 wiring; D6 anti-cheat refactor).
+	// BuildRepoDigest is the shared knowledge-synthesis primitive
+	// consumed by both this Senator-bootstrap path and the
+	// `force onboard` CLI. Calling it here (instead of duplicating
+	// the README + commits + ... assembly) is the call-site-level
+	// guarantee that both consumers move in lockstep — the AST
+	// audit (Pattern P38) walks BOTH this file and cmd/force/onboard.go
+	// and asserts each references BuildRepoDigest.
+	repoDigest, _ := c.BuildRepoDigest(ctx, repo)
 	systemPrompt := bootstrapSenatorRulesSystemPrompt
-	userPrompt := buildBootstrapSenatorRulesUserPrompt(repo, digest, readmeSample)
+	userPrompt := buildBootstrapSenatorRulesUserPrompt(repo, repoDigest.RecentCommits, repoDigest.READMESample)
 	out, err := claude.CallWithTranscript(ctx, claude.CallDescriptor{
 		Agent:         "librarian",
 		PromptVersion: "bootstrap-senator-rules-v1",
@@ -454,6 +455,7 @@ var _ interface {
 	RecentCommitsDigest(context.Context, string, time.Duration) (CommitsDigest, error)
 	BootstrapSenatorRules(context.Context, string) ([]CandidateRule, error)
 	RefreshSenatorMemoryDigest(context.Context, string) (SenatorDigest, error)
+	BuildRepoDigest(context.Context, string) (RepoDigest, error)
 } = (*inProcessClient)(nil)
 
 // silences unused-import lint when sql is the only use; sql is

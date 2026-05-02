@@ -755,6 +755,9 @@ Paired Runs / Engineering Corps (D3):
   proposed-features archive <id> Soft-archive a proposal
   proposed-features suppress <fingerprint> --rationale "..." [--until <date>]
   render-rules [--check]         Regenerate CLAUDE.md / FIX-LOG.md / docs/* from FleetRules
+  onboard <repo-spec> [--refresh]
+                                 Synthesize ONBOARDING.md for a registered repo or on-disk path
+                                 (D6 — reuses the Senator bootstrap pipeline's digest assembly)
 
 Operator decision surfaces (Phase 6 — Pulse / Briefing / Reflection / Ask):
   decide <decision-id> approve|reject
