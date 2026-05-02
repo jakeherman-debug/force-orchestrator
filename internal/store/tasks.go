@@ -96,6 +96,14 @@ func GetBounty(db *sql.DB, id int) (*Bounty, error) {
 // stall (BountyBoard table dropped, migration gap, FK constraint surprise)
 // is observable to the operator via the daemon log, rather than looking
 // identical to "queue empty."
+//
+// D5.5 P2 γ — Pattern P-StageGate (No astromech pre-staging): stage-scoped
+// tasks (BountyBoard.stage_id IS NOT NULL) are filtered out when their
+// owning ConvoyStages.status is still 'Pending'. The stage transitions to
+// 'Open' (or beyond) before any astromech can hold a worktree on its work.
+// Tasks with stage_id IS NULL (legacy / single-mode convoys) are unaffected
+// — the NULL branch of the OR short-circuits before the JOIN materialises.
+// The existing idx_bounty_stage_id index keeps the lookup point-and-shoot.
 func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) {
 	var b Bounty
 	// D2 T1-1: filter out spend_suspended rows. dogTaskSpendWatch sets the
@@ -117,6 +125,10 @@ func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) 
 		  AND (convoy_id = 0 OR NOT EXISTS (
 		    SELECT 1 FROM FeatureBlockers fb
 		    WHERE fb.blocked_convoy_id = BountyBoard.convoy_id AND fb.resolved_at IS NULL
+		  ))
+		  AND (stage_id IS NULL OR EXISTS (
+		    SELECT 1 FROM ConvoyStages cs
+		    WHERE cs.id = BountyBoard.stage_id AND cs.status != 'Pending'
 		  ))
 		ORDER BY priority DESC, id ASC
 		LIMIT 1`, taskType).
@@ -161,6 +173,10 @@ func ClaimBounty(db *sql.DB, taskType string, agentName string) (*Bounty, bool) 
 // for the legacy-row case above.
 func ClaimBountyForWrite(db *sql.DB, taskType string, agentName string) (*Bounty, bool) {
 	var b Bounty
+	// D5.5 P2 γ — Pattern P-StageGate: same stage_id-based gating that
+	// ClaimBounty applies. Astromechs running write-mode are still
+	// astromechs and must respect the "no pre-staging" anti-cheat
+	// directive. See ClaimBounty's docstring for the full rationale.
 	err := db.QueryRow(`
 		SELECT id, parent_id, target_repo, type, status, payload, convoy_id, checkpoint,
 		       priority, IFNULL(task_timeout,0)
@@ -181,6 +197,10 @@ func ClaimBountyForWrite(db *sql.DB, taskType string, agentName string) (*Bounty
 		  AND (convoy_id = 0 OR NOT EXISTS (
 		    SELECT 1 FROM FeatureBlockers fb
 		    WHERE fb.blocked_convoy_id = BountyBoard.convoy_id AND fb.resolved_at IS NULL
+		  ))
+		  AND (stage_id IS NULL OR EXISTS (
+		    SELECT 1 FROM ConvoyStages cs
+		    WHERE cs.id = BountyBoard.stage_id AND cs.status != 'Pending'
 		  ))
 		ORDER BY priority DESC, id ASC
 		LIMIT 1`, taskType).
