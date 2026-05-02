@@ -381,9 +381,13 @@ func TestListDogs(t *testing.T) {
 	// dogs (librarian-dedup-watch / -quality-recompute / -conflict-watch /
 	// -hypothesis-emit + claude-md-drift-watch); D4 Phase 3 added
 	// senate-refresh (weekly per-Senator memory digest); D5 Phase 4
-	// (slice α) added supply-allowlist-refresh (daily).
-	if len(dogs) != 33 {
-		t.Errorf("expected 33 built-in dogs (D5-P4-α added supply-allowlist-refresh), got %d", len(dogs))
+	// added two SUPPLY dogs: supply-allowlist-refresh (daily, populates
+	// SystemConfig.supply_allowlist_<eco> from `aws codeartifact
+	// list-packages` for SUPPLY-002) and supply-token-recheck (every 30
+	// min — probes CodeArtifact health, replays SUPPLY-* deferrals on
+	// recovery via supplydeferral.ReplayPendingDeferrals).
+	if len(dogs) != 34 {
+		t.Errorf("expected 34 built-in dogs (D5-P4 added supply-allowlist-refresh + supply-token-recheck), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -398,8 +402,8 @@ func TestListDogs(t *testing.T) {
 		"claude-md-drift-watch",
 		// D4 Phase 3 — senate-refresh.
 		"senate-refresh",
-		// D5 Phase 4 (slice α) — supply-allowlist-refresh.
-		"supply-allowlist-refresh"} {
+		// D5 Phase 4 — SUPPLY dogs (α + β).
+		"supply-allowlist-refresh", "supply-token-recheck"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

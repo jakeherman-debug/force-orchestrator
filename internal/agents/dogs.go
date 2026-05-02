@@ -135,10 +135,10 @@ var dogCooldowns = map[string]time.Duration{
 	// refresh" — invariants don't drift daily, so the digest cost
 	// amortises well at one pass per week.
 	"senate-refresh": 7 * 24 * time.Hour,
-	// D5 Phase 4 (slice α) — supply-allowlist-refresh. Walks the
-	// per-ecosystem CodeArtifact repository (npm-prod / pypi-prod /
-	// rubygems-prod / maven-prod), pulls the org's own pull-history
-	// via aws codeartifact list-packages, and writes the sorted
+	// D5 Phase 4 — supply-allowlist-refresh. Walks the per-ecosystem
+	// CodeArtifact repository (npm-prod / pypi-prod / rubygems-prod /
+	// maven-prod), pulls the org's own pull-history via
+	// aws codeartifact list-packages, and writes the sorted
 	// newline-joined name set into SystemConfig.supply_allowlist_<eco>
 	// for SUPPLY-002 typosquat detection. Daily cadence — the org's
 	// pull history is slow-moving and ListPackages cost scales with
@@ -146,6 +146,14 @@ var dogCooldowns = map[string]time.Duration{
 	// (the next tick retries); other errors are aggregated via
 	// errors.Join so a single broken ecosystem doesn't sink the rest.
 	"supply-allowlist-refresh": 24 * time.Hour,
+	// D5 Phase 4 — supply-token-recheck. Probes CodeArtifact health
+	// every 30 min; on recovery, replays SUPPLY-* deferrals (rows with
+	// disposition='token_expired') against the branch tip's current
+	// manifest. 30-min cadence balances "operator notices token expiry
+	// quickly" with "don't burn AWS DescribeDomain calls during a long
+	// outage" — debounce in dogSupplyTokenRecheck handles repeated
+	// failures across cycles without spamming the operator.
+	"supply-token-recheck": 30 * time.Minute,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -197,12 +205,12 @@ var dogOrder = []string{
 	// dogs so the digest reads from the post-dedup, post-quality view
 	// of FleetMemory. Independent of the per-Senator review path.
 	"senate-refresh",
-	// D5 Phase 4 (slice α) — supply-allowlist-refresh populates the
+	// D5 Phase 4 — SUPPLY dogs. supply-allowlist-refresh populates the
 	// SUPPLY-002 typosquat allowlist from CodeArtifact's per-ecosystem
-	// repositories. Ordered last because it has no dependency on any
-	// other dog and its only persistence target is SystemConfig (no
-	// FleetMemory / convoy / task interaction).
+	// repositories. supply-token-recheck runs after to replay any
+	// in-flight ISBReview deferrals once token health recovers.
 	"supply-allowlist-refresh",
+	"supply-token-recheck",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -398,6 +406,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogSenateRefresh(ctx, db, lib, logger)
 	case "supply-allowlist-refresh":
 		return dogSupplyAllowlistRefresh(ctx, db, ca, logger)
+	case "supply-token-recheck":
+		return dogSupplyTokenRecheck(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
