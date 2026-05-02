@@ -118,43 +118,10 @@ func (d DatadogMetricThreshold) Evaluate(ctx context.Context, _ *sql.DB, stage S
 	return true, fmt.Sprintf("datadog: %q = %.4f at %s; %s %.4f passed", cfg.MetricQuery, value, at.Format(time.RFC3339), cfg.Comparator, cfg.Threshold), nil
 }
 
-// validComparator returns true if c is one of lt, gt, eq, lte, gte.
-func validComparator(c string) bool {
-	switch c {
-	case "lt", "gt", "eq", "lte", "gte":
-		return true
-	}
-	return false
-}
-
-// compareValue compares value against threshold using comparator.
-// "eq" tolerance: treat values within 1e-9 as equal — bare float ==
-// comparison is unreliable for any value that's been arithmetic'd, and
-// 1e-9 is well below the resolution of any sane Datadog metric.
-func compareValue(comparator string, value, threshold float64) bool {
-	switch comparator {
-	case "lt":
-		return value < threshold
-	case "gt":
-		return value > threshold
-	case "lte":
-		return value <= threshold
-	case "gte":
-		return value >= threshold
-	case "eq":
-		return absFloat(value-threshold) < 1e-9
-	}
-	return false
-}
-
-// absFloat returns the absolute value of x. Local helper rather than
-// importing math just for math.Abs; keeps the build graph slim.
-func absFloat(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
+// validComparator + compareValue are defined in comparator.go (shared
+// across datadog_metric_threshold + databricks_query_threshold; canonical
+// home for threshold-gate comparator helpers, including the 1e-9 eq
+// tolerance documented there).
 
 // RegisterDatadogGate registers the datadog_metric_threshold gate against
 // the provided registry. Slice δ owns this helper; slice ε will add a
