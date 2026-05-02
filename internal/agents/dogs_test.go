@@ -385,9 +385,11 @@ func TestListDogs(t *testing.T) {
 	// SystemConfig.supply_allowlist_<eco> from `aws codeartifact
 	// list-packages` for SUPPLY-002) and supply-token-recheck (every 30
 	// min — probes CodeArtifact health, replays SUPPLY-* deferrals on
-	// recovery via supplydeferral.ReplayPendingDeferrals).
-	if len(dogs) != 34 {
-		t.Errorf("expected 34 built-in dogs (D5-P4 added supply-allowlist-refresh + supply-token-recheck), got %d", len(dogs))
+	// recovery via supplydeferral.ReplayPendingDeferrals); D5.5 Phase 1
+	// added convoy-stage-watch (5-min — advances ConvoyStages state
+	// machine, evaluates gates via stagegate.Registry).
+	if len(dogs) != 35 {
+		t.Errorf("expected 35 built-in dogs (D5.5-P1 added convoy-stage-watch), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -403,7 +405,9 @@ func TestListDogs(t *testing.T) {
 		// D4 Phase 3 — senate-refresh.
 		"senate-refresh",
 		// D5 Phase 4 — SUPPLY dogs (α + β).
-		"supply-allowlist-refresh", "supply-token-recheck"} {
+		"supply-allowlist-refresh", "supply-token-recheck",
+		// D5.5 Phase 1 — staged-convoy stage-watch.
+		"convoy-stage-watch"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}
