@@ -152,7 +152,12 @@ func runSenateReviewTask(ctx context.Context, db *sql.DB, agentName string, b *s
 	if err != nil || feature == nil {
 		msg := fmt.Sprintf("SenateReview: source Feature %d not found: %v", p.FeatureID, err)
 		logger.Printf("Task %d: %s", b.ID, msg)
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already terminated (source
+		// Feature vanished); if this status flip fails, the SenateReview
+		// row will be recovered by the stale-lock detector. Non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: SenateReview Completed status transition failed (post feature-not-found): %v", b.ID, upErr)
+		}
 		return
 	}
 	// Idempotence: if the feature is no longer in AwaitingSenateReview,
@@ -161,7 +166,12 @@ func runSenateReviewTask(ctx context.Context, db *sql.DB, agentName string, b *s
 	if feature.Status != "AwaitingSenateReview" {
 		logger.Printf("Task %d: Feature %d already in status %q (not AwaitingSenateReview) — Senate completing without re-review",
 			b.ID, p.FeatureID, feature.Status)
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already succeeded (some
+		// other path advanced the Feature); if this status flip fails,
+		// the audit-trail flip is non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: SenateReview Completed status transition failed (post idempotent-skip): %v", b.ID, upErr)
+		}
 		return
 	}
 
@@ -182,7 +192,12 @@ func runSenateReviewTask(ctx context.Context, db *sql.DB, agentName string, b *s
 		if _, advErr := store.UpdateBountyStatusFrom(db, p.FeatureID, "AwaitingSenateReview", "AwaitingChancellorReview"); advErr != nil {
 			logger.Printf("Task %d: senate fast-advance UpdateBountyStatusFrom failed: %v", b.ID, advErr)
 		}
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already succeeded (the
+		// fast-advance UpdateBountyStatusFrom above is the load-bearing
+		// transition); if this status flip fails, it's non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: SenateReview Completed status transition failed (post fast-advance): %v", b.ID, upErr)
+		}
 		return
 	}
 
@@ -226,7 +241,13 @@ func runSenateReviewTask(ctx context.Context, db *sql.DB, agentName string, b *s
 		// would re-use the stale plan.
 		store.SetProposedConvoyStatus(db, p.FeatureID, "cancelled")
 		telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
-		_ = store.UpdateBountyStatus(db, b.ID, "Completed")
+		// best-effort status update — main work already succeeded
+		// (rejection routed via ReturnTaskForRework + audit + telemetry +
+		// proposed-convoy cancel); if this status flip fails, it's
+		// non-critical.
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: SenateReview Completed status transition failed (post senate-blocked): %v", b.ID, upErr)
+		}
 		return
 	}
 
