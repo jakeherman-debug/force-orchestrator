@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS Convoys (
     draft_pr_number       INTEGER DEFAULT 0,
     draft_pr_state        TEXT    DEFAULT '',    -- 'Open' | 'Merged' | 'Closed'
     shipped_at            TEXT    DEFAULT '',    -- set when draft PR is merged
+    staging_mode          TEXT    NOT NULL DEFAULT 'single',  -- 'single' | 'staged' (D5.5)
+    staging_strategy      TEXT    NOT NULL DEFAULT 'strict',  -- 'strict' | 'merge_parallel' | 'stacked'; D5.5 only implements 'strict'
     created_at            TEXT    DEFAULT (datetime('now'))
 );
 
@@ -89,15 +91,16 @@ CREATE TABLE IF NOT EXISTS Convoys (
 -- defaults to 1 — repos opt OUT of the PR flow, not in.
 
 CREATE TABLE IF NOT EXISTS Repositories (
-    name              TEXT PRIMARY KEY,
-    local_path        TEXT,
-    description       TEXT,
-    remote_url        TEXT    DEFAULT '',  -- populated by `git remote get-url origin` at startup
-    default_branch    TEXT    DEFAULT '',  -- populated by `git symbolic-ref refs/remotes/origin/HEAD`
-    pr_template_path  TEXT    DEFAULT '',  -- populated by FindPRTemplate task (may be '' if repo has no template)
-    pr_flow_enabled   INTEGER DEFAULT 1,   -- 0 = legacy local-merge, 1 = new PR flow (default)
-    quarantined_at    TEXT    DEFAULT '',  -- set by repo-config-check when repo becomes unhealthy
-    quarantine_reason TEXT    DEFAULT ''
+    name                  TEXT PRIMARY KEY,
+    local_path            TEXT,
+    description           TEXT,
+    remote_url            TEXT    DEFAULT '',  -- populated by `git remote get-url origin` at startup
+    default_branch        TEXT    DEFAULT '',  -- populated by `git symbolic-ref refs/remotes/origin/HEAD`
+    pr_template_path      TEXT    DEFAULT '',  -- populated by FindPRTemplate task (may be '' if repo has no template)
+    pr_flow_enabled       INTEGER DEFAULT 1,   -- 0 = legacy local-merge, 1 = new PR flow (default)
+    quarantined_at        TEXT    DEFAULT '',  -- set by repo-config-check when repo becomes unhealthy
+    quarantine_reason     TEXT    DEFAULT '',
+    release_label_pattern TEXT    NOT NULL DEFAULT ''  -- per-repo regex for D5.5 release_label_present gate; empty means no release-label workflow
 );
 
 -- ── Ask-branch sub-PR tracking ────────────────────────────────────────────────
@@ -136,10 +139,38 @@ CREATE TABLE IF NOT EXISTS ConvoyAskBranches (
     draft_pr_state       TEXT    DEFAULT '',         -- '' | 'Open' | 'Merged' | 'Closed'
     shipped_at           TEXT    DEFAULT '',
     last_rebased_at      TEXT    DEFAULT '',
+    stage_id             INTEGER,                    -- FK → ConvoyStages.id (D5.5); legacy single-mode convoys point at their auto-created stage 1
     created_at           TEXT    DEFAULT (datetime('now')),
     PRIMARY KEY (convoy_id, repo)
 );
-CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo);
+CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo     ON ConvoyAskBranches (repo);
+CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_stage_id ON ConvoyAskBranches (stage_id);
+
+-- ── ConvoyStages (D5.5) ───────────────────────────────────────────────────────
+-- Commander-drafted ordered phase pipeline for a convoy. One row per stage;
+-- stage_num is 1-indexed and ordered by execution. Status progresses
+-- Pending → Open → AllPRsMerged → AwaitingGate → GatePassed → Verified.
+-- Any state may transition to Failed (terminal). Forward-compat migration
+-- creates a single Open stage 1 row with gate_type=NULL for every existing
+-- (single-mode) convoy.
+
+CREATE TABLE IF NOT EXISTS ConvoyStages (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    convoy_id            INTEGER NOT NULL REFERENCES Convoys(id),
+    stage_num            INTEGER NOT NULL,             -- 1-indexed
+    intent_text          TEXT    NOT NULL DEFAULT '',  -- Commander's reason for this stage
+    status               TEXT    NOT NULL DEFAULT 'Pending', -- Pending|Open|AllPRsMerged|AwaitingGate|GatePassed|Verified|Failed
+    gate_type            TEXT,                          -- soak_minutes|operator_confirm|all_of|any_of|null (terminal-stage only) | future P3 leaves
+    gate_config_json     TEXT    NOT NULL DEFAULT '{}', -- per-gate-type config
+    gate_timeout_minutes INTEGER NOT NULL DEFAULT 10080, -- 7 days default; escalation after
+    opened_at            TEXT,
+    all_prs_merged_at    TEXT,
+    gate_passed_at       TEXT,
+    completed_at         TEXT,
+    UNIQUE(convoy_id, stage_num)
+);
+CREATE INDEX IF NOT EXISTS idx_convoy_stages_convoy_id ON ConvoyStages (convoy_id);
+CREATE INDEX IF NOT EXISTS idx_convoy_stages_status    ON ConvoyStages (status);
 
 -- ── Persistent agent worktrees ────────────────────────────────────────────────
 -- Astromechs reuse their worktree across tasks for the same repo.

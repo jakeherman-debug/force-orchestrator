@@ -12,16 +12,19 @@ func createSchema(db *sql.DB) {
 	// pr_template_path, pr_flow_enabled) are populated by the Layer B backfill at daemon
 	// startup and the FindPRTemplate task. pr_flow_enabled defaults to 1 — repos opt OUT
 	// of the PR flow, not in.
+	// release_label_pattern (D5.5): per-repo regex used by the staged-convoy
+	// `release_label_present` gate; empty means the repo doesn't use release labels.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Repositories (
-		name             TEXT PRIMARY KEY,
-		local_path       TEXT,
-		description      TEXT,
-		remote_url       TEXT    DEFAULT '',
-		default_branch   TEXT    DEFAULT '',
-		pr_template_path TEXT    DEFAULT '',
-		pr_flow_enabled  INTEGER DEFAULT 1,
-		quarantined_at   TEXT    DEFAULT '',
-		quarantine_reason TEXT   DEFAULT ''
+		name                  TEXT PRIMARY KEY,
+		local_path            TEXT,
+		description           TEXT,
+		remote_url            TEXT    DEFAULT '',
+		default_branch        TEXT    DEFAULT '',
+		pr_template_path      TEXT    DEFAULT '',
+		pr_flow_enabled       INTEGER DEFAULT 1,
+		quarantined_at        TEXT    DEFAULT '',
+		quarantine_reason     TEXT    DEFAULT '',
+		release_label_pattern TEXT    NOT NULL DEFAULT ''
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
@@ -71,6 +74,10 @@ func createSchema(db *sql.DB) {
 	// main-drift-watch to detect when main has moved and a rebase is needed.
 	// draft_pr_* track the final human-gated PR into main. shipped_at is set when
 	// the draft PR is merged.
+	// staging_mode (D5.5): 'single' (legacy + default) | 'staged' (Commander-drafted
+	// phase pipeline). staging_strategy: 'strict' (default + only value implemented
+	// in D5.5) | 'merge_parallel' | 'stacked' (future). The enum is enforced at the
+	// agent layer, not via SQL CHECK, so future values are accepted without migration.
 	db.Exec(`CREATE TABLE IF NOT EXISTS Convoys (
 		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
 		name                 TEXT UNIQUE NOT NULL,
@@ -82,6 +89,8 @@ func createSchema(db *sql.DB) {
 		draft_pr_number      INTEGER DEFAULT 0,
 		draft_pr_state       TEXT    DEFAULT '',
 		shipped_at           TEXT    DEFAULT '',
+		staging_mode         TEXT    NOT NULL DEFAULT 'single',
+		staging_strategy     TEXT    NOT NULL DEFAULT 'strict',
 		created_at           TEXT    DEFAULT (datetime('now'))
 	);`)
 
@@ -240,6 +249,10 @@ func createSchema(db *sql.DB) {
 	//
 	// The Convoys.ask_branch / draft_pr_* scalar fields on Convoys predate this
 	// table and are left in place for backwards-compat; new code reads this table.
+	// stage_id (D5.5) — FK to ConvoyStages.id. For single-stage (legacy) convoys
+	// the migration sets every existing row to stage 1 of an implicit single-stage
+	// convoy. For staged convoys (D5.5), each (convoy, repo, stage) gets its own
+	// ConvoyAskBranches row.
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyAskBranches (
 		convoy_id            INTEGER NOT NULL,
 		repo                 TEXT    NOT NULL,
@@ -250,10 +263,37 @@ func createSchema(db *sql.DB) {
 		draft_pr_state       TEXT    DEFAULT '',
 		shipped_at           TEXT    DEFAULT '',
 		last_rebased_at      TEXT    DEFAULT '',
+		stage_id             INTEGER,
 		created_at           TEXT    DEFAULT (datetime('now')),
 		PRIMARY KEY (convoy_id, repo)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_repo ON ConvoyAskBranches (repo)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_stage_id ON ConvoyAskBranches (stage_id)`)
+
+	// ConvoyStages (D5.5) — Commander-drafted ordered phase pipeline for a convoy.
+	// One row per stage; stage_num is 1-indexed and ordered by execution. Status
+	// progresses Pending → Open → AllPRsMerged → AwaitingGate → GatePassed → Verified.
+	// gate_type is 'soak_minutes' | 'operator_confirm' | NULL (no gate; terminal
+	// stage only) plus in P1 the compounds 'all_of' | 'any_of'. Forward-compat
+	// migration creates a single Open stage 1 row with gate_type=NULL for every
+	// existing (single-mode) convoy.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyStages (
+		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id            INTEGER NOT NULL REFERENCES Convoys(id),
+		stage_num            INTEGER NOT NULL,
+		intent_text          TEXT    NOT NULL DEFAULT '',
+		status               TEXT    NOT NULL DEFAULT 'Pending',
+		gate_type            TEXT,
+		gate_config_json     TEXT    NOT NULL DEFAULT '{}',
+		gate_timeout_minutes INTEGER NOT NULL DEFAULT 10080,
+		opened_at            TEXT,
+		all_prs_merged_at    TEXT,
+		gate_passed_at       TEXT,
+		completed_at         TEXT,
+		UNIQUE(convoy_id, stage_num)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_stages_convoy_id ON ConvoyStages (convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_stages_status ON ConvoyStages (status)`)
 
 	// PRReviewComments — per-comment state for bot and human reviews on draft PRs.
 	// author_kind discriminates; classification drives dispatch (see agents/pr_review_triage.go).
@@ -453,6 +493,54 @@ func runMigrations(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_convoy ON PRReviewComments (convoy_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_thread ON PRReviewComments (review_thread_id)`)
+
+	// ── D5.5 Staged Convoys ──────────────────────────────────────────────────
+	// Additive: ConvoyStages table + Convoys.staging_mode/staging_strategy +
+	// ConvoyAskBranches.stage_id + Repositories.release_label_pattern. All
+	// idempotent (ALTER no-ops on duplicate columns; CREATE IF NOT EXISTS).
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN staging_mode     TEXT NOT NULL DEFAULT 'single'`)
+	db.Exec(`ALTER TABLE Convoys ADD COLUMN staging_strategy TEXT NOT NULL DEFAULT 'strict'`)
+	db.Exec(`ALTER TABLE ConvoyAskBranches ADD COLUMN stage_id INTEGER`)
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN release_label_pattern TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyStages (
+		id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id            INTEGER NOT NULL REFERENCES Convoys(id),
+		stage_num            INTEGER NOT NULL,
+		intent_text          TEXT    NOT NULL DEFAULT '',
+		status               TEXT    NOT NULL DEFAULT 'Pending',
+		gate_type            TEXT,
+		gate_config_json     TEXT    NOT NULL DEFAULT '{}',
+		gate_timeout_minutes INTEGER NOT NULL DEFAULT 10080,
+		opened_at            TEXT,
+		all_prs_merged_at    TEXT,
+		gate_passed_at       TEXT,
+		completed_at         TEXT,
+		UNIQUE(convoy_id, stage_num)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_stages_convoy_id ON ConvoyStages (convoy_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_stages_status    ON ConvoyStages (status)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_ask_branches_stage_id ON ConvoyAskBranches (stage_id)`)
+
+	// Forward-compat data migration: every pre-D5.5 convoy is implicitly a
+	// single-stage convoy. Create stage 1 (status=Open, gate_type=NULL,
+	// opened_at=convoy.created_at) for every convoy that does not already
+	// have one, then point each ConvoyAskBranches row at that stage. Both
+	// inserts/updates are idempotent — re-running is a no-op.
+	db.Exec(`INSERT INTO ConvoyStages
+		(convoy_id, stage_num, intent_text, status, gate_type, gate_config_json, opened_at)
+		SELECT c.id, 1, '', 'Open', NULL, '{}',
+			COALESCE(NULLIF(c.created_at, ''), datetime('now'))
+		FROM Convoys c
+		WHERE NOT EXISTS (
+			SELECT 1 FROM ConvoyStages s
+			WHERE s.convoy_id = c.id AND s.stage_num = 1
+		)`)
+	db.Exec(`UPDATE ConvoyAskBranches
+		SET stage_id = (
+			SELECT s.id FROM ConvoyStages s
+			WHERE s.convoy_id = ConvoyAskBranches.convoy_id AND s.stage_num = 1
+		)
+		WHERE stage_id IS NULL`)
 
 	// ── Fleet memory: topic_tags column + FTS rebuild ────────────────────────
 	// Additive column on the main table; for the FTS5 virtual table we need to

@@ -76,8 +76,62 @@ type Convoy struct {
 	DraftPRNumber     int
 	DraftPRState      string // Open, Merged, Closed, "" (not yet created)
 	ShippedAt         string
+	StagingMode       string // 'single' (default + legacy) | 'staged' (D5.5)
+	StagingStrategy   string // 'strict' (default + only impl in D5.5) | 'merge_parallel' | 'stacked'
 	CreatedAt         string
 }
+
+// ── Convoy stages (D5.5) ─────────────────────────────────────────────────────
+//
+// ConvoyStage is one row in a Commander-drafted phase pipeline for a convoy.
+// stages execute in stage_num order (1-indexed). Status lifecycle:
+//
+//   Pending → Open → AllPRsMerged → AwaitingGate → GatePassed → Verified
+//
+// Any non-terminal state may transition to Failed (terminal). Legacy
+// single-mode convoys carry one auto-created stage 1 row in status=Open
+// with gate_type=NULL; D5.5's forward-compat migration handles that.
+type ConvoyStage struct {
+	ID                 int
+	ConvoyID           int
+	StageNum           int
+	IntentText         string
+	Status             string
+	GateType           string // empty string represents NULL — meaning no gate (terminal-stage only) or unset
+	GateTypeIsNull     bool   // true iff the DB column is NULL
+	GateConfigJSON     string
+	GateTimeoutMinutes int
+	OpenedAt           string
+	AllPRsMergedAt     string
+	GatePassedAt       string
+	CompletedAt        string
+}
+
+// Convoy stage status constants. Status changes go through AdvanceStage.
+const (
+	StageStatusPending       = "Pending"
+	StageStatusOpen          = "Open"
+	StageStatusAllPRsMerged  = "AllPRsMerged"
+	StageStatusAwaitingGate  = "AwaitingGate"
+	StageStatusGatePassed    = "GatePassed"
+	StageStatusVerified      = "Verified"
+	StageStatusFailed        = "Failed"
+)
+
+// Convoy staging-mode constants (Convoy.StagingMode).
+const (
+	StagingModeSingle = "single"
+	StagingModeStaged = "staged"
+)
+
+// Convoy staging-strategy constants (Convoy.StagingStrategy). Only `strict`
+// is implemented in D5.5; `merge_parallel` and `stacked` are reserved for
+// future deliverables.
+const (
+	StagingStrategyStrict        = "strict"
+	StagingStrategyMergeParallel = "merge_parallel"
+	StagingStrategyStacked       = "stacked"
+)
 
 // ── Repository ────────────────────────────────────────────────────────────────
 
@@ -87,15 +141,16 @@ type Convoy struct {
 // its origin URL changes; a quarantined repo falls back to the legacy local-merge
 // path until the operator re-validates it.
 type Repository struct {
-	Name             string
-	LocalPath        string
-	Description      string
-	RemoteURL        string
-	DefaultBranch    string
-	PRTemplatePath   string
-	PRFlowEnabled    bool
-	QuarantinedAt    string
-	QuarantineReason string
+	Name                string
+	LocalPath           string
+	Description         string
+	RemoteURL           string
+	DefaultBranch       string
+	PRTemplatePath      string
+	PRFlowEnabled       bool
+	QuarantinedAt       string
+	QuarantineReason    string
+	ReleaseLabelPattern string // D5.5: per-repo regex for `release_label_present` gate; "" = no release-label workflow
 }
 
 // ── Per-(convoy, repo) ask-branch ────────────────────────────────────────────

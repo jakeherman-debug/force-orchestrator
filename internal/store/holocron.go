@@ -34,27 +34,29 @@ func InitHolocronDSN(dsn string) *sql.DB {
 // AddRepo inserts or replaces a repo registration. PR-flow fields are initialised
 // to their schema defaults — Layer B backfill populates remote_url/default_branch
 // at daemon startup, and the FindPRTemplate task populates pr_template_path.
-// Preserves any existing PR-flow fields on an update rather than clobbering them.
+// Preserves any existing PR-flow fields (and the D5.5 release_label_pattern) on
+// an update rather than clobbering them.
 func AddRepo(db *sql.DB, name, path, desc string) {
 	// Preserve existing PR-flow fields when re-adding a repo (e.g. when the operator
 	// re-registers to change local_path or description).
 	var (
-		remoteURL, defaultBranch, templatePath, quarantinedAt, quarantineReason string
-		prFlowEnabled                                                           int
+		remoteURL, defaultBranch, templatePath, quarantinedAt, quarantineReason, releaseLabelPattern string
+		prFlowEnabled                                                                                int
 	)
 	row := db.QueryRow(`SELECT
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
-		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, '')
+		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
+		IFNULL(release_label_pattern, '')
 		FROM Repositories WHERE name = ?`, name)
-	existed := row.Scan(&remoteURL, &defaultBranch, &templatePath, &prFlowEnabled, &quarantinedAt, &quarantineReason) == nil
+	existed := row.Scan(&remoteURL, &defaultBranch, &templatePath, &prFlowEnabled, &quarantinedAt, &quarantineReason, &releaseLabelPattern) == nil
 	if !existed {
 		prFlowEnabled = 1
 	}
 
 	db.Exec(`INSERT OR REPLACE INTO Repositories
-		(name, local_path, description, remote_url, default_branch, pr_template_path, pr_flow_enabled, quarantined_at, quarantine_reason)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		name, path, desc, remoteURL, defaultBranch, templatePath, prFlowEnabled, quarantinedAt, quarantineReason)
+		(name, local_path, description, remote_url, default_branch, pr_template_path, pr_flow_enabled, quarantined_at, quarantine_reason, release_label_pattern)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, path, desc, remoteURL, defaultBranch, templatePath, prFlowEnabled, quarantinedAt, quarantineReason, releaseLabelPattern)
 }
 
 func GetRepoPath(db *sql.DB, repoName string) string {
@@ -74,11 +76,13 @@ func GetRepo(db *sql.DB, name string) *Repository {
 	err := db.QueryRow(`SELECT
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
-		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, '')
+		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
+		IFNULL(release_label_pattern, '')
 		FROM Repositories WHERE name = ?`, name).
 		Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
-			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason)
+			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason,
+			&r.ReleaseLabelPattern)
 	if err != nil {
 		return nil
 	}
@@ -92,7 +96,8 @@ func ListRepos(db *sql.DB) []Repository {
 	rows, err := db.Query(`SELECT
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
-		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, '')
+		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
+		IFNULL(release_label_pattern, '')
 		FROM Repositories ORDER BY name`)
 	if err != nil {
 		return nil
@@ -106,7 +111,8 @@ func ListRepos(db *sql.DB) []Repository {
 		)
 		if err := rows.Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
-			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason); err != nil {
+			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason,
+			&r.ReleaseLabelPattern); err != nil {
 			log.Printf("ListRepos: scan error: %v", err)
 			continue
 		}
