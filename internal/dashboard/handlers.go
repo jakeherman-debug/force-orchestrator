@@ -926,6 +926,15 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			handleConvoyDiffSummary(r.Context(), db, id, w)
+		case "stages":
+			// D5.5 P4 — staged-convoy operator surface. Dispatches the
+			// list / detail / advance / abort routes off the suffix
+			// segments after parts[3]. handleConvoyStages writes the
+			// response (and any 4xx/5xx) itself.
+			if handleConvoyStages(db, w, r, id, parts[3:]) {
+				return
+			}
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}

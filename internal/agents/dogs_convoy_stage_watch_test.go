@@ -585,3 +585,196 @@ func TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_BudgetError_Fai
 		t.Errorf("expected SendMail to be called even on budget error (fail-open); got %d call(s)", sendMailCalls)
 	}
 }
+
+// ── D5.5 P4 — stage-transition pings + audit trail ─────────────────────────
+//
+// The dog fires notify-after on each stage transition (Open→AllPRsMerged,
+// AllPRsMerged→AwaitingGate, AwaitingGate→GatePassed, AwaitingGate→Failed)
+// and appends a stage_auto_advance AuditLog row. Pings are debounced via
+// SystemConfig.stage_transition_notified_<convoy>_<stage>_<status> so a
+// re-tick that re-evaluates the same transition doesn't re-ping.
+
+func cswCaptureStageTransitionNotifies(t *testing.T) (calls *[]string, restore func()) {
+	t.Helper()
+	captured := []string{}
+	restore = SetStageTransitionNotifyForTest(func(_ context.Context, label string) error {
+		captured = append(captured, label)
+		return nil
+	})
+	return &captured, restore
+}
+
+func TestConvoyStageWatch_StageTransition_FiresNotifyAfter_Open(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := cswInsertConvoy(t, db, "transition-open")
+	stageID := cswInsertStage(t, db, convoyID, 1, "soak_minutes", `{"minutes":1}`)
+	if _, err := db.Exec(`UPDATE ConvoyStages SET status='Open', opened_at=datetime('now') WHERE id = ?`, stageID); err != nil {
+		t.Fatalf("set Open: %v", err)
+	}
+	cswInsertConvoyAskBranch(t, db, convoyID, "repo-a", stageID)
+	cswInsertAskBranchPR(t, db, convoyID, "repo-a", "Merged", 401)
+
+	calls, restore := cswCaptureStageTransitionNotifies(t)
+	defer restore()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("dog returned err: %v", err)
+	}
+
+	if len(*calls) != 1 {
+		t.Fatalf("expected 1 notify-after call after Open→AllPRsMerged, got %d (%v)", len(*calls), *calls)
+	}
+	want := []string{"Open", "AllPRsMerged", "soak_minutes", "transition-open"}
+	for _, w := range want {
+		if !strings.Contains((*calls)[0], w) {
+			t.Errorf("ping label missing %q; got %q", w, (*calls)[0])
+		}
+	}
+
+	// Audit row landed.
+	logs, err := store.ListStageAuditLog(db, convoyID, 1)
+	if err != nil {
+		t.Fatalf("ListStageAuditLog: %v", err)
+	}
+	if len(logs) != 1 || logs[0].Action != store.AuditActionStageAutoAdvance ||
+		logs[0].Actor != "convoy-stage-watch-dog" {
+		t.Errorf("audit row not as expected: %+v", logs)
+	}
+}
+
+func TestConvoyStageWatch_StageTransition_FiresNotifyAfter_GatePassed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := cswInsertConvoy(t, db, "transition-gatepass")
+	stageID := cswInsertStage(t, db, convoyID, 1, "null", `{}`)
+	if _, err := db.Exec(`UPDATE ConvoyStages SET status='AwaitingGate', all_prs_merged_at=datetime('now') WHERE id = ?`, stageID); err != nil {
+		t.Fatalf("set AwaitingGate: %v", err)
+	}
+
+	calls, restore := cswCaptureStageTransitionNotifies(t)
+	defer restore()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("dog returned err: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected 1 ping for AwaitingGate→GatePassed, got %d", len(*calls))
+	}
+	if !strings.Contains((*calls)[0], "GatePassed") {
+		t.Errorf("ping label missing GatePassed marker; got %q", (*calls)[0])
+	}
+}
+
+func TestConvoyStageWatch_StageTransition_FiresNotifyAfter_Failed(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	convoyID := cswInsertConvoy(t, db, "transition-fail")
+	stageID := cswInsertStage(t, db, convoyID, 1, "always_fail", `{}`)
+	if _, err := db.Exec(`UPDATE ConvoyStages SET status='AwaitingGate', all_prs_merged_at=datetime('now') WHERE id = ?`, stageID); err != nil {
+		t.Fatalf("set AwaitingGate: %v", err)
+	}
+
+	calls, restore := cswCaptureStageTransitionNotifies(t)
+	defer restore()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+	reg.Register(&dogStubGate{typeName: "always_fail", passed: false, reason: "intentional fail"})
+
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("dog returned err: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected 1 ping for AwaitingGate→Failed, got %d", len(*calls))
+	}
+	if !strings.Contains((*calls)[0], "Failed") {
+		t.Errorf("ping label missing Failed marker; got %q", (*calls)[0])
+	}
+}
+
+func TestConvoyStageWatch_StageTransition_DebouncedPerTransition(t *testing.T) {
+	// Re-running the dog after a transition fired must NOT re-ping the
+	// same (convoy, stage, new_status) tuple. The debounce flag lives in
+	// SystemConfig.
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := cswInsertConvoy(t, db, "transition-debounce")
+	stageID := cswInsertStage(t, db, convoyID, 1, "null", `{}`)
+	if _, err := db.Exec(`UPDATE ConvoyStages SET status='AwaitingGate', all_prs_merged_at=datetime('now') WHERE id = ?`, stageID); err != nil {
+		t.Fatalf("set AwaitingGate: %v", err)
+	}
+
+	calls, restore := cswCaptureStageTransitionNotifies(t)
+	defer restore()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+
+	// Tick 1: real transition AwaitingGate→GatePassed → 1 ping.
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("tick 1: expected 1 ping, got %d", len(*calls))
+	}
+
+	// Force the stage back to AwaitingGate so the dog re-fires the same
+	// transition. Without the debounce, this would emit a second ping.
+	if _, err := db.Exec(`UPDATE ConvoyStages SET status='AwaitingGate', gate_passed_at=NULL WHERE id = ?`, stageID); err != nil {
+		t.Fatalf("reset to AwaitingGate: %v", err)
+	}
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Errorf("tick 2: debounce failed — expected 1 ping total, got %d", len(*calls))
+	}
+}
+
+func TestConvoyStageWatch_DogTransition_AppendsAuditLog(t *testing.T) {
+	// Cross-cuts the dog flow + the AuditLog write. The audit row's
+	// actor MUST be "convoy-stage-watch-dog" so the dashboard's
+	// per-stage history pane can distinguish dog vs operator actions.
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	convoyID := cswInsertConvoy(t, db, "transition-audit")
+	stageID := cswInsertStage(t, db, convoyID, 1, "null", `{}`)
+	if _, err := db.Exec(`UPDATE ConvoyStages SET status='AwaitingGate', all_prs_merged_at=datetime('now') WHERE id = ?`, stageID); err != nil {
+		t.Fatalf("set AwaitingGate: %v", err)
+	}
+
+	_, restore := cswCaptureStageTransitionNotifies(t)
+	defer restore()
+
+	reg := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(reg)
+	if err := runConvoyStageWatch(context.Background(), db, reg, testLogger{}); err != nil {
+		t.Fatalf("dog: %v", err)
+	}
+
+	logs, err := store.ListStageAuditLog(db, convoyID, 1)
+	if err != nil {
+		t.Fatalf("ListStageAuditLog: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected 1 audit row, got %d", len(logs))
+	}
+	if logs[0].Actor != "convoy-stage-watch-dog" {
+		t.Errorf("actor = %q, want convoy-stage-watch-dog", logs[0].Actor)
+	}
+	if logs[0].Action != store.AuditActionStageAutoAdvance {
+		t.Errorf("action = %q, want %q", logs[0].Action, store.AuditActionStageAutoAdvance)
+	}
+	if !strings.Contains(logs[0].Detail, `"new_status":"GatePassed"`) {
+		t.Errorf("detail missing new_status: %q", logs[0].Detail)
+	}
+}

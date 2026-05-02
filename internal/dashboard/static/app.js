@@ -1291,6 +1291,7 @@ function renderConvoys(convoys) {
           <span class="convoy-counts">${c.completed} / ${c.total} tasks complete (${pct}%)</span>
           ${reviewBadge}
           <div style="flex:1"></div>
+          <button class="action-btn" onclick="showConvoyStages(${c.id}, ${escHtml(JSON.stringify(c.name || 'Convoy'))})">Stages</button>
           ${approveBtn}
           ${cancelBtn}
           ${shipBtn}
@@ -1568,6 +1569,171 @@ async function approveConvoy(id) {
     loadTasks();
     pollStatus();
   } catch(e) { showToast(e.message, 'err'); }
+}
+
+// ── D5.5 P4 — Staged-convoys view ────────────────────────────────────────────
+//
+// showConvoyStages opens the per-stage modal for one convoy.
+// renderStagesPanel renders the list as a table with a per-stage advance/abort
+// pair plus an inline "view history" expander that lazy-loads the detail
+// endpoint (which carries the per-stage audit log).
+//
+// The endpoints exercised here:
+//
+//   GET  /api/convoys/<id>/stages              — list + status + gate type
+//   GET  /api/convoys/<id>/stages/<num>        — detail + ask-branches + audit
+//   POST /api/convoys/<id>/stages/<num>/advance — operator-confirm rendezvous
+//   POST /api/convoys/<id>/stages/<num>/abort  — force stage to Failed
+//
+// Single-mode convoys still expose the modal (via the forward-compat stage 1
+// row) but the gate column reads "(none)" and the advance/abort buttons are
+// hidden for the implicit terminal stage.
+
+async function showConvoyStages(convoyID, name) {
+  S.stagesConvoyID = convoyID;
+  $('stages-modal-convoy').textContent = `#${convoyID} — ${name}`;
+  $('stages-modal-content').innerHTML = `<div class="empty-state"><span class="icon">⏳</span>Loading…</div>`;
+  $('stages-modal').classList.remove('hidden');
+  try {
+    const r = await api(`/api/convoys/${convoyID}/stages`);
+    renderStagesPanel(convoyID, r.stages || []);
+  } catch (e) {
+    $('stages-modal-content').innerHTML = `<div class="empty-state"><span class="icon">⚠️</span>Failed to load stages: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderStagesPanel(convoyID, stages) {
+  const el = $('stages-modal-content');
+  if (!stages.length) {
+    el.innerHTML = `<div class="empty-state"><span class="icon">📭</span>No stages yet.</div>`;
+    return;
+  }
+  el.innerHTML = stages.map(s => {
+    const gateType = s.gate_type || '(none)';
+    const gateSummary = s.gate_config ? renderGateSummary(s.gate_type, s.gate_config) : '';
+    const ts = [];
+    if (s.opened_at) ts.push(`opened ${escHtml(s.opened_at)}`);
+    if (s.all_prs_merged_at) ts.push(`merged ${escHtml(s.all_prs_merged_at)}`);
+    if (s.gate_passed_at) ts.push(`gate passed ${escHtml(s.gate_passed_at)}`);
+    if (s.completed_at) ts.push(`completed ${escHtml(s.completed_at)}`);
+    const isTerminal = s.status === 'Verified' || s.status === 'Failed';
+    const advanceBtn = (!isTerminal && s.gate_type === 'operator_confirm')
+      ? `<button class="action-btn approve-btn" onclick="openStageActionModal('advance', ${convoyID}, ${s.stage_num})">Advance</button>`
+      : '';
+    const abortBtn = !isTerminal
+      ? `<button class="action-btn cancel-btn" onclick="openStageActionModal('abort', ${convoyID}, ${s.stage_num})">Abort</button>`
+      : '';
+    const evalStatusColor = {
+      passed: 'var(--green)',
+      failed: 'var(--red)',
+      pending: 'var(--accent)',
+      'n/a': 'var(--text2)',
+    }[s.gate_evaluation_status] || 'var(--text2)';
+    return `
+      <div class="convoy-card" style="margin-bottom:8px">
+        <div class="convoy-header">
+          <strong>Stage ${s.stage_num}</strong>
+          ${statusPill(s.status)}
+          <span style="color:${evalStatusColor};font-size:12px">gate: ${escHtml(s.gate_evaluation_status)}</span>
+          <span style="flex:1"></span>
+          ${advanceBtn}
+          ${abortBtn}
+        </div>
+        <div style="padding:6px 10px;font-size:13px">
+          <div><strong>Intent:</strong> ${escHtml(s.intent_text || '(no intent)')}</div>
+          <div><strong>Gate:</strong> ${escHtml(gateType)}${gateSummary ? ' — ' + escHtml(gateSummary) : ''}</div>
+          ${ts.length ? `<div style="color:var(--text2);font-size:12px">${ts.join(' · ')}</div>` : ''}
+          <div style="margin-top:4px"><a style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="toggleStageHistory(${convoyID}, ${s.stage_num})">View history</a></div>
+          <div id="stage-history-${convoyID}-${s.stage_num}" style="display:none;margin-top:6px"></div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderGateSummary(gateType, cfg) {
+  if (!cfg || typeof cfg !== 'object') return '';
+  switch (gateType) {
+    case 'soak_minutes':
+      return cfg.minutes ? `${cfg.minutes}min soak` : '';
+    case 'operator_confirm':
+      return cfg.prompt || 'awaiting operator';
+    case 'datadog_metric_threshold':
+      return cfg.query ? `${cfg.query} ${cfg.comparator || ''} ${cfg.threshold || ''}` : '';
+    case 'databricks_query_threshold':
+      return cfg.warehouse_id ? `query @ ${cfg.warehouse_id}` : '';
+    case 'release_label_present':
+      return cfg.label_pattern || '';
+    case 'probe_endpoint':
+      return cfg.url || '';
+    default:
+      try { return JSON.stringify(cfg); } catch (e) { return ''; }
+  }
+}
+
+async function toggleStageHistory(convoyID, stageNum) {
+  const el = $(`stage-history-${convoyID}-${stageNum}`);
+  if (!el) return;
+  if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = `<div class="empty-state" style="padding:6px"><span class="icon">⏳</span>Loading history…</div>`;
+  try {
+    const detail = await api(`/api/convoys/${convoyID}/stages/${stageNum}`);
+    const log = detail.audit_log || [];
+    if (!log.length) {
+      el.innerHTML = `<div style="color:var(--text2);font-size:12px">No audit entries yet.</div>`;
+      return;
+    }
+    el.innerHTML = `<div style="font-size:12px">` + log.map(e => {
+      let parsed = {};
+      try { parsed = JSON.parse(e.Detail); } catch(_) {}
+      const summary = `${parsed.old_status || '?'} → ${parsed.new_status || '?'}` +
+        (parsed.reason ? ` — ${parsed.reason}` : '');
+      return `<div style="padding:2px 0">
+        <span style="color:var(--text2)">${escHtml(e.CreatedAt)}</span>
+        <strong>${escHtml(e.Actor)}</strong>
+        <em>${escHtml(e.Action)}</em>:
+        ${escHtml(summary)}
+      </div>`;
+    }).join('') + `</div>`;
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:12px">Failed to load history: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function openStageActionModal(action, convoyID, stageNum) {
+  S.stageAction = { action, convoyID, stageNum };
+  $('stage-action-modal-title').textContent = action === 'advance' ? 'Advance Stage' : 'Abort Stage';
+  $('stage-action-modal-summary').textContent =
+    action === 'advance'
+      ? `Confirm operator-advance of convoy #${convoyID} stage ${stageNum}. The convoy-stage-watch dog will pick this up on its next tick.`
+      : `Force convoy #${convoyID} stage ${stageNum} to Failed. The convoy itself stays in its current state — you decide revert vs accept-as-shipped separately.`;
+  $('stage-action-operator').value = '';
+  $('stage-action-reason').value = '';
+  $('stage-action-confirm').textContent = action === 'advance' ? 'Advance' : 'Abort';
+  $('stage-action-modal').classList.remove('hidden');
+}
+
+async function confirmStageAction() {
+  const sa = S.stageAction || {};
+  if (!sa.action) return;
+  const operator = $('stage-action-operator').value.trim();
+  const reason = $('stage-action-reason').value.trim();
+  if (!operator) { showToast('Operator required', 'err'); return; }
+  if (!reason)   { showToast('Reason required', 'err');   return; }
+  try {
+    await api(`/api/convoys/${sa.convoyID}/stages/${sa.stageNum}/${sa.action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operator, reason }),
+    });
+    showToast(`Stage ${sa.action} recorded`, 'ok');
+    closeModal('stage-action-modal');
+    // Refresh the stage list inside the parent modal.
+    if (S.stagesConvoyID === sa.convoyID) {
+      const r = await api(`/api/convoys/${sa.convoyID}/stages`);
+      renderStagesPanel(sa.convoyID, r.stages || []);
+    }
+  } catch(e) { showToast('Action failed: ' + e.message, 'err'); }
 }
 
 // ── Agents ─────────────────────────────────────────────────────────────────────

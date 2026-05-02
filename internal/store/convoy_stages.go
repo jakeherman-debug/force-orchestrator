@@ -322,3 +322,107 @@ func SetRepositoryReleaseLabelPattern(db *sql.DB, repoName, pattern string) erro
 	}
 	return nil
 }
+
+// ── Stage audit trail (D5.5 P4) ──────────────────────────────────────────────
+//
+// Stage transitions (operator advance, operator abort, automatic dog advance)
+// each append an AuditLog row so the dashboard can render a per-stage history
+// without scanning every other audit action. The convention:
+//
+//   actor    — operator name ("operator-x") or "convoy-stage-watch-dog"
+//   action   — one of the stage-action prefix values below
+//   task_id  — the convoy_id (we re-use this column as the convoy handle since
+//              stage rows have no task_id; queries filter by action prefix +
+//              detail.stage_num for stage-scoped views)
+//   detail   — JSON {"stage_num":N,"old_status":"...","new_status":"...",
+//              "reason":"...","gate_evaluation_summary":"..."}
+//
+// `ListStageAuditLog` returns rows for one stage, newest-first.
+
+const (
+	// AuditActionStageAdvance — operator clicked "Advance" on the dashboard.
+	AuditActionStageAdvance = "stage_advance"
+	// AuditActionStageAbort — operator clicked "Abort" on the dashboard.
+	AuditActionStageAbort = "stage_abort"
+	// AuditActionStageAutoAdvance — convoy-stage-watch dog advanced the stage
+	// based on a gate evaluation outcome.
+	AuditActionStageAutoAdvance = "stage_auto_advance"
+)
+
+// stageActionPrefix is the SQL LIKE prefix that matches every stage-related
+// audit action. Used by ListStageAuditLog to scope queries; lets us add new
+// stage_* actions in the future without changing the query.
+const stageActionPrefix = "stage_"
+
+// LogStageAudit appends an AuditLog row recording a stage state transition.
+// The detail blob is stored as JSON so per-stage drill-downs can decode it.
+//
+// Returns an error on insert failure. Unlike LogAudit (the legacy void
+// helper), this mutator threads the error per CLAUDE.md "no silent failures":
+// stage audit trail is operator-actionable, so silently dropping a row would
+// hide the only durable record of who pushed which gate.
+func LogStageAudit(db *sql.DB, actor, action string, convoyID, stageNum int, oldStatus, newStatus, reason, gateEvalSummary string) error {
+	if db == nil {
+		return fmt.Errorf("LogStageAudit: db is nil")
+	}
+	if convoyID <= 0 {
+		return fmt.Errorf("LogStageAudit: convoyID must be > 0 (got %d)", convoyID)
+	}
+	if stageNum <= 0 {
+		return fmt.Errorf("LogStageAudit: stageNum must be > 0 (got %d)", stageNum)
+	}
+	if action == "" {
+		return fmt.Errorf("LogStageAudit: action must be non-empty")
+	}
+	detail := fmt.Sprintf(
+		`{"stage_num":%d,"old_status":%q,"new_status":%q,"reason":%q,"gate_evaluation_summary":%q}`,
+		stageNum, oldStatus, newStatus, reason, gateEvalSummary)
+	if _, err := db.Exec(
+		`INSERT INTO AuditLog (actor, action, task_id, detail) VALUES (?, ?, ?, ?)`,
+		actor, action, convoyID, detail); err != nil {
+		return fmt.Errorf("LogStageAudit: insert convoy=%d stage=%d action=%s: %w", convoyID, stageNum, action, err)
+	}
+	return nil
+}
+
+// ListStageAuditLog returns every audit row for a given (convoyID, stageNum)
+// in descending id order (newest first). Filters on action LIKE 'stage_%'
+// and detail stage_num match. Returns an empty slice if no rows match.
+func ListStageAuditLog(db *sql.DB, convoyID, stageNum int) ([]AuditEntry, error) {
+	if db == nil {
+		return nil, fmt.Errorf("ListStageAuditLog: db is nil")
+	}
+	if convoyID <= 0 {
+		return nil, fmt.Errorf("ListStageAuditLog: convoyID must be > 0 (got %d)", convoyID)
+	}
+	if stageNum <= 0 {
+		return nil, fmt.Errorf("ListStageAuditLog: stageNum must be > 0 (got %d)", stageNum)
+	}
+	// Match the JSON shape LogStageAudit writes: `"stage_num":N,`. The
+	// trailing comma anchors the boundary so stage_num=1 doesn't match
+	// stage_num=10 etc.
+	stagePat := fmt.Sprintf(`%%"stage_num":%d,%%`, stageNum)
+	rows, err := db.Query(`SELECT id, actor, action, task_id, detail, created_at
+		FROM AuditLog
+		WHERE action LIKE ?
+		  AND task_id = ?
+		  AND detail LIKE ?
+		ORDER BY id DESC`,
+		stageActionPrefix+"%", convoyID, stagePat)
+	if err != nil {
+		return nil, fmt.Errorf("ListStageAuditLog: query convoy=%d stage=%d: %w", convoyID, stageNum, err)
+	}
+	defer rows.Close()
+	out := make([]AuditEntry, 0)
+	for rows.Next() {
+		var e AuditEntry
+		if sErr := rows.Scan(&e.ID, &e.Actor, &e.Action, &e.TaskID, &e.Detail, &e.CreatedAt); sErr != nil {
+			return nil, fmt.Errorf("ListStageAuditLog: scan: %w", sErr)
+		}
+		out = append(out, e)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		return nil, fmt.Errorf("ListStageAuditLog: rows iter: %w", rErr)
+	}
+	return out, nil
+}
