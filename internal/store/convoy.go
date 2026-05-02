@@ -50,6 +50,144 @@ func CreateConvoy(db *sql.DB, name string) (int, error) {
 	return id, nil
 }
 
+// StagedStageSpec is the spec for one stage to land into a freshly-created
+// staged convoy via CreateStagedConvoy. Used by the Commander/Chancellor
+// staged-plan handoff (D5.5 P2). Each stage gets one ConvoyStages row;
+// gateConfigJSON is stored verbatim — the planner is responsible for emitting
+// well-formed gate JSON (see internal/agents/commander.staging_validator).
+type StagedStageSpec struct {
+	StageNum       int    // 1-indexed, contiguous
+	Intent         string // human-readable rationale (ConvoyStages.intent_text)
+	GateType       string // "" → NULL (terminal stages only)
+	GateConfigJSON string // valid JSON; "" normalised to "{}"
+}
+
+// CreateStagedConvoy creates a Commander-drafted staged convoy: one Convoys
+// row in staging_mode='staged' + one ConvoyStages row per spec. Stage 1 is
+// stamped Open at create time (mirroring CreateConvoy's behavior for the
+// auto-stage-1 of single-mode convoys); stages 2+ land Pending and are
+// promoted to Open by the convoy-stage-watch dog when the prior stage's gate
+// passes.
+//
+// Returns the new convoy ID and the per-stage row IDs (in stage_num order)
+// so the caller can stamp BountyBoard.stage_id on tasks.
+//
+// On any failure the entire creation rolls back so the caller never sees a
+// half-created convoy.
+//
+// stagingStrategy must be one of the registered values (StagingStrategyStrict
+// in D5.5; merge_parallel/stacked are forward-compat enum values rejected at
+// the planner-validator layer, not here). This helper does not enforce the
+// "only strict is implemented" rule — that lives in the staging validator —
+// so future deliverables can flip the flag without touching this constructor.
+func CreateStagedConvoy(db *sql.DB, name, stagingStrategy string, stages []StagedStageSpec) (convoyID int, stageIDs []int, err error) {
+	if name == "" {
+		return 0, nil, fmt.Errorf("CreateStagedConvoy: name must be non-empty")
+	}
+	if len(stages) == 0 {
+		return 0, nil, fmt.Errorf("CreateStagedConvoy: stages must be non-empty")
+	}
+	if stagingStrategy == "" {
+		stagingStrategy = StagingStrategyStrict
+	}
+	// Verify stages are 1-indexed and contiguous so the ConvoyStages
+	// UNIQUE(convoy_id, stage_num) constraint is respected and the watcher
+	// dog's "next stage" lookup never gaps.
+	for i, s := range stages {
+		if s.StageNum != i+1 {
+			return 0, nil, fmt.Errorf("CreateStagedConvoy: stages must be 1-indexed contiguous; got stage_num=%d at index %d", s.StageNum, i)
+		}
+	}
+
+	tx, txErr := db.Begin()
+	if txErr != nil {
+		return 0, nil, fmt.Errorf("CreateStagedConvoy: begin tx: %w", txErr)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	res, execErr := tx.Exec(
+		`INSERT INTO Convoys (name, status, staging_mode, staging_strategy) VALUES (?, 'Active', ?, ?)`,
+		name, StagingModeStaged, stagingStrategy)
+	if execErr != nil {
+		return 0, nil, fmt.Errorf("CreateStagedConvoy: insert convoy %q: %w", name, execErr)
+	}
+	idRaw, idErr := res.LastInsertId()
+	if idErr != nil {
+		return 0, nil, fmt.Errorf("CreateStagedConvoy: LastInsertId: %w", idErr)
+	}
+	convoyID = int(idRaw)
+
+	stageIDs = make([]int, 0, len(stages))
+	for _, s := range stages {
+		cfg := s.GateConfigJSON
+		if cfg == "" {
+			cfg = "{}"
+		}
+		var gateTypeArg any
+		if s.GateType == "" {
+			gateTypeArg = nil
+		} else {
+			gateTypeArg = s.GateType
+		}
+		// Stage 1 lands Open immediately so astromechs can begin work;
+		// stages 2+ land Pending and are promoted by the watcher dog when
+		// the prior stage's gate passes.
+		var sres sql.Result
+		if s.StageNum == 1 {
+			sres, execErr = tx.Exec(
+				`INSERT INTO ConvoyStages
+					(convoy_id, stage_num, intent_text, status, gate_type, gate_config_json, opened_at)
+					VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+				convoyID, s.StageNum, s.Intent, StageStatusOpen, gateTypeArg, cfg)
+		} else {
+			sres, execErr = tx.Exec(
+				`INSERT INTO ConvoyStages
+					(convoy_id, stage_num, intent_text, status, gate_type, gate_config_json)
+					VALUES (?, ?, ?, ?, ?, ?)`,
+				convoyID, s.StageNum, s.Intent, StageStatusPending, gateTypeArg, cfg)
+		}
+		if execErr != nil {
+			return 0, nil, fmt.Errorf("CreateStagedConvoy: insert stage %d for convoy %d: %w", s.StageNum, convoyID, execErr)
+		}
+		sIDRaw, sidErr := sres.LastInsertId()
+		if sidErr != nil {
+			return 0, nil, fmt.Errorf("CreateStagedConvoy: LastInsertId for stage %d: %w", s.StageNum, sidErr)
+		}
+		stageIDs = append(stageIDs, int(sIDRaw))
+	}
+
+	if commitErr := tx.Commit(); commitErr != nil {
+		return 0, nil, fmt.Errorf("CreateStagedConvoy: commit: %w", commitErr)
+	}
+	return convoyID, stageIDs, nil
+}
+
+// SetConvoyStaging updates the staging_mode + staging_strategy on an existing
+// convoy. Used when the Commander emits a staged-mode plan but the convoy row
+// was already created via the legacy single-mode path. Validates inputs but
+// does not enforce strategy-vs-implementation gating (the planner does that).
+func SetConvoyStaging(db *sql.DB, convoyID int, mode, strategy string) error {
+	if convoyID <= 0 {
+		return fmt.Errorf("SetConvoyStaging: convoyID must be > 0 (got %d)", convoyID)
+	}
+	if mode != StagingModeSingle && mode != StagingModeStaged {
+		return fmt.Errorf("SetConvoyStaging: unknown mode %q", mode)
+	}
+	if strategy == "" {
+		strategy = StagingStrategyStrict
+	}
+	_, err := db.Exec(`UPDATE Convoys SET staging_mode = ?, staging_strategy = ? WHERE id = ?`,
+		mode, strategy, convoyID)
+	if err != nil {
+		return fmt.Errorf("SetConvoyStaging: update convoy %d: %w", convoyID, err)
+	}
+	return nil
+}
+
 // ApproveConvoyTasks transitions all Planned tasks in a convoy to Pending.
 // Returns the number of tasks activated.
 func ApproveConvoyTasks(db *sql.DB, convoyID int) int {

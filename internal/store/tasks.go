@@ -659,6 +659,42 @@ func QueueISBReview(db *sql.DB, b *Bounty, branchName, commitSHA string) (int, e
 	return int(id), nil
 }
 
+// QueueStageSenateReview spawns a SenateReview task scoped to one stage of a
+// staged convoy (D5.5 P2 β). Distinct from QueueSenateReview, which is
+// scoped to a Commander-emitted Feature plan: this variant carries
+// `convoy_id` + `stage_id` instead of `feature_id`, and the Senate handler
+// reads the stage's `intent_text` + the stage-scoped diff to apply its
+// memory-driven advice. The task_type is still `SenateReview` so the
+// existing Senate claim loop picks it up; the payload shape's `stage_id`
+// field is the discriminator the handler branches on.
+//
+// Idempotent: returns (0, nil) if a Pending/Locked SenateReview already
+// exists for this (convoy, stage). The dedup key is
+// `senate-review-stage:<convoyID>:<stageID>` and is backed by the partial
+// UNIQUE idx_bounty_idem; two concurrent callers cannot both land a row.
+func QueueStageSenateReview(db *sql.DB, convoyID, stageID int) (int, error) {
+	if convoyID <= 0 {
+		return 0, fmt.Errorf("QueueStageSenateReview: convoyID required")
+	}
+	if stageID <= 0 {
+		return 0, fmt.Errorf("QueueStageSenateReview: stageID required")
+	}
+	payload := fmt.Sprintf(`{"convoy_id":%d,"stage_id":%d}`, convoyID, stageID)
+	key := fmt.Sprintf("senate-review-stage:%d:%d", convoyID, stageID)
+	id, existed, err := AddIdempotentTask(db, key,
+		0, "", "SenateReview", payload, convoyID, 0, "Pending")
+	if err != nil {
+		return 0, fmt.Errorf("QueueStageSenateReview(convoy=%d stage=%d): %w", convoyID, stageID, err)
+	}
+	if existed {
+		// Match QueueConvoyReview's "already queued" contract — return 0
+		// rather than the existing id so callers in the ConvoyReview hook
+		// only count newly-queued work for log lines and tests.
+		return 0, nil
+	}
+	return id, nil
+}
+
 // QueueSenateReview spawns a SenateReview task for a Feature whose
 // Commander-emitted plan is sitting in ProposedConvoys. D4 Phase 3 —
 // queued by the Senate-router hook (agents.QueueSenateReviewHook)
@@ -1040,6 +1076,28 @@ func AddConvoyTaskTx(tx *sql.Tx, parentID int, repo, payload string, convoyID, p
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
+	return int(id), nil
+}
+
+// AddConvoyTaskWithStageTx creates a CodeEdit subtask within a convoy, stamping
+// BountyBoard.stage_id at insert time. stageID must be > 0 — callers that don't
+// have a stage assignment use AddConvoyTaskTx instead and let stage_id default
+// to NULL. (D5.5 P2: multi-stage convoy task creation path.)
+func AddConvoyTaskWithStageTx(tx *sql.Tx, parentID int, repo, payload string, convoyID, priority, stageID int, status string) (int, error) {
+	if stageID <= 0 {
+		return 0, fmt.Errorf("AddConvoyTaskWithStageTx: stageID must be > 0 (got %d) — use AddConvoyTaskTx for stage-less tasks", stageID)
+	}
+	res, err := tx.Exec(
+		`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, convoy_id, priority, stage_id, created_at)
+		 VALUES (?, ?, 'CodeEdit', ?, ?, ?, ?, ?, datetime('now'))`,
+		parentID, repo, status, payload, convoyID, priority, stageID)
+	if err != nil {
+		return 0, fmt.Errorf("AddConvoyTaskWithStageTx: insert convoy=%d stage=%d: %w", convoyID, stageID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("AddConvoyTaskWithStageTx: LastInsertId: %w", err)
+	}
 	return int(id), nil
 }
 

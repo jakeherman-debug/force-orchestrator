@@ -401,16 +401,71 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		}
 	}()
 
+	// D5.5 P2 β — per-stage Senate review hook.
+	//
+	// queuePerStageSenateReviewIfStaged fires once at any post-LLM exit
+	// path (clean pass, needs_work spawn, deferred-completion gates,
+	// no-ask-branches early return) for staged convoys. The Senate task
+	// reads the stage's intent + diff and applies its memory-driven
+	// advice. The senateHookArmed flag is flipped on AFTER the LLM
+	// completes (or after the no-branches short-circuit) so parse-fail
+	// escalation paths and the loop-cap escalation path do NOT fire the
+	// hook — those paths terminate ConvoyReview without producing a
+	// reviewable verdict, and queueing a Senate task on a row that's
+	// failing to even produce JSON would just amplify the problem.
+	//
+	// currentStage is declared in the next block (and re-bound there); the
+	// closure captures the named local by reference so the defer reads the
+	// post-block value at exec time.
+	senateHookArmed := false
+	var currentStage store.ConvoyStage
+	defer func() {
+		if senateHookArmed {
+			queuePerStageSenateReviewIfStaged(db, convoy, currentStage, bounty.ID, logger)
+		}
+	}()
+
+	// D5.5 P2 β — per-stage scoping.
+	//
+	// For staged convoys, the review walks ONLY the ask-branches belonging
+	// to the currently in-flight stage; the LLM sees the stage's intent +
+	// just that stage's diff. For single-mode convoys (every D3/D4/D5-era
+	// convoy + new convoys whose Commander didn't opt into staged) the
+	// behaviour is unchanged — every ask-branch on the convoy is in scope.
+	//
+	// Determine current stage up-front so the no-ask-branches early return,
+	// the diff-base computation, the prompt assembly, and the per-stage
+	// Senate hook all reference the same stage row. CurrentInFlightStage
+	// errors are non-fatal: log and degrade to convoy-wide scope so a
+	// stage-state hiccup never poisons the whole review pipeline (matches
+	// the supply-recheck gate's fail-open posture above).
+	stage, stageErr := store.CurrentInFlightStage(db, payload.ConvoyID)
+	if stageErr != nil {
+		logger.Printf("ConvoyReview #%d: CurrentInFlightStage(convoy %d) failed (%v) — degrading to convoy-wide scope",
+			bounty.ID, payload.ConvoyID, stageErr)
+	}
+	currentStage = stage
+
 	// Build the diff for each ask-branch repo. Truncate to avoid overwhelming the LLM.
 	diffCapBytes := getIntConfig(db, "convoy_review_diff_cap", 80*1024)
-	branches := store.ListConvoyAskBranches(db, payload.ConvoyID)
+	var branches []store.ConvoyAskBranch
+	if convoy.StagingMode == store.StagingModeStaged && currentStage.ID > 0 {
+		branches = store.ListConvoyAskBranchesByStage(db, payload.ConvoyID, currentStage.ID)
+		logger.Printf("ConvoyReview #%d: staged convoy %d — scoping to stage %d (id=%d, status=%s, %d ask-branch(es))",
+			bounty.ID, payload.ConvoyID, currentStage.StageNum, currentStage.ID, currentStage.Status, len(branches))
+	} else {
+		branches = store.ListConvoyAskBranches(db, payload.ConvoyID)
+	}
 	if len(branches) == 0 {
-		logger.Printf("ConvoyReview #%d: convoy %d has no ask-branches — completing as clean",
+		logger.Printf("ConvoyReview #%d: convoy %d has no ask-branches in scope — completing as clean",
 			bounty.ID, payload.ConvoyID)
 		completeCycle("clean", `{"reason":"no_ask_branches"}`, nil)
 		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
 			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, no ask-branches) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
 		}
+		// Per-stage Senate hook fires on the no-branches path too — the
+		// stage's audit trail records the intent-only review.
+		senateHookArmed = true
 		return
 	}
 
@@ -478,7 +533,18 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	// convoy-tasks summary, the full ask-branch diff) in <user_content>
 	// sentinel tags. The system prompt's promptInjectionClause tells the
 	// model to treat everything inside as data.
-	userPrompt := fmt.Sprintf("convoy_name: %s\n\nconvoy_tasks:\n%s\n\ndiff:\n%s",
+	//
+	// D5.5 P2 β — for staged convoys, prepend the current stage's intent to
+	// the prompt. The LLM gets "this stage was supposed to deliver X" as
+	// context alongside the stage-scoped diff, which sharpens the gap /
+	// regression / incorrect classification (the LLM no longer has to
+	// reverse-engineer stage boundaries from convoy-wide task descriptions).
+	stagePrefix := ""
+	if convoy.StagingMode == store.StagingModeStaged && currentStage.ID > 0 {
+		stagePrefix = fmt.Sprintf("Stage %d intent: %s\n\n", currentStage.StageNum, currentStage.IntentText)
+	}
+	userPrompt := fmt.Sprintf("%sconvoy_name: %s\n\nconvoy_tasks:\n%s\n\ndiff:\n%s",
+		stagePrefix,
 		convoy.Name,
 		WrapUserContent("convoy_tasks", convoyTasks),
 		WrapUserContent("diff", diffBlocks.String()))
@@ -540,6 +606,14 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 			return
 		}
 	}
+
+	// D5.5 P2 β — LLM ran successfully; the per-stage Senate hook is now
+	// armed. Every downstream exit path (clean pass, conflicted-loop
+	// escalation, post-clean drift, active-tasks defer, ask-branch
+	// conflict defer, needs_work spawn) fires the hook via the deferred
+	// closure above. Parse-failure escalation paths exit BEFORE this point
+	// and intentionally do NOT fire the hook.
+	senateHookArmed = true
 
 	// γ2 — merge spec AT failures into the LLM finding set BEFORE the
 	// "clean pass" check. A clean LLM pass with failing ATs is NOT clean.
@@ -747,6 +821,49 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 	completeCycle("needs_work", SerializeATResults(atResults), spawnedTaskIDs)
 	if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
 		logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, %d fix tasks spawned) failed (%v); convoy-review-watch will retry", bounty.ID, spawned, uerr)
+	}
+}
+
+// queuePerStageSenateReviewIfStaged is the D5.5 P2 β per-stage Senate hook.
+//
+// For staged convoys with an in-flight stage, queues one SenateReview task
+// scoped to that stage (carrying convoy_id + stage_id, not feature_id —
+// see store.QueueStageSenateReview). For single-mode convoys or convoys
+// with no resolvable stage row, this is a no-op so legacy ConvoyReview
+// behaviour is unchanged.
+//
+// Errors are logged but never propagated — the Senate hook is advisory
+// (the per-Senator memory-driven advice is a layered safety net, not a
+// gate), and a transient queue failure shouldn't poison the ConvoyReview
+// pipeline. The dog re-fires ConvoyReview after fix tasks complete, which
+// re-arms the hook on the next pass.
+func queuePerStageSenateReviewIfStaged(db *sql.DB, convoy *store.Convoy, stage store.ConvoyStage, bountyID int, logger interface{ Printf(string, ...any) }) {
+	if convoy == nil {
+		return
+	}
+	if convoy.StagingMode != store.StagingModeStaged {
+		// Single-mode convoys don't fire the per-stage hook — the legacy
+		// SenateReview path (Feature-scoped, queued by Commander's
+		// QueueSenateReviewHook) covers them.
+		return
+	}
+	if stage.ID <= 0 {
+		// No in-flight stage resolved — degraded path; skip silently.
+		// The standard ConvoyReview verdict still lands.
+		return
+	}
+	taskID, err := store.QueueStageSenateReview(db, convoy.ID, stage.ID)
+	if err != nil {
+		logger.Printf("ConvoyReview #%d: per-stage Senate hook for convoy %d stage %d failed: %v",
+			bountyID, convoy.ID, stage.StageNum, err)
+		return
+	}
+	if taskID > 0 {
+		logger.Printf("ConvoyReview #%d: queued per-stage SenateReview #%d (convoy %d stage %d)",
+			bountyID, taskID, convoy.ID, stage.StageNum)
+	} else {
+		logger.Printf("ConvoyReview #%d: per-stage SenateReview already pending for convoy %d stage %d (idempotent skip)",
+			bountyID, convoy.ID, stage.StageNum)
 	}
 }
 
