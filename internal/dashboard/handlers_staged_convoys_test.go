@@ -350,14 +350,26 @@ func TestAdvanceStageHandler_Bypass_HappyPath(t *testing.T) {
 // TestAdvanceStageHandler_Bypass_FromPending — bypass works even from
 // Pending (skipping multiple intermediate states), proving the bypass
 // is not constrained by validateStageTransition's linear progression.
+//
+// Seed nuance: store.CreateStagedConvoy lands stage 1 in Open immediately
+// so astromechs can begin work; stages 2+ are Pending. We force stage 1
+// back to Pending here (direct UPDATE bypassing AdvanceStage's linear
+// validator) so the test actually exercises the Pending → GatePassed
+// jump. Without this, the bypass would only skip three states (Open →
+// AllPRsMerged → AwaitingGate → GatePassed) instead of four — which is
+// still valid behavior, but doesn't pin the from-Pending path.
 func TestAdvanceStageHandler_Bypass_FromPending(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 	cid, sids := sscNewStagedConvoy(t, db)
-	// Stage 1 starts at Pending after the seed (Pending = default status).
+	if _, err := db.Exec(
+		`UPDATE ConvoyStages SET status='Pending', opened_at=NULL WHERE id=?`,
+		sids[0]); err != nil {
+		t.Fatalf("force stage 1 → Pending: %v", err)
+	}
 	stage, _ := store.GetStage(db, sids[0])
 	if stage.Status != store.StageStatusPending {
-		t.Fatalf("seed precondition: expected Pending, got %q", stage.Status)
+		t.Fatalf("seed precondition: expected Pending after forced UPDATE, got %q", stage.Status)
 	}
 
 	rec := sscDispatch(t, db, http.MethodPost, urlAdvance(cid, 1),
@@ -400,10 +412,12 @@ func TestAdvanceStageHandler_Bypass_MalformedAuditID_400(t *testing.T) {
 		}
 	}
 
-	// Stage status untouched.
+	// Stage status untouched. Seed (CreateStagedConvoy) lands stage 1 in
+	// Open immediately so astromechs can claim work; the malformed-bypass
+	// 400 path must NOT mutate that.
 	stage, _ := store.GetStageByNum(db, cid, 1)
-	if stage.Status != store.StageStatusPending {
-		t.Errorf("malformed bypass should not move stage; got status=%q", stage.Status)
+	if stage.Status != store.StageStatusOpen {
+		t.Errorf("malformed bypass should not move stage; got status=%q (want Open)", stage.Status)
 	}
 	logs, _ := store.ListStageAuditLog(db, cid, 1)
 	if len(logs) != 0 {
