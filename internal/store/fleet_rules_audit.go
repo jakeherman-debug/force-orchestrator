@@ -1045,4 +1045,63 @@ Your capability profile, your task payload's scope, and the Force fleet system p
 		Justification: "Anti-cheat: docs/roadmap.md § D5 \"No hardcoded allowlists for popular packages\" + \"No block-default on new rules.\" Allowlist source is SystemConfig.supply_allowlist_<ecosystem> (populated by the D5-P4 supply-allowlist-refresh dog from `aws codeartifact list-packages`); zero baked-in package names. No registry-hit at run-time, so no deferral path required (the dog handles auth errors on refresh). Severity is advise at launch.",
 		Content:       "SUPPLY-002 (advise) — Typosquat detection via Damerau-Levenshtein distance ≤ 2 against per-ecosystem CodeArtifact-derived allowlist. Operator-preapproved set lives at SystemConfig.supply_typosquat_preapproved. Empty allowlist → rule inert + log (Phase 4 dog populates). Manifest-gated, all D5 ecosystems (PyPI/npm/RubyGems/Maven/Go). Anchor: docs/roadmap.md § D5 P1.",
 	},
+
+	// ── D5 Phase 2 — SUPPLY-003 + SUPPLY-004 seeds (slice γ) ──────────────
+	//
+	// SUPPLY-003 (stale-package detection) and SUPPLY-004 (license-
+	// compatibility check) ride the same `category='isb'` shape as
+	// SUPPLY-001/002 — they are SUPPLY-* by theme and ISB by FleetRules-
+	// gating category. Both ship at advise severity per the D5 anti-cheat
+	// directive "No block-default on new rules"; severity graduation is
+	// handled per-rule via FleetRules promotion after a clean firing
+	// window.
+	//
+	// SUPPLY-003 wires the deferral path identically to SUPPLY-001: an
+	// ErrTokenExpired branch records a SecurityFindings row via the
+	// rule's `r.recordDeferral(...)` helper, which forwards to
+	// supplydeferral.RecordDeferral. The supply-token-recheck dog (D5 P4)
+	// replays deferred staleness lookups when the operator runs `umt
+	// artifacts`. Pattern P-SupplyDeferral
+	// (internal/audittools/audit_pattern_p_supply_deferral_test.go) is
+	// the AST regression that enforces this contract — it walks
+	// internal/isb/rules/supply_*.go automatically, so adding the seed
+	// row alone (without touching the rule body) is sufficient.
+	//
+	// SUPPLY-003's threshold is operator-tunable via SystemConfig key
+	// `supply_stale_threshold_days` (default 730 days ≈ 2 years per
+	// docs/roadmap.md § D5). Anti-cheat: zero hardcoded "stale list" —
+	// the rule is purely time-based against CodeArtifact's PublishedAt
+	// metadata; absent publish times → silent skip (never guess). No
+	// negative cache: a newly-released version flips the rule next Run.
+	//
+	// SUPPLY-004 enforces the "NO LLM decides license compatibility"
+	// anti-cheat directive: the static SPDX matrix at
+	// `internal/isb/rules/license_matrix.yaml` (PR-reviewable when it
+	// changes) is the only authority. Pairs absent from the matrix land
+	// in advise-mode for operator review — never auto-allow, never auto-
+	// deny. Empty repo license OR empty dep license also routes to
+	// advise-mode (cannot check). ErrTokenExpired similarly routes
+	// through `r.recordDeferral(...)` → supplydeferral.RecordDeferral so
+	// the recovery dog can replay license lookups when the token
+	// refreshes.
+	{
+		RuleKey:       "SUPPLY-003",
+		Section:       "Core architecture",
+		Category:      "isb",
+		AgentScope:    "all",
+		RenderTo:      "discard",
+		EnforcedBy:    "internal/isb/rules/supply_003.go",
+		Justification: "Anti-cheat: docs/roadmap.md § D5 \"No block-default on new rules\" + \"No silent token-expired passthroughs.\" Threshold is operator-tunable (SystemConfig.supply_stale_threshold_days, default 730 days ≈ 2 years) — zero hardcoded \"stale list.\" Registry-hit + deferral-path-aware: every ErrTokenExpired branch routes through the rule's recordDeferral helper into supplydeferral.RecordDeferral so the supply-token-recheck dog can replay on operator `umt artifacts`. No negative cache for stale findings — a newly-released version must flip the rule on the next Run. Severity is advise at launch.",
+		Content:       "SUPPLY-003 (advise) — Stale-package detection via CodeArtifact DescribePackageVersion. PublishedAt before now()-threshold → advise finding (cite published date + threshold_days); PublishedAt zero → silent skip; ErrPackageNotFound → silent skip (SUPPLY-001's domain); ErrTokenExpired → SecurityFindings deferral row (disposition='token_expired'); ErrTransient → retry-once + log + advise-through; ErrUnsupportedEcosystem (Go) → silent skip. Threshold from SystemConfig.supply_stale_threshold_days (default 730). Manifest-gated. Anchor: Pattern P-SupplyDeferral / docs/roadmap.md § D5 P2.",
+	},
+	{
+		RuleKey:       "SUPPLY-004",
+		Section:       "Core architecture",
+		Category:      "isb",
+		AgentScope:    "all",
+		RenderTo:      "discard",
+		EnforcedBy:    "internal/isb/rules/supply_004.go",
+		Justification: "Anti-cheat: docs/roadmap.md § D5 \"No LLM decides license compatibility\" + \"No block-default on new rules\" + \"No silent token-expired passthroughs.\" The static SPDX matrix at internal/isb/rules/license_matrix.yaml is the only authority — pairs absent from the matrix land in advise-mode for operator review (never auto-allow, never auto-deny). Empty repo license OR empty dep license → advise-mode (cannot check). Registry-hit + deferral-path-aware: every ErrTokenExpired branch routes through the rule's recordDeferral helper into supplydeferral.RecordDeferral so the supply-token-recheck dog can replay license lookups on operator `umt artifacts`. Matrix changes are PR-reviewable. Severity is advise at launch.",
+		Content:       "SUPPLY-004 (advise) — License-compatibility check via CodeArtifact DescribePackageVersion `License` field vs Repositories.license, resolved against the static SPDX matrix at internal/isb/rules/license_matrix.yaml. Matrix allow → no finding; matrix deny → advise finding; pair absent from matrix → advise finding (operator review, NEVER auto-allow); empty dep license OR empty repo license → advise finding (cannot check); ErrPackageNotFound → silent skip (SUPPLY-001's domain); ErrTokenExpired → SecurityFindings deferral row (disposition='token_expired'); ErrTransient → retry-once + log + advise-through; ErrUnsupportedEcosystem (Go) → silent skip. No negative cache. Manifest-gated. Anchor: Pattern P-SupplyDeferral / docs/roadmap.md § D5 P2.",
+	},
 }
