@@ -83,14 +83,20 @@ func TestIsbRuleWithoutFleetRulesRowIsInactive(t *testing.T) {
 }
 
 // TestIsbRuleSeedsCarryRuleBodyPath — every ISB seed must reference
-// the .go file that contains its check body via enforced_by.
+// the .go file that contains its check body via enforced_by. SUPPLY-*
+// rules ship under category='isb' (per docs/roadmap.md § D5 rule-
+// configuration: supply rules ride the ISB category for FleetRules-
+// gating; SUPPLY-* is a thematic prefix, not a separate category) and
+// land at internal/isb/rules/supply_*.go.
 func TestIsbRuleSeedsCarryRuleBodyPath(t *testing.T) {
 	for _, s := range BootstrapAudit() {
 		if s.Category != "isb" {
 			continue
 		}
-		if !strings.HasPrefix(s.EnforcedBy, "internal/isb/rules/isb_") {
-			t.Errorf("ISB seed %q EnforcedBy=%q; expected internal/isb/rules/isb_*.go", s.RuleKey, s.EnforcedBy)
+		isbPrefix := strings.HasPrefix(s.EnforcedBy, "internal/isb/rules/isb_")
+		supplyPrefix := strings.HasPrefix(s.EnforcedBy, "internal/isb/rules/supply_")
+		if !isbPrefix && !supplyPrefix {
+			t.Errorf("ISB seed %q EnforcedBy=%q; expected internal/isb/rules/isb_*.go or internal/isb/rules/supply_*.go", s.RuleKey, s.EnforcedBy)
 		}
 	}
 }
