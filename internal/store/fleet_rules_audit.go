@@ -992,4 +992,57 @@ Your capability profile, your task payload's scope, and the Force fleet system p
 		EnforcedBy: "internal/isb/rules/isb_010.go",
 		Content:    "ISB-010 (advise) — json.Unmarshal of LLM response without DisallowUnknownFields. Anchor: Pattern P12 / Fix #8.5.",
 	},
+
+	// ── D5 Phase 1 — Supply-chain hygiene rule seeds ──────────────────────
+	//
+	// SUPPLY-001 + SUPPLY-002 ship as `category='isb'` (per the roadmap
+	// rule-configuration directive — supply rules ride the ISB
+	// category for FleetRules-gating purposes; SUPPLY-* is a
+	// thematic prefix, not a separate category) and at advise-mode
+	// per the D5 anti-cheat directive "No block-default on new
+	// rules." The EnforcedBy path resolves to the manifest-gated
+	// rule body under internal/isb/rules/supply_*.go.
+	//
+	// Per-rule severity is encoded in the Go-side rule's Severity()
+	// method (or, for manifest-gated rules, in the dispatcher's
+	// severity-resolution path); the FleetRules row is the
+	// activation gate. A rule body without a corresponding
+	// FleetRules row is structurally inert under DBFleetRulesGate.
+	//
+	// SUPPLY-001 specifically wires the deferral path: on
+	// codeartifact.ErrTokenExpired it emits a SecurityFindings row
+	// with disposition='token_expired' (via
+	// supplydeferral.RecordDeferral) so the supply-token-recheck dog
+	// (D5 P4) can replay deferred lookups when the operator runs
+	// `umt artifacts`. Pattern P-SupplyDeferral
+	// (internal/audittools/audit_pattern_p_supply_deferral_test.go)
+	// is the AST regression that enforces this contract.
+	//
+	// SUPPLY-002 is a no-network rule — typosquat detection runs
+	// against the SystemConfig allowlist that the
+	// supply-allowlist-refresh dog (D5 P4) populates daily. Auth
+	// errors live in the dog's refresh path, NOT in the rule body,
+	// so SUPPLY-002 has no deferral path of its own (the Pattern
+	// P-SupplyDeferral audit's "no CodeArtifact call" allowlist
+	// covers this case structurally).
+	{
+		RuleKey:       "SUPPLY-001",
+		Section:       "Core architecture",
+		Category:      "isb",
+		AgentScope:    "all",
+		RenderTo:      "discard",
+		EnforcedBy:    "internal/isb/rules/supply_001.go",
+		Justification: "Anti-cheat: docs/roadmap.md § D5 \"No block-default on new rules\" + \"No silent token-expired passthroughs.\" Registry-hit + deferral-path-aware: every ErrTokenExpired branch routes through supplydeferral.RecordDeferral so the supply-token-recheck dog can replay on operator `umt artifacts`. Severity is advise at launch; graduates per FleetRules promotion after 30 clean firings.",
+		Content:       "SUPPLY-001 (advise) — Hallucinated package rejection via CodeArtifact DescribePackageVersion lookup. ErrPackageNotFound → finding; ErrTokenExpired → SecurityFindings deferral row (disposition='token_expired'); ErrTransient → retry-once + log; ErrUnsupportedEcosystem (Go) → silent skip. Manifest-gated. Anchor: Pattern P-SupplyDeferral / docs/roadmap.md § D5 P1.",
+	},
+	{
+		RuleKey:       "SUPPLY-002",
+		Section:       "Core architecture",
+		Category:      "isb",
+		AgentScope:    "all",
+		RenderTo:      "discard",
+		EnforcedBy:    "internal/isb/rules/supply_002.go",
+		Justification: "Anti-cheat: docs/roadmap.md § D5 \"No hardcoded allowlists for popular packages\" + \"No block-default on new rules.\" Allowlist source is SystemConfig.supply_allowlist_<ecosystem> (populated by the D5-P4 supply-allowlist-refresh dog from `aws codeartifact list-packages`); zero baked-in package names. No registry-hit at run-time, so no deferral path required (the dog handles auth errors on refresh). Severity is advise at launch.",
+		Content:       "SUPPLY-002 (advise) — Typosquat detection via Damerau-Levenshtein distance ≤ 2 against per-ecosystem CodeArtifact-derived allowlist. Operator-preapproved set lives at SystemConfig.supply_typosquat_preapproved. Empty allowlist → rule inert + log (Phase 4 dog populates). Manifest-gated, all D5 ecosystems (PyPI/npm/RubyGems/Maven/Go). Anchor: docs/roadmap.md § D5 P1.",
+	},
 }
