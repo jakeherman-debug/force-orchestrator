@@ -134,6 +134,118 @@ func SetDisposition(db *sql.DB, findingID int, disposition, bypassAuditID, bypas
 	return nil
 }
 
+// SecurityFindingsFilter narrows ListSecurityFindingsFiltered. Empty
+// fields fall through (no filter); Limit defaults to 50, Offset to 0.
+// D4 fix-loop-1 α1 — backs the dashboard Security Findings list view.
+type SecurityFindingsFilter struct {
+	Bureau      string // 'BoS' | 'ISB' | '' (no filter)
+	Disposition string // 'open' | 'overridden' | 'escalated' | 'closed' | '' (no filter)
+	RuleID      string // exact match; '' = no filter
+	Since       string // datetime string; rows with created_at >= Since
+	Limit       int
+	Offset      int
+}
+
+// ListSecurityFindingsFiltered returns SecurityFindings rows matching
+// the filter, ordered by id DESC (most-recent-first). Empty result is
+// (nil, nil). The 'open' disposition filter is the special case:
+// disposition='' OR disposition='escalated' (i.e. NOT a terminal state).
+func ListSecurityFindingsFiltered(db *sql.DB, f SecurityFindingsFilter) ([]SecurityFinding, error) {
+	if f.Limit <= 0 {
+		f.Limit = 50
+	}
+	if f.Limit > 500 {
+		f.Limit = 500
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+
+	q := `SELECT id, task_id, bureau, rule_id, severity, file_path,
+	             line_number, message, commit_sha,
+	             IFNULL(disposition,''), IFNULL(bypass_audit_id,''),
+	             IFNULL(bypass_reason,''),
+	             IFNULL(created_at,''), IFNULL(resolved_at,'')
+	      FROM SecurityFindings WHERE 1=1`
+	args := []any{}
+	if f.Bureau != "" {
+		q += " AND bureau = ?"
+		args = append(args, f.Bureau)
+	}
+	if f.RuleID != "" {
+		q += " AND rule_id = ?"
+		args = append(args, f.RuleID)
+	}
+	if f.Since != "" {
+		q += " AND created_at >= ?"
+		args = append(args, f.Since)
+	}
+	switch f.Disposition {
+	case "":
+		// no filter
+	case "open":
+		q += " AND (disposition = '' OR disposition = 'escalated')"
+	default:
+		q += " AND disposition = ?"
+		args = append(args, f.Disposition)
+	}
+	q += " ORDER BY id DESC LIMIT ? OFFSET ?"
+	args = append(args, f.Limit, f.Offset)
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ListSecurityFindingsFiltered: %w", err)
+	}
+	defer rows.Close()
+	var out []SecurityFinding
+	for rows.Next() {
+		var ff SecurityFinding
+		if scanErr := rows.Scan(&ff.ID, &ff.TaskID, &ff.Bureau, &ff.RuleID, &ff.Severity,
+			&ff.FilePath, &ff.LineNumber, &ff.Message, &ff.CommitSHA,
+			&ff.Disposition, &ff.BypassAuditID, &ff.BypassReason,
+			&ff.CreatedAt, &ff.ResolvedAt); scanErr != nil {
+			return nil, fmt.Errorf("ListSecurityFindingsFiltered: scan: %w", scanErr)
+		}
+		out = append(out, ff)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		return nil, fmt.Errorf("ListSecurityFindingsFiltered: rows.Err: %w", rErr)
+	}
+	return out, nil
+}
+
+// CountSecurityFindingsFiltered returns the total count for a filter
+// (without limit/offset). Useful for paginated UIs that need a total.
+func CountSecurityFindingsFiltered(db *sql.DB, f SecurityFindingsFilter) (int, error) {
+	q := `SELECT COUNT(*) FROM SecurityFindings WHERE 1=1`
+	args := []any{}
+	if f.Bureau != "" {
+		q += " AND bureau = ?"
+		args = append(args, f.Bureau)
+	}
+	if f.RuleID != "" {
+		q += " AND rule_id = ?"
+		args = append(args, f.RuleID)
+	}
+	if f.Since != "" {
+		q += " AND created_at >= ?"
+		args = append(args, f.Since)
+	}
+	switch f.Disposition {
+	case "":
+	case "open":
+		q += " AND (disposition = '' OR disposition = 'escalated')"
+	default:
+		q += " AND disposition = ?"
+		args = append(args, f.Disposition)
+	}
+	var n int
+	if err := db.QueryRow(q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("CountSecurityFindingsFiltered: %w", err)
+	}
+	return n, nil
+}
+
 // HasBlockingFindings returns true iff any of the task's findings are
 // (severity='block' AND disposition NOT IN ('overridden','resolved','suppressed','closed')).
 // This is the BoS-approve gate: the reviewer rejects the task iff this

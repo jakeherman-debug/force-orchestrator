@@ -233,6 +233,11 @@
   <button class="tab-btn"        data-tab="knowledge"   onclick="switchTab('knowledge')">Knowledge <span class="tab-badge" id="tbadge-knowledge"></span></button>
   <button class="tab-btn"        data-tab="experiments" onclick="switchTab('experiments')">Experiments <span class="tab-badge" id="tbadge-experiments"></span></button>
   <button class="tab-btn"        data-tab="ec"          onclick="switchTab('ec')">EC <span class="tab-badge" id="tbadge-ec"></span></button>
+  <!-- D4 fix-loop-1 α — D4 dashboard surface: BoS / ISB findings, per-rule
+       precision, override audit, Senate review log. Four sub-tabs share
+       one top-level "Security" tab so the existing IA stays compact. -->
+  <button class="tab-btn"        data-tab="security"    onclick="switchTab('security')">Security <span class="tab-badge" id="tbadge-security"></span></button>
+  <button class="tab-btn"        data-tab="senate"      onclick="switchTab('senate')">Senate <span class="tab-badge" id="tbadge-senate"></span></button>
   <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
   <div id="tab-spacer"></div>
   <span id="last-refresh" style="font-size:11px;color:var(--text2);align-self:center"></span>
@@ -479,6 +484,146 @@
     </div>
     <div id="ec-list-wrap" style="padding:10px 14px"></div>
     <div id="ec-detail-wrap" style="padding:10px 14px;border-top:1px solid var(--border);display:none"></div>
+  </div>
+
+  <!-- ── D4 fix-loop-1 α — Security tab (BoS / ISB) ──────────────────────────
+       Three sub-tabs:
+         - Findings:      filterable list of SecurityFindings rows
+                          (fetch /api/security-findings)
+         - Rule metrics:  per-rule precision / firings / ramp status
+                          (fetch /api/rule-metrics)
+         - Override audit: every disposition='overridden' row + bypass
+                          metadata (fetch /api/override-audit) -->
+  <div class="tab-pane" id="tab-security">
+    <div id="security-tabs" class="reflection-tabs" style="padding:6px 14px;border-bottom:1px solid var(--border)">
+      <button class="reflection-tab reflection-tab-active" data-security-tab="findings">Findings</button>
+      <button class="reflection-tab" data-security-tab="rule-metrics">Rule Metrics</button>
+      <button class="reflection-tab" data-security-tab="override-audit">Override Audit</button>
+    </div>
+
+    <div id="security-pane-findings" class="reflection-pane" style="padding:10px 14px">
+      <h3>Security findings</h3>
+      <p class="reflection-help">List of every BoS / ISB finding. Filter by bureau / disposition / rule. Operators can resolve a finding (close, suppress, or override with a bypass audit id).</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label>Bureau
+          <select id="sf-bureau" class="field-select">
+            <option value="all">all</option>
+            <option value="BoS">BoS</option>
+            <option value="ISB">ISB</option>
+          </select>
+        </label>
+        <label>Disposition
+          <select id="sf-disposition" class="field-select">
+            <option value="all">all</option>
+            <option value="open" selected>open</option>
+            <option value="overridden">overridden</option>
+            <option value="resolved">resolved</option>
+            <option value="suppressed">suppressed</option>
+            <option value="closed">closed</option>
+          </select>
+        </label>
+        <label>Rule
+          <input id="sf-rule-id" class="field-input" type="text" placeholder="e.g. BOS-001" style="width:120px">
+        </label>
+        <button class="hdr-btn" onclick="window.loadSecurityFindings && window.loadSecurityFindings()">Refresh</button>
+        <span id="sf-summary" style="margin-left:auto;font-size:11px;color:var(--text2)"></span>
+      </div>
+      <div id="security-findings-table" class="reflection-table"></div>
+    </div>
+
+    <div id="security-pane-rule-metrics" class="reflection-pane" hidden style="padding:10px 14px">
+      <h3>Per-rule precision metrics</h3>
+      <p class="reflection-help">Per-rule firing volume, true-positive / false-positive split, derived precision, and anti-cheat ramp status (advise rules graduate to block after 30 clean firings).</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label>Bureau
+          <select id="rm-bureau" class="field-select">
+            <option value="all">all</option>
+            <option value="BoS">BoS</option>
+            <option value="ISB">ISB</option>
+          </select>
+        </label>
+        <button class="hdr-btn" onclick="window.loadRuleMetrics && window.loadRuleMetrics()">Refresh</button>
+      </div>
+      <div id="rule-metrics-table" class="reflection-table"></div>
+    </div>
+
+    <div id="security-pane-override-audit" class="reflection-pane" hidden style="padding:10px 14px">
+      <h3>Override audit</h3>
+      <p class="reflection-help">Every <code>// BOS-BYPASS</code> / <code>// ISB-BYPASS</code> comment that downgraded a finding. Filter by bureau, rule, or audit id. The full audit trail of operator-acked bypasses lives here.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label>Bureau
+          <select id="oa-bureau" class="field-select">
+            <option value="all">all</option>
+            <option value="BoS">BoS</option>
+            <option value="ISB">ISB</option>
+          </select>
+        </label>
+        <label>Rule
+          <input id="oa-rule-id" class="field-input" type="text" placeholder="e.g. BOS-001" style="width:120px">
+        </label>
+        <label>Audit ID
+          <input id="oa-audit-id" class="field-input" type="text" placeholder="AUDIT-NNN" style="width:140px">
+        </label>
+        <button class="hdr-btn" onclick="window.loadOverrideAudit && window.loadOverrideAudit()">Refresh</button>
+        <span id="oa-summary" style="margin-left:auto;font-size:11px;color:var(--text2)"></span>
+      </div>
+      <div id="override-audit-table" class="reflection-table"></div>
+    </div>
+  </div>
+
+  <!-- ── D4 fix-loop-1 α — Senate tab ──────────────────────────────────────────
+       Two sub-tabs:
+         - Chambers:     active Senators + their scope / status
+                         (fetch /api/senate/chambers)
+         - Reviews:      per-feature review log + drill-down
+                         (fetch /api/senate/reviews + /api/senate/reviews/<id>) -->
+  <div class="tab-pane" id="tab-senate">
+    <div id="senate-tabs" class="reflection-tabs" style="padding:6px 14px;border-bottom:1px solid var(--border)">
+      <button class="reflection-tab reflection-tab-active" data-senate-tab="chambers">Chambers</button>
+      <button class="reflection-tab" data-senate-tab="reviews">Review Log</button>
+    </div>
+
+    <div id="senate-pane-chambers" class="reflection-pane" style="padding:10px 14px">
+      <h3>Senate chambers</h3>
+      <p class="reflection-help">Active Senators consulted by the Chancellor on each Feature. Each Senator has a repo / team scope and an onboarding lifecycle state.</p>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <label>Status
+          <select id="sc-status" class="field-select">
+            <option value="all">all</option>
+            <option value="active" selected>active</option>
+            <option value="onboarding">onboarding</option>
+            <option value="suspended">suspended</option>
+            <option value="retired">retired</option>
+          </select>
+        </label>
+        <button class="hdr-btn" onclick="window.loadSenateChambers && window.loadSenateChambers()">Refresh</button>
+      </div>
+      <div id="senate-chambers-table" class="reflection-table"></div>
+    </div>
+
+    <div id="senate-pane-reviews" class="reflection-pane" hidden style="padding:10px 14px">
+      <h3>Review log</h3>
+      <p class="reflection-help">Every Senator's verdict on each Feature. Filter by feature_id, senator, or position. Click an id to see the cited memories that shaped the verdict.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label>Feature ID
+          <input id="sr-feature-id" type="number" min="1" class="field-input" style="width:100px">
+        </label>
+        <label>Senator
+          <input id="sr-senator" type="text" class="field-input" style="width:160px">
+        </label>
+        <label>Position
+          <select id="sr-position" class="field-select">
+            <option value="">any</option>
+            <option value="concur">concur</option>
+            <option value="amend">amend</option>
+            <option value="dissent">dissent</option>
+          </select>
+        </label>
+        <button class="hdr-btn" onclick="window.loadSenateReviews && window.loadSenateReviews()">Refresh</button>
+      </div>
+      <div id="senate-reviews-table" class="reflection-table"></div>
+      <div id="senate-review-detail" class="reflection-table" style="margin-top:14px"></div>
+    </div>
   </div>
 
   <!-- Logs tab -->
