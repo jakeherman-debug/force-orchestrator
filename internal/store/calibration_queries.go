@@ -131,8 +131,8 @@ func LoadCalibrationScoreboard(ctx context.Context, db *sql.DB) (CalibrationScor
 	// Per-bucket breakout lives in sb.SampleStatsByBucket below.
 	if sErr := db.QueryRowContext(ctx,
 		`SELECT
-		   SUM(CASE WHEN operator_action = 'confirm' THEN 1 ELSE 0 END),
-		   SUM(CASE WHEN operator_action = 'override' THEN 1 ELSE 0 END),
+		   IFNULL(SUM(CASE WHEN operator_action = 'confirm' THEN 1 ELSE 0 END), 0),
+		   IFNULL(SUM(CASE WHEN operator_action = 'override' THEN 1 ELSE 0 END), 0),
 		   COUNT(*)
 		 FROM CalibrationAuditSamples
 		 WHERE surfaced_at > datetime('now', '-30 days')`,
@@ -192,7 +192,7 @@ func LoadCalibrationScoreboard(ctx context.Context, db *sql.DB) (CalibrationScor
 	// Replay drift
 	if rErr := db.QueryRowContext(ctx,
 		`SELECT COUNT(*),
-		        SUM(CASE WHEN decision_changed != 0 THEN 1 ELSE 0 END)
+		        IFNULL(SUM(CASE WHEN decision_changed != 0 THEN 1 ELSE 0 END), 0)
 		   FROM ReplayResults
 		  WHERE replay_started_at > datetime('now', '-30 days')`,
 	).Scan(&sb.ReplayDrift.Total, &sb.ReplayDrift.DecisionChanged); rErr != nil && !errors.Is(rErr, sql.ErrNoRows) {
