@@ -284,6 +284,39 @@ func (c *Client) PRView(cwd, repo string, number int) (*PRView, error) {
 	return &v, nil
 }
 
+// PRLabels runs `gh pr view <number> --json labels` and returns just the
+// label-name list. Used by the D5.5 release_label_present stage gate,
+// which polls for a per-repo release-label regex match across the merged
+// PRs in a stage. Kept as a focused method (rather than expanding the
+// PRView JSON list) so callers that only need labels don't pay for the
+// heavier reviews/mergeStateStatus payload, and so the stub-by-arg-string
+// test pattern stays pure (the args slice differs, so the runner key is
+// disambiguated from PRView).
+func (c *Client) PRLabels(cwd, repo string, number int) ([]string, error) {
+	args := []string{"pr", "view", fmt.Sprintf("%d", number), "--json", "labels"}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	stdout, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return nil, redactGHError("gh pr view --json labels", err, stderr)
+	}
+	var payload struct {
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if uErr := json.Unmarshal(stdout, &payload); uErr != nil {
+		return nil, fmt.Errorf("gh pr view --json labels: parse json: %v (payload=%s)",
+			uErr, strings.TrimSpace(string(stdout)))
+	}
+	out := make([]string, 0, len(payload.Labels))
+	for _, l := range payload.Labels {
+		out = append(out, l.Name)
+	}
+	return out, nil
+}
+
 // PRCheck is a single row in `gh pr checks --json`.
 type PRCheck struct {
 	Name       string `json:"name"`

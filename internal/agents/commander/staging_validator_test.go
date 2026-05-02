@@ -489,3 +489,220 @@ func TestStagingPlan_ToStageSpecs_RoundTrip(t *testing.T) {
 		t.Fatalf("stage 2 should have empty gate type (null gate); got %q", specs[1].GateType)
 	}
 }
+
+// ── ValidateReleaseLabelGateForRepos (D5.5 P3 γ) ───────────────────────────
+
+// p3Registry returns a stagegate.Registry pre-loaded with the baseline +
+// the P3 advanced gates so structural validation passes for tests that
+// exercise the per-repo pattern check. The release_label_present gate
+// needs a PRLabelFetcher; the validator never invokes it (only the
+// runtime dispatcher does), so we wire a no-op stub here.
+func p3Registry(t *testing.T) *stagegate.Registry {
+	t.Helper()
+	r := stagegate.NewRegistry()
+	stagegate.RegisterBaselineGates(r)
+	stagegate.RegisterP3AdvancedGates(r, noopLabelFetcher{})
+	return r
+}
+
+// noopLabelFetcher satisfies stagegate.PRLabelFetcher for the validator
+// tests. The validator never calls PRLabels — only the runtime dispatcher
+// does — so the stub returns empty results for any input.
+type noopLabelFetcher struct{}
+
+func (noopLabelFetcher) PRLabels(_, _ string, _ int) ([]string, error) {
+	return nil, nil
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_AllReposHavePattern_OK — happy
+// path: every repo touched by a release_label_present-gated stage has a
+// non-empty release_label_pattern → planner-time check passes.
+func TestValidateStagingPlan_ReleaseLabelGate_AllReposHavePattern_OK(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	store.AddRepo(db, "frontend", "/tmp/fe", "")
+	if err := store.SetRepositoryReleaseLabelPattern(db, "api", `^released-prod$`); err != nil {
+		t.Fatalf("set pattern api: %v", err)
+	}
+	if err := store.SetRepositoryReleaseLabelPattern(db, "frontend", `^released-prod$`); err != nil {
+		t.Fatalf("set pattern frontend: %v", err)
+	}
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "stage 1 with release_label_present",
+				Tasks:    []store.TaskPlan{taskN(1, "api"), taskN(2, "frontend")},
+				Gate:     &StagingPlanGate{Type: "release_label_present"},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(3, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	// Structural validation must pass first.
+	if err := ValidateStagingPlan(plan, p3Registry(t)); err != nil {
+		t.Fatalf("structural validation failed: %v", err)
+	}
+	if err := ValidateReleaseLabelGateForRepos(plan, db); err != nil {
+		t.Fatalf("expected pattern check to pass; got %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_ReposLackPattern_Rejects — at
+// least one repo touched by a release_label_present-gated stage has an
+// empty pattern → reject with the operator-actionable message naming the
+// stage and the offending repo.
+func TestValidateStagingPlan_ReleaseLabelGate_ReposLackPattern_Rejects(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	store.AddRepo(db, "frontend", "/tmp/fe", "")
+	// Only api has a pattern; frontend is intentionally left empty.
+	if err := store.SetRepositoryReleaseLabelPattern(db, "api", `^released-prod$`); err != nil {
+		t.Fatalf("set pattern api: %v", err)
+	}
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "release-label gate touches both repos",
+				Tasks:    []store.TaskPlan{taskN(1, "api"), taskN(2, "frontend")},
+				Gate:     &StagingPlanGate{Type: "release_label_present"},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(3, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3Registry(t)); err != nil {
+		t.Fatalf("structural validation should still pass: %v", err)
+	}
+	err := ValidateReleaseLabelGateForRepos(plan, db)
+	if err == nil {
+		t.Fatal("expected rejection because frontend has no pattern; got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "stage 1") {
+		t.Errorf("error must name stage 1, got %q", msg)
+	}
+	if !strings.Contains(msg, "frontend") {
+		t.Errorf("error must name the offending repo (frontend), got %q", msg)
+	}
+	if !strings.Contains(msg, "release_label_pattern") {
+		t.Errorf("error must mention release_label_pattern, got %q", msg)
+	}
+	if !strings.Contains(msg, "force config set") {
+		t.Errorf("error must include the operator-actionable hint, got %q", msg)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_NestedInCompound_Rejects —
+// the per-repo check walks compound trees: a release_label_present
+// nested under all_of must still trigger pattern enforcement.
+func TestValidateStagingPlan_ReleaseLabelGate_NestedInCompound_Rejects(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	// api: no pattern set.
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "compound gate with release_label_present nested",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate: &StagingPlanGate{
+					Type: "all_of",
+					Gates: []*StagingPlanGate{
+						soakGate(5),
+						{Type: "release_label_present"},
+					},
+				},
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateStagingPlan(plan, p3Registry(t)); err != nil {
+		t.Fatalf("structural validation should pass: %v", err)
+	}
+	err := ValidateReleaseLabelGateForRepos(plan, db)
+	if err == nil {
+		t.Fatal("expected rejection because api has no pattern; got nil")
+	}
+	if !strings.Contains(err.Error(), "api") {
+		t.Errorf("error must name api, got %q", err.Error())
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_GateNotUsed_NoOp — when no
+// stage uses release_label_present (even if some repos lack patterns),
+// the per-repo check is a silent no-op.
+func TestValidateStagingPlan_ReleaseLabelGate_GateNotUsed_NoOp(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	store.AddRepo(db, "api", "/tmp/api", "")
+	// no pattern set — but the plan doesn't use release_label_present,
+	// so the per-repo validator should accept it.
+
+	plan := StagingPlan{
+		StagingMode:     string(store.StagingModeStaged),
+		StagingStrategy: store.StagingStrategyStrict,
+		Stages: []StagingPlanStage{
+			{
+				StageNum: 1,
+				Intent:   "soak only",
+				Tasks:    []store.TaskPlan{taskN(1, "api")},
+				Gate:     soakGate(60),
+			},
+			{
+				StageNum: 2,
+				Intent:   "terminal",
+				Tasks:    []store.TaskPlan{taskN(2, "api")},
+				Gate:     nil,
+			},
+		},
+	}
+	if err := ValidateReleaseLabelGateForRepos(plan, db); err != nil {
+		t.Errorf("plan without release_label_present should pass; got %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_SingleMode_NoOp — single-mode
+// plans never carry stage gates; the check short-circuits to nil.
+func TestValidateStagingPlan_ReleaseLabelGate_SingleMode_NoOp(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	plan := StagingPlan{StagingMode: string(store.StagingModeSingle)}
+	if err := ValidateReleaseLabelGateForRepos(plan, db); err != nil {
+		t.Errorf("single-mode plan should be a no-op; got %v", err)
+	}
+}
+
+// TestValidateStagingPlan_ReleaseLabelGate_NilDB_Errors — wiring guard.
+func TestValidateStagingPlan_ReleaseLabelGate_NilDB_Errors(t *testing.T) {
+	plan := StagingPlan{StagingMode: string(store.StagingModeStaged)}
+	if err := ValidateReleaseLabelGateForRepos(plan, nil); err == nil {
+		t.Fatal("expected error on nil db; got nil")
+	}
+}
