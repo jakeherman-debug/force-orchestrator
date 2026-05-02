@@ -3,13 +3,16 @@ package agents
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
@@ -132,6 +135,25 @@ var dogCooldowns = map[string]time.Duration{
 	// refresh" — invariants don't drift daily, so the digest cost
 	// amortises well at one pass per week.
 	"senate-refresh": 7 * 24 * time.Hour,
+	// D5 Phase 4 — supply-allowlist-refresh. Walks the per-ecosystem
+	// CodeArtifact repository (npm-prod / pypi-prod / rubygems-prod /
+	// maven-prod), pulls the org's own pull-history via
+	// aws codeartifact list-packages, and writes the sorted
+	// newline-joined name set into SystemConfig.supply_allowlist_<eco>
+	// for SUPPLY-002 typosquat detection. Daily cadence — the org's
+	// pull history is slow-moving and ListPackages cost scales with
+	// the org footprint. Token-expired per ecosystem is non-fatal
+	// (the next tick retries); other errors are aggregated via
+	// errors.Join so a single broken ecosystem doesn't sink the rest.
+	"supply-allowlist-refresh": 24 * time.Hour,
+	// D5 Phase 4 — supply-token-recheck. Probes CodeArtifact health
+	// every 30 min; on recovery, replays SUPPLY-* deferrals (rows with
+	// disposition='token_expired') against the branch tip's current
+	// manifest. 30-min cadence balances "operator notices token expiry
+	// quickly" with "don't burn AWS DescribeDomain calls during a long
+	// outage" — debounce in dogSupplyTokenRecheck handles repeated
+	// failures across cycles without spamming the operator.
+	"supply-token-recheck": 30 * time.Minute,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -183,6 +205,12 @@ var dogOrder = []string{
 	// dogs so the digest reads from the post-dedup, post-quality view
 	// of FleetMemory. Independent of the per-Senator review path.
 	"senate-refresh",
+	// D5 Phase 4 — SUPPLY dogs. supply-allowlist-refresh populates the
+	// SUPPLY-002 typosquat allowlist from CodeArtifact's per-ecosystem
+	// repositories. supply-token-recheck runs after to replay any
+	// in-flight ISBReview deferrals once token health recovers.
+	"supply-allowlist-refresh",
+	"supply-token-recheck",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -207,7 +235,13 @@ var dogOrder = []string{
 // WriteMemory bounties (sub-pr-ci-watch, draft-pr-watch). The Librarian
 // is constructed once at daemon startup and passed via SpawnInquisitor's
 // config struct; tests pass a librarian.NewMock() instance.
-func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
+//
+// D5 Phase 4 (slice α): ca threads through to supply-allowlist-refresh
+// (and forthcoming supply-token-recheck in slice β). The CodeArtifact
+// client is constructed once at daemon startup via codeartifact.NewInProcess
+// and passed via InquisitorConfig; tests pass a stub Client (or nil, which
+// the dog will detect and skip with a log line).
+func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, ca codeartifact.Client, logger interface{ Printf(string, ...any) }) {
 	if IsEstopped(db) {
 		logger.Printf("RunDogs: e-stop active — skipping all dogs this cycle")
 		return
@@ -245,7 +279,7 @@ func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, logger inter
 		// subprocess invocation.
 		dogCtx, dogCancel := context.WithTimeout(ctx, 5*time.Minute)
 		errCh := make(chan error, 1)
-		go func(name string) { errCh <- runDog(dogCtx, db, name, lib, logger) }(dogName)
+		go func(name string) { errCh <- runDog(dogCtx, db, name, lib, ca, logger) }(dogName)
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -285,10 +319,15 @@ func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, logger inter
 // D0-B: lib is the librarian.Client used by sub-pr-ci-watch / draft-pr-watch
 // for their WriteMemory enqueues; CLI/dashboard callers construct it via
 // librarian.NewInProcess(db) at the entry point.
-func RunDogByName(ctx context.Context, db *sql.DB, name string, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
+// D5 Phase 4 (slice α): ca is the codeartifact.Client used by
+// supply-allowlist-refresh; CLI/dashboard callers construct it via
+// codeartifact.NewInProcess(ctx, db) at the entry point. ca may be nil
+// when the AWS SDK config can't load (e.g. in CI without AWS env); the
+// dog itself detects nil and logs a skip rather than panicking.
+func RunDogByName(ctx context.Context, db *sql.DB, name string, lib librarian.Client, ca codeartifact.Client, logger interface{ Printf(string, ...any) }) error {
 	// Mark the run before executing so a crashed dog still shows up as attempted.
 	store.DogMarkRun(db, name)
-	return runDog(ctx, db, name, lib, logger)
+	return runDog(ctx, db, name, lib, ca, logger)
 }
 
 // DogNames returns the canonical order of registered dogs. Used for CLI
@@ -299,7 +338,7 @@ func DogNames() []string {
 	return out
 }
 
-func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, logger interface{ Printf(string, ...any) }) error {
+func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, ca codeartifact.Client, logger interface{ Printf(string, ...any) }) error {
 	switch name {
 	case "git-hygiene":
 		return dogGitHygiene(ctx, db, logger)
@@ -365,9 +404,74 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogClaudeMDDriftWatch(ctx, db, lib, logger)
 	case "senate-refresh":
 		return dogSenateRefresh(ctx, db, lib, logger)
+	case "supply-allowlist-refresh":
+		return dogSupplyAllowlistRefresh(ctx, db, ca, logger)
+	case "supply-token-recheck":
+		return dogSupplyTokenRecheck(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
+}
+
+// dogSupplyAllowlistRefresh walks each supported ecosystem (npm / pypi /
+// rubygems / maven), calls codeartifact.Client.ListPackages, and writes
+// the sorted, newline-joined name set into
+// SystemConfig.supply_allowlist_<ecosystem>. Used by SUPPLY-002
+// typosquat detection ("the set of packages the org has ever pulled —
+// better signal than external popularity"). D5 Phase 4 (slice α).
+//
+// Per-ecosystem error handling:
+//   - ErrTokenExpired: log and skip; the next 24h tick retries (the
+//     operator will refresh the SSO session via `umt artifacts`
+//     out-of-band). Non-fatal so a single ecosystem's auth blip doesn't
+//     wipe the whole allowlist.
+//   - any other error: aggregate via errors.Join and continue to the
+//     next ecosystem; the joined error returns at the end so the
+//     standard dog-mail path surfaces it.
+//
+// Go is intentionally NOT in the ecosystem list — CodeArtifact does not
+// expose a Go format and SUPPLY-002 silent-skips Go entirely.
+//
+// On nil ca (e.g. when the daemon couldn't construct an in-process
+// CodeArtifact client because LoadDefaultConfig failed), log and exit
+// nil — the dog reschedules normally and the operator can re-attempt
+// once AWS config is fixed.
+func dogSupplyAllowlistRefresh(ctx context.Context, db *sql.DB, ca codeartifact.Client, logger interface{ Printf(string, ...any) }) error {
+	if ca == nil {
+		logger.Printf("Dog supply-allowlist-refresh: codeartifact client unavailable; skipping (operator must fix AWS config)")
+		return nil
+	}
+	ecosystems := []codeartifact.Ecosystem{
+		codeartifact.EcosystemNPM,
+		codeartifact.EcosystemPyPI,
+		codeartifact.EcosystemRubyGems,
+		codeartifact.EcosystemMaven,
+	}
+	var errs []error
+	for _, eco := range ecosystems {
+		pkgs, err := ca.ListPackages(ctx, eco)
+		if errors.Is(err, codeartifact.ErrTokenExpired) {
+			logger.Printf("supply-allowlist-refresh: token expired for %s; skipping (will retry on next tick)", eco)
+			continue
+		}
+		if err != nil {
+			logger.Printf("supply-allowlist-refresh: %s ListPackages error: %v", eco, err)
+			errs = append(errs, fmt.Errorf("%s: %w", eco, err))
+			continue
+		}
+		names := make([]string, 0, len(pkgs))
+		for _, p := range pkgs {
+			names = append(names, p.Name)
+		}
+		sort.Strings(names)
+		store.SetConfig(db, fmt.Sprintf("supply_allowlist_%s", eco), strings.Join(names, "\n"))
+		store.SetConfig(db, fmt.Sprintf("supply_allowlist_%s_last_refresh", eco), store.NowSQLite())
+		logger.Printf("Dog supply-allowlist-refresh: %s — %d package(s)", eco, len(names))
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // dogSenateRefresh iterates every active Senator chamber, calls

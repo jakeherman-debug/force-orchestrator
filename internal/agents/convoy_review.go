@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,10 +15,22 @@ import (
 	"force-orchestrator/internal/agents/adversarial"
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/clients/codeartifact"
 	igit "force-orchestrator/internal/git"
+	"force-orchestrator/internal/isb/supplydeferral"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
 )
+
+// ConvoyStatusAwaitingSupplyRecheck is the convoy lifecycle status the
+// AwaitingSupplyRecheck gate stamps onto Convoys.status when a convoy
+// has SUPPLY-* deferrals that can't currently be replayed (CodeArtifact
+// token still expired) AND the operator's "Ship It" surface must refuse
+// to advance the convoy until the deferrals resolve. The dashboard +
+// CLI ship handlers gate on `Status == "DraftPROpen"` — anything else
+// (including this string) blocks the ship action with the standard
+// "convoy is not in DraftPROpen state" error, which is the desired UX.
+const ConvoyStatusAwaitingSupplyRecheck = "AwaitingSupplyRecheck"
 
 // ── Diplomat — ConvoyReview ──────────────────────────────────────────────────
 //
@@ -284,6 +297,60 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 		if ferr := store.FailBounty(db, bounty.ID, fmt.Sprintf("convoy %d not found", payload.ConvoyID)); ferr != nil {
 			logger.Printf("ConvoyReview #%d: FailBounty(convoy %d not found) failed (%v); stale-lock detector will recover", bounty.ID, payload.ConvoyID, ferr)
 		}
+		return
+	}
+
+	// D5 P4 γ — AwaitingSupplyRecheck gate.
+	//
+	// Before we spend an LLM call on this pass, check whether any
+	// ask-branch in the convoy carries SUPPLY-* findings still in
+	// disposition='token_expired'. If so:
+	//   - If CodeArtifact is reachable: replay each branch inline. A
+	//     successful replay flips rows to resolved_late / superseded;
+	//     the gate then passes and ConvoyReview proceeds normally
+	//     (any newly-inserted block rows from still_flagged outcomes
+	//     flow through the regular ISB pipeline, not this gate).
+	//   - If CodeArtifact is still down (or replay deps unwired):
+	//     stamp the convoy with status='AwaitingSupplyRecheck', fire a
+	//     one-shot Slack ping, and exit ConvoyReview early. The
+	//     operator's "Ship It" surface refuses to advance any convoy
+	//     not in 'DraftPROpen' (see internal/dashboard/ship.go +
+	//     cmd/force/convoy_pr.go), so this status is a hard block.
+	//     The supply-token-recheck dog (slice β) will eventually
+	//     replay the deferrals and the convoy can be moved back to
+	//     DraftPROpen via the standard PR-state transition path.
+	if blocked, reason, gateErr := evaluateSupplyRecheckGate(ctx, db, payload.ConvoyID, logger); gateErr != nil {
+		// Gate-evaluation errors are NOT fatal to ConvoyReview itself —
+		// the gate is an optimisation / safety check, and a transient
+		// CA / DB hiccup shouldn't poison the whole pass. Log and
+		// proceed; the standard ISB block-eval downstream will still
+		// catch any unresolved blocks via SecurityFindings.
+		logger.Printf("ConvoyReview #%d: supply-recheck gate evaluation error (continuing): %v", bounty.ID, gateErr)
+	} else if blocked {
+		logger.Printf("ConvoyReview #%d: convoy %d blocked by AwaitingSupplyRecheck gate — %s",
+			bounty.ID, payload.ConvoyID, reason)
+		if serr := store.SetConvoyStatus(db, payload.ConvoyID, ConvoyStatusAwaitingSupplyRecheck); serr != nil {
+			logger.Printf("ConvoyReview #%d: SetConvoyStatus(AwaitingSupplyRecheck) for convoy %d failed (%v); convoy-review-watch will retry",
+				bounty.ID, payload.ConvoyID, serr)
+		}
+		// Best-effort operator ping. notifyAfterFn is the same package
+		// var the supply-token-recheck dog uses; failures here are
+		// non-fatal — the dog will fire its own ping on the next tick.
+		label := fmt.Sprintf("[SUPPLY] Convoy #%d (%s) — %s", payload.ConvoyID, convoy.Name, reason)
+		if nerr := notifyAfterFn(ctx, label); nerr != nil {
+			logger.Printf("ConvoyReview #%d: notify-after failed (continuing): %v", bounty.ID, nerr)
+		}
+		// Mark the bounty Completed — we're not failing the review,
+		// we're deferring it pending recheck. The convoy-review-watch
+		// dog will requeue once the supply-token-recheck dog clears
+		// the deferrals AND the convoy returns to DraftPROpen.
+		if uerr := store.UpdateBountyStatus(db, bounty.ID, "Completed"); uerr != nil {
+			logger.Printf("ConvoyReview #%d: UpdateBountyStatus(Completed, AwaitingSupplyRecheck) failed (%v); convoy-review-watch will retry", bounty.ID, uerr)
+		}
+		store.SendMail(db, agentName, "operator",
+			fmt.Sprintf("[CONVOY GATE] Convoy '%s' (#%d) — AwaitingSupplyRecheck", convoy.Name, payload.ConvoyID),
+			fmt.Sprintf("ConvoyReview deferred: %s\n\nRun `umt artifacts` to refresh the CodeArtifact token; the supply-token-recheck dog will replay the deferrals on its next tick.", reason),
+			bounty.ID, store.MailTypeAlert)
 		return
 	}
 
@@ -810,4 +877,175 @@ func dogConvoyReviewWatch(ctx context.Context, db *sql.DB, logger interface{ Pri
 		}
 	}
 	return nil
+}
+
+// ── D5 P4 γ — AwaitingSupplyRecheck gate helpers ─────────────────────────
+//
+// evaluateSupplyRecheckGate inspects every ask-branch in the convoy for
+// SUPPLY-* findings still in disposition='token_expired'. It returns:
+//   - (false, "", nil)   — no deferrals, OR replay succeeded for all of
+//                          them. ConvoyReview proceeds normally.
+//   - (true,  reason, nil) — deferrals exist AND we cannot resolve them
+//                            right now (CodeArtifact still down, deps
+//                            unwired, or replay still surfaces them).
+//   - (false, "", err)   — gate-evaluation infrastructure error (CA
+//                          health probe returned a non-token error,
+//                          replay helper failed unexpectedly). Caller
+//                          treats this as "log + proceed" so a flaky
+//                          gate doesn't block the entire ConvoyReview
+//                          pipeline.
+//
+// Replay-side caveat: if the replay produces still_flagged outcomes,
+// those are real SUPPLY-* block findings, not deferrals — the
+// disposition='token_expired' rows are flipped to 'superseded' and new
+// disposition='block' rows are inserted. The gate then PASSES (returns
+// false) because there are no remaining token_expired rows; the
+// downstream ConvoyReview LLM pass + ISB block-eval pick up the new
+// block findings via the standard SecurityFindings path.
+func evaluateSupplyRecheckGate(ctx context.Context, db *sql.DB, convoyID int, logger interface{ Printf(string, ...any) }) (bool, string, error) {
+	branches := store.ListConvoyAskBranches(db, convoyID)
+	if len(branches) == 0 {
+		// No ask-branches → no deferrals possible on this convoy.
+		return false, "", nil
+	}
+
+	// Fast path: read-only count of token_expired SUPPLY-* findings on
+	// the convoy's ask-branches. If zero, gate is clean regardless of
+	// CodeArtifact state — no need to even probe Health.
+	deferralCount, perBranchCount, countErr := countConvoyDeferrals(db, branches)
+	if countErr != nil {
+		return false, "", fmt.Errorf("evaluateSupplyRecheckGate: count deferrals for convoy %d: %w", convoyID, countErr)
+	}
+	if deferralCount == 0 {
+		return false, "", nil
+	}
+
+	// Deferrals exist. If replay deps aren't wired (production daemon
+	// without RegisterSupplyRecheckDeps, or test isolation), we can't
+	// replay — fall back to read-only block.
+	deps := getSupplyRecheckDeps()
+	if deps == nil || deps.CA == nil {
+		return true, formatDeferralReason(deferralCount, perBranchCount), nil
+	}
+
+	// Probe CA health. ErrTokenExpired → block (the supply-token-
+	// recheck dog will recover and replay; we just need to keep this
+	// convoy from shipping in the meantime). Any other error class is
+	// a gate-evaluation failure — log + proceed, since blocking on a
+	// transient network blip would be heavy-handed.
+	if err := deps.CA.Health(ctx); err != nil {
+		if errors.Is(err, codeartifact.ErrTokenExpired) {
+			return true, formatDeferralReason(deferralCount, perBranchCount), nil
+		}
+		return false, "", fmt.Errorf("evaluateSupplyRecheckGate: CA health probe: %w", err)
+	}
+
+	// Health OK — try inline replay per ask-branch. The replay helper
+	// flips dispositions on rows it processes; once we re-count, any
+	// remaining token_expired rows mean replay was incomplete (e.g.
+	// missing rule adapter), which still warrants the gate block.
+	if deps.RepoResolver == nil {
+		// Misconfigured deps. Fall back to read-only block — log the
+		// missing wiring as a warning so the operator notices.
+		logger.Printf("evaluateSupplyRecheckGate: SupplyRecheckDeps.RepoResolver is nil — falling back to read-only block")
+		return true, formatDeferralReason(deferralCount, perBranchCount), nil
+	}
+
+	logger.Printf("evaluateSupplyRecheckGate: convoy %d has %d deferral(s) — replaying inline (CA healthy)",
+		convoyID, deferralCount)
+	for _, ab := range branches {
+		if ab.AskBranch == "" {
+			continue
+		}
+		if _, err := supplydeferral.ReplayPendingDeferralsForBranch(ctx, db, ab.AskBranch, deps.RepoResolver, deps.Rules, supplydeferralLogger{logger}); err != nil {
+			// Replay had partial failures. Don't escalate to a hard
+			// gate-evaluation error — the still_flagged path inserts
+			// new block rows, and the partial-failure case is the
+			// dog's responsibility to resolve on the next 30-min tick.
+			// We DO want to fall through to the recount below so a
+			// branch whose replay actually flipped all rows passes.
+			logger.Printf("evaluateSupplyRecheckGate: convoy %d branch %s replay had partial failures (continuing): %v",
+				convoyID, ab.AskBranch, err)
+		}
+	}
+
+	// Re-count: if any token_expired rows remain after replay, block.
+	// (Replay flips successful rows to resolved_late / superseded; only
+	// rules with no registered adapter or rows whose branch is missing
+	// stay token_expired.)
+	remaining, perBranchAfter, recountErr := countConvoyDeferrals(db, branches)
+	if recountErr != nil {
+		return false, "", fmt.Errorf("evaluateSupplyRecheckGate: recount after replay for convoy %d: %w", convoyID, recountErr)
+	}
+	if remaining > 0 {
+		return true, formatDeferralReason(remaining, perBranchAfter), nil
+	}
+	logger.Printf("evaluateSupplyRecheckGate: convoy %d — replay resolved all %d deferral(s); gate passes",
+		convoyID, deferralCount)
+	return false, "", nil
+}
+
+// countConvoyDeferrals tallies SUPPLY-* findings still in
+// disposition='token_expired' across every ask-branch of a convoy.
+// Returns (totalCount, perBranchCount, err). The per-branch map keys
+// are ask-branch names; values are the count for that branch. Branches
+// with zero deferrals are omitted from the map.
+//
+// SecurityFindings doesn't carry a branch column — branch lives in the
+// JSON payload — so we route through ListPendingDeferrals(branch),
+// which parses + filters server-side. One QueryRow per branch keeps the
+// total work O(branches × deferrals_in_branch); typical convoys have
+// 1–3 branches.
+func countConvoyDeferrals(db *sql.DB, branches []store.ConvoyAskBranch) (int, map[string]int, error) {
+	total := 0
+	perBranch := map[string]int{}
+	for _, ab := range branches {
+		if ab.AskBranch == "" {
+			continue
+		}
+		rows, err := supplydeferral.ListPendingDeferrals(db, ab.AskBranch)
+		if err != nil {
+			return 0, nil, fmt.Errorf("countConvoyDeferrals(%s): %w", ab.AskBranch, err)
+		}
+		if n := len(rows); n > 0 {
+			perBranch[ab.AskBranch] = n
+			total += n
+		}
+	}
+	return total, perBranch, nil
+}
+
+// formatDeferralReason builds the operator-facing reason string for a
+// blocked AwaitingSupplyRecheck gate. Format:
+//
+//	"N SUPPLY-* checks deferred (token expired); run umt artifacts to unblock"
+//
+// When the per-branch map has a single entry, the branch name is also
+// embedded for quick triage. The phrasing matches the spec example in
+// docs/roadmap.md § "Layer 2 — ConvoyReview gate".
+func formatDeferralReason(total int, perBranch map[string]int) string {
+	if total == 1 {
+		// Singular form for the common 1-finding case.
+		for branch := range perBranch {
+			return fmt.Sprintf("1 SUPPLY-* check deferred on %s (token expired); run umt artifacts to unblock", branch)
+		}
+		return "1 SUPPLY-* check deferred (token expired); run umt artifacts to unblock"
+	}
+	if len(perBranch) == 1 {
+		for branch, n := range perBranch {
+			return fmt.Sprintf("%d SUPPLY-* checks deferred on %s (token expired); run umt artifacts to unblock", n, branch)
+		}
+	}
+	// Multi-branch: deterministic ordering for stable test assertions.
+	keys := make([]string, 0, len(perBranch))
+	for b := range perBranch {
+		keys = append(keys, b)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, b := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %d", b, perBranch[b]))
+	}
+	return fmt.Sprintf("%d SUPPLY-* checks deferred across %d branch(es) [%s] (token expired); run umt artifacts to unblock",
+		total, len(keys), strings.Join(parts, ", "))
 }

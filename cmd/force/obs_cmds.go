@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
@@ -423,7 +424,15 @@ func cmdDogs(ctx context.Context, db *sql.DB, args []string) {
 		// so RunDogByName has the same client the daemon would have given
 		// it; the dashboard does the same in its handler.
 		libClient := librarian.NewInProcess(db)
-		if err := agents.RunDogByName(ctx, db, name, libClient, logger); err != nil {
+		// D5 Phase 4 (slice α): construct the CodeArtifact client too. On
+		// constructor failure (e.g. CI without AWS config) keep nil — the
+		// supply-* dogs detect nil and log/skip rather than crash.
+		caClient, caErr := codeartifact.NewInProcess(ctx, db)
+		if caErr != nil {
+			fmt.Fprintf(os.Stderr, "[CODEARTIFACT] construction failed (%v) — supply dogs will skip\n", caErr)
+			caClient = nil
+		}
+		if err := agents.RunDogByName(ctx, db, name, libClient, caClient, logger); err != nil {
 			fmt.Printf("Dog %s failed: %v\n", name, err)
 			os.Exit(1)
 		}

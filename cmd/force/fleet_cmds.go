@@ -18,6 +18,7 @@ import (
 	"force-orchestrator/internal/agents/engineering_corps"
 	"force-orchestrator/internal/analysis"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/clients/metrics"
 	igit "force-orchestrator/internal/git"
@@ -268,6 +269,20 @@ func cmdDaemon(db *sql.DB) {
 	// add more clients to the same Spawn config structs.
 	libClient := librarian.NewInProcess(db)
 
+	// D5 Phase 4 (slice α): construct the CodeArtifact client once at
+	// daemon startup. Used by supply-allowlist-refresh (and forthcoming
+	// supply-token-recheck in slice β). The constructor only fails on
+	// AWS SDK config errors (e.g. malformed region); a missing token
+	// surfaces lazily inside the per-call API path as ErrTokenExpired,
+	// not here. On constructor failure we keep the client as nil and
+	// log — the dog itself detects nil and skips with a log line so the
+	// daemon still boots.
+	caClient, caErr := codeartifact.NewInProcess(ctx, db)
+	if caErr != nil {
+		fmt.Fprintf(os.Stderr, "[CODEARTIFACT] construction failed (%v) — supply dogs will skip until reconfigured\n", caErr)
+		caClient = nil
+	}
+
 	// D2 T1-2 — wire the per-agent context-size guard. The DB handle
 	// drives SystemConfig reads (per-agent caps) and persists
 	// PromptByteAttribution rows; the summarizer is the librarian's
@@ -411,7 +426,7 @@ func cmdDaemon(db *sql.DB) {
 		}
 		go agents.SpawnSenate(ctx, db, name, libClient)
 	}
-	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient})
+	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient, CodeArtifact: caClient})
 
 	// D3 Phase 3 — Engineering Corps. Spawned AFTER the review-agent
 	// roster is up and AFTER treatments.Apply is wired (above) so the
