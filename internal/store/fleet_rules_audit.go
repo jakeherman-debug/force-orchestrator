@@ -1104,4 +1104,51 @@ Your capability profile, your task payload's scope, and the Force fleet system p
 		Justification: "Anti-cheat: docs/roadmap.md § D5 \"No LLM decides license compatibility\" + \"No block-default on new rules\" + \"No silent token-expired passthroughs.\" The static SPDX matrix at internal/isb/rules/license_matrix.yaml is the only authority — pairs absent from the matrix land in advise-mode for operator review (never auto-allow, never auto-deny). Empty repo license OR empty dep license → advise-mode (cannot check). Registry-hit + deferral-path-aware: every ErrTokenExpired branch routes through the rule's recordDeferral helper into supplydeferral.RecordDeferral so the supply-token-recheck dog can replay license lookups on operator `umt artifacts`. Matrix changes are PR-reviewable. Severity is advise at launch.",
 		Content:       "SUPPLY-004 (advise) — License-compatibility check via CodeArtifact DescribePackageVersion `License` field vs Repositories.license, resolved against the static SPDX matrix at internal/isb/rules/license_matrix.yaml. Matrix allow → no finding; matrix deny → advise finding; pair absent from matrix → advise finding (operator review, NEVER auto-allow); empty dep license OR empty repo license → advise finding (cannot check); ErrPackageNotFound → silent skip (SUPPLY-001's domain); ErrTokenExpired → SecurityFindings deferral row (disposition='token_expired'); ErrTransient → retry-once + log + advise-through; ErrUnsupportedEcosystem (Go) → silent skip. No negative cache. Manifest-gated. Anchor: Pattern P-SupplyDeferral / docs/roadmap.md § D5 P2.",
 	},
+
+	// ── D5 Phase 3 — SUPPLY-005 seed (slice γ) ────────────────────────────
+	//
+	// SUPPLY-005 (known-CVE blocking via vendored osv-scanner) rides the
+	// same `category='isb'` shape as SUPPLY-001..004 — SUPPLY-* by theme,
+	// ISB by FleetRules-gating category. Severity at launch is advise per
+	// the D5 anti-cheat directive "No block-default on new rules": the
+	// scanner correctly classifies CRITICAL / HIGH / MEDIUM / LOW
+	// severities and surfaces them in the finding message, but every
+	// finding ships at isb.SeverityAdvise until paired-run promotion
+	// graduates the rule. This reconciles with the roadmap's
+	// "High/Critical → reject" line — that's the post-promotion state.
+	//
+	// SUPPLY-005 is structurally distinct from SUPPLY-001..004 in two
+	// ways that drive its FleetRules row:
+	//
+	//  1. NO CodeArtifact dependency. The vendored osv-scanner library
+	//     scans the lock file (Gemfile.lock, package-lock.json, go.sum,
+	//     etc.) directly — independent of AWS auth. Therefore there is
+	//     NO ErrTokenExpired path, NO supplydeferral.RecordDeferral call,
+	//     and NO supply-token-recheck dog replay. Pattern
+	//     P-SupplyDeferral exempts files that don't import the
+	//     codeartifact client (supply_005.go has no codeartifact import,
+	//     so the audit walks past it cleanly).
+	//
+	//  2. ALL FIVE ecosystems including Go. CodeArtifact has no Go
+	//     format, so SUPPLY-001..004 ErrUnsupportedEcosystem-skip Go;
+	//     osv-scanner parses go.sum / go.mod natively, so SUPPLY-005
+	//     covers Go on the same footing as PyPI / npm / RubyGems / Maven.
+	//
+	// Lock-file vs manifest discipline: SUPPLY-005 wants the LOCK file.
+	// The manifest-gating dispatcher hands both the manifest and any
+	// companion lock file to the rule when both are touched; the rule
+	// silently skips paths the scanner reports as
+	// osv.ErrUnsupportedLockfile (e.g. plain `Gemfile`) — the same commit
+	// will normally also touch `Gemfile.lock`, which the scanner
+	// recognises and produces findings against.
+	{
+		RuleKey:       "SUPPLY-005",
+		Section:       "Core architecture",
+		Category:      "isb",
+		AgentScope:    "all",
+		RenderTo:      "discard",
+		EnforcedBy:    "internal/isb/rules/supply_005.go",
+		Justification: "Anti-cheat: docs/roadmap.md § D5 \"No block-default on new rules.\" Severity-mapping discipline — the vendored osv-scanner returns CRITICAL / HIGH / MEDIUM / LOW classifications; ALL of them ship at isb.SeverityAdvise at launch (the message carries the bucket so the dashboard sees it), and the BLOCKING behaviour for High/Critical is a future FleetRules promotion via the same paired-run mechanism as the other SUPPLY rules. Independent of CodeArtifact: no codeartifact import, no auth path, no ErrTokenExpired branch, no supplydeferral.RecordDeferral call, no deferral row — Pattern P-SupplyDeferral exempts this rule structurally because it has no codeartifact dependency. Works during token-expired windows by design.",
+		Content:       "SUPPLY-005 (advise) — Known-CVE blocking via vendored osv-scanner Go library against the lock file (Gemfile.lock, package-lock.json, go.sum, requirements.txt, pom.xml lockfile, etc.). Each scanner-returned vulnerability → advise finding (cite OSV-ID, ecosystem, package@version, summary, severity bucket, advisory URL); osv.ErrUnsupportedLockfile → silent skip for that path (companion lockfile in same commit produces the findings); other scanner errors → wrapped via errors.Join, partial sibling-manifest findings still flow back. CRITICAL / HIGH / MEDIUM / LOW all → advise at launch (paired-run promotion graduates High/Critical to block). Covers all D5 ecosystems including Go (osv-scanner parses go.sum natively). Independent of CodeArtifact / AWS auth — no deferral path. Manifest-gated. Anchor: docs/roadmap.md § D5 P3.",
+	},
 }
