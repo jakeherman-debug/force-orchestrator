@@ -132,6 +132,14 @@ var dogCooldowns = map[string]time.Duration{
 	// refresh" — invariants don't drift daily, so the digest cost
 	// amortises well at one pass per week.
 	"senate-refresh": 7 * 24 * time.Hour,
+	// D5 P4 Slice β — supply-token-recheck. Probes CodeArtifact health
+	// every 30 min; on recovery, replays SUPPLY-* deferrals (rows with
+	// disposition='token_expired') against the branch tip's current
+	// manifest. 30-min cadence balances "operator notices token expiry
+	// quickly" with "don't burn AWS DescribeDomain calls during a long
+	// outage" — debounce in dogSupplyTokenRecheck handles repeated
+	// failures across cycles without spamming the operator.
+	"supply-token-recheck": 30 * time.Minute,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -183,6 +191,10 @@ var dogOrder = []string{
 	// dogs so the digest reads from the post-dedup, post-quality view
 	// of FleetMemory. Independent of the per-Senator review path.
 	"senate-refresh",
+	// D5 P4 Slice β — supply-token-recheck runs late in the cycle so
+	// any in-flight ISBReview tasks have already had a chance to land
+	// new deferrals; the dog then replays the accumulated set.
+	"supply-token-recheck",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -365,6 +377,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogClaudeMDDriftWatch(ctx, db, lib, logger)
 	case "senate-refresh":
 		return dogSenateRefresh(ctx, db, lib, logger)
+	case "supply-token-recheck":
+		return dogSupplyTokenRecheck(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

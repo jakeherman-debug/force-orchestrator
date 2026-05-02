@@ -380,9 +380,11 @@ func TestListDogs(t *testing.T) {
 	// proposed-features-decay; D4 Phase 0 added five Librarian-evolution
 	// dogs (librarian-dedup-watch / -quality-recompute / -conflict-watch /
 	// -hypothesis-emit + claude-md-drift-watch); D4 Phase 3 added
-	// senate-refresh (weekly per-Senator memory digest).
-	if len(dogs) != 32 {
-		t.Errorf("expected 32 built-in dogs (D4-P3 added senate-refresh), got %d", len(dogs))
+	// senate-refresh (weekly per-Senator memory digest); D5 P4 Slice β
+	// added supply-token-recheck (CodeArtifact health probe + SUPPLY-*
+	// deferral replay every 30 min).
+	if len(dogs) != 33 {
+		t.Errorf("expected 33 built-in dogs (D5-P4-β added supply-token-recheck), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -396,7 +398,9 @@ func TestListDogs(t *testing.T) {
 		"librarian-conflict-watch", "librarian-hypothesis-emit",
 		"claude-md-drift-watch",
 		// D4 Phase 3 — senate-refresh.
-		"senate-refresh"} {
+		"senate-refresh",
+		// D5 P4 Slice β — supply-token-recheck.
+		"supply-token-recheck"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}
