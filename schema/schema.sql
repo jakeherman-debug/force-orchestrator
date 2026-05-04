@@ -1286,4 +1286,41 @@ CREATE TABLE IF NOT EXISTS SenateReview (
 );
 CREATE INDEX IF NOT EXISTS idx_senate_review_feature ON SenateReview(feature_id);
 
+-- ── D8 Track 1 — Cross-Repo Dependency Graph ─────────────────────────────────
+-- Two tables maintained by dogRepoGraphScan (daily cadence). CrossRepoSymbols
+-- is the per-repo exported-symbol catalogue; CrossRepoDependencies is the
+-- consumer→provider edge set. Repositories is keyed on `name` (TEXT PRIMARY
+-- KEY) so the FK column is `repo_name`, not the integer `repo_id` sketched in
+-- the roadmap. signature_hash digests the AST-level signature so pure renames
+-- don't churn the row. Soft-delete: deleted_at='' means live; non-empty
+-- means the consumer site has disappeared but the row is retained for
+-- debugging history (Track 1 spec, "Deletion semantics").
+CREATE TABLE IF NOT EXISTS CrossRepoSymbols (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_name       TEXT    NOT NULL,                     -- FK → Repositories.name
+    symbol_path     TEXT    NOT NULL,                     -- 'package.Type.Method' | 'module/api/UserHandler'
+    symbol_kind     TEXT    NOT NULL,                     -- 'function' | 'type' | 'http_handler' | 'cli_command' | 'exported_const'
+    file_path       TEXT    NOT NULL,                     -- repo-relative path
+    line_number     INTEGER NOT NULL,
+    signature_hash  TEXT    NOT NULL,                     -- AST-stable across pure renames
+    last_scanned_at TEXT    NOT NULL,                     -- SQLite UTC ('YYYY-MM-DD HH:MM:SS')
+    is_public       INTEGER NOT NULL DEFAULT 1,           -- 1=exported, 0=private (v1 only emits public)
+    UNIQUE(repo_name, symbol_path)
+);
+CREATE INDEX IF NOT EXISTS idx_cross_repo_symbols_repo ON CrossRepoSymbols(repo_name);
+CREATE INDEX IF NOT EXISTS idx_cross_repo_symbols_kind ON CrossRepoSymbols(symbol_kind);
+
+CREATE TABLE IF NOT EXISTS CrossRepoDependencies (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumer_repo_name TEXT    NOT NULL,                  -- FK → Repositories.name
+    consumer_file      TEXT    NOT NULL,                  -- repo-relative path
+    consumer_line      INTEGER NOT NULL,
+    provider_symbol_id INTEGER NOT NULL,                  -- FK → CrossRepoSymbols.id
+    discovered_at      TEXT    NOT NULL,
+    deleted_at         TEXT    NOT NULL DEFAULT '',       -- '' = live; non-empty = soft-deleted
+    UNIQUE(consumer_repo_name, consumer_file, consumer_line, provider_symbol_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_provider ON CrossRepoDependencies(provider_symbol_id);
+CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_consumer ON CrossRepoDependencies(consumer_repo_name);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
