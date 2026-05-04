@@ -1,0 +1,39 @@
+# docs/arch-health-weights.yaml — D9 ArchHealth Phase 1.
+#
+# Per-rule weight used by dogArchitectureHealthReport to compute the
+# per-repo invariant-health score (see internal/agents/dogs_arch_health_report.go
+# § renderArchHealthReport / weighted-average computation).
+#
+# Anti-cheat (docs/roadmap.md § D9 — "No health-report metric inflation"):
+#   These weights are FleetRule-adjacent. Changes to the weights MUST land
+#   through the D3 promotion pipeline (FleetRules table + the
+#   `force render-rules` flow), NOT by hand-editing this file. Hand-edits
+#   are advisory only — the renderer reads this file directly today, but
+#   any quietly re-weighted firing must be traceable to a PromotionProposal
+#   that the operator approved.
+#
+# Default weight is 1.0 per rule. Higher weight means a violation of that
+# rule contributes more to the per-repo invariant-health score's downside
+# (higher score = healthier). Weights below were chosen to match each
+# rule's CLAUDE.md anchor severity at launch:
+#   - "No silent failures" rules (BOS-001 / BOS-005) carry weight 1.0
+#     — already promoted to advise via FleetRules; severity ramps come
+#     through D4's promotion path, not through this file.
+#   - All other rules ship at weight 1.0 (uniform baseline).
+#
+# Schema:
+#   weights:
+#     <RULE-ID>: <float>     # e.g. BOS-001: 1.0
+
+weights:
+  BOS-001: 1.0
+  BOS-002: 1.0
+  BOS-003: 1.0
+  BOS-004: 1.0
+  BOS-005: 1.0
+  BOS-006: 1.0
+  BOS-007: 1.0
+  BOS-008: 1.0
+  BOS-009: 1.0
+  BOS-010: 1.0
+  BOS-011: 1.0

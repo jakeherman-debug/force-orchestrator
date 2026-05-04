@@ -108,6 +108,13 @@ func RunDashboard(db *sql.DB, port int) {
 	//   4. Senate review log (chambers + per-feature reviews).
 	mux.HandleFunc("/api/security-findings", handleSecurityFindings(db))
 	mux.HandleFunc("/api/security-findings/", handleSecurityFindingsSubroutes(db))
+	// ── D9 Phase 1 — Architecture Health endpoints. /api/arch-health/latest
+	// returns the most recent ArchHealthAggregates view; /api/arch-health/<YYYY-MM>
+	// returns a specific month; /api/arch-health/months returns the distinct
+	// month list for a UI picker. The dog `architecture-health-report` is the
+	// only writer.
+	mux.HandleFunc("/api/arch-health", handleArchHealthRoot(db))
+	mux.HandleFunc("/api/arch-health/", handleArchHealthRoot(db))
 	mux.HandleFunc("/api/rule-metrics", handleRuleMetrics(db))
 	mux.HandleFunc("/api/override-audit", handleOverrideAudit(db))
 	mux.HandleFunc("/api/senate/chambers", handleSenateChambers(db))

@@ -195,6 +195,76 @@ func TestSPAWiring_CalibrationEndpoint_HandlerSmokeTest(t *testing.T) {
 	}
 }
 
+// TestSPA_ArchHealthTab_Wired — D9 ArchHealth fix-iter1 regression.
+//
+// The verifier flagged a NO GO defect: the "Arch Health" tab button
+// existed in index.html but had (a) no <div class="tab-pane" id="tab-arch-health">
+// content pane, (b) no `case 'arch-health':` arm in switchTab, and
+// (c) no loadArchHealth() function in app.js — clicking the button
+// silently no-op'd. Backend handlers worked fine; only the SPA wiring
+// was missing.
+//
+// This test pins all three structural elements so a future refactor that
+// removes any one of them fails CI before reaching the dashboard.
+func TestSPA_ArchHealthTab_Wired(t *testing.T) {
+	root := repoRootSPA(t)
+
+	indexHTMLBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/index.html"))
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	indexHTML := string(indexHTMLBytes)
+
+	appJSBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	appJS := string(appJSBytes)
+
+	// (1) Content pane MUST exist in index.html.
+	if !strings.Contains(indexHTML, `id="tab-arch-health"`) {
+		t.Errorf(`SPA wiring (D9 ArchHealth): index.html missing <div id="tab-arch-health"> — clicking the Arch Health tab button silently no-ops`)
+	}
+	// Required UI elements inside the pane.
+	for _, marker := range []string{
+		`id="ah-month"`,           // month picker
+		`id="arch-health-table"`,  // main table region
+		`id="arch-health-per-author"`, // per-author summary block (carries the ⚠️ flag)
+	} {
+		if !strings.Contains(indexHTML, marker) {
+			t.Errorf("SPA wiring (D9 ArchHealth): index.html arch-health pane missing required element %q", marker)
+		}
+	}
+
+	// (2) switchTab MUST route 'arch-health' to loadArchHealth.
+	if !strings.Contains(appJS, `case 'arch-health':`) {
+		t.Errorf("SPA wiring (D9 ArchHealth): app.js switchTab missing `case 'arch-health':` — tab button click does not trigger any loader")
+	}
+
+	// (3) loadArchHealth() MUST be defined and exposed on window.
+	for _, marker := range []string{
+		`function loadArchHealth(`,
+		`window.loadArchHealth = loadArchHealth`,
+	} {
+		if !strings.Contains(appJS, marker) {
+			t.Errorf("SPA wiring (D9 ArchHealth): app.js missing %q", marker)
+		}
+	}
+
+	// (4) The loader MUST reference all three backend endpoints (months
+	// list, latest, and the per-month form). Mirrors the round-trip
+	// parity check above for P6B endpoints.
+	for _, endpoint := range []string{
+		"/api/arch-health/months",
+		"/api/arch-health/latest",
+		"/api/arch-health/", // per-month form: '/api/arch-health/' + encodeURIComponent(selected)
+	} {
+		if !strings.Contains(appJS, endpoint) {
+			t.Errorf("SPA wiring (D9 ArchHealth): app.js does not reference %q — the loader cannot reach the backend", endpoint)
+		}
+	}
+}
+
 func repoRootSPA(t *testing.T) string {
 	t.Helper()
 	wd, _ := os.Getwd()

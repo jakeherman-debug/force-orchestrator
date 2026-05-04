@@ -390,9 +390,11 @@ func TestListDogs(t *testing.T) {
 	// machine, evaluates gates via stagegate.Registry); D8 Track 1
 	// added repo-graph-scan (24h — walks registered repos, extracts
 	// exported symbols + import call sites into CrossRepoSymbols /
-	// CrossRepoDependencies for cross-repo blast-radius).
-	if len(dogs) != 36 {
-		t.Errorf("expected 36 built-in dogs (D8-T1 added repo-graph-scan), got %d", len(dogs))
+	// CrossRepoDependencies for cross-repo blast-radius); D9 Phase 1
+	// added architecture-health-report (monthly — runs every BoS rule
+	// over the full codebase and renders reports/architecture-health-YYYY-MM.md).
+	if len(dogs) != 37 {
+		t.Errorf("expected 37 built-in dogs (D8-T1 added repo-graph-scan; D9-P1 added architecture-health-report), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -412,7 +414,9 @@ func TestListDogs(t *testing.T) {
 		// D5.5 Phase 1 — staged-convoy stage-watch.
 		"convoy-stage-watch",
 		// D8 Track 1 — repo-graph-scan.
-		"repo-graph-scan"} {
+		"repo-graph-scan",
+		// D9 Phase 1 — monthly architecture-health-report.
+		"architecture-health-report"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

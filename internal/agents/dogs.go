@@ -171,6 +171,14 @@ var dogCooldowns = map[string]time.Duration{
 	// 2/3 (documented stub in dogs_repo_graph_scan.go). The 24h budget
 	// matches the freshness SLO ("MAX(last_scanned_at) within 24h").
 	"repo-graph-scan": 24 * time.Hour,
+	// D9 Phase 1 — architecture-health-report. Monthly longitudinal
+	// dog. Cooldown-only gate (30 days); the dog body itself does NOT
+	// additionally guard on day-of-month so a manual mid-month invocation
+	// is unguarded and will run if cooldown allows. The natural cadence
+	// (per docs/roadmap.md § D9-ArchHealth: "monthly, runs on the 1st
+	// at 00:00 UTC") is enforced by the inquisitor schedule + cooldown,
+	// not by an in-body day-of-month check.
+	"architecture-health-report": 30 * 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -240,6 +248,10 @@ var dogOrder = []string{
 	// after lighter dogs have made forward progress on the cycle's
 	// cooperative work. 24h cooldown means the per-cycle hit is rare.
 	"repo-graph-scan",
+	// D9 Phase 1 — architecture-health-report. Monthly longitudinal
+	// scan; runs last in the order because it walks every registered
+	// repo's full tree and is the most expensive dog by far.
+	"architecture-health-report",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -441,6 +453,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogConvoyStageWatch(ctx, db, logger)
 	case "repo-graph-scan":
 		return dogRepoGraphScan(ctx, db, logger)
+	case "architecture-health-report":
+		return dogArchitectureHealthReport(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

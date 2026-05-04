@@ -105,6 +105,13 @@ var p25Allowlist = map[string]string{
 	"/api/senate/chambers":     "Senator roster (D4-α); GET-only read view",
 	"/api/senate/reviews":      "Senate review log (D4-α); GET-only read view",
 	"/api/senate/reviews/":     "Senate single-review detail (D4-α); GET-only read view",
+
+	// D9 ArchHealth — Architecture Health Report read endpoints. The only
+	// writer is the dog `architecture-health-report`; the dashboard
+	// surfaces the latest aggregate view. CLI parity is `force dogs run
+	// architecture-health-report`, which is the existing dog-runner verb.
+	"/api/arch-health":  "Architecture health latest/by-month read view (D9); GET-only — only writer is the architecture-health-report dog",
+	"/api/arch-health/": "Architecture health latest/by-month read view (D9); GET-only — only writer is the architecture-health-report dog",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in

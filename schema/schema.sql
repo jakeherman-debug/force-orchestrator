@@ -1323,4 +1323,21 @@ CREATE TABLE IF NOT EXISTS CrossRepoDependencies (
 CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_provider ON CrossRepoDependencies(provider_symbol_id);
 CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_consumer ON CrossRepoDependencies(consumer_repo_name);
 
+-- D9 Phase 1 — ArchHealthAggregates (Architecture Health Report).
+-- One row per (report_month, rule_id, repo_id, author_type) tuple. Rendered
+-- into reports/architecture-health-YYYY-MM.md by dogArchitectureHealthReport.
+-- author_type ∈ {'human','astromech','archaeologist-migration'}.
+-- UNIQUE clause makes the dog idempotent — re-running the same month is a no-op.
+CREATE TABLE IF NOT EXISTS ArchHealthAggregates (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_month    TEXT    NOT NULL,                         -- 'YYYY-MM'
+    rule_id         TEXT    NOT NULL,                         -- e.g. 'BOS-001'
+    repo_id         INTEGER NOT NULL,                         -- references Repositories.rowid (Repositories is keyed by name; we use a synthetic id derived from the row order at scan time, see store.ListReposForArchHealth)
+    author_type     TEXT    NOT NULL,                         -- 'human' | 'astromech' | 'archaeologist-migration'
+    violation_count INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(report_month, rule_id, repo_id, author_type)
+);
+CREATE INDEX IF NOT EXISTS idx_arch_health_aggregates_month_rule ON ArchHealthAggregates(report_month, rule_id);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
