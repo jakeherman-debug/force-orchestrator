@@ -1,0 +1,5 @@
+name: chancellor_plan_merge_rate
+version: 2026-05-02
+direction: higher_is_better
+unit: rate
+description: Fraction of chancellor plan calls whose downstream convoy ultimately landed on main — proxy structurally identical to paired-runs.md's example metric.

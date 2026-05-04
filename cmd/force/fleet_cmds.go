@@ -361,8 +361,11 @@ func cmdDaemon(db *sql.DB) {
 	// D3 Phase 1 — install the log-only treatments.Apply hook.
 	// Every Claude CLI invocation now records to TreatmentApplyLog
 	// (mode='log_only'). Phase 2 of D3 swaps this for live pass-through.
-	claude.SetTreatmentApplyHook(func(hookCtx context.Context, agent string, taskID int) error {
-		_, _, err := treatments.Apply(hookCtx, db, treatments.CallDescriptor{
+	// D7: the hook returns the resolved model id so the runner can swap
+	// it onto the argv as --model <id>, letting paired-runs experiments
+	// downgrade an agent to Haiku (or any other model) per-arm.
+	claude.SetTreatmentApplyHook(func(hookCtx context.Context, agent string, taskID int) (string, error) {
+		applied, _, err := treatments.Apply(hookCtx, db, treatments.CallDescriptor{
 			AgentName:       agent,
 			NaturalUnitKind: "task",
 			NaturalUnitID:   taskID,
@@ -372,9 +375,12 @@ func cmdDaemon(db *sql.DB) {
 		// (no operator mail flood) and let the agent's call proceed.
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[TREATMENTS-APPLY] %s/task %d: %v\n", agent, taskID, err)
-			return nil
+			return "", nil
 		}
-		return nil
+		// applied.Model is the experimental arm's TreatmentSpec.model_identifier
+		// when an experiment slotted this unit; "" when no enrollment landed.
+		// The runner only emits --model when this is non-empty.
+		return applied.Model, nil
 	})
 
 	go agents.SpawnChancellor(ctx, db)

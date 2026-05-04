@@ -87,10 +87,20 @@ func activeTranscriptDB() *sql.DB {
 // has its own scrubber (claude.ScrubInbound) for inbound boundary; the
 // wrapper's redaction protects the stored *transcript row* — different
 // chokepoint, same defense-in-depth.
+//
+// D7: the wrapper auto-stamps the call ctx with WithClaudeCallContext
+// using the descriptor's Agent + TaskID so the treatments.Apply hook
+// downstream sees the agent name when computing experiment enrollment.
+// Without this, every CallWithTranscript-routed call hits
+// invokeTreatmentApplyHook with agent="" and never matches an
+// experiment by subject_agent. Pre-D7 the only agent threading
+// WithClaudeCallContext was Captain (for context-size attribution);
+// the model-override seam needs every agent's name on the hook ctx.
 func CallWithTranscript(ctx context.Context, desc CallDescriptor, systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int) (string, error) {
 	db := activeTranscriptDB()
 	rowID := insertTranscriptStart(db, desc, systemPrompt, userPrompt)
 
+	ctx = ensureCallCtx(ctx, desc)
 	out, err := AskClaudeCLIContext(ctx, systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig, maxTurns)
 
 	updateTranscriptEnd(db, rowID, out, err)
@@ -113,6 +123,9 @@ func CallWithTranscriptStreaming(ctx context.Context, desc CallDescriptor, promp
 	// astromech.go:assembleAstromechPrompt).
 	rowID := insertTranscriptStart(db, desc, "", prompt)
 
+	// D7: stamp the call ctx with desc.Agent + desc.TaskID so the
+	// treatments-apply hook downstream identifies the subject agent.
+	ctx = ensureCallCtx(ctx, desc)
 	out, err := RunCLIStreamingContext(ctx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout, w, extraEnv...)
 
 	updateTranscriptEnd(db, rowID, out, err)
@@ -126,10 +139,43 @@ func CallWithTranscriptOneShot(ctx context.Context, desc CallDescriptor, prompt,
 	db := activeTranscriptDB()
 	rowID := insertTranscriptStart(db, desc, "", prompt)
 
+	// D7: stamp the call ctx with desc.Agent + desc.TaskID. RunCLI does
+	// not currently fire the treatments-apply hook (Auditor / Investigator
+	// path), but stamping the ctx is a uniform shape and future-proofs
+	// the seam if RunCLI gains a hook later.
+	ctx = ensureCallCtx(ctx, desc)
 	out, err := RunCLI(ctx, prompt, allowedTools, disallowedTools, mcpConfig, dir, maxTurns, timeout)
 
 	updateTranscriptEnd(db, rowID, out, err)
 	return out, err
+}
+
+// ensureCallCtx stamps the call ctx with the descriptor's Agent +
+// TaskID via WithClaudeCallContext so downstream seams (the
+// treatments-apply hook, CheckContextSize) can identify the subject
+// agent. If the caller already wrapped the ctx (e.g. Captain wires it
+// for byte-attribution contributions), this is a no-op — the existing
+// value wins because context.WithValue layers, and the hook reads
+// from the outermost layer.
+//
+// Empty desc.Agent leaves the ctx untouched — there are tests + early
+// boot paths that pass a zero-value descriptor and we don't want to
+// stamp "" over a parent layer's already-correct agent name.
+func ensureCallCtx(ctx context.Context, desc CallDescriptor) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if desc.Agent == "" {
+		return ctx
+	}
+	// Prefer an existing inner stamp — Captain wires its own with
+	// SourceContribution so we don't want to overwrite that. A simple
+	// "is anything stamped?" check via ClaudeCallContext keeps the
+	// no-op invariant.
+	if existingAgent, _, _, ok := ClaudeCallContext(ctx); ok && existingAgent != "" {
+		return ctx
+	}
+	return WithClaudeCallContext(ctx, desc.Agent, desc.TaskID, nil)
 }
 
 // insertTranscriptStart writes the pre-call row and returns the row id.

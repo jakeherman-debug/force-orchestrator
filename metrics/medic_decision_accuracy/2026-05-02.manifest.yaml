@@ -1,0 +1,5 @@
+name: medic_decision_accuracy
+version: 2026-05-02
+direction: higher_is_better
+unit: rate
+description: Fraction of medic decision-classification calls that completed cleanly — proxy for decision-classification accuracy until D7 ships ground-truth scoring against operator-overridden escalations.

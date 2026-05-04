@@ -1,0 +1,5 @@
+name: diplomat_summarization_quality
+version: 2026-05-02
+direction: higher_is_better
+unit: rate
+description: Fraction of diplomat summarization calls that completed cleanly — proxy for summarization quality until D7 ships ground-truth scoring against PR-body operator overrides.

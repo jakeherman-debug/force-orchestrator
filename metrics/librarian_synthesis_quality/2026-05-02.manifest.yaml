@@ -1,0 +1,5 @@
+name: librarian_synthesis_quality
+version: 2026-05-02
+direction: higher_is_better
+unit: rate
+description: Fraction of librarian synthesis calls that completed cleanly — proxy for synthesis quality until D7 ships ground-truth scoring against retention of synthesized memories.

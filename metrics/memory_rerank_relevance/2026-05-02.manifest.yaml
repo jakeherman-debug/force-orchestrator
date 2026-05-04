@@ -1,0 +1,5 @@
+name: memory_rerank_relevance
+version: 2026-05-02
+direction: higher_is_better
+unit: rate
+description: Fraction of memory-rerank calls whose JSON parsed cleanly. Lower-bound proxy for rerank quality until D7 ships ground-truth scoring of which reranked memories were ultimately used.

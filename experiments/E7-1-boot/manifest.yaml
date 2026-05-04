@@ -1,0 +1,68 @@
+# D7 Experiment E7-1 — Boot model downgrade.
+#
+# Hypothesis: Boot triage decisions hold quality when the agent runs
+# on Haiku 4.5 instead of the current Sonnet-class default; cost
+# drops ≥ 60% (Haiku list price ~ $1/$5 per million tokens vs Sonnet
+# $3/$15).
+#
+# Anti-cheat (paired-runs.md § Anti-cheat directives + roadmap line
+# 2090–2093): the ship gate requires BOTH quality-hold AND cost-drop
+# — promotion on cost alone is forbidden. Confirm phase is required
+# even though stakes_tier=medium leaves it on-demand by default,
+# because the roadmap mandates it across all 8 D7 experiments.
+#
+# To run (post-operator-ratification):
+#   force experiment author experiments/E7-1-boot/manifest.yaml
+#   force experiment ratify <id>
+#   # holdout-mode enrolment auto-attaches to Inquisitor's stalled-task
+#   # triage path; Boot transcripts are recorded against the experiment
+#   # via treatments.Apply hook -> LLMCallTranscripts.cost_usd.
+#   force experiment terminate <id> --reason=window_elapsed
+#   force experiment status <id>
+
+name: E7-1-boot
+hypothesis: |
+  Downgrading Boot triage from claude-sonnet-4-7 to claude-haiku-4-5
+  holds decision accuracy within 5% while reducing cost-per-call by
+  more than 60%.
+min_practical_effect: 0.05
+stakes_tier: medium
+subject_agent: boot
+assignment_unit: task
+analysis_framework_version: "2026-04-29"
+duration_cap_hours: 168
+budget_usd: 10
+hard_cap_usd: 25
+
+confirm_phase_required: true
+
+treatments:
+  - arm_label: control
+    prompt_template_ref: "boot/default@HEAD"
+    model: claude-sonnet-4-7
+    target_cell_weight: 0.5
+  - arm_label: treatment
+    prompt_template_ref: "boot/default@HEAD"
+    model: claude-haiku-4-5-20251001
+    target_cell_weight: 0.5
+
+metrics:
+  - metric_name: boot_decision_accuracy
+    metric_version: "2026-05-02"
+    direction: higher_is_better
+    is_primary: true
+  - metric_name: boot_cost_per_call
+    metric_version: "2026-05-02"
+    direction: lower_is_better
+    is_primary: false
+
+ship_gate:
+  quality: "P(haiku boot_decision_accuracy >= control - 0.05) > 0.95"
+  cost: "haiku boot_cost_per_call < 0.4 * control boot_cost_per_call"
+
+promote:
+  rule_key: boot-default-model
+  proposed_content: |
+    Boot triage default model upgraded to claude-haiku-4-5-20251001
+    (D7 E7-1 winner). Quality held within 5% of sonnet-4-7 baseline;
+    cost dropped > 60%.

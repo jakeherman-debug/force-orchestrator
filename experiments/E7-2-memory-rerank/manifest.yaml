@@ -1,0 +1,59 @@
+# D7 Experiment E7-2 — memory-rerank model downgrade.
+#
+# Hypothesis: Memory-rerank's memory-relevance selection holds parse-success rate within 5% on Haiku while cutting cost > 60%.
+#
+# Anti-cheat (paired-runs.md § Anti-cheat directives + roadmap line
+# 2090–2093): the ship gate requires BOTH quality-hold AND cost-drop
+# — promotion on cost alone is forbidden. Confirm phase is required
+# uniformly across all 8 D7 experiments per roadmap line 2093.
+#
+# To run (post-operator-ratification):
+#   force experiment author experiments/E7-2-memory-rerank/manifest.yaml
+#   force experiment ratify <id>
+#   force experiment terminate <id> --reason=window_elapsed
+#   force experiment status <id>
+
+name: E7-2-memory-rerank
+hypothesis: |
+  Memory-rerank's memory-relevance selection holds parse-success rate within 5% on Haiku while cutting cost > 60%.
+min_practical_effect: 0.05
+stakes_tier: medium
+subject_agent: memory-rerank
+assignment_unit: task
+analysis_framework_version: "2026-04-29"
+duration_cap_hours: 168
+budget_usd: 10
+hard_cap_usd: 25
+
+confirm_phase_required: true
+
+treatments:
+  - arm_label: control
+    prompt_template_ref: "memory-rerank/default@HEAD"
+    model: claude-sonnet-4-7
+    target_cell_weight: 0.5
+  - arm_label: treatment
+    prompt_template_ref: "memory-rerank/default@HEAD"
+    model: claude-haiku-4-5-20251001
+    target_cell_weight: 0.5
+
+metrics:
+  - metric_name: memory_rerank_relevance
+    metric_version: "2026-05-02"
+    direction: higher_is_better
+    is_primary: true
+  - metric_name: memory_rerank_cost_per_call
+    metric_version: "2026-05-02"
+    direction: lower_is_better
+    is_primary: false
+
+ship_gate:
+  quality: "P(haiku memory_rerank_relevance >= control - 0.05) > 0.95"
+  cost: "haiku memory_rerank_cost_per_call < 0.4 * control memory_rerank_cost_per_call"
+
+promote:
+  rule_key: memory-rerank-default-model
+  proposed_content: |
+    memory-rerank default model upgraded to claude-haiku-4-5-20251001
+    (E7-2 winner). Quality held within 5% of sonnet-4-7 baseline;
+    cost dropped > 60%.
