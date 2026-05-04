@@ -83,6 +83,7 @@ func createSchema(db *sql.DB) {
 		deferred_revert           INTEGER DEFAULT 0,
 		revert_target_task_id     INTEGER DEFAULT 0,
 		stage_id                  INTEGER DEFAULT NULL,
+		blast_radius_json         TEXT    NOT NULL DEFAULT '{}',
 		created_at                TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
@@ -2185,6 +2186,16 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN spawning_at_id                  TEXT    DEFAULT ''`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN deferred_revert                 INTEGER DEFAULT 0`)
 	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN revert_target_task_id           INTEGER DEFAULT 0`)
+
+	// D8 Track 2 — Chancellor blast-radius integration. Populated on every
+	// Feature row at convoy-creation time by the blast-radius post-process
+	// pass (internal/agents/chancellor_blast_radius.go). Empty default '{}'
+	// keeps pre-D8-T2 rows + non-Feature rows readable as the zero value.
+	// Stored on BountyBoard rather than a sidecar table because Features
+	// already live in BountyBoard with type='Feature'; per-Feature-payload
+	// JSON (blast_radius_json, proposed_action_json, prior_review_outcomes_json)
+	// is the established shape.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN blast_radius_json               TEXT    NOT NULL DEFAULT '{}'`)
 
 	// Convoys — paired-runs holdout/assignment + verification spec +
 	// parent-feature backreference + critical flag.

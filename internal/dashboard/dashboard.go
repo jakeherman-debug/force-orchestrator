@@ -100,6 +100,11 @@ func RunDashboard(db *sql.DB, port int) {
 	// extracted from cmd/force/task_cmds.go cmdAddJira). See
 	// handlers_feature_from_jira.go for validation + response shape.
 	mux.HandleFunc("/api/feature/from-jira", handleFeatureFromJira(db))
+	// D8 T2 — per-Feature blast-radius surface. GET only; the writer is
+	// the Chancellor blast-radius post-process. Returns the canonical
+	// {modified_symbols, affected_consumer_repos, auto_included_tasks}
+	// shape with empty arrays for Features that have no blast-radius.
+	mux.HandleFunc("/api/features/", handleFeatureBlastRadius(db))
 	// ── D4 fix-loop-1 α — Dashboard views for D4 entities (exit criterion 5).
 	// Four operator surfaces back the BoS / ISB / Senate stack:
 	//   1. Security findings list + per-finding resolve (BoS + ISB rows).

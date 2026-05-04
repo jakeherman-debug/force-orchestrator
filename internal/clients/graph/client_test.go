@@ -8,22 +8,32 @@ import (
 	"force-orchestrator/internal/clients/graph"
 )
 
-func TestInProcess_StubReturnsErrNotImplemented(t *testing.T) {
-	c := graph.NewInProcess()
+// TestInProcess_NilDBReturnsErrIndexNotReady documents the fail-safe
+// behaviour of NewInProcess(nil): every read returns ErrIndexNotReady so
+// daemon-startup paths that haven't opened the DB yet fail explicitly
+// rather than panicking. (D8 T2 replaces the D0-era ErrNotImplemented
+// guards now that the in-process backing has a real implementation.)
+func TestInProcess_NilDBReturnsErrIndexNotReady(t *testing.T) {
+	c := graph.NewInProcess(nil)
 	ctx := context.Background()
 
 	sym := graph.Symbol{Repo: "force", Name: "auth.Login", Kind: "func"}
-	if _, err := c.Consumers(ctx, sym); !errors.Is(err, graph.ErrNotImplemented) {
-		t.Errorf("Consumers: expected ErrNotImplemented, got %v", err)
+	if _, err := c.Consumers(ctx, sym); !errors.Is(err, graph.ErrIndexNotReady) {
+		t.Errorf("Consumers: expected ErrIndexNotReady on nil-db client, got %v", err)
 	}
-	if _, err := c.Definers(ctx, sym); !errors.Is(err, graph.ErrNotImplemented) {
-		t.Errorf("Definers: expected ErrNotImplemented, got %v", err)
+	if _, err := c.Definers(ctx, sym); !errors.Is(err, graph.ErrIndexNotReady) {
+		t.Errorf("Definers: expected ErrIndexNotReady on nil-db client, got %v", err)
 	}
-	if _, err := c.BlastRadius(ctx, sym); !errors.Is(err, graph.ErrNotImplemented) {
-		t.Errorf("BlastRadius: expected ErrNotImplemented, got %v", err)
+	if _, err := c.BlastRadius(ctx, sym); !errors.Is(err, graph.ErrIndexNotReady) {
+		t.Errorf("BlastRadius: expected ErrIndexNotReady on nil-db client, got %v", err)
 	}
-	if _, err := c.IndexHealth(ctx); !errors.Is(err, graph.ErrNotImplemented) {
-		t.Errorf("IndexHealth: expected ErrNotImplemented, got %v", err)
+	if _, err := c.BlastRadiusForModifications(ctx, []graph.SymbolModification{
+		{Repo: "force", FilePath: "auth/login.go", SymbolPath: "auth.Login"},
+	}); !errors.Is(err, graph.ErrIndexNotReady) {
+		t.Errorf("BlastRadiusForModifications: expected ErrIndexNotReady on nil-db client, got %v", err)
+	}
+	if _, err := c.IndexHealth(ctx); !errors.Is(err, graph.ErrIndexNotReady) {
+		t.Errorf("IndexHealth: expected ErrIndexNotReady on nil-db client, got %v", err)
 	}
 }
 
