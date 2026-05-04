@@ -42,6 +42,20 @@ const (
 // optional Kind / Factors fields (D3 Phase 4) discriminate factorial
 // from single-treatment manifests; when absent or 'single', the Phase 2
 // path runs unchanged.
+//
+// D7 fields (ShipGate, ConfirmPhaseRequired): paired-runs.md
+// § Engineering Corps spells the ship-gate as "P(haiku metric >=
+// control - <delta>) > 0.95 AND haiku cost_per_call < 0.4 ×
+// control cost_per_call." That gate isn't decided in the lifecycle
+// scoring layer (which only declares a winner) — it's the
+// PromotionAuthor's job to evaluate it before minting the
+// PromotionProposal. The fields ride on the Manifest so the operator
+// reviewing the YAML pre-ratification sees the exact gate that will
+// be checked, and so PromotionAuthor (a future EC task type) can read
+// them out of the persisted experiment row. Persistence: we stash the
+// JSON-marshalled ShipGate + ConfirmPhaseRequired into SystemConfig
+// under experiment_ship_gate_<id>, mirroring the Promote shape; this
+// avoids a schema migration in the engineering-only D7 commit.
 type Manifest struct {
 	Name                     string              `yaml:"name"`
 	Hypothesis               string              `yaml:"hypothesis"`
@@ -57,7 +71,24 @@ type Manifest struct {
 	Factors                  []ManifestFactor    `yaml:"factors"`          // D3 P4: factorial factor catalog
 	Treatments               []ManifestTreatment `yaml:"treatments"`
 	Metrics                  []ManifestMetric    `yaml:"metrics"`
+	ShipGate                 *ManifestShipGate   `yaml:"ship_gate"`              // D7: PromotionAuthor's promotion gate
+	ConfirmPhaseRequired     bool                `yaml:"confirm_phase_required"` // D7: gate the confirm phase
 	Promote                  *ManifestPromotion  `yaml:"promote"`
+}
+
+// ManifestShipGate captures the two-part promotion gate
+// PromotionAuthor evaluates before minting a PromotionProposal:
+// quality (typically a posterior-probability inequality on the
+// primary metric) and cost (typically a fractional-of-control
+// inequality on the cost-per-call secondary metric). The strings are
+// human-readable expressions persisted verbatim — the actual numerical
+// evaluation happens in PromotionAuthor against the live
+// ExperimentOutcomes / LLMCallTranscripts data. Anti-cheat
+// (paired-runs.md § Anti-cheat directives): both Quality AND Cost
+// must clear; promoting on cost alone is forbidden.
+type ManifestShipGate struct {
+	Quality string `yaml:"quality"`
+	Cost    string `yaml:"cost"`
 }
 
 // ManifestTreatment is one arm of the experiment. For factorial
@@ -273,10 +304,53 @@ func AuthorFromManifest(ctx context.Context, db *sql.DB, m Manifest) (int, error
 		}
 	}
 
+	// D7: stash the ship-gate + confirm-phase-required flag so
+	// PromotionAuthor can read it back at termination. Only persist
+	// when the manifest declares a ship_gate or confirm_phase_required.
+	// Same shape as the Promote block — JSON in SystemConfig, no
+	// schema migration required for the engineering D7 deliverable.
+	if m.ShipGate != nil || m.ConfirmPhaseRequired {
+		body, _ := json.Marshal(struct {
+			ShipGate             *ManifestShipGate `json:"ship_gate"`
+			ConfirmPhaseRequired bool              `json:"confirm_phase_required"`
+		}{m.ShipGate, m.ConfirmPhaseRequired})
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO SystemConfig (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value
+		`, fmt.Sprintf("experiment_ship_gate_%d", expID), string(body)); err != nil {
+			return 0, fmt.Errorf("AuthorFromManifest: cache ship-gate block: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("AuthorFromManifest: commit: %w", err)
 	}
 	return expID, nil
+}
+
+// LoadShipGate returns the ship-gate + confirm-phase-required flag
+// persisted by AuthorFromManifest for the named experiment, or
+// (nil, false, nil) when none was declared. PromotionAuthor consumes
+// this when it evaluates the gate before minting a
+// PromotionProposal.
+func LoadShipGate(ctx context.Context, db *sql.DB, experimentID int) (*ManifestShipGate, bool, error) {
+	var raw string
+	err := db.QueryRowContext(ctx, `SELECT value FROM SystemConfig WHERE key = ?`,
+		fmt.Sprintf("experiment_ship_gate_%d", experimentID)).Scan(&raw)
+	if err == sql.ErrNoRows || raw == "" {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("LoadShipGate: %w", err)
+	}
+	var body struct {
+		ShipGate             *ManifestShipGate `json:"ship_gate"`
+		ConfirmPhaseRequired bool              `json:"confirm_phase_required"`
+	}
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		return nil, false, fmt.Errorf("LoadShipGate: unmarshal: %w", err)
+	}
+	return body.ShipGate, body.ConfirmPhaseRequired, nil
 }
 
 // Ratify is the operator-routed gate from 'authored' to 'running'.

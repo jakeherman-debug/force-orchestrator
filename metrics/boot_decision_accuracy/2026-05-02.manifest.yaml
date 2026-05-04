@@ -1,0 +1,5 @@
+name: boot_decision_accuracy
+version: 2026-05-02
+direction: higher_is_better
+unit: rate
+description: Fraction of Boot triage decisions that were not silently overridden by Inquisitor follow-up. Per-run scoping treats one ExperimentRuns row as a single Boot triage call. Lower-bound proxy for Boot's effective accuracy until D7 ships ground-truth scoring.

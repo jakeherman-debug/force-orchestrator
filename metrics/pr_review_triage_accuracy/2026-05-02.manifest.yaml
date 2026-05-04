@@ -1,0 +1,5 @@
+name: pr_review_triage_accuracy
+version: 2026-05-02
+direction: higher_is_better
+unit: rate
+description: Fraction of pr-review-triage decisions that completed without an error excerpt — proxy for classifier reliability until D7 ships ground-truth scoring against operator-overridden classifications.

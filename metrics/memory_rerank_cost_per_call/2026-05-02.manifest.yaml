@@ -1,0 +1,5 @@
+name: memory_rerank_cost_per_call
+version: 2026-05-02
+direction: lower_is_better
+unit: usd
+description: Mean cost in USD across LLMCallTranscripts rows whose agent equals 'memory-rerank' and whose task_id matches an ExperimentRuns row in the experiment. Computed at run granularity so the ship-gate's haiku-vs-control fraction-of-control comparison stays apples-to-apples.

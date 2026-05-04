@@ -281,7 +281,11 @@ func defaultCLIRunner(parentCtx context.Context, prompt, allowedTools, disallowe
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
-	args := buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig, maxTurns, "json")
+	// D7: if an experiment treatment hook stashed a model override onto
+	// the ctx via withRequestedModel, surface it on the argv so the
+	// claude binary actually runs the experimental arm's model.
+	modelOverride := RequestedModel(parentCtx)
+	args := buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig, maxTurns, "json", modelOverride)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	if dir != "" {
 		cmd.Dir = dir
@@ -396,9 +400,13 @@ func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir strin
 func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer, extraEnv ...string) (string, error) {
 	// D3 Phase 1 — log-only treatments.Apply ingress (mirrors
 	// AskClaudeCLIContext). Astromech sessions route through here.
-	if err := invokeTreatmentApplyHook(parentCtx); err != nil {
+	// D7: hook may stash a model override onto the returned ctx so a
+	// downstream `claude` exec runs the experimental arm's model.
+	hookedCtx, err := invokeTreatmentApplyHook(parentCtx)
+	if err != nil {
 		return "", fmt.Errorf("treatments.Apply: %w", err)
 	}
+	parentCtx = hookedCtx
 
 	// D1 T0-2: scrub prompt at the boundary before any path (stub or
 	// real exec) sees it. Centralised here so the streaming variant
@@ -430,7 +438,9 @@ func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, dis
 	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
-	args := buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig, maxTurns, "stream-json")
+	// D7: surface the experiment-arm model selection (if any) onto the argv.
+	modelOverride := RequestedModel(parentCtx)
+	args := buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig, maxTurns, "stream-json", modelOverride)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	// AUDIT-093 (Fix #8d): WaitDelay bounds how long Wait() blocks after
 	// ctx cancellation before os/exec gives up on stdout/stderr pipes and
@@ -573,9 +583,14 @@ func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, allowedT
 	// mutating the call. Phase 2 flips this live; Phase 1 ships the
 	// audit trail so the live flip is a config change, not a code
 	// change.
-	if err := invokeTreatmentApplyHook(ctx); err != nil {
+	// D7: hook may stash a model override onto the returned ctx via
+	// withRequestedModel; defaultCLIRunner reads it back and emits
+	// `--model <id>` on the argv for the experimental arm.
+	hookedCtx, err := invokeTreatmentApplyHook(ctx)
+	if err != nil {
 		return "", fmt.Errorf("treatments.Apply: %w", err)
 	}
+	ctx = hookedCtx
 
 	// D2 T1-2 — per-agent context-size enforcement runs at the TOP of
 	// the ingress, BEFORE redaction (size cap is on the bytes that
@@ -728,12 +743,18 @@ func ClearRateLimitHits(db *sql.DB, agentName string) {
 // --verbose). The streaming path adds --verbose; the one-shot path
 // does not.
 //
+// modelOverride (D7): when non-empty, emitted as `--model <id>` so the
+// claude binary runs the requested model instead of its default. Wired
+// from RequestedModel(ctx) which the treatments-apply hook stashes per
+// active experiment arm. Empty preserves pre-D7 behaviour (claude
+// binary picks default).
+//
 // D1 T0-1: --disallowedTools is the actual hard restriction (Fix #8e
 // empirical finding that --allowedTools is auto-approve hint, not
 // enforcement, in --dangerously-skip-permissions mode). The
 // capabilities loader supplies the complement of the profile against
 // the full REGISTRY universe.
-func buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int, outputFormat string) []string {
+func buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int, outputFormat, modelOverride string) []string {
 	args := []string{"-p", prompt, "--dangerously-skip-permissions",
 		"--max-turns", fmt.Sprintf("%d", maxTurns),
 		"--output-format", outputFormat,
@@ -749,6 +770,9 @@ func buildClaudeArgs(prompt, allowedTools, disallowedTools, mcpConfig string, ma
 	}
 	if mcpConfig != "" {
 		args = append(args, "--mcp-config", mcpConfig, "--strict-mcp-config")
+	}
+	if modelOverride != "" {
+		args = append(args, "--model", modelOverride)
 	}
 	return args
 }

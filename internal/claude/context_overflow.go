@@ -86,6 +86,44 @@ func ClaudeCallContext(ctx context.Context) (agent string, taskID int, contribut
 	return v.Agent, v.TaskID, v.Contributions, true
 }
 
+// requestedModelCtxKey is the unexported context-value type used by
+// the treatments-apply hook to communicate the model an active
+// experiment treatment selected for this call. Read by the runner
+// just before exec'ing the `claude` binary so the model id flows onto
+// the argv as `--model <id>`. Empty / unset means "use the claude
+// binary's default" — the historical pre-D7 behaviour.
+//
+// D7: this is the swap-point that lets a paired-runs experiment
+// downgrade an agent to Haiku per-arm. Set by withRequestedModel,
+// read by RequestedModel + buildClaudeArgs.
+type requestedModelCtxKey struct{}
+
+// withRequestedModel returns a derived ctx carrying the model id the
+// caller wants the next claude exec to run under. Empty model means
+// "no override" — the runner omits --model and the claude binary
+// picks its default.
+func withRequestedModel(ctx context.Context, model string) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, requestedModelCtxKey{}, model)
+}
+
+// RequestedModel returns the model id the treatments-apply hook (or
+// any other in-flight caller) has requested for this Claude call, or
+// "" if none is set. Exported so call-site tests can assert that the
+// hook stashed an experiment-arm's model id in the ctx; production
+// code reads it indirectly through buildClaudeArgs.
+func RequestedModel(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(requestedModelCtxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // SystemConfig keys for the per-agent prompt-byte budget. The default
 // cap is conservative (200 KB) but plenty of headroom for healthy
 // captain / medic prompts. Per-agent overrides land at agent_max_prompt_bytes_<agent>.
@@ -172,14 +210,22 @@ func activeContextSizeDB() *sql.DB { return activeContextSizeDBHandle }
 // Claude call at the top of AskClaudeCLIContext / RunCLIStreamingContext.
 //
 // The hook receives the (agent, taskID) tuple already on the call ctx
-// via WithClaudeCallContext + the daemon's DB handle. It is expected
-// to return nil unless the call should be aborted (live mode only;
-// Phase 1 always returns nil).
+// via WithClaudeCallContext + the daemon's DB handle. It returns:
+//
+//   - modelOverride: the model id the active experiment treatment
+//     selected for this call (e.g. "claude-haiku-4-5-20251001"), or
+//     "" when no experiment is enrolling this unit (descriptor
+//     unchanged). The runner threads this onto the argv as
+//     `--model <id>`. D7 makes this the swap-point that lets a
+//     paired-runs experiment downgrade an agent to Haiku per-arm.
+//   - err: non-nil aborts the call. Phase 1 always returns nil even
+//     on a journal write failure (fail-open). Phase 2+ may return a
+//     real error if a treatment apply must hard-fail (rare).
 //
 // Internal/claude does not import internal/treatments to avoid binding
 // the runtime package to a specific treatment implementation. The
 // daemon wires the closure at startup.
-type TreatmentApplyHook func(ctx context.Context, agent string, taskID int) error
+type TreatmentApplyHook func(ctx context.Context, agent string, taskID int) (modelOverride string, err error)
 
 var activeTreatmentApplyHook TreatmentApplyHook
 
@@ -192,15 +238,24 @@ func SetTreatmentApplyHook(fn TreatmentApplyHook) {
 
 // invokeTreatmentApplyHook fires the installed hook with the call's
 // (agent, taskID) tuple. No-op when no hook is installed (tests, early
-// boot). Errors are propagated to the caller — Phase 1 returns nil so
-// the upstream caller never sees a non-nil error from this path.
-func invokeTreatmentApplyHook(ctx context.Context) error {
+// boot). The returned ctx carries any modelOverride the hook produced
+// so the downstream runner sees it via RequestedModel(ctx). Errors are
+// propagated to the caller — Phase 1 always returns nil so the
+// upstream caller never sees a non-nil error from this path.
+func invokeTreatmentApplyHook(ctx context.Context) (context.Context, error) {
 	hook := activeTreatmentApplyHook
 	if hook == nil {
-		return nil
+		return ctx, nil
 	}
 	agent, taskID, _, _ := ClaudeCallContext(ctx)
-	return hook(ctx, agent, taskID)
+	model, err := hook(ctx, agent, taskID)
+	if err != nil {
+		return ctx, err
+	}
+	if model != "" {
+		ctx = withRequestedModel(ctx, model)
+	}
+	return ctx, nil
 }
 
 // SetSummarizer installs the active summarizer. cmdDaemon wires the
