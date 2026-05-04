@@ -2,10 +2,12 @@ package agents
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"strings"
 	"testing"
 
+	"force-orchestrator/internal/clients/graph"
 	"force-orchestrator/internal/store"
 )
 
@@ -53,7 +55,7 @@ func TestFix8b_Chancellor_ApproveProposal_PropagatesConvoyCreateError(t *testing
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	err := approveProposal(db, feature, nil, chancellorRuling{}, logger)
+	err := approveProposal(context.Background(), db, graph.NewInProcess(db), feature, nil, chancellorRuling{}, logger)
 	if err == nil {
 		t.Fatalf("expected approveProposal to return error when both CreateConvoy and FailBounty fail, got nil")
 	}
@@ -100,7 +102,7 @@ func TestFix8b_Chancellor_ApproveProposal_PropagatesUpdateBountyStatusError(t *t
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	err := approveProposal(db, feature, tasks, chancellorRuling{}, logger)
+	err := approveProposal(context.Background(), db, graph.NewInProcess(db), feature, tasks, chancellorRuling{}, logger)
 	if err == nil {
 		t.Fatalf("expected approveProposal to return error when UpdateBountyStatus fails, got nil")
 	}

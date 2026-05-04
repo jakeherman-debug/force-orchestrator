@@ -18,23 +18,30 @@ type MockClient struct {
 	BlastByName     map[string]BlastRadius
 	HealthFixture   Health
 
-	ConsumersFn   func(ctx context.Context, symbol Symbol) ([]Consumer, error)
-	DefinersFn    func(ctx context.Context, symbol Symbol) ([]Symbol, error)
-	BlastRadiusFn func(ctx context.Context, modifiedSymbol Symbol) (BlastRadius, error)
-	IndexHealthFn func(ctx context.Context) (Health, error)
+	// BlastByModifications keys on the SymbolPath of the FIRST modification
+	// in the batch (test convenience). For richer fixtures use the *Fn hook.
+	BlastByModifications map[string]BlastRadius
 
-	ConsumersCalls   []Symbol
-	DefinersCalls    []Symbol
-	BlastRadiusCalls []Symbol
-	HealthCalls      int
+	ConsumersFn                  func(ctx context.Context, symbol Symbol) ([]Consumer, error)
+	DefinersFn                   func(ctx context.Context, symbol Symbol) ([]Symbol, error)
+	BlastRadiusFn                func(ctx context.Context, modifiedSymbol Symbol) (BlastRadius, error)
+	BlastRadiusForModificationsFn func(ctx context.Context, mods []SymbolModification) (BlastRadius, error)
+	IndexHealthFn                func(ctx context.Context) (Health, error)
+
+	ConsumersCalls                  []Symbol
+	DefinersCalls                   []Symbol
+	BlastRadiusCalls                []Symbol
+	BlastRadiusForModificationsCalls [][]SymbolModification
+	HealthCalls                     int
 }
 
 // NewMock returns a MockClient with empty fixture maps.
 func NewMock() *MockClient {
 	return &MockClient{
-		ConsumersByName: map[string][]Consumer{},
-		DefinersByName:  map[string][]Symbol{},
-		BlastByName:     map[string]BlastRadius{},
+		ConsumersByName:      map[string][]Consumer{},
+		DefinersByName:       map[string][]Symbol{},
+		BlastByName:          map[string]BlastRadius{},
+		BlastByModifications: map[string]BlastRadius{},
 	}
 }
 
@@ -75,6 +82,24 @@ func (m *MockClient) BlastRadius(ctx context.Context, modifiedSymbol Symbol) (Bl
 		return b, nil
 	}
 	return BlastRadius{}, ErrSymbolNotFound
+}
+
+func (m *MockClient) BlastRadiusForModifications(ctx context.Context, mods []SymbolModification) (BlastRadius, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Defensive copy so test assertions on the recorded slice aren't
+	// mutated by a caller that retains the input.
+	cp := append([]SymbolModification(nil), mods...)
+	m.BlastRadiusForModificationsCalls = append(m.BlastRadiusForModificationsCalls, cp)
+	if m.BlastRadiusForModificationsFn != nil {
+		return m.BlastRadiusForModificationsFn(ctx, mods)
+	}
+	if len(mods) > 0 {
+		if b, ok := m.BlastByModifications[mods[0].SymbolPath]; ok {
+			return b, nil
+		}
+	}
+	return BlastRadius{ConsumersBySymbol: map[string][]ConsumerSite{}}, nil
 }
 
 func (m *MockClient) IndexHealth(ctx context.Context) (Health, error) {

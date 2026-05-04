@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/clients/graph"
 	"force-orchestrator/internal/store"
 )
 
@@ -79,7 +80,7 @@ func TestRunChancellorReview_RespectsContextCancellation(t *testing.T) {
 	// while it's blocked inside the stubbed CLI runner.
 	done := make(chan struct{})
 	go func() {
-		runChancellorReview(ctx, db, feature, tasks, mustLoadCapProfile(t, "chancellor"), logger)
+		runChancellorReview(ctx, db, graph.NewInProcess(db), feature, tasks, mustLoadCapProfile(t, "chancellor"), logger)
 		close(done)
 	}()
 

@@ -40,10 +40,51 @@ type Client interface {
 	// at the supplied depth (0 means "direct consumers only").
 	BlastRadius(ctx context.Context, modifiedSymbol Symbol) (BlastRadius, error)
 
+	// BlastRadiusForModifications is the data-driven, multi-modification
+	// variant Chancellor uses during plan post-processing (D8 Track 2).
+	// Each SymbolModification is a (repo, file_path, symbol_path) tuple
+	// representing a change a Feature's plan proposes to make. The result
+	// aggregates per-modification consumer file:line lists across the
+	// entire batch, and surfaces the de-duplicated AffectedConsumerRepos
+	// set Chancellor uses to (a) auto-include downstream consumer-update
+	// tasks in the same convoy and (b) fan out per-affected-Senator
+	// consultations.
+	//
+	// Modifications whose (repo, symbol_path) does not match a known
+	// CrossRepoSymbol are silently skipped — those represent symbols the
+	// dog hasn't indexed yet, or modifications to non-public symbols, and
+	// blast-radius is a "best known consumers" query rather than a
+	// completeness guarantee.
+	BlastRadiusForModifications(ctx context.Context, mods []SymbolModification) (BlastRadius, error)
+
 	// IndexHealth returns metadata about the graph's freshness
 	// (last-rebuild timestamp, repos covered, repos missing). The
 	// dashboard surfaces this so the operator can spot a stale index.
 	IndexHealth(ctx context.Context) (Health, error)
+}
+
+// SymbolModification is one (repo, file_path, symbol_path) tuple
+// representing a change a Feature's plan proposes to make. Used as
+// input to BlastRadiusForModifications. The Repo field is the provider
+// repo whose exported symbol is being modified — Chancellor extracts
+// this from a CodeEdit task's `Repo` field and pairs it with the
+// symbol-path it parses out of the task's payload via lightweight
+// regex (Chancellor.ExtractSymbolModifications).
+type SymbolModification struct {
+	Repo       string // provider repo name (matches CrossRepoSymbols.repo_name)
+	FilePath   string // repo-relative file path the modification touches
+	SymbolPath string // qualified symbol identifier (e.g. "auth.LoginHandler")
+}
+
+// ConsumerSite is one (repo, file_path, line_number) consumer location
+// produced by BlastRadiusForModifications. The aggregated BlastRadius
+// returns these so Chancellor can render per-symbol "your consumer
+// sites at <file>:<line>" breadcrumbs in the auto-included downstream
+// task payloads.
+type ConsumerSite struct {
+	Repo     string
+	FilePath string
+	Line     int
 }
 
 // Symbol identifies one named entity in the cross-repo graph.
@@ -65,6 +106,20 @@ type Consumer struct {
 }
 
 // BlastRadius is the result of a transitive consumer query.
+//
+// D8 Track 2 extends the type with three additional fields populated
+// by BlastRadiusForModifications: ModifiedSymbols (the Symbol-shape
+// reflection of every input SymbolModification that resolved to a
+// known CrossRepoSymbol), AffectedConsumerRepos (the de-duplicated,
+// alphabetically-sorted set of consumer repos across all modifications),
+// and ConsumersBySymbol (per modified symbol_path → consumer file:line
+// list, used to render auto-included downstream task payloads).
+//
+// The legacy BlastRadius(ctx, modifiedSymbol Symbol) single-symbol API
+// continues to populate Direct / Indirect / Tests; the multi-modification
+// API populates ModifiedSymbols / AffectedConsumerRepos / ConsumersBySymbol.
+// A given BlastRadius value may carry either set or both depending on
+// which API was called.
 type BlastRadius struct {
 	Modified Symbol
 	Direct   []Consumer // first-degree consumers
@@ -72,6 +127,11 @@ type BlastRadius struct {
 	Tests    []Symbol   // test functions in the closure
 	Depth    int        // depth at which the search was capped
 	Truncated bool      // true when the search hit a node-count cap
+
+	// D8 Track 2 — multi-modification aggregate fields.
+	ModifiedSymbols       []Symbol                  // every input SymbolModification that resolved to a known CrossRepoSymbol
+	AffectedConsumerRepos []string                  // alphabetically-sorted, de-duplicated consumer repo names
+	ConsumersBySymbol     map[string][]ConsumerSite // key: SymbolPath → consumer (repo, file, line) list
 }
 
 // Health describes the graph index's freshness for the operator

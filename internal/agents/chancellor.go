@@ -11,6 +11,7 @@ import (
 
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/clients/graph"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
 )
@@ -71,6 +72,12 @@ func SpawnChancellor(ctx context.Context, db *sql.DB) {
 		logger.Printf("Chancellor cannot start: %v", err)
 		return
 	}
+	// D8 T2 — graph client backs the blast-radius post-process. Constructed
+	// here at spawn-time (not per-Feature) so the same Client instance
+	// flows through every approve/sequence/merge path. Pattern P16: agents
+	// construct via the package's NewInProcess factory; never via a
+	// composite literal.
+	gc := graph.NewInProcess(db)
 	logger.Printf("Supreme Chancellor online — reviewing proposed convoys")
 
 	for {
@@ -93,11 +100,11 @@ func SpawnChancellor(ctx context.Context, db *sql.DB) {
 			continue
 		}
 
-		runChancellorReview(ctx, db, feature, tasks, profile, logger)
+		runChancellorReview(ctx, db, gc, feature, tasks, profile, logger)
 	}
 }
 
-func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
+func runChancellorReview(ctx context.Context, db *sql.DB, gc graph.Client, feature *store.Bounty, tasks []store.TaskPlan, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) {
 	logger.Printf("Reviewing Feature #%d (%d proposed task(s)): %s",
 		feature.ID, len(tasks), util.TruncateStr(feature.Payload, 80))
 
@@ -190,7 +197,7 @@ func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty,
 	switch ruling.Action {
 	case "APPROVE":
 		logger.Printf("Feature #%d: APPROVED — %s", feature.ID, ruling.Reason)
-		actionErr = approveProposal(db, feature, tasks, ruling, logger)
+		actionErr = approveProposal(ctx, db, gc, feature, tasks, ruling, logger)
 
 	case "SEQUENCE":
 		if len(ruling.SequenceAfterConvoyIDs) == 0 {
@@ -215,7 +222,7 @@ func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty,
 			return
 		}
 		logger.Printf("Feature #%d: SEQUENCE after convoy(s) %v — %s", feature.ID, ruling.SequenceAfterConvoyIDs, ruling.Reason)
-		actionErr = sequenceProposal(db, feature, tasks, ruling, logger)
+		actionErr = sequenceProposal(ctx, db, gc, feature, tasks, ruling, logger)
 
 	case "REJECT":
 		logger.Printf("Feature #%d: REJECTED — %s", feature.ID, ruling.Reason)
@@ -242,7 +249,7 @@ func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty,
 			return
 		}
 		logger.Printf("Feature #%d: MERGE with Feature #%d — %s", feature.ID, ruling.MergeWithFeatureID, ruling.Reason)
-		actionErr = mergeProposals(ctx, db, feature, tasks, ruling, profile, logger)
+		actionErr = mergeProposals(ctx, db, gc, feature, tasks, ruling, profile, logger)
 
 	default:
 		// Fix #8.5 (AUDIT-116) — fail CLOSED on unknown action.
@@ -279,7 +286,7 @@ func runChancellorReview(ctx context.Context, db *sql.DB, feature *store.Bounty,
 // that leave the Feature in an inconsistent state. A non-nil return means at
 // least one terminator (FailBounty / UpdateBountyStatus) did not land; the
 // caller logs and the stale-lock detector re-evaluates on the next sweep.
-func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
+func approveProposal(ctx context.Context, db *sql.DB, gc graph.Client, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
 	convoyPreview := strings.ReplaceAll(feature.Payload, "\n", " ")
 	if len(convoyPreview) > 50 {
 		convoyPreview = convoyPreview[:50]
@@ -308,6 +315,16 @@ func approveProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, 
 			return fmt.Errorf("approveProposal feature #%d: insertConvoyAndTasks failed (%v) and FailBounty failed: %w", feature.ID, err, failErr)
 		}
 		return fmt.Errorf("approveProposal feature #%d: insertConvoyAndTasks: %w", feature.ID, err)
+	}
+
+	// D8 T2 — blast-radius post-process. Runs AFTER the convoy lands so
+	// the auto-included consumer tasks share the convoy_id; runs BEFORE
+	// the Feature flips to Completed so a post-process failure surfaces
+	// while the Feature is still locked. Errors are logged but do NOT
+	// fail the Feature (the convoy is already on disk and the operator
+	// should see it; the blast-radius is a safety net, not a gate).
+	if _, brErr := PostProcessBlastRadius(ctx, db, gc, feature.ID, convoyID, tasks, idMapping, logger); brErr != nil {
+		logger.Printf("Feature #%d: blast-radius post-process failed (%v) — convoy #%d still landed", feature.ID, brErr, convoyID)
 	}
 
 	store.SetProposedConvoyStatus(db, feature.ID, "approved")
@@ -435,7 +452,7 @@ func enforceHolds(db *sql.DB, newConvoyID int, ruling chancellorRuling, feature 
 // sequenceProposal creates the convoy immediately but wires cross-convoy blocking dependencies
 // so the new convoy's root tasks cannot start until the tail tasks of each specified convoy complete.
 // Fix #8b: returns error so runChancellorReview can log DB-write failures.
-func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
+func sequenceProposal(ctx context.Context, db *sql.DB, gc graph.Client, feature *store.Bounty, tasks []store.TaskPlan, ruling chancellorRuling, logger interface{ Printf(string, ...any) }) error {
 	blockingConvoyIDs := ruling.SequenceAfterConvoyIDs
 	reason := ruling.Reason
 	convoyPreview := strings.ReplaceAll(feature.Payload, "\n", " ")
@@ -466,6 +483,13 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 			return fmt.Errorf("sequenceProposal feature #%d: insertConvoyAndTasks failed (%v) and FailBounty failed: %w", feature.ID, err, failErr)
 		}
 		return fmt.Errorf("sequenceProposal feature #%d: insertConvoyAndTasks: %w", feature.ID, err)
+	}
+
+	// D8 T2 — blast-radius post-process (mirrors approveProposal). Errors
+	// logged; the blast-radius is a safety net, not a gate, so a sequence
+	// that lands its convoy + cross-convoy dep wiring still succeeds.
+	if _, brErr := PostProcessBlastRadius(ctx, db, gc, feature.ID, convoyID, tasks, idMapping, logger); brErr != nil {
+		logger.Printf("Feature #%d: blast-radius post-process failed in sequence path (%v) — convoy #%d still landed", feature.ID, brErr, convoyID)
 	}
 
 	// Find root tasks in the new plan (those with no blocked_by in the plan).
@@ -523,14 +547,14 @@ func sequenceProposal(db *sql.DB, feature *store.Bounty, tasks []store.TaskPlan,
 // Fix #8b: returns error so runChancellorReview can log DB-write failures.
 // When the merge path falls back to independent approval, the fallback
 // errors are joined and returned together so neither is lost.
-func mergeProposals(ctx context.Context, db *sql.DB, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) error {
+func mergeProposals(ctx context.Context, db *sql.DB, gc graph.Client, featureA *store.Bounty, tasksA []store.TaskPlan, ruling chancellorRuling, profile *capabilities.Profile, logger interface{ Printf(string, ...any) }) error {
 	featureBID := ruling.MergeWithFeatureID
 	reason := ruling.Reason
 	featureB, tasksB, ok := store.ClaimMergeTarget(db, featureBID, chancellorName)
 	if !ok {
 		// Target already gone or claimed — approve A independently.
 		logger.Printf("Feature #%d: merge target #%d unavailable — approving independently", featureA.ID, featureBID)
-		return approveProposal(db, featureA, tasksA, ruling, logger)
+		return approveProposal(ctx, db, gc, featureA, tasksA, ruling, logger)
 	}
 
 	logger.Printf("Merging Feature #%d + Feature #%d", featureA.ID, featureB.ID)
@@ -540,8 +564,8 @@ func mergeProposals(ctx context.Context, db *sql.DB, featureA *store.Bounty, tas
 		// Synthesis failed — approve both independently. Join errors so a
 		// single-leg failure doesn't silently succeed under a two-leg return.
 		logger.Printf("Merge synthesis failed — approving Feature #%d and #%d independently", featureA.ID, featureB.ID)
-		errA := approveProposal(db, featureA, tasksA, ruling, logger)
-		errB := approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
+		errA := approveProposal(ctx, db, gc, featureA, tasksA, ruling, logger)
+		errB := approveProposal(ctx, db, gc, featureB, tasksB, chancellorRuling{}, logger)
 		switch {
 		case errA != nil && errB != nil:
 			return fmt.Errorf("mergeProposals fallback: featureA=%v; featureB=%v", errA, errB)
@@ -557,8 +581,8 @@ func mergeProposals(ctx context.Context, db *sql.DB, featureA *store.Bounty, tas
 	convoyID, convoyErr := store.CreateConvoy(db, convoyName)
 	if convoyErr != nil {
 		logger.Printf("Merge convoy creation failed — approving independently")
-		errA := approveProposal(db, featureA, tasksA, ruling, logger)
-		errB := approveProposal(db, featureB, tasksB, chancellorRuling{}, logger)
+		errA := approveProposal(ctx, db, gc, featureA, tasksA, ruling, logger)
+		errB := approveProposal(ctx, db, gc, featureB, tasksB, chancellorRuling{}, logger)
 		switch {
 		case errA != nil && errB != nil:
 			return fmt.Errorf("mergeProposals fallback after CreateConvoy %v: featureA=%v; featureB=%v", convoyErr, errA, errB)
@@ -587,6 +611,14 @@ func mergeProposals(ctx context.Context, db *sql.DB, featureA *store.Bounty, tas
 			return fmt.Errorf("mergeProposals feature #%d: insertConvoyAndTasks failed (%v); FailBounty B failed: %w", featureB.ID, err, failB)
 		}
 		return fmt.Errorf("mergeProposals feature #%d/#%d: insertConvoyAndTasks: %w", featureA.ID, featureB.ID, err)
+	}
+
+	// D8 T2 — blast-radius post-process. Persists to featureA's row (the
+	// "primary" Feature in the merge); featureB inherits the merged
+	// convoy's downstream impact through the same auto-included tasks
+	// because they all carry convoy_id=convoyID. Errors logged.
+	if _, brErr := PostProcessBlastRadius(ctx, db, gc, featureA.ID, convoyID, mergedTasks, idMapping, logger); brErr != nil {
+		logger.Printf("Feature #%d (merge primary): blast-radius post-process failed (%v) — convoy #%d still landed", featureA.ID, brErr, convoyID)
 	}
 
 	store.SetProposedConvoyStatus(db, featureA.ID, "merged")

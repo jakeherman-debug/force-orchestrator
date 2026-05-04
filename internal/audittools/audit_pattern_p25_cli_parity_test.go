@@ -112,6 +112,16 @@ var p25Allowlist = map[string]string{
 	// architecture-health-report`, which is the existing dog-runner verb.
 	"/api/arch-health":  "Architecture health latest/by-month read view (D9); GET-only — only writer is the architecture-health-report dog",
 	"/api/arch-health/": "Architecture health latest/by-month read view (D9); GET-only — only writer is the architecture-health-report dog",
+
+	// D8 T2 — Per-Feature blast-radius surface. GET-only; the only
+	// writer is the Chancellor blast-radius post-process
+	// (internal/agents/chancellor_blast_radius.go) which runs after
+	// convoy creation. Operators inspect the impact via the Feature
+	// ratification view; no operator-action verb because the data is
+	// computed deterministically and the operator's recourse for
+	// "wrong consumers" is to fix the cross-repo graph (the dog
+	// `repo-graph-scan` re-emits) and re-trigger the convoy.
+	"/api/features/": "D8 T2 per-Feature blast-radius surface; GET-only — only writer is the Chancellor blast-radius post-process",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in

@@ -340,6 +340,47 @@ func ListLiveDependenciesForConsumerRepo(db *sql.DB, consumerRepo string) ([]Cro
 	return out, nil
 }
 
+// ListCrossRepoSymbolsByRepo returns every CrossRepoSymbols row for the
+// given repo. Used by Chancellor's blast-radius post-process (D8 Track 2)
+// to enumerate the set of provider symbols the repo exports — the
+// post-process scans each Feature task's payload against this set to
+// identify which symbols a planned modification would touch.
+//
+// Returns rows ordered by symbol_path ASC for stable iteration.
+func ListCrossRepoSymbolsByRepo(db *sql.DB, repoName string) ([]CrossRepoSymbol, error) {
+	if db == nil {
+		return nil, fmt.Errorf("ListCrossRepoSymbolsByRepo: db is nil")
+	}
+	if repoName == "" {
+		return nil, fmt.Errorf("ListCrossRepoSymbolsByRepo: repoName required")
+	}
+	rows, err := db.Query(`SELECT id, repo_name, symbol_path, symbol_kind, file_path,
+			line_number, signature_hash, last_scanned_at, is_public
+		FROM CrossRepoSymbols
+		WHERE repo_name = ?
+		ORDER BY symbol_path ASC`,
+		repoName)
+	if err != nil {
+		return nil, fmt.Errorf("ListCrossRepoSymbolsByRepo(%s): %w", repoName, err)
+	}
+	defer rows.Close()
+	var out []CrossRepoSymbol
+	for rows.Next() {
+		var s CrossRepoSymbol
+		var pub int
+		if sErr := rows.Scan(&s.ID, &s.RepoName, &s.SymbolPath, &s.SymbolKind,
+			&s.FilePath, &s.LineNumber, &s.SignatureHash, &s.LastScannedAt, &pub); sErr != nil {
+			return nil, fmt.Errorf("ListCrossRepoSymbolsByRepo(%s): scan: %w", repoName, sErr)
+		}
+		s.IsPublic = pub == 1
+		out = append(out, s)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		return nil, fmt.Errorf("ListCrossRepoSymbolsByRepo(%s): iter: %w", repoName, rErr)
+	}
+	return out, nil
+}
+
 // CountCrossRepoSymbols / CountCrossRepoDependencies are convenience helpers
 // the dog logs at end-of-run for operator-visibility (mirrors how
 // supply-allowlist-refresh logs per-ecosystem package counts).
