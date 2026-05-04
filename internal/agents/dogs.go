@@ -163,6 +163,14 @@ var dogCooldowns = map[string]time.Duration{
 	// matches sub-pr-ci-watch / draft-pr-watch — staged-convoy signal
 	// shares the same operator-facing dashboard refresh granularity.
 	"convoy-stage-watch": 5 * time.Minute,
+	// D10 — architecture-doc-render. Re-renders ARCHITECTURE.md for
+	// every repo with handoff_synthesis_enabled=1. Logically a
+	// merge-to-main trigger; the dog cadence is the safety net so a
+	// missed merge-event doesn't leave the doc stale. Hourly is fast
+	// enough that operator-perceived staleness is bounded; the
+	// renderer's BuildRepoDigest call is cheap (filesystem walk +
+	// short git log) so cost stays low.
+	"architecture-doc-render": 1 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -226,6 +234,11 @@ var dogOrder = []string{
 	// touched-table set, so this dog can't block earlier work but
 	// reads the freshest post-tick state.
 	"convoy-stage-watch",
+	// D10 — architecture-doc-render writes ARCHITECTURE.md for every
+	// repo with handoff_synthesis_enabled=1. Ordered last because the
+	// renderer reads RepoDigest (filesystem walk + recent commits)
+	// and ought to see the freshest post-tick state.
+	"architecture-doc-render",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -425,6 +438,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogSupplyTokenRecheck(ctx, db, logger)
 	case "convoy-stage-watch":
 		return dogConvoyStageWatch(ctx, db, logger)
+	case "architecture-doc-render":
+		return dogArchitectureDocRender(ctx, db, lib, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

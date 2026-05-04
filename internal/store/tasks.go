@@ -40,8 +40,9 @@ var InfrastructureTaskTypes = []string{
 	"PRReviewTriage",
 	"ConvoyReview",
 	"WorktreeReset",
-	"BoSReview", // D4 Phase 1 — Bureau of Standards commit-time review
-	"ISBReview", // D4 Phase 2 — Imperial Security Bureau commit-time review
+	"BoSReview",            // D4 Phase 1 — Bureau of Standards commit-time review
+	"ISBReview",            // D4 Phase 2 — Imperial Security Bureau commit-time review
+	"PRHandoffSynthesis",   // D10 — auto-generated reviewer narrative on draft PRs (opt-in)
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {

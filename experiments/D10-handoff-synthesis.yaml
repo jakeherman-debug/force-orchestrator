@@ -1,0 +1,51 @@
+# D10 — Synthetic Handoff Documentation paired-run experiment.
+#
+# Validates whether the auto-generated reviewer narrative
+# (PRHandoffSynthesis) shortens the human review cycle on enabled
+# repos. Per CLAUDE.md anti-cheat #3 ("no shipping without
+# measuring"): the engineering portion ships in this deliverable;
+# the operator runs the experiment and ratifies a T+30-day verdict.
+#
+# Run shape (operator-initiated):
+#
+#   force experiment run experiments/D10-handoff-synthesis.yaml
+#
+# Both arms apply at the per-repo level. The operator enrols at
+# least one repo into 'treatment_on' (sets handoff_synthesis_enabled=1)
+# and at least one into 'control_off' (leaves the flag at the default
+# 0). All draft PRs opened against an enrolled repo during the
+# experiment window contribute to the metric panel.
+
+experiment_id: D10-handoff
+description: >
+  Does the auto-generated reviewer narrative (Diplomat
+  PRHandoffSynthesis comment + dog-rendered ARCHITECTURE.md) shorten
+  human review cycles on opted-in repos?
+
+arms:
+  - id: control_off
+    description: handoff_synthesis_enabled=0 (default). No reviewer
+      narrative comment is posted; ARCHITECTURE.md is not auto-rendered.
+    handoff_synthesis_enabled: false
+  - id: treatment_on
+    description: handoff_synthesis_enabled=1. Diplomat posts a
+      reviewer-narrative comment on each draft PR + the
+      dogArchitectureDocRender dog re-renders ARCHITECTURE.md on
+      every merge to main.
+    handoff_synthesis_enabled: true
+
+metric_primary: time_to_review_close
+metric_secondary: review_comment_count
+stakes_tier: low
+min_practical_effect: 0.10
+ship_gate: "treatment time_to_review_close < control time_to_review_close - 5%"
+
+# Operator notes (non-binding):
+#   - Default-OFF is the v1 ship surface; the experiment is the
+#     gate that earns expansion.
+#   - At T+30 days, operator ratifies "keep" (expand to more repos)
+#     or "drop" (deprecate the feature, leave the engineering for
+#     a future iteration). Either verdict is valid; "drop" is not
+#     a failure of the engineering, it's evidence that the human
+#     reviewer didn't find value in the narrative.
+operator_verdict_due: "T+30 days from first enrolled merge"
