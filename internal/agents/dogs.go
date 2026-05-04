@@ -163,6 +163,12 @@ var dogCooldowns = map[string]time.Duration{
 	// matches sub-pr-ci-watch / draft-pr-watch — staged-convoy signal
 	// shares the same operator-facing dashboard refresh granularity.
 	"convoy-stage-watch": 5 * time.Minute,
+	// D9 Phase 1 — architecture-health-report. Monthly longitudinal
+	// dog. Cooldown is 30 days; the dog body itself additionally
+	// guards on `day-of-month == 1` so a mid-month tick that happens
+	// to satisfy the cooldown still no-ops (per docs/roadmap.md
+	// § D9-ArchHealth: "monthly, runs on the 1st at 00:00 UTC").
+	"architecture-health-report": 30 * 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -226,6 +232,10 @@ var dogOrder = []string{
 	// touched-table set, so this dog can't block earlier work but
 	// reads the freshest post-tick state.
 	"convoy-stage-watch",
+	// D9 Phase 1 — architecture-health-report. Monthly longitudinal
+	// scan; runs last in the order because it walks every registered
+	// repo's full tree and is the most expensive dog by far.
+	"architecture-health-report",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -425,6 +435,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogSupplyTokenRecheck(ctx, db, logger)
 	case "convoy-stage-watch":
 		return dogConvoyStageWatch(ctx, db, logger)
+	case "architecture-health-report":
+		return dogArchitectureHealthReport(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

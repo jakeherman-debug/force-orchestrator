@@ -1316,6 +1316,25 @@ func createSchema(db *sql.DB) {
 		created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_senate_review_feature ON SenateReview(feature_id);`)
+
+	// D9 Phase 1 — ArchHealthAggregates (Architecture Health Report).
+	// One row per (report_month, rule_id, repo_id, author_type) tuple. The
+	// dog dogArchitectureHealthReport scans the full codebase monthly, runs
+	// every BoS rule, and aggregates findings here before rendering
+	// reports/architecture-health-YYYY-MM.md. The UNIQUE clause makes the
+	// dog idempotent — re-running the same month is a no-op (INSERT OR
+	// IGNORE).
+	db.Exec(`CREATE TABLE IF NOT EXISTS ArchHealthAggregates (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		report_month    TEXT    NOT NULL,
+		rule_id         TEXT    NOT NULL,
+		repo_id         INTEGER NOT NULL,
+		author_type     TEXT    NOT NULL,
+		violation_count INTEGER NOT NULL DEFAULT 0,
+		created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+		UNIQUE(report_month, rule_id, repo_id, author_type)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_arch_health_aggregates_month_rule ON ArchHealthAggregates(report_month, rule_id);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -2522,4 +2541,22 @@ func runMigrations(db *sql.DB) {
 	// '' so already-detected rows stay sticky.
 	db.Exec(`ALTER TABLE Repositories ADD COLUMN license TEXT NOT NULL DEFAULT ''`)
 	backfillRepositoryLicenses(db)
+
+	// ── D9 Phase 1 — ArchHealthAggregates (upgrade path) ────────────────────
+	// Mirror of the createSchema declaration above. CREATE TABLE IF NOT
+	// EXISTS keeps the migration idempotent — fresh DBs already have the
+	// table from createSchema; upgraded DBs land it here on the next
+	// runMigrations sweep. TestSchemaParity enforces that the column set
+	// declared in createSchema matches schema/schema.sql.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ArchHealthAggregates (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		report_month    TEXT    NOT NULL,
+		rule_id         TEXT    NOT NULL,
+		repo_id         INTEGER NOT NULL,
+		author_type     TEXT    NOT NULL,
+		violation_count INTEGER NOT NULL DEFAULT 0,
+		created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+		UNIQUE(report_month, rule_id, repo_id, author_type)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_arch_health_aggregates_month_rule ON ArchHealthAggregates(report_month, rule_id)`)
 }

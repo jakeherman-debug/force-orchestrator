@@ -237,6 +237,10 @@
        precision, override audit, Senate review log. Four sub-tabs share
        one top-level "Security" tab so the existing IA stays compact. -->
   <button class="tab-btn"        data-tab="security"    onclick="switchTab('security')">Security <span class="tab-badge" id="tbadge-security"></span></button>
+  <!-- D9 ArchHealth — Architecture Health tab. Reads /api/arch-health/latest
+       and renders the per-month aggregates view. The dog
+       `architecture-health-report` is the only writer; this tab is read-only. -->
+  <button class="tab-btn"        data-tab="arch-health" onclick="switchTab('arch-health')">Arch Health <span class="tab-badge" id="tbadge-arch-health"></span></button>
   <button class="tab-btn"        data-tab="senate"      onclick="switchTab('senate')">Senate <span class="tab-badge" id="tbadge-senate"></span></button>
   <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
   <div id="tab-spacer"></div>
