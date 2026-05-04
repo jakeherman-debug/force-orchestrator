@@ -48,6 +48,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"testing"
 	"time"
 
 	"force-orchestrator/internal/clients/codeartifact"
@@ -139,7 +140,27 @@ var notifyAfterFn = realNotifyAfter
 // call is a no-op and the dog logs a warning. We do NOT propagate
 // notify-after's exit code — the dog's primary purpose is the replay
 // sweep; webhook delivery is a UX bonus.
+//
+// Test-mode short-circuit: when the binary was built by `go test`
+// (testing.Testing() == true, Go 1.21+), realNotifyAfter returns nil
+// immediately without shelling out. Production paths are unaffected.
+//
+// Why: prior to this guard, integration-style tests that exercised the
+// dog's onStageTransition / convoy-review notify paths fired the real
+// long-running-notifier helper, flooding the operator's Slack channel
+// with `Convoy #1 "test-staged-1" stage 1: Open → AllPRsMerged ...`
+// pings every test run. Tests that explicitly want to assert on the
+// call path install a mock via `notifyAfterFn = ...` (see
+// withNotifyStub in dogs_supply_token_recheck_test.go) or
+// SetStageTransitionNotifyForTest — those overrides take precedence
+// because they replace the function pointer entirely; this guard only
+// fires when no override is installed.
 func realNotifyAfter(ctx context.Context, label string) error {
+	if testing.Testing() {
+		// Production-only side effect; tests that need to verify the
+		// call path install a mock via the package-var seam.
+		return nil
+	}
 	bin, err := exec.LookPath("notify-after")
 	if err != nil {
 		// Helper not installed — silently no-op. Log line below is
