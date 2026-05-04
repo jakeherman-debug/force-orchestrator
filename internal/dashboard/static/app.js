@@ -275,6 +275,7 @@ function switchTab(name) {
     case 'experiments': loadExperiments(); loadFleetProgress(); break;
     case 'ec':          loadECProposals(); break;
     case 'security':    window.loadSecurityFindings && window.loadSecurityFindings(); break;
+    case 'arch-health': window.loadArchHealth       && window.loadArchHealth(); break;
     case 'senate':      window.loadSenateChambers   && window.loadSenateChambers(); break;
     case 'logs':        startLogStream(); break;
   }
@@ -3084,3 +3085,166 @@ async function loadSenateReviewDetail(id) {
   }
 }
 window.loadSenateReviewDetail = loadSenateReviewDetail;
+
+// ── D9 ArchHealth — Architecture Health tab loader ──────────────────────────
+// Reads handlers_arch_health.go endpoints. Populates the month picker on
+// first call (preserves selection across re-renders), then fetches either
+// /api/arch-health/latest (when no month selected) or
+// /api/arch-health/<YYYY-MM>. Renders:
+//   1. Per-author summary block — sums violation_count by author_type, with
+//      a ⚠️ flag whenever astromech > human (Architectural Health Indicator
+//      #2 from docs/roadmap.md § D9-ArchHealth).
+//   2. The full per-(rule, repo, author) table.
+async function loadArchHealth() {
+  const monthSelect = document.getElementById('ah-month');
+  if (!monthSelect) return;
+
+  // (1) Populate the month picker once. If it's already populated, keep
+  // whatever the operator selected; otherwise fetch the months list and
+  // default to "latest".
+  if (monthSelect.options.length === 0) {
+    try {
+      const r = await fetch('/api/arch-health/months');
+      if (r.ok) {
+        const data = await r.json();
+        const months = (data && data.months) || [];
+        // Prepend a "latest" sentinel so the picker reads naturally.
+        const latestOpt = document.createElement('option');
+        latestOpt.value = 'latest';
+        latestOpt.textContent = 'latest';
+        monthSelect.appendChild(latestOpt);
+        // Months come back ascending; show newest first in the picker.
+        for (let i = months.length - 1; i >= 0; i--) {
+          const opt = document.createElement('option');
+          opt.value = months[i];
+          opt.textContent = months[i];
+          monthSelect.appendChild(opt);
+        }
+      }
+    } catch (_e) {
+      // Silently swallow — the data fetch below will surface the error.
+    }
+  }
+
+  const selected = monthSelect.value || 'latest';
+  const url = selected === 'latest'
+    ? '/api/arch-health/latest'
+    : '/api/arch-health/' + encodeURIComponent(selected);
+
+  try {
+    const r = await fetch(url);
+    if (!r.ok) {
+      _refSafeHTML('arch-health-table', '<div class="reflection-error">HTTP ' + r.status + '</div>');
+      return;
+    }
+    const data = await r.json();
+    const rows = (data && data.rows) || [];
+    const perAuthor = (data && data.per_author_total) || {};
+    const total = (data && data.total_violations) || 0;
+    const month = (data && data.month) || '';
+
+    const summary = document.getElementById('ah-summary');
+    if (summary) {
+      summary.textContent = month
+        ? (month + ' · ' + total + ' total violation(s) across ' + rows.length + ' (rule, repo, author) cell(s)')
+        : '(no report data yet — awaiting first dog run)';
+    }
+
+    // — Per-author summary block. Compute astromech-vs-human per rule from
+    // the rows array (per_author_total flattens across rules, so we need
+    // the granular roll-up here for the ⚠️ flag).
+    const perAuthorTarget = document.getElementById('arch-health-per-author');
+    if (perAuthorTarget) {
+      perAuthorTarget.innerHTML = '';
+      if (rows.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'reflection-empty';
+        empty.textContent = '(no aggregates for this month)';
+        perAuthorTarget.appendChild(empty);
+      } else {
+        // Summary header — flat per-author totals.
+        const h = document.createElement('h4');
+        h.textContent = 'Per-author totals';
+        perAuthorTarget.appendChild(h);
+        const summaryTable = document.createElement('table');
+        summaryTable.className = 'reflection-data-table';
+        const sthead = document.createElement('thead');
+        const sheadRow = document.createElement('tr');
+        ['Author', 'Violations'].forEach(hh => {
+          const th = document.createElement('th');
+          th.textContent = hh;
+          sheadRow.appendChild(th);
+        });
+        sthead.appendChild(sheadRow);
+        summaryTable.appendChild(sthead);
+        const stbody = document.createElement('tbody');
+        Object.keys(perAuthor).sort().forEach(author => {
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td'); td1.appendChild(_refTextNode(author));
+          const td2 = document.createElement('td'); td2.appendChild(_refTextNode(String(perAuthor[author])));
+          tr.appendChild(td1); tr.appendChild(td2);
+          stbody.appendChild(tr);
+        });
+        summaryTable.appendChild(stbody);
+        perAuthorTarget.appendChild(summaryTable);
+
+        // Per-rule astromech-vs-human comparison (⚠️ where astromech > human).
+        const perRule = {}; // ruleID -> { human: n, astromech: m }
+        rows.forEach(rw => {
+          const rid = rw.rule_id || '';
+          const auth = rw.author_type || '';
+          const cnt = rw.violation_count || 0;
+          if (!perRule[rid]) perRule[rid] = { human: 0, astromech: 0 };
+          if (auth === 'human' || auth === 'astromech') {
+            perRule[rid][auth] = (perRule[rid][auth] || 0) + cnt;
+          }
+        });
+        const flagH = document.createElement('h4');
+        flagH.textContent = 'Per-rule human vs astromech';
+        flagH.style.marginTop = '10px';
+        perAuthorTarget.appendChild(flagH);
+        const flagTable = document.createElement('table');
+        flagTable.className = 'reflection-data-table';
+        const fthead = document.createElement('thead');
+        const fheadRow = document.createElement('tr');
+        ['Rule', 'Human', 'Astromech', 'Flag'].forEach(hh => {
+          const th = document.createElement('th');
+          th.textContent = hh;
+          fheadRow.appendChild(th);
+        });
+        fthead.appendChild(fheadRow);
+        flagTable.appendChild(fthead);
+        const ftbody = document.createElement('tbody');
+        Object.keys(perRule).sort().forEach(rid => {
+          const e = perRule[rid];
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td'); td1.appendChild(_refTextNode(rid));
+          const td2 = document.createElement('td'); td2.appendChild(_refTextNode(String(e.human)));
+          const td3 = document.createElement('td'); td3.appendChild(_refTextNode(String(e.astromech)));
+          const td4 = document.createElement('td');
+          // ⚠️ flag — astromech > human means automation is the dominant
+          // source of the rule's violations (Architectural Health Indicator).
+          td4.appendChild(_refTextNode(e.astromech > e.human ? '⚠️' : ''));
+          tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4);
+          ftbody.appendChild(tr);
+        });
+        flagTable.appendChild(ftbody);
+        perAuthorTarget.appendChild(flagTable);
+      }
+    }
+
+    // — Full per-(rule, repo, author) table.
+    const headers = ['Rule', 'Repo ID', 'Author', 'Violations', 'Month'];
+    const tableRows = rows.map(rw => [
+      rw.rule_id || '',
+      String(rw.repo_id || ''),
+      rw.author_type || '',
+      String(rw.violation_count || 0),
+      rw.report_month || '',
+    ]);
+    _refRenderTable('arch-health-table', headers, tableRows);
+  } catch (e) {
+    _refSafeHTML('arch-health-table', '<div class="reflection-error">' + e.message + '</div>');
+  }
+}
+window.loadArchHealth = loadArchHealth;

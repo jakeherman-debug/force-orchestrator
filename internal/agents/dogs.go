@@ -164,10 +164,12 @@ var dogCooldowns = map[string]time.Duration{
 	// shares the same operator-facing dashboard refresh granularity.
 	"convoy-stage-watch": 5 * time.Minute,
 	// D9 Phase 1 — architecture-health-report. Monthly longitudinal
-	// dog. Cooldown is 30 days; the dog body itself additionally
-	// guards on `day-of-month == 1` so a mid-month tick that happens
-	// to satisfy the cooldown still no-ops (per docs/roadmap.md
-	// § D9-ArchHealth: "monthly, runs on the 1st at 00:00 UTC").
+	// dog. Cooldown-only gate (30 days); the dog body itself does NOT
+	// additionally guard on day-of-month so a manual mid-month invocation
+	// is unguarded and will run if cooldown allows. The natural cadence
+	// (per docs/roadmap.md § D9-ArchHealth: "monthly, runs on the 1st
+	// at 00:00 UTC") is enforced by the inquisitor schedule + cooldown,
+	// not by an in-body day-of-month check.
 	"architecture-health-report": 30 * 24 * time.Hour,
 }
 
