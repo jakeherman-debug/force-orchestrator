@@ -387,9 +387,11 @@ func TestListDogs(t *testing.T) {
 	// min — probes CodeArtifact health, replays SUPPLY-* deferrals on
 	// recovery via supplydeferral.ReplayPendingDeferrals); D5.5 Phase 1
 	// added convoy-stage-watch (5-min — advances ConvoyStages state
-	// machine, evaluates gates via stagegate.Registry).
-	if len(dogs) != 35 {
-		t.Errorf("expected 35 built-in dogs (D5.5-P1 added convoy-stage-watch), got %d", len(dogs))
+	// machine, evaluates gates via stagegate.Registry); D9 added
+	// archaeologist-sweep (weekly — fans out per-repo
+	// ArchaeologistSweep tasks for the proactive debt-pattern agent).
+	if len(dogs) != 36 {
+		t.Errorf("expected 36 built-in dogs (D9 added archaeologist-sweep), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -407,7 +409,9 @@ func TestListDogs(t *testing.T) {
 		// D5 Phase 4 — SUPPLY dogs (α + β).
 		"supply-allowlist-refresh", "supply-token-recheck",
 		// D5.5 Phase 1 — staged-convoy stage-watch.
-		"convoy-stage-watch"} {
+		"convoy-stage-watch",
+		// D9 — Archaeologist sweep dog.
+		"archaeologist-sweep"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

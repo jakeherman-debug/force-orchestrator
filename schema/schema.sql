@@ -155,7 +155,8 @@ CREATE TABLE IF NOT EXISTS Repositories (
     pr_review_enabled     INTEGER DEFAULT 1,   -- 0 = opt-out of PR review-comment triage (AUDIT-023, Fix #4)
     mode                  TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')), -- D2 T1-4
     license               TEXT    NOT NULL DEFAULT '',  -- D5 P0: SPDX id detected from LICENSE file at AddRepo time; backfilled on first runMigrations after upgrade
-    release_label_pattern TEXT    NOT NULL DEFAULT ''   -- D5.5: per-repo regex for the release_label_present gate; empty means repo doesn't use release labels
+    release_label_pattern TEXT    NOT NULL DEFAULT '',  -- D5.5: per-repo regex for the release_label_present gate; empty means repo doesn't use release labels
+    archaeologist_sweep_disabled INTEGER NOT NULL DEFAULT 0  -- D9: 1 = operator opt-out of Archaeologist's weekly debt-pattern sweep
 );
 
 -- ── Ask-branch sub-PR tracking ────────────────────────────────────────────────
@@ -1285,5 +1286,23 @@ CREATE TABLE IF NOT EXISTS SenateReview (
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_senate_review_feature ON SenateReview(feature_id);
+
+-- ── D9 — Archaeologist findings (proactive debt detection) ───────────────────
+-- One row per (pattern_id, repo_id, file_path, line_number) hit. Status flows
+-- open → proposed → migrated|rejected. The Archaeologist's claim loop writes
+-- rows on every ArchaeologistSweep task; ArchaeologistProposeMigration tasks
+-- fire when a pattern's open-status hit count exceeds its MinHitsForFeature.
+CREATE TABLE IF NOT EXISTS ArchaeologistFindings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern_id   TEXT    NOT NULL,                        -- 'ARCH-001' | 'ARCH-002' | ...
+    repo_id      INTEGER NOT NULL,                        -- Repositories.rowid (joined to .name)
+    file_path    TEXT    NOT NULL,                        -- relative to repo local_path
+    line_number  INTEGER NOT NULL,
+    detail_json  TEXT    NOT NULL DEFAULT '{}',           -- per-pattern auxiliary detail (key, deprecated symbol, ...)
+    detected_at  TEXT    NOT NULL,                        -- SQLite UTC timestamp
+    status       TEXT    NOT NULL DEFAULT 'open',         -- 'open' | 'proposed' | 'migrated' | 'rejected'
+    UNIQUE(pattern_id, repo_id, file_path, line_number)
+);
+CREATE INDEX IF NOT EXISTS idx_arch_findings_pattern ON ArchaeologistFindings(pattern_id, status);
 
 -- ── Convoy events ─────────────────────────────────────────────────────────────

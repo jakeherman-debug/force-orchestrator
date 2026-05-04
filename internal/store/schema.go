@@ -43,7 +43,8 @@ func createSchema(db *sql.DB) {
 		pr_review_enabled     INTEGER DEFAULT 1,
 		mode                  TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')),
 		license               TEXT    NOT NULL DEFAULT '',
-		release_label_pattern TEXT    NOT NULL DEFAULT ''
+		release_label_pattern TEXT    NOT NULL DEFAULT '',
+		archaeologist_sweep_disabled INTEGER NOT NULL DEFAULT 0
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
@@ -1316,6 +1317,25 @@ func createSchema(db *sql.DB) {
 		created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_senate_review_feature ON SenateReview(feature_id);`)
+
+	// ── D9 — Archaeologist findings (proactive debt detection) ───────────────
+	// One row per (pattern_id, repo_id, file_path, line_number) hit. The
+	// Archaeologist's claim loop writes findings on every ArchaeologistSweep
+	// task; the ArchaeologistProposeMigration task type fires when a
+	// pattern's open-status hit count exceeds Pattern.MinHitsForFeature().
+	// Status flows open → proposed → migrated|rejected.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ArchaeologistFindings (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		pattern_id   TEXT    NOT NULL,
+		repo_id      INTEGER NOT NULL,
+		file_path    TEXT    NOT NULL,
+		line_number  INTEGER NOT NULL,
+		detail_json  TEXT    NOT NULL DEFAULT '{}',
+		detected_at  TEXT    NOT NULL,
+		status       TEXT    NOT NULL DEFAULT 'open',
+		UNIQUE(pattern_id, repo_id, file_path, line_number)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_arch_findings_pattern ON ArchaeologistFindings(pattern_id, status);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -2522,4 +2542,28 @@ func runMigrations(db *sql.DB) {
 	// '' so already-detected rows stay sticky.
 	db.Exec(`ALTER TABLE Repositories ADD COLUMN license TEXT NOT NULL DEFAULT ''`)
 	backfillRepositoryLicenses(db)
+
+	// ── D9 — Archaeologist (upgrade path) ────────────────────────────────────
+	// Operator opt-out flag (per-repo). Default 0 (sweeping enabled). The
+	// Archaeologist's sweep dog filters Repositories WHERE
+	// IFNULL(archaeologist_sweep_disabled, 0) = 0. Idempotent ALTER (silent
+	// no-op when the column already exists).
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN archaeologist_sweep_disabled INTEGER NOT NULL DEFAULT 0`)
+
+	// ArchaeologistFindings — see createSchema for column-level docs. The
+	// CREATE TABLE IF NOT EXISTS keeps this idempotent on both fresh
+	// (createSchema already ran) and upgrade DBs. Schema parity is
+	// enforced by TestSchemaParity.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ArchaeologistFindings (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		pattern_id   TEXT    NOT NULL,
+		repo_id      INTEGER NOT NULL,
+		file_path    TEXT    NOT NULL,
+		line_number  INTEGER NOT NULL,
+		detail_json  TEXT    NOT NULL DEFAULT '{}',
+		detected_at  TEXT    NOT NULL,
+		status       TEXT    NOT NULL DEFAULT 'open',
+		UNIQUE(pattern_id, repo_id, file_path, line_number)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_arch_findings_pattern ON ArchaeologistFindings(pattern_id, status)`)
 }
