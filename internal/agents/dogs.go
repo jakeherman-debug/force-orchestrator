@@ -163,6 +163,14 @@ var dogCooldowns = map[string]time.Duration{
 	// matches sub-pr-ci-watch / draft-pr-watch — staged-convoy signal
 	// shares the same operator-facing dashboard refresh granularity.
 	"convoy-stage-watch": 5 * time.Minute,
+	// D8 Track 1 — repo-graph-scan. Walks every registered repo's source
+	// (Go via go/parser; tree-sitter for JS/TS/Python/Rust stubbed),
+	// extracts exported symbols into CrossRepoSymbols, and resolves
+	// import sites in consumer repos into CrossRepoDependencies edges.
+	// Daily cadence per the roadmap; PR-merge-trigger is wired by Track
+	// 2/3 (documented stub in dogs_repo_graph_scan.go). The 24h budget
+	// matches the freshness SLO ("MAX(last_scanned_at) within 24h").
+	"repo-graph-scan": 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -226,6 +234,12 @@ var dogOrder = []string{
 	// touched-table set, so this dog can't block earlier work but
 	// reads the freshest post-tick state.
 	"convoy-stage-watch",
+	// D8 Track 1 — repo-graph-scan. Ordered after convoy-stage-watch
+	// because the graph scan is the heaviest dog (filesystem walk +
+	// AST parse across the whole fleet) and we want it to run only
+	// after lighter dogs have made forward progress on the cycle's
+	// cooperative work. 24h cooldown means the per-cycle hit is rare.
+	"repo-graph-scan",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -425,6 +439,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogSupplyTokenRecheck(ctx, db, logger)
 	case "convoy-stage-watch":
 		return dogConvoyStageWatch(ctx, db, logger)
+	case "repo-graph-scan":
+		return dogRepoGraphScan(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

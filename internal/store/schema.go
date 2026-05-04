@@ -1316,6 +1316,45 @@ func createSchema(db *sql.DB) {
 		created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_senate_review_feature ON SenateReview(feature_id);`)
+
+	// ── D8 Track 1 — Cross-Repo Dependency Graph ────────────────────────────
+	// CrossRepoSymbols holds one row per exported symbol per registered repo.
+	// CrossRepoDependencies holds the consumer→provider edges discovered by
+	// dogRepoGraphScan. Repositories is keyed on `name` (TEXT PRIMARY KEY) so
+	// the FK shape is `repo_name TEXT REFERENCES Repositories(name)` rather
+	// than the integer id sketched in the roadmap. signature_hash is stable
+	// across pure renames (it digests the AST signature, not the text form).
+	// is_public is 0/1; v1 only emits public symbols but the column is here
+	// so a future pass can index private call sites without a migration.
+	// Soft-delete: deleted_at='' means live; non-empty means the consumer
+	// site disappeared but the row is retained for debugging history.
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoSymbols (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_name       TEXT    NOT NULL,
+		symbol_path     TEXT    NOT NULL,
+		symbol_kind     TEXT    NOT NULL,
+		file_path       TEXT    NOT NULL,
+		line_number     INTEGER NOT NULL,
+		signature_hash  TEXT    NOT NULL,
+		last_scanned_at TEXT    NOT NULL,
+		is_public       INTEGER NOT NULL DEFAULT 1,
+		UNIQUE(repo_name, symbol_path)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_symbols_repo ON CrossRepoSymbols(repo_name);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_symbols_kind ON CrossRepoSymbols(symbol_kind);`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoDependencies (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		consumer_repo_name TEXT    NOT NULL,
+		consumer_file      TEXT    NOT NULL,
+		consumer_line      INTEGER NOT NULL,
+		provider_symbol_id INTEGER NOT NULL,
+		discovered_at      TEXT    NOT NULL,
+		deleted_at         TEXT    NOT NULL DEFAULT '',
+		UNIQUE(consumer_repo_name, consumer_file, consumer_line, provider_symbol_id)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_provider ON CrossRepoDependencies(provider_symbol_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_consumer ON CrossRepoDependencies(consumer_repo_name);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -2522,4 +2561,36 @@ func runMigrations(db *sql.DB) {
 	// '' so already-detected rows stay sticky.
 	db.Exec(`ALTER TABLE Repositories ADD COLUMN license TEXT NOT NULL DEFAULT ''`)
 	backfillRepositoryLicenses(db)
+
+	// ── D8 Track 1 — Cross-Repo Dependency Graph (upgrade path) ──────────────
+	// CREATE TABLE IF NOT EXISTS so a fresh DB skips this block (already
+	// created in createSchema) and an upgraded DB picks up the tables on the
+	// next runMigrations sweep. Schema parity is enforced by TestSchemaParity.
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoSymbols (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_name       TEXT    NOT NULL,
+		symbol_path     TEXT    NOT NULL,
+		symbol_kind     TEXT    NOT NULL,
+		file_path       TEXT    NOT NULL,
+		line_number     INTEGER NOT NULL,
+		signature_hash  TEXT    NOT NULL,
+		last_scanned_at TEXT    NOT NULL,
+		is_public       INTEGER NOT NULL DEFAULT 1,
+		UNIQUE(repo_name, symbol_path)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_symbols_repo ON CrossRepoSymbols(repo_name)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_symbols_kind ON CrossRepoSymbols(symbol_kind)`)
+
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoDependencies (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		consumer_repo_name TEXT    NOT NULL,
+		consumer_file      TEXT    NOT NULL,
+		consumer_line      INTEGER NOT NULL,
+		provider_symbol_id INTEGER NOT NULL,
+		discovered_at      TEXT    NOT NULL,
+		deleted_at         TEXT    NOT NULL DEFAULT '',
+		UNIQUE(consumer_repo_name, consumer_file, consumer_line, provider_symbol_id)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_provider ON CrossRepoDependencies(provider_symbol_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_consumer ON CrossRepoDependencies(consumer_repo_name)`)
 }
