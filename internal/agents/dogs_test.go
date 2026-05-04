@@ -394,9 +394,11 @@ func TestListDogs(t *testing.T) {
 	// added architecture-health-report (monthly — runs every BoS rule
 	// over the full codebase and renders reports/architecture-health-YYYY-MM.md);
 	// D9 added archaeologist-sweep (weekly — fans out per-repo
-	// ArchaeologistSweep tasks for the proactive debt-pattern agent).
-	if len(dogs) != 38 {
-		t.Errorf("expected 38 built-in dogs (D8-T1 added repo-graph-scan; D9-P1 added architecture-health-report; D9 added archaeologist-sweep), got %d", len(dogs))
+	// ArchaeologistSweep tasks for the proactive debt-pattern agent);
+	// D10 added architecture-doc-render (hourly — re-renders
+	// ARCHITECTURE.md for every repo with handoff_synthesis_enabled=1).
+	if len(dogs) != 39 {
+		t.Errorf("expected 39 built-in dogs (D8-T1 added repo-graph-scan; D9-P1 added architecture-health-report; D9 added archaeologist-sweep; D10 added architecture-doc-render), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -420,7 +422,9 @@ func TestListDogs(t *testing.T) {
 		// D9 Phase 1 — monthly architecture-health-report.
 		"architecture-health-report",
 		// D9 — Archaeologist sweep dog.
-		"archaeologist-sweep"} {
+		"archaeologist-sweep",
+		// D10 — architecture-doc-render.
+		"architecture-doc-render"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

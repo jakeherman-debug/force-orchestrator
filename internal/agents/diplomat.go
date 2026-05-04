@@ -137,6 +137,16 @@ func SpawnDiplomat(ctx context.Context, db *sql.DB, name string) {
 			runConvoyReview(ctx, db, name, bounty, convoyReviewProfile, logger)
 			continue
 		}
+		// D10 — PRHandoffSynthesis: reviewer-narrative comment on
+		// draft PRs for repos with handoff_synthesis_enabled=1.
+		// Default OFF; QueuePRHandoffSynthesis + runPRHandoffSynthesis
+		// both gate on the per-repo flag so a row that lands without
+		// any enrolled repo completes as a no-op. Uses the diplomat
+		// profile (no new model selection per the roadmap).
+		if bounty, claimed := store.ClaimBounty(db, "PRHandoffSynthesis", name); claimed {
+			runPRHandoffSynthesis(ctx, db, name, bounty, diplomatProfile, logger)
+			continue
+		}
 		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
 	}
 }

@@ -110,23 +110,27 @@ func GetRepoPath(db *sql.DB, repoName string) string {
 // pr_flow_enabled flag.
 func GetRepo(db *sql.DB, name string) *Repository {
 	var (
-		r             Repository
-		prFlowEnabled int
+		r                       Repository
+		prFlowEnabled           int
+		handoffSynthesisEnabled int
 	)
 	err := db.QueryRow(`SELECT
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
 		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
-		IFNULL(mode, 'read_only'), IFNULL(release_label_pattern, '')
+		IFNULL(mode, 'read_only'), IFNULL(release_label_pattern, ''),
+		IFNULL(handoff_synthesis_enabled, 0)
 		FROM Repositories WHERE name = ?`, name).
 		Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
 			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason,
-			&r.Mode, &r.ReleaseLabelPattern)
+			&r.Mode, &r.ReleaseLabelPattern,
+			&handoffSynthesisEnabled)
 	if err != nil {
 		return nil
 	}
 	r.PRFlowEnabled = prFlowEnabled == 1
+	r.HandoffSynthesisEnabled = handoffSynthesisEnabled == 1
 	return &r
 }
 
@@ -137,7 +141,8 @@ func ListRepos(db *sql.DB) []Repository {
 		name, IFNULL(local_path, ''), IFNULL(description, ''),
 		IFNULL(remote_url, ''), IFNULL(default_branch, ''), IFNULL(pr_template_path, ''),
 		IFNULL(pr_flow_enabled, 1), IFNULL(quarantined_at, ''), IFNULL(quarantine_reason, ''),
-		IFNULL(mode, 'read_only'), IFNULL(release_label_pattern, '')
+		IFNULL(mode, 'read_only'), IFNULL(release_label_pattern, ''),
+		IFNULL(handoff_synthesis_enabled, 0)
 		FROM Repositories ORDER BY name`)
 	if err != nil {
 		return nil
@@ -146,17 +151,20 @@ func ListRepos(db *sql.DB) []Repository {
 	var repos []Repository
 	for rows.Next() {
 		var (
-			r             Repository
-			prFlowEnabled int
+			r                       Repository
+			prFlowEnabled           int
+			handoffSynthesisEnabled int
 		)
 		if err := rows.Scan(&r.Name, &r.LocalPath, &r.Description,
 			&r.RemoteURL, &r.DefaultBranch, &r.PRTemplatePath,
 			&prFlowEnabled, &r.QuarantinedAt, &r.QuarantineReason,
-			&r.Mode, &r.ReleaseLabelPattern); err != nil {
+			&r.Mode, &r.ReleaseLabelPattern,
+			&handoffSynthesisEnabled); err != nil {
 			log.Printf("ListRepos: scan error: %v", err)
 			continue
 		}
 		r.PRFlowEnabled = prFlowEnabled == 1
+		r.HandoffSynthesisEnabled = handoffSynthesisEnabled == 1
 		repos = append(repos, r)
 	}
 	if rErr := rows.Err(); rErr != nil {

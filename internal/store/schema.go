@@ -44,7 +44,8 @@ func createSchema(db *sql.DB) {
 		mode                  TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')),
 		license               TEXT    NOT NULL DEFAULT '',
 		release_label_pattern TEXT    NOT NULL DEFAULT '',
-		archaeologist_sweep_disabled INTEGER NOT NULL DEFAULT 0
+		archaeologist_sweep_disabled INTEGER NOT NULL DEFAULT 0,
+		handoff_synthesis_enabled INTEGER NOT NULL DEFAULT 0
 	);`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS BountyBoard (
@@ -1394,6 +1395,20 @@ func createSchema(db *sql.DB) {
 		UNIQUE(pattern_id, repo_id, file_path, line_number)
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_arch_findings_pattern ON ArchaeologistFindings(pattern_id, status);`)
+
+	// D10 — PRHandoffSyntheses. One row per Diplomat-emitted reviewer
+	// narrative comment posted on a draft PR. The row is the audit
+	// trail: the LLM call landed, the gh post landed, and the (convoy,
+	// PR url) pair is recorded for the operator + experiment harness.
+	db.Exec(`CREATE TABLE IF NOT EXISTS PRHandoffSyntheses (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id      INTEGER NOT NULL REFERENCES Convoys(id),
+		pr_url         TEXT NOT NULL,
+		posted_at      TEXT NOT NULL,
+		experiment_arm TEXT NOT NULL DEFAULT '',
+		comment_id     INTEGER NOT NULL DEFAULT 0
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_handoff_convoy ON PRHandoffSyntheses(convoy_id);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -2674,4 +2689,28 @@ func runMigrations(db *sql.DB) {
 		UNIQUE(pattern_id, repo_id, file_path, line_number)
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_arch_findings_pattern ON ArchaeologistFindings(pattern_id, status)`)
+
+	// ── D10 — Synthetic Handoff Documentation ───────────────────────────────
+	// Per-repo opt-in flag for the PRHandoffSynthesis Diplomat task and
+	// the dogArchitectureDocRender dog. Default 0 (OFF) — D10 ships
+	// opt-in until the validating paired-run experiment proves out.
+	// Anti-cheat #1 (no enabling by default) is enforced both here and
+	// at the call sites (`store.HandoffSynthesisEnabled` + claim-loop
+	// gate). Tests assert the default-OFF behaviour and the
+	// flag-on/flag-off gating.
+	db.Exec(`ALTER TABLE Repositories ADD COLUMN handoff_synthesis_enabled INTEGER NOT NULL DEFAULT 0`)
+
+	// PRHandoffSyntheses: one row per posted reviewer narrative.
+	// Idempotent: CREATE TABLE IF NOT EXISTS in createSchema is the
+	// fresh-DB path; this same statement re-emitted here is the
+	// upgrade-path safety net.
+	db.Exec(`CREATE TABLE IF NOT EXISTS PRHandoffSyntheses (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		convoy_id      INTEGER NOT NULL REFERENCES Convoys(id),
+		pr_url         TEXT NOT NULL,
+		posted_at      TEXT NOT NULL,
+		experiment_arm TEXT NOT NULL DEFAULT '',
+		comment_id     INTEGER NOT NULL DEFAULT 0
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_handoff_convoy ON PRHandoffSyntheses(convoy_id)`)
 }

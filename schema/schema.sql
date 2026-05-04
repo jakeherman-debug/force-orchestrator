@@ -156,7 +156,8 @@ CREATE TABLE IF NOT EXISTS Repositories (
     mode                  TEXT    NOT NULL DEFAULT 'read_only' CHECK (mode IN ('read_only','write','quarantined')), -- D2 T1-4
     license               TEXT    NOT NULL DEFAULT '',  -- D5 P0: SPDX id detected from LICENSE file at AddRepo time; backfilled on first runMigrations after upgrade
     release_label_pattern TEXT    NOT NULL DEFAULT '',  -- D5.5: per-repo regex for the release_label_present gate; empty means repo doesn't use release labels
-    archaeologist_sweep_disabled INTEGER NOT NULL DEFAULT 0  -- D9: 1 = operator opt-out of Archaeologist's weekly debt-pattern sweep
+    archaeologist_sweep_disabled INTEGER NOT NULL DEFAULT 0,  -- D9: 1 = operator opt-out of Archaeologist's weekly debt-pattern sweep
+    handoff_synthesis_enabled INTEGER NOT NULL DEFAULT 0  -- D10: per-repo opt-in for Diplomat PRHandoffSynthesis + dogArchitectureDocRender. Default 0 (OFF) — D10 ships opt-in.
 );
 
 -- ── Ask-branch sub-PR tracking ────────────────────────────────────────────────
@@ -1358,5 +1359,21 @@ CREATE TABLE IF NOT EXISTS ArchaeologistFindings (
     UNIQUE(pattern_id, repo_id, file_path, line_number)
 );
 CREATE INDEX IF NOT EXISTS idx_arch_findings_pattern ON ArchaeologistFindings(pattern_id, status);
+
+-- ── D10 Synthetic Handoff Documentation ──────────────────────────────────────
+-- One row per Diplomat-emitted reviewer narrative comment posted on a draft
+-- PR. PRHandoffSyntheses is the audit trail: the LLM call landed, the gh
+-- post landed, and the (convoy, PR url) pair is recorded for the operator
+-- + the validating paired-run experiment harness. Per-repo opt-in via
+-- Repositories.handoff_synthesis_enabled (default 0).
+CREATE TABLE IF NOT EXISTS PRHandoffSyntheses (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    convoy_id      INTEGER NOT NULL REFERENCES Convoys(id),
+    pr_url         TEXT NOT NULL,
+    posted_at      TEXT NOT NULL,                        -- SQLite UTC ('YYYY-MM-DD HH:MM:SS')
+    experiment_arm TEXT NOT NULL DEFAULT '',             -- e.g. 'control_off' | 'treatment_on' (D10-handoff experiment)
+    comment_id     INTEGER NOT NULL DEFAULT 0            -- GitHub REST comment ID, when the gh poster reports it
+);
+CREATE INDEX IF NOT EXISTS idx_pr_handoff_convoy ON PRHandoffSyntheses(convoy_id);
 
 -- ── Convoy events ─────────────────────────────────────────────────────────────

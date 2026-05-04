@@ -178,6 +178,11 @@ type Repository struct {
 	// doesn't use release labels; convoys touching such a repo cannot
 	// use the release_label_present gate (planner-time error).
 	ReleaseLabelPattern string
+	// HandoffSynthesisEnabled is D10's per-repo opt-in for the
+	// Diplomat PRHandoffSynthesis task type and the
+	// dogArchitectureDocRender dog. Default false — D10 ships opt-in
+	// until the validating paired-run experiment proves out.
+	HandoffSynthesisEnabled bool
 }
 
 // ── Per-(convoy, repo) ask-branch ────────────────────────────────────────────

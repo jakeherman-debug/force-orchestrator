@@ -46,6 +46,7 @@ var InfrastructureTaskTypes = []string{
 	// fan-out. Both are infrastructure (operator only sees them on failure).
 	"ArchaeologistSweep",
 	"ArchaeologistProposeMigration",
+	"PRHandoffSynthesis", // D10 — auto-generated reviewer narrative on draft PRs (opt-in)
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {
