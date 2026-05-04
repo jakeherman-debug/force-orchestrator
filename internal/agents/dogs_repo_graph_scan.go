@@ -28,15 +28,22 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"force-orchestrator/internal/store"
 )
 
-// repoGraphScanSingleRepoBudget caps per-repo wall time. Roadmap budget is
-// "single-repo < 60s" (Track 1 § "Performance budget"); we leave headroom for
-// stdlib parsing of large repos and let the surrounding 5-minute dog timeout
-// (RunDogs) be the hard ceiling.
-const repoGraphScanSingleRepoBudget = 60 // seconds — informational, not enforced inline; see RunDogs ctx
+// repoGraphScanSingleRepoBudget caps per-repo wall time. Roadmap budget
+// (D8 Track 1 § "Performance budget") is "single-repo < 60s"; we enforce that
+// inline via a context.WithTimeout around each per-repo provider/consumer pass.
+// On timeout the dog logs the violation, soft-skips the offending repo, and
+// continues — preserving the "no silent failures" CLAUDE.md invariant while
+// keeping a single slow repo from poisoning the rest of the fleet's pass.
+//
+// Exposed as a var (not const) so tests can lower the budget to drive the
+// timeout-and-skip path deterministically. Production callers leave it at the
+// default 60s.
+var repoGraphScanSingleRepoBudget = 60 * time.Second
 
 // symbolExtractor is the per-language pluggable surface. Each implementation
 // walks a repo on disk and emits providers + consumer call sites. v1 ships
@@ -144,34 +151,49 @@ func dogRepoGraphScan(ctx context.Context, db *sql.DB, logger interface{ Printf(
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("repo-graph-scan: ctx cancelled mid-provider-pass: %w", ctxErr)
 		}
-		for _, ex := range registry {
-			if !ex.Detect(m.path) {
-				continue
-			}
-			syms, exErr := ex.ExtractProviders(ctx, m.name, m.path)
-			if exErr != nil {
-				logger.Printf("Dog repo-graph-scan: provider extract %s/%s: %v", m.name, ex.Name(), exErr)
-				aggErrs = append(aggErrs, fmt.Errorf("%s/%s providers: %w", m.name, ex.Name(), exErr))
-				continue
-			}
-			for _, s := range syms {
-				if _, uErr := store.UpsertCrossRepoSymbol(db, store.CrossRepoSymbol{
-					RepoName:      m.name,
-					SymbolPath:    s.SymbolPath,
-					SymbolKind:    s.SymbolKind,
-					FilePath:      s.FilePath,
-					LineNumber:    s.LineNumber,
-					SignatureHash: s.SignatureHash,
-					IsPublic:      s.IsPublic,
-				}); uErr != nil {
-					logger.Printf("Dog repo-graph-scan: upsert symbol %s/%s: %v", m.name, s.SymbolPath, uErr)
-					aggErrs = append(aggErrs, uErr)
+		// Per-repo timeout enforcement (roadmap budget < 60s/repo). Wrap the
+		// extractor calls in a deadlined ctx so a single pathological repo
+		// can't poison the fleet pass. On timeout we log + skip the repo —
+		// not a fatal aggErr, since "this one repo is too slow today" is a
+		// recoverable degradation (next tick retries).
+		func() {
+			repoCtx, cancel := context.WithTimeout(ctx, repoGraphScanSingleRepoBudget)
+			defer cancel()
+			repoStart := time.Now()
+			for _, ex := range registry {
+				if !ex.Detect(m.path) {
 					continue
 				}
-				totalSymbols++
+				syms, exErr := ex.ExtractProviders(repoCtx, m.name, m.path)
+				if exErr != nil {
+					if errors.Is(exErr, context.DeadlineExceeded) {
+						logger.Printf("Dog repo-graph-scan: provider extract %s/%s exceeded per-repo budget %s after %s — skipping repo, will retry next tick",
+							m.name, ex.Name(), repoGraphScanSingleRepoBudget, time.Since(repoStart))
+						return
+					}
+					logger.Printf("Dog repo-graph-scan: provider extract %s/%s: %v", m.name, ex.Name(), exErr)
+					aggErrs = append(aggErrs, fmt.Errorf("%s/%s providers: %w", m.name, ex.Name(), exErr))
+					continue
+				}
+				for _, s := range syms {
+					if _, uErr := store.UpsertCrossRepoSymbol(db, store.CrossRepoSymbol{
+						RepoName:      m.name,
+						SymbolPath:    s.SymbolPath,
+						SymbolKind:    s.SymbolKind,
+						FilePath:      s.FilePath,
+						LineNumber:    s.LineNumber,
+						SignatureHash: s.SignatureHash,
+						IsPublic:      s.IsPublic,
+					}); uErr != nil {
+						logger.Printf("Dog repo-graph-scan: upsert symbol %s/%s: %v", m.name, s.SymbolPath, uErr)
+						aggErrs = append(aggErrs, uErr)
+						continue
+					}
+					totalSymbols++
+				}
+				logger.Printf("Dog repo-graph-scan: %s — %s extractor emitted %d symbol(s)", m.name, ex.Name(), len(syms))
 			}
-			logger.Printf("Dog repo-graph-scan: %s — %s extractor emitted %d symbol(s)", m.name, ex.Name(), len(syms))
-		}
+		}()
 	}
 
 	// Consumer pass — resolve each call-site against moduleToRepo and the
@@ -183,55 +205,77 @@ func dogRepoGraphScan(ctx context.Context, db *sql.DB, logger interface{ Printf(
 		// Track which (consumer_file, edge id) we observe this pass so we
 		// can soft-delete the per-file edges that disappeared.
 		observedFiles := map[string]map[int64]struct{}{}
-		for _, ex := range registry {
-			if !ex.Detect(m.path) {
-				continue
+		// Per-repo timeout — same pattern as provider pass. A consumer pass
+		// timeout for a repo means we DON'T run the soft-delete sweep for
+		// that repo this tick (we'd otherwise tombstone every live edge on
+		// the misperception that "we observed nothing"). Wrapping in an
+		// IIFE so deadline-detection can bail out cleanly via early return.
+		consumerTimedOut := false
+		func() {
+			repoCtx, cancel := context.WithTimeout(ctx, repoGraphScanSingleRepoBudget)
+			defer cancel()
+			repoStart := time.Now()
+			for _, ex := range registry {
+				if !ex.Detect(m.path) {
+					continue
+				}
+				sites, exErr := ex.ExtractConsumers(repoCtx, m.name, m.path)
+				if exErr != nil {
+					if errors.Is(exErr, context.DeadlineExceeded) {
+						logger.Printf("Dog repo-graph-scan: consumer extract %s/%s exceeded per-repo budget %s after %s — skipping soft-delete sweep, will retry next tick",
+							m.name, ex.Name(), repoGraphScanSingleRepoBudget, time.Since(repoStart))
+						consumerTimedOut = true
+						return
+					}
+					logger.Printf("Dog repo-graph-scan: consumer extract %s/%s: %v", m.name, ex.Name(), exErr)
+					aggErrs = append(aggErrs, fmt.Errorf("%s/%s consumers: %w", m.name, ex.Name(), exErr))
+					continue
+				}
+				for _, site := range sites {
+					providerRepo := resolveQualifierToRepo(moduleToRepo, site.ProviderQualifier)
+					if providerRepo == "" {
+						// Out-of-fleet import — not a tracked dependency. (e.g.
+						// github.com/google/uuid). v1 deliberately silently
+						// drops these; tracking external deps is a different
+						// problem than cross-repo blast-radius.
+						continue
+					}
+					if providerRepo == m.name {
+						// In-repo import — not cross-repo, skip.
+						continue
+					}
+					symID, lErr := store.LookupCrossRepoSymbolID(db, providerRepo, site.ProviderSymbol)
+					if lErr != nil {
+						// Not a fatal error — the producer may not export the
+						// symbol the consumer thinks it does (e.g. a struct
+						// field accessed via a method). v1 logs at debug-ish
+						// level and skips.
+						continue
+					}
+					edgeID, uErr := store.UpsertCrossRepoDependency(db, store.CrossRepoDependency{
+						ConsumerRepoName: m.name,
+						ConsumerFile:     site.ConsumerFile,
+						ConsumerLine:     site.ConsumerLine,
+						ProviderSymbolID: symID,
+					})
+					if uErr != nil {
+						logger.Printf("Dog repo-graph-scan: upsert dep %s/%s:%d → %s/%s: %v",
+							m.name, site.ConsumerFile, site.ConsumerLine, providerRepo, site.ProviderSymbol, uErr)
+						aggErrs = append(aggErrs, uErr)
+						continue
+					}
+					if _, seen := observedFiles[site.ConsumerFile]; !seen {
+						observedFiles[site.ConsumerFile] = map[int64]struct{}{}
+					}
+					observedFiles[site.ConsumerFile][edgeID] = struct{}{}
+					totalEdgesAdded++
+				}
 			}
-			sites, exErr := ex.ExtractConsumers(ctx, m.name, m.path)
-			if exErr != nil {
-				logger.Printf("Dog repo-graph-scan: consumer extract %s/%s: %v", m.name, ex.Name(), exErr)
-				aggErrs = append(aggErrs, fmt.Errorf("%s/%s consumers: %w", m.name, ex.Name(), exErr))
-				continue
-			}
-			for _, site := range sites {
-				providerRepo := resolveQualifierToRepo(moduleToRepo, site.ProviderQualifier)
-				if providerRepo == "" {
-					// Out-of-fleet import — not a tracked dependency. (e.g.
-					// github.com/google/uuid). v1 deliberately silently
-					// drops these; tracking external deps is a different
-					// problem than cross-repo blast-radius.
-					continue
-				}
-				if providerRepo == m.name {
-					// In-repo import — not cross-repo, skip.
-					continue
-				}
-				symID, lErr := store.LookupCrossRepoSymbolID(db, providerRepo, site.ProviderSymbol)
-				if lErr != nil {
-					// Not a fatal error — the producer may not export the
-					// symbol the consumer thinks it does (e.g. a struct
-					// field accessed via a method). v1 logs at debug-ish
-					// level and skips.
-					continue
-				}
-				edgeID, uErr := store.UpsertCrossRepoDependency(db, store.CrossRepoDependency{
-					ConsumerRepoName: m.name,
-					ConsumerFile:     site.ConsumerFile,
-					ConsumerLine:     site.ConsumerLine,
-					ProviderSymbolID: symID,
-				})
-				if uErr != nil {
-					logger.Printf("Dog repo-graph-scan: upsert dep %s/%s:%d → %s/%s: %v",
-						m.name, site.ConsumerFile, site.ConsumerLine, providerRepo, site.ProviderSymbol, uErr)
-					aggErrs = append(aggErrs, uErr)
-					continue
-				}
-				if _, seen := observedFiles[site.ConsumerFile]; !seen {
-					observedFiles[site.ConsumerFile] = map[int64]struct{}{}
-				}
-				observedFiles[site.ConsumerFile][edgeID] = struct{}{}
-				totalEdgesAdded++
-			}
+		}()
+		if consumerTimedOut {
+			// Skip the soft-delete sweep for this repo — observedFiles is
+			// incomplete and would falsely tombstone live edges.
+			continue
 		}
 
 		// Soft-delete: any live edge for an observed file whose id is NOT

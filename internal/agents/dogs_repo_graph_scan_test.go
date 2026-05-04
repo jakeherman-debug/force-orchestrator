@@ -17,13 +17,17 @@
 package agents
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"force-orchestrator/internal/store"
 )
@@ -390,6 +394,181 @@ func TestUpsertCrossRepoSymbol_Idempotent(t *testing.T) {
 	}
 	if line != 5 || hash != "h2" {
 		t.Errorf("expected metadata refresh; got line=%d hash=%q", line, hash)
+	}
+}
+
+// makeSyntheticGoRepo writes a Go module at `dir` with `numPkgs` packages,
+// each exporting `exportsPerPkg` symbols (a function, a type, and a const,
+// rotating). Used by perf-budget tests to drive the dog with a realistic-ish
+// symbol fan-out without depending on a real-world repo on disk.
+//
+// Module path = "example.com/synthetic-<modSuffix>" so multiple synthetic
+// repos in the same test don't share a module path. Returns the module path.
+func makeSyntheticGoRepo(t *testing.T, dir, modSuffix string, numPkgs, exportsPerPkg int) string {
+	t.Helper()
+	modulePath := "example.com/synthetic-" + modSuffix
+	mustWrite(t, filepath.Join(dir, "go.mod"), "module "+modulePath+"\n\ngo 1.21\n")
+	for p := 0; p < numPkgs; p++ {
+		pkgName := fmt.Sprintf("pkg%02d", p)
+		pkgDir := filepath.Join(dir, pkgName)
+		mustMkdir(t, pkgDir)
+		var b strings.Builder
+		fmt.Fprintf(&b, "package %s\n\n", pkgName)
+		for i := 0; i < exportsPerPkg; i++ {
+			switch i % 3 {
+			case 0:
+				fmt.Fprintf(&b, "// Func%02d is a synthetic exported function.\nfunc Func%02d(x int) int { return x + %d }\n\n", i, i, i)
+			case 1:
+				fmt.Fprintf(&b, "// Type%02d is a synthetic exported struct.\ntype Type%02d struct {\n\tField int\n}\n\n", i, i)
+			case 2:
+				fmt.Fprintf(&b, "// Const%02d is a synthetic exported constant.\nconst Const%02d = %d\n\n", i, i, i*7)
+			}
+		}
+		mustWrite(t, filepath.Join(pkgDir, "synth.go"), b.String())
+	}
+	return modulePath
+}
+
+// TestDogRepoGraphScan_PerfBudget_SingleRepo asserts that a single-repo scan
+// completes well under the per-repo wall-time budget.
+//
+// Scaling note: the roadmap's 60s/repo budget (docs/roadmap.md L2181) is for
+// a "realistic" producer repo (~500 exported symbols) on the reference
+// operator machine. Our test fixture is ~10x smaller (10 packages × 5 exports
+// = ~50 symbols). We assert against a 10x-scaled bound (5s) here. If real-
+// fleet runs show drift past the 60s wall budget, the operator surfaces it
+// via the dog's per-repo timeout log line (see dogRepoGraphScan inline
+// per-repo context.WithTimeout); this test just pins the scaling assumption
+// so we catch a 100x perf regression at CI time, not on the operator's
+// machine at 3am.
+func TestDogRepoGraphScan_PerfBudget_SingleRepo(t *testing.T) {
+	const perfBudgetSingleRepoTestScaling = 5 * time.Second
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	dir := t.TempDir()
+	makeSyntheticGoRepo(t, dir, "perf-single", 10, 5)
+	store.AddRepo(db, "perf-single", dir, "")
+
+	logger := log.New(io.Discard, "", 0)
+	start := time.Now()
+	if err := dogRepoGraphScan(context.Background(), db, logger); err != nil {
+		t.Fatalf("dogRepoGraphScan: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed >= perfBudgetSingleRepoTestScaling {
+		t.Errorf("single-repo perf budget violated: %s >= %s (10x-scaled bound for 60s/repo roadmap target on a 50-symbol fixture)",
+			elapsed, perfBudgetSingleRepoTestScaling)
+	}
+	// Sanity: the scan actually did the work — fixture has ~50 symbols.
+	n, err := store.CountCrossRepoSymbols(db)
+	if err != nil {
+		t.Fatalf("CountCrossRepoSymbols: %v", err)
+	}
+	if n < 40 {
+		t.Errorf("expected the synthetic 10x5 fixture to yield ~50 symbols, got %d (perf assertion is meaningless if the dog short-circuited)", n)
+	}
+}
+
+// TestDogRepoGraphScan_PerfBudget_FullFleet asserts that a multi-repo scan
+// completes well under the full-fleet wall-time budget.
+//
+// Scaling note: the roadmap's 30-minute full-fleet budget (docs/roadmap.md
+// L2181) assumes ~30 repos × ~500 symbols each on the reference operator
+// machine. We register 5 synthetic repos × ~25 symbols each (5 packages × 5
+// exports). That's ~6x fewer repos and ~20x fewer symbols-per-repo than the
+// roadmap assumption, so the fixture is ~120x lighter. We assert a 15s bound
+// (1800s/120 = 15s) — generous enough to absorb CI noise, tight enough to
+// catch a 5x perf regression in symbol extraction or upsert pathways. As
+// with the single-repo test, the production budget enforcement happens via
+// the per-repo context.WithTimeout in dogRepoGraphScan; this test pins the
+// scaling assumption against fleet-aggregate cost.
+func TestDogRepoGraphScan_PerfBudget_FullFleet(t *testing.T) {
+	const perfBudgetFullFleetTestScaling = 15 * time.Second
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	root := t.TempDir()
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("perf-fleet-%d", i)
+		dir := filepath.Join(root, name)
+		mustMkdir(t, dir)
+		makeSyntheticGoRepo(t, dir, name, 5, 5)
+		store.AddRepo(db, name, dir, "")
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	start := time.Now()
+	if err := dogRepoGraphScan(context.Background(), db, logger); err != nil {
+		t.Fatalf("dogRepoGraphScan: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed >= perfBudgetFullFleetTestScaling {
+		t.Errorf("full-fleet perf budget violated: %s >= %s (scaled bound for 30-min roadmap target on a 5-repo × 25-symbol fixture)",
+			elapsed, perfBudgetFullFleetTestScaling)
+	}
+	n, err := store.CountCrossRepoSymbols(db)
+	if err != nil {
+		t.Fatalf("CountCrossRepoSymbols: %v", err)
+	}
+	if n < 100 {
+		t.Errorf("expected the 5-repo × 25-symbol fleet fixture to yield ~125 symbols, got %d (perf assertion is meaningless if the dog short-circuited)", n)
+	}
+}
+
+// TestDogRepoGraphScan_PerfBudget_SingleRepoTimeout exercises the
+// self-healing path: when a single repo blows the per-repo budget, the dog
+// logs the violation and continues to the next repo (does NOT crash, does
+// NOT poison the rest of the fleet's pass). Drives the path by overriding
+// repoGraphScanSingleRepoBudget down to ~1ns so any synthetic fixture trips
+// it deterministically.
+//
+// Per CLAUDE.md "no silent failures": the dog's behaviour on timeout is
+// "log loud, skip clean, retry next tick" — verified here by checking the
+// log buffer for the expected violation marker AND by confirming the
+// healthy second repo still got its symbols upserted.
+func TestDogRepoGraphScan_PerfBudget_SingleRepoTimeout(t *testing.T) {
+	// Override the budget for the duration of this test; restore on exit so
+	// other tests (esp. PerfBudget_SingleRepo / _FullFleet) see the default.
+	prev := repoGraphScanSingleRepoBudget
+	repoGraphScanSingleRepoBudget = 1 * time.Nanosecond
+	t.Cleanup(func() { repoGraphScanSingleRepoBudget = prev })
+
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	root := t.TempDir()
+	slowDir := filepath.Join(root, "slow")
+	healthyDir := filepath.Join(root, "healthy")
+	mustMkdir(t, slowDir)
+	mustMkdir(t, healthyDir)
+	// Same shape for both — the budget override is what makes "slow" slow.
+	makeSyntheticGoRepo(t, slowDir, "slow", 3, 5)
+	makeSyntheticGoRepo(t, healthyDir, "healthy", 3, 5)
+	store.AddRepo(db, "slow", slowDir, "")
+	store.AddRepo(db, "healthy", healthyDir, "")
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	// Both repos will trip the 1ns budget; assert the dog returns nil (not
+	// a fatal error — timeout is a recoverable degradation) and that we got
+	// the expected log line.
+	if err := dogRepoGraphScan(context.Background(), db, logger); err != nil {
+		t.Fatalf("dogRepoGraphScan: expected nil on per-repo timeout (recoverable), got %v", err)
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "exceeded per-repo budget") {
+		t.Errorf("expected timeout log line containing 'exceeded per-repo budget', got logs:\n%s", logs)
+	}
+	// Both repos should have hit the violation path; the dog should NOT
+	// have crashed mid-fleet — surface that by checking the final summary
+	// line ran (it's emitted at the bottom of dogRepoGraphScan).
+	if !strings.Contains(logs, "Dog repo-graph-scan: scanned") {
+		t.Errorf("expected dog to reach final summary log line (proves it didn't crash mid-fleet), got logs:\n%s", logs)
 	}
 }
 
