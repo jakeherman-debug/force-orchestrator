@@ -179,6 +179,14 @@ var dogCooldowns = map[string]time.Duration{
 	// at 00:00 UTC") is enforced by the inquisitor schedule + cooldown,
 	// not by an in-body day-of-month check.
 	"architecture-health-report": 30 * 24 * time.Hour,
+	// D9 — archaeologist-sweep. Per-repo weekly debt-pattern sweep.
+	// Walks ListArchaeologistSweepTargets and queues one
+	// ArchaeologistSweep task per active repo. Weekly cadence matches
+	// the roadmap §D9 spec ("Sweep cadence: weekly per repo"); the
+	// dedup is empirical — duplicate ArchaeologistSweep tasks for the
+	// same repo over the same week would just re-Insert OR IGNORE the
+	// same hits, but the weekly cooldown keeps the queue tidy.
+	"archaeologist-sweep": 7 * 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -252,6 +260,11 @@ var dogOrder = []string{
 	// scan; runs last in the order because it walks every registered
 	// repo's full tree and is the most expensive dog by far.
 	"architecture-health-report",
+	// D9 — archaeologist-sweep. Independent of every other dog
+	// (touches BountyBoard inserts only), so order is largely
+	// indifferent; ordered last so it always runs after the per-tick
+	// fleet-stability dogs have finished.
+	"archaeologist-sweep",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -455,9 +468,41 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogRepoGraphScan(ctx, db, logger)
 	case "architecture-health-report":
 		return dogArchitectureHealthReport(ctx, db, logger)
+	case "archaeologist-sweep":
+		return dogArchaeologistSweep(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
+}
+
+// dogArchaeologistSweep enqueues one ArchaeologistSweep task per
+// non-opted-out registered repo. The cooldown (7d) means each repo
+// only gets one task per week. Idempotent across cooldown windows:
+// the underlying Pattern.Scan + InsertArchaeologistFinding pair are
+// dedup'd by the UNIQUE(pattern_id, repo_id, file_path, line_number)
+// constraint on ArchaeologistFindings.
+//
+// D9 anti-cheat #2 (language-aware patterns) is enforced by the
+// patterns themselves, not by this dog — every pattern filters its
+// own file extensions.
+func dogArchaeologistSweep(ctx context.Context, db *sql.DB, logger interface{ Printf(string, ...any) }) error {
+	_ = ctx
+	targets, err := store.ListArchaeologistSweepTargets(db)
+	if err != nil {
+		return fmt.Errorf("dogArchaeologistSweep: list sweep targets: %w", err)
+	}
+	queued := 0
+	for _, t := range targets {
+		id, qErr := store.QueueArchaeologistSweep(db, t.ID, t.Name)
+		if qErr != nil {
+			logger.Printf("Dog archaeologist-sweep: QueueArchaeologistSweep(%s): %v — skipping", t.Name, qErr)
+			continue
+		}
+		logger.Printf("Dog archaeologist-sweep: queued #%d for %s", id, t.Name)
+		queued++
+	}
+	logger.Printf("Dog archaeologist-sweep: queued %d sweep task(s) across %d active repo(s)", queued, len(targets))
+	return nil
 }
 
 // dogSupplyAllowlistRefresh walks each supported ecosystem (npm / pypi /

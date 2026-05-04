@@ -42,6 +42,10 @@ var InfrastructureTaskTypes = []string{
 	"WorktreeReset",
 	"BoSReview", // D4 Phase 1 — Bureau of Standards commit-time review
 	"ISBReview", // D4 Phase 2 — Imperial Security Bureau commit-time review
+	// D9 — Archaeologist: weekly per-repo debt-pattern sweep + migration-proposal
+	// fan-out. Both are infrastructure (operator only sees them on failure).
+	"ArchaeologistSweep",
+	"ArchaeologistProposeMigration",
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {

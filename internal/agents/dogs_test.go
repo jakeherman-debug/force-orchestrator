@@ -392,9 +392,11 @@ func TestListDogs(t *testing.T) {
 	// exported symbols + import call sites into CrossRepoSymbols /
 	// CrossRepoDependencies for cross-repo blast-radius); D9 Phase 1
 	// added architecture-health-report (monthly — runs every BoS rule
-	// over the full codebase and renders reports/architecture-health-YYYY-MM.md).
-	if len(dogs) != 37 {
-		t.Errorf("expected 37 built-in dogs (D8-T1 added repo-graph-scan; D9-P1 added architecture-health-report), got %d", len(dogs))
+	// over the full codebase and renders reports/architecture-health-YYYY-MM.md);
+	// D9 added archaeologist-sweep (weekly — fans out per-repo
+	// ArchaeologistSweep tasks for the proactive debt-pattern agent).
+	if len(dogs) != 38 {
+		t.Errorf("expected 38 built-in dogs (D8-T1 added repo-graph-scan; D9-P1 added architecture-health-report; D9 added archaeologist-sweep), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -416,7 +418,9 @@ func TestListDogs(t *testing.T) {
 		// D8 Track 1 — repo-graph-scan.
 		"repo-graph-scan",
 		// D9 Phase 1 — monthly architecture-health-report.
-		"architecture-health-report"} {
+		"architecture-health-report",
+		// D9 — Archaeologist sweep dog.
+		"archaeologist-sweep"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

@@ -183,6 +183,19 @@ func cmdDaemon(db *sql.DB) {
 	}
 	senateRoster := []string{"Senate-Mothma", "Senate-Bail", "Senate-Padme"}
 
+	// D9 — Archaeologist. Pure Go pattern-scanning (no LLM call); one
+	// agent suffices because the per-task cost is small and the dog
+	// schedule throttles fan-out to one sweep per repo per week.
+	// Operators can scale via num_archaeologist.
+	numArchaeologist := 1
+	if n := store.GetConfig(db, "num_archaeologist", ""); n != "" {
+		fmt.Sscanf(n, "%d", &numArchaeologist)
+	}
+	if numArchaeologist < 1 {
+		numArchaeologist = 1
+	}
+	archaeologistRoster := []string{"Howard-Carter", "Indiana-Jones", "Lara-Croft"}
+
 	// Recover any Failed convoys whose tasks were manually reset (e.g. via `force reset` or
 	// direct DB edits) without going through the normal task-completion path.
 	store.RecoverStaleConvoys(db)
@@ -484,6 +497,18 @@ func cmdDaemon(db *sql.DB) {
 			name = senateRoster[i]
 		}
 		go agents.SpawnSenate(ctx, db, name, libClient)
+	}
+	// D9 — Archaeologist. Claim-loop agent (Diplomat pattern) consuming
+	// ArchaeologistSweep + ArchaeologistProposeMigration tasks. Receives
+	// libClient by constructor injection so the proposal handoff can
+	// route through librarian.Client.EmitCandidate (anti-cheat #1: the
+	// Archaeologist proposes; the operator ratifies).
+	for i := 0; i < numArchaeologist; i++ {
+		name := fmt.Sprintf("Archaeologist-%d", i+1)
+		if i < len(archaeologistRoster) {
+			name = archaeologistRoster[i]
+		}
+		go agents.SpawnArchaeologist(ctx, db, libClient, name)
 	}
 	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient, CodeArtifact: caClient})
 
