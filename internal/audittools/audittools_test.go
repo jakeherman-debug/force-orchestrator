@@ -73,6 +73,7 @@ func TestNoAuditSkipMarkersRemain(t *testing.T) {
 			name := d.Name()
 			if name == ".fix-worktrees" || name == ".force-worktrees" ||
 				name == ".claude" || name == ".build-worktrees" ||
+				name == ".d7-worktrees" ||
 				name == "vendor" || name == ".git" || name == "node_modules" {
 				return filepath.SkipDir
 			}
@@ -143,6 +144,7 @@ func countAllowlistHits(root string) int {
 				name := d.Name()
 				if name == ".fix-worktrees" || name == ".force-worktrees" ||
 					name == ".claude" || name == ".build-worktrees" ||
+					name == ".d7-worktrees" ||
 					name == "vendor" || name == ".git" || name == "node_modules" {
 					return filepath.SkipDir
 				}

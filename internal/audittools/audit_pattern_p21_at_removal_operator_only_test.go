@@ -107,6 +107,7 @@ func TestPattern_P21_ATRemovalIsOperatorOnly(t *testing.T) {
 			name := d.Name()
 			if name == ".build-worktrees" || name == ".force-worktrees" ||
 				name == ".claude" || name == ".fix-worktrees" ||
+				name == ".d7-worktrees" ||
 				name == "vendor" || name == ".git" || name == "node_modules" ||
 				name == "testdata" {
 				return filepath.SkipDir

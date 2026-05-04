@@ -115,6 +115,7 @@ func TestPattern_PStagingPromotionConfirm_NoUngatedSetConvoyStaging(t *testing.T
 				name := d.Name()
 				if name == ".fix-worktrees" || name == ".force-worktrees" ||
 					name == ".claude" || name == ".build-worktrees" ||
+					name == ".d7-worktrees" ||
 					name == "vendor" || name == ".git" ||
 					name == "node_modules" || name == "testdata" {
 					return filepath.SkipDir
