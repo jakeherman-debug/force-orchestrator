@@ -1277,6 +1277,7 @@ function renderConvoys(convoys) {
       ? `<button class="action-btn ship-btn" onclick="showShip(${c.id})">Ship It</button>`
       : '';
     const reviewBadge = renderPRReviewBadge(c);
+    const watchChip = renderConvoyWatchChip(c);
     return `
       <div class="convoy-card">
         <div class="convoy-header">
@@ -1284,6 +1285,7 @@ function renderConvoys(convoys) {
           <span class="convoy-id" style="cursor:pointer" onclick="showConvoyTasks(${c.id}, ${escHtml(JSON.stringify(c.name || 'Convoy'))})">#${c.id}</span>
           ${statusPill(c.status)}
           <span class="convoy-ts">${fmtTS(c.created_at)}</span>
+          ${watchChip}
         </div>
         <div class="progress-bar-wrap">
           <div class="progress-bar-fill" style="width:${pct}%"></div>
@@ -1327,6 +1329,195 @@ function renderPRReviewBadge(c) {
     ${parts.join(' ')}
   </button>`;
 }
+
+// ── D11 P2 sub-task B — Per-convoy "Watch" notification override ────────────
+//
+// renderConvoyWatchChip returns a clickable chip for the convoy header.
+// The chip's label reflects the current override state, derived from
+// c.watch_override (Default / Verbose / Quiet / Custom). The chip's
+// click handler opens the watch popover via loadConvoyWatchPopover.
+//
+// The convoy card payload doesn't currently carry watch_override
+// (P2 sub-task B is the first surface that reads it). The chip falls
+// back to showing "Default" + lazy-fetches the override on click; this
+// keeps the convoy-list endpoint untouched while still giving the
+// operator a one-click affordance.
+function renderConvoyWatchChip(c) {
+  const ov = c.watch_override; // optional field; absent → Default
+  let label = 'Default';
+  let cls = 'watch-chip-default';
+  if (ov && ov.mode) {
+    if (ov.mode === 'verbose')          { label = 'Verbose'; cls = 'watch-chip-verbose'; }
+    else if (ov.mode === 'quiet')       { label = 'Quiet';   cls = 'watch-chip-quiet'; }
+    else if (ov.mode === 'custom_json') { label = 'Custom';  cls = 'watch-chip-custom'; }
+  }
+  return `<button class="watch-chip ${cls}" onclick="loadConvoyWatchPopover(${c.id})" title="Notification override for this convoy">
+    👁 Watch: ${label}
+  </button>`;
+}
+
+// loadConvoyWatchPopover fetches GET /api/convoys/<id>/watch and renders
+// the popover modal so the operator can pick a mode + reason. Uses the
+// shared #convoy-watch-modal element declared in index.html.
+async function loadConvoyWatchPopover(convoyID) {
+  S.watchConvoyID = convoyID;
+  const modal = $('convoy-watch-modal');
+  if (!modal) {
+    showToast('Watch popover not wired (missing modal element)', 'err');
+    return;
+  }
+  $('convoy-watch-id').textContent = `#${convoyID}`;
+  $('convoy-watch-body').innerHTML = `<div class="dim" style="padding:10px">Loading…</div>`;
+  modal.classList.remove('hidden');
+  try {
+    const data = await api(`/api/convoys/${convoyID}/watch`);
+    renderConvoyWatchPopover(data);
+  } catch (e) {
+    $('convoy-watch-body').innerHTML = `<div style="padding:10px;color:var(--red)">Failed to load: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderConvoyWatchPopover(data) {
+  const ov  = data.has_override ? data.override : null;
+  const cur = ov ? ov.mode : 'default';
+  const reason = ov ? (ov.reason || '') : '';
+  const operator = ov ? (ov.set_by || '') : '';
+  const cats = data.categories || [];
+  const settings = data.settings || ['off','mail','slack','mail+slack'];
+
+  const radio = (id, val, label) => {
+    const checked = (cur === val) ? 'checked' : '';
+    return `<label class="watch-radio">
+      <input type="radio" name="watch-mode" id="watch-mode-${id}" value="${val}" ${checked} onclick="onWatchModeChange()">
+      ${label}
+    </label>`;
+  };
+
+  // Per-category grid. Always rendered but hidden unless mode=custom_json.
+  const gridRows = cats.map(c => {
+    const current = (ov && ov.custom_json && ov.custom_json[c.name]) || '';
+    const opts = settings.map(s => {
+      const sel = (s === current) ? 'selected' : '';
+      return `<option value="${s}" ${sel}>${s}</option>`;
+    }).join('');
+    const inheritOpt = (current === '') ? 'selected' : '';
+    return `<tr>
+      <td class="watch-cat-name" title="${escHtml(c.description || '')}">${escHtml(c.name)}</td>
+      <td class="dim" style="font-size:11px">tier ${c.tier}, default <span class="mono">${escHtml(c.yaml_default)}</span></td>
+      <td>
+        <select class="watch-cat-select" data-cat="${escHtml(c.name)}">
+          <option value="" ${inheritOpt}>(inherit)</option>
+          ${opts}
+        </select>
+      </td>
+    </tr>`;
+  }).join('');
+  // Wildcard "*" row — applies to any category not explicitly set.
+  const wildcardCurrent = (ov && ov.custom_json && ov.custom_json['*']) || '';
+  const wildcardOpts = settings.map(s => {
+    const sel = (s === wildcardCurrent) ? 'selected' : '';
+    return `<option value="${s}" ${sel}>${s}</option>`;
+  }).join('');
+  const wildcardInherit = (wildcardCurrent === '') ? 'selected' : '';
+
+  $('convoy-watch-body').innerHTML = `
+    <div class="watch-mode-grid">
+      ${radio('default', 'default', 'Default (clear override)')}
+      ${radio('verbose', 'verbose', 'Verbose (everything fires)')}
+      ${radio('quiet',   'quiet',   'Quiet (everything muted)')}
+      ${radio('custom',  'custom_json', 'Custom (per-category)')}
+    </div>
+
+    <div id="watch-custom-grid" style="display:${cur === 'custom_json' ? 'block' : 'none'};margin-top:10px">
+      <table class="watch-cat-table">
+        <thead><tr><th>Category</th><th>Default</th><th>Override</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="watch-cat-name"><strong>* (wildcard)</strong></td>
+            <td class="dim" style="font-size:11px">applies to anything not set below</td>
+            <td>
+              <select class="watch-cat-select" data-cat="*">
+                <option value="" ${wildcardInherit}>(inherit)</option>
+                ${wildcardOpts}
+              </select>
+            </td>
+          </tr>
+          ${gridRows}
+        </tbody>
+      </table>
+    </div>
+
+    <div style="margin-top:10px">
+      <label class="field-label" for="watch-operator">Operator</label>
+      <input class="field-input" type="text" id="watch-operator" placeholder="your name or email" value="${escHtml(operator)}">
+    </div>
+    <div style="margin-top:10px">
+      <label class="field-label" for="watch-reason">Reason (required for override; optional for clear)</label>
+      <textarea class="field-textarea" id="watch-reason" rows="2" placeholder="Why this override?">${escHtml(reason)}</textarea>
+    </div>
+  `;
+}
+
+// onWatchModeChange toggles the per-category grid visibility based on
+// the selected radio.
+function onWatchModeChange() {
+  const grid = $('watch-custom-grid');
+  if (!grid) return;
+  const checked = document.querySelector('input[name="watch-mode"]:checked');
+  grid.style.display = (checked && checked.value === 'custom_json') ? 'block' : 'none';
+}
+
+async function saveConvoyWatch() {
+  const id = S.watchConvoyID;
+  if (!id) return;
+  const checked = document.querySelector('input[name="watch-mode"]:checked');
+  if (!checked) { showToast('pick a mode', 'err'); return; }
+  const mode = checked.value;
+  const operator = ($('watch-operator').value || '').trim();
+  const reason   = ($('watch-reason').value || '').trim();
+  if (!operator) { showToast('operator required', 'err'); return; }
+
+  try {
+    if (mode === 'default') {
+      // Clear path. Reason is optional but encouraged.
+      await api(`/api/convoys/${id}/watch/clear`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator, reason }),
+      });
+      showToast(`Convoy #${id} watch cleared`, 'ok');
+    } else {
+      if (!reason) { showToast('reason required for override', 'err'); return; }
+      let custom_json = '';
+      if (mode === 'custom_json') {
+        const grid = {};
+        document.querySelectorAll('#watch-custom-grid select.watch-cat-select').forEach(sel => {
+          const v = sel.value;
+          if (v !== '') grid[sel.dataset.cat] = v;
+        });
+        if (Object.keys(grid).length === 0) {
+          showToast('custom mode requires at least one category override', 'err');
+          return;
+        }
+        custom_json = JSON.stringify(grid);
+      }
+      await api(`/api/convoys/${id}/watch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, custom_json, operator, reason }),
+      });
+      showToast(`Convoy #${id} watch set to ${mode}`, 'ok');
+    }
+    closeModal('convoy-watch-modal');
+    loadConvoys();
+  } catch (e) {
+    showToast('Save failed: ' + e.message, 'err');
+  }
+}
+
+window.loadConvoyWatchPopover = loadConvoyWatchPopover;
+window.saveConvoyWatch = saveConvoyWatch;
+window.onWatchModeChange = onWatchModeChange;
 
 // togglePRReviewPanel lazy-loads the convoy's PR review comments inline.
 // Pass forceOpen=true to open (or refresh) without toggling — used by

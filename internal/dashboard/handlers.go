@@ -935,6 +935,15 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			http.NotFound(w, r)
+		case "watch":
+			// D11 P2 sub-task B — per-convoy notification override
+			// (the "👁 Watch" chip). Dispatches GET/POST /watch and
+			// POST /watch/clear off the suffix segments. handleConvoyWatch
+			// writes the response (and any 4xx/5xx) itself.
+			if handleConvoyWatch(db, w, r, id, parts[3:]) {
+				return
+			}
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}

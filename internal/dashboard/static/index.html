@@ -849,6 +849,28 @@
   </div>
 </div>
 
+<!-- ── D11 P2 sub-task B — Per-convoy "Watch" notification override modal ──
+     Operator clicks the "👁 Watch:" chip on a convoy card to open this
+     popover. Picks a mode (Default / Verbose / Quiet / Custom), enters a
+     reason, and the override lands in ConvoyNotificationOverrides via
+     POST /api/convoys/<id>/watch (or /watch/clear for Default). The
+     dispatcher reads the row on every Dispatch call (Phase 1 layering). -->
+<div class="modal-backdrop hidden" id="convoy-watch-modal">
+  <div class="modal-box" style="width:680px;max-height:80vh;overflow:auto">
+    <div class="modal-header">
+      <h2>Watch — Convoy <span id="convoy-watch-id"></span></h2>
+      <button class="modal-close" onclick="closeModal('convoy-watch-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="convoy-watch-body"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('convoy-watch-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveConvoyWatch()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Ship-it confirmation modal ──────────────────────────────────────────── -->
 <div class="modal-backdrop hidden" id="ship-modal">
   <div class="modal-box" style="width:640px">
