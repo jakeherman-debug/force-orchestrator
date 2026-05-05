@@ -1413,3 +1413,59 @@ select option { background: var(--bg2); color: var(--text); }
   max-height: 500px;
   overflow-y: auto;
 }
+
+/* ── D11 P2 sub-task B — Per-convoy "Watch" notification override ──────────
+   Chip on convoy card header + popover modal styles. */
+.watch-chip {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  transition: all .15s;
+}
+.watch-chip:hover { border-color: var(--accent); color: var(--accent); }
+.watch-chip.watch-chip-default { /* dim — no override */ opacity: .65; }
+.watch-chip.watch-chip-verbose { border-color: var(--accent);  color: var(--accent); opacity: 1; }
+.watch-chip.watch-chip-quiet   { border-color: var(--orange); color: var(--orange); opacity: 1; }
+.watch-chip.watch-chip-custom  { border-color: var(--green);  color: var(--green);  opacity: 1; }
+
+.watch-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.watch-radio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 12px;
+}
+.watch-radio:hover { border-color: var(--accent); }
+.watch-cat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.watch-cat-table th, .watch-cat-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.watch-cat-name { font-family: var(--font-mono, monospace); font-size: 12px; }
+.watch-cat-select {
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px 4px;
+  font-size: 12px;
+}

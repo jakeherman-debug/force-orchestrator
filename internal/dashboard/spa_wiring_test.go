@@ -343,6 +343,77 @@ func TestSPA_NotificationsTab_Wired(t *testing.T) {
 	}
 }
 
+// TestSPA_ConvoyWatchChip_Wired — D11 P2 sub-task B regression.
+//
+// The "👁 Watch:" chip on every convoy card is the operator's entry
+// point to per-convoy notification overrides. This test pins:
+//
+//  1. The chip's display label ("Watch:") is in index.html / app.js so a
+//     refactor that drops it fails CI.
+//  2. The watch popover modal element exists in index.html.
+//  3. loadConvoyWatchPopover() and saveConvoyWatch() are defined in app.js
+//     and exposed on window.
+//  4. The three backend endpoints are referenced by the loader.
+func TestSPA_ConvoyWatchChip_Wired(t *testing.T) {
+	root := repoRootSPA(t)
+
+	indexHTMLBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/index.html"))
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	indexHTML := string(indexHTMLBytes)
+
+	appJSBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	appJS := string(appJSBytes)
+
+	// (1) Chip label substring appears in app.js (the chip is rendered
+	// dynamically). The "Watch:" prefix is what the operator sees.
+	if !strings.Contains(appJS, "Watch:") {
+		t.Errorf("SPA wiring (D11 P2 watch): app.js missing chip label %q — operator can't see the override state", "Watch:")
+	}
+	if !strings.Contains(appJS, "renderConvoyWatchChip(") {
+		t.Errorf("SPA wiring (D11 P2 watch): app.js missing renderConvoyWatchChip — chip will not render")
+	}
+
+	// (2) Modal element + label in index.html.
+	for _, marker := range []string{
+		`id="convoy-watch-modal"`,
+		`id="convoy-watch-id"`,
+		`id="convoy-watch-body"`,
+		`onclick="saveConvoyWatch()"`,
+	} {
+		if !strings.Contains(indexHTML, marker) {
+			t.Errorf("SPA wiring (D11 P2 watch): index.html missing %q — popover cannot mount", marker)
+		}
+	}
+
+	// (3) Loader + saver defined and exposed.
+	for _, marker := range []string{
+		"function loadConvoyWatchPopover(",
+		"function saveConvoyWatch(",
+		"window.loadConvoyWatchPopover = loadConvoyWatchPopover",
+		"window.saveConvoyWatch = saveConvoyWatch",
+	} {
+		if !strings.Contains(appJS, marker) {
+			t.Errorf("SPA wiring (D11 P2 watch): app.js missing %q", marker)
+		}
+	}
+
+	// (4) Backend endpoints referenced.
+	for _, endpoint := range []string{
+		"/api/convoys/${convoyID}/watch",
+		"/api/convoys/${id}/watch",
+		"/api/convoys/${id}/watch/clear",
+	} {
+		if !strings.Contains(appJS, endpoint) {
+			t.Errorf("SPA wiring (D11 P2 watch): app.js does not reference %q — loader cannot reach backend", endpoint)
+		}
+	}
+}
+
 func repoRootSPA(t *testing.T) string {
 	t.Helper()
 	wd, _ := os.Getwd()
