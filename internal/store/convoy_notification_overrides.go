@@ -1,4 +1,4 @@
-// internal/store/convoy_notification_overrides.go — D11 Phase 2 Sub-task B.
+// internal/store/convoy_notification_overrides.go — D11 Phase 2 Sub-tasks B + C.
 //
 // Per-convoy operator override of the fleet-wide notification preset. The
 // table itself is created in createSchema + runMigrations (D11 Phase 1);
@@ -13,9 +13,10 @@
 //   - The notify dispatcher reads the row via its own loadConvoyOverride
 //     (internal/notify/dispatcher.go) on every Dispatch call to short-
 //     circuit the resolution chain.
-//   - When the convoy hits a terminal status, the cleanup dog calls
-//     MarkConvoyOverrideClosed to stamp convoy_closed_at, then later
-//     deletes rows older than the retention window.
+//   - When the convoy hits a terminal status, the convoy terminal-
+//     transition hook (sub-task C) calls MarkConvoyOverrideClosed to
+//     stamp convoy_closed_at, then later the notification-override-
+//     cleanup dog deletes rows whose convoys closed > 7 days ago.
 //
 // All helpers return error per CLAUDE.md "no silent failures." Callers
 // MUST surface the error — never log-and-continue.
@@ -39,8 +40,9 @@ import (
 // CustomJSON is the raw JSON text as stored in the column. Callers that
 // need the parsed map should json.Unmarshal it themselves.
 //
-// ConvoyClosedAt is empty while the convoy is still active; the cleanup
-// dog (sub-task C) stamps it when the convoy hits a terminal status.
+// ConvoyClosedAt is empty while the convoy is still active; the convoy
+// terminal-transition hook (sub-task C) stamps it when the convoy hits a
+// terminal status, and the cleanup dog purges the row 7 days later.
 type ConvoyNotificationOverride struct {
 	ConvoyID       int
 	Mode           string
@@ -170,24 +172,30 @@ func ListActiveConvoyNotificationOverrides(db *sql.DB) ([]ConvoyNotificationOver
 }
 
 // MarkConvoyOverrideClosed stamps convoy_closed_at on the override row
-// for the given convoy. Called by the cleanup dog (D11 Phase 2 sub-task
-// C) when the convoy hits a terminal status. The stamped value is
-// retained until the dog's retention sweep deletes the row a fixed
-// window later — callers don't need to delete after stamping.
+// for the given convoy. Called by the convoy terminal-transition hook
+// (D11 Phase 2 sub-task C — pilot_draft_watch, CheckConvoyCompletions,
+// stale-convoys-report, dashboard cancel) when the convoy hits a
+// terminal status. The stamped value is retained until the cleanup dog's
+// retention sweep deletes the row 7 days later — callers don't need to
+// delete after stamping.
 //
-// closedAt is the timestamp to write (typically NowSQLite at the moment
-// the convoy entered terminal). Empty string is rejected: a closed-at
-// value of "" is indistinguishable from "still active" in
-// ListActiveConvoyNotificationOverrides.
+// closedAt is the timestamp to write. If empty, NowSQLite() is
+// substituted — the canonical SQLite-shaped timestamp comparable to
+// `datetime('now')` reads. Callers in the terminal-transition hook
+// generally pass "" to let the helper stamp the current time.
 //
-// No-op (returns nil) if no row exists for the convoy — the cleanup dog
-// may sweep convoys that never had an override.
+// No-op (returns nil) if no row exists for the convoy — the hook fires
+// for every convoy regardless of whether the operator ever set an
+// override; UPDATE silently affects zero rows in that case.
+//
+// Idempotent: re-stamping a row already stamped slides the cleanup
+// boundary forward, which is harmless.
 func MarkConvoyOverrideClosed(db *sql.DB, convoyID int, closedAt string) error {
 	if convoyID <= 0 {
 		return fmt.Errorf("store: MarkConvoyOverrideClosed convoy_id must be > 0")
 	}
 	if closedAt == "" {
-		return fmt.Errorf("store: MarkConvoyOverrideClosed closedAt must be non-empty")
+		closedAt = NowSQLite()
 	}
 	_, err := db.Exec(
 		`UPDATE ConvoyNotificationOverrides SET convoy_closed_at = ? WHERE convoy_id = ?`,

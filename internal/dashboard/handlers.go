@@ -894,6 +894,12 @@ func handleConvoysSubroutes(db *sql.DB) http.HandlerFunc {
 			}
 			n := store.CancelConvoyPendingTasks(db, id)
 			db.Exec(`UPDATE Convoys SET status = 'Cancelled' WHERE id = ?`, id)
+			// D11 Phase 2 (sub-task C): stamp ConvoyNotificationOverrides
+			// closure so notification-override-cleanup can purge after 7d.
+			// Cancellation is a terminal transition just like Shipped/Failed.
+			if err := store.MarkConvoyOverrideClosed(db, id, ""); err != nil {
+				log.Printf("warn: MarkConvoyOverrideClosed convoy=%d: %v", id, err)
+			}
 			store.LogAudit(db, "dashboard", "convoy-cancel", id,
 				fmt.Sprintf("cancelled convoy #%d (%d pending task(s) stopped)", id, n))
 			fmt.Fprintf(w, `{"ok":true,"id":%d,"cancelled":%d}`, id, n)
