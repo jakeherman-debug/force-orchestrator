@@ -339,3 +339,71 @@ func TestTransitionConvoyToAbandoned_QueuesCleanupAndFailureMemory(t *testing.T)
 		t.Errorf("memory payload missing abandoned tag: %q", mp)
 	}
 }
+
+// D11 Phase 2 (sub-task C). The terminal-transition path must stamp
+// convoy_closed_at on the ConvoyNotificationOverrides row (if any) so
+// the daily notification-override-cleanup dog can purge it after 7d.
+// We seed an override row, run transitionConvoyToShipped, and assert
+// the closure stamp is non-empty.
+func TestTransitionConvoyToShipped_StampsOverrideClosedAt(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, _ := store.CreateConvoy(db, "[1] done")
+	_ = store.UpsertConvoyAskBranch(db, cid, "api", "force/ask-1-done", "sha")
+	if _, err := db.Exec(`INSERT INTO ConvoyNotificationOverrides
+		(convoy_id, mode, custom_json, set_at, set_by, reason)
+		VALUES (?, 'verbose', '{}', datetime('now'), 'op', 'test')`, cid); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+
+	transitionConvoyToShipped(context.Background(), db, cid, "[1] done", librarian.NewInProcess(db), testLogger{})
+
+	var stamp string
+	db.QueryRow(
+		`SELECT IFNULL(convoy_closed_at, '') FROM ConvoyNotificationOverrides WHERE convoy_id = ?`,
+		cid,
+	).Scan(&stamp)
+	if stamp == "" {
+		t.Errorf("expected convoy_closed_at stamped on Shipped transition, got empty")
+	}
+}
+
+// Same for the Abandoned transition path.
+func TestTransitionConvoyToAbandoned_StampsOverrideClosedAt(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, _ := store.CreateConvoy(db, "[1] dropped")
+	_ = store.UpsertConvoyAskBranch(db, cid, "api", "force/ask-1-dropped", "sha")
+	if _, err := db.Exec(`INSERT INTO ConvoyNotificationOverrides
+		(convoy_id, mode, custom_json, set_at, set_by, reason)
+		VALUES (?, 'quiet', '{}', datetime('now'), 'op', 'test')`, cid); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+
+	transitionConvoyToAbandoned(context.Background(), db, cid, "[1] dropped", librarian.NewInProcess(db), testLogger{})
+
+	var stamp string
+	db.QueryRow(
+		`SELECT IFNULL(convoy_closed_at, '') FROM ConvoyNotificationOverrides WHERE convoy_id = ?`,
+		cid,
+	).Scan(&stamp)
+	if stamp == "" {
+		t.Errorf("expected convoy_closed_at stamped on Abandoned transition, got empty")
+	}
+}
+
+// Convoys without an override row must not block the terminal
+// transition. The hook's UPDATE silently affects 0 rows in that case.
+func TestTransitionConvoyToShipped_NoOverrideRowSilentNoOp(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+	cid, _ := store.CreateConvoy(db, "[1] no-override")
+	_ = store.UpsertConvoyAskBranch(db, cid, "api", "force/ask-1-no", "sha")
+
+	transitionConvoyToShipped(context.Background(), db, cid, "[1] no-override", librarian.NewInProcess(db), testLogger{})
+
+	conv := store.GetConvoy(db, cid)
+	if conv.Status != "Shipped" {
+		t.Errorf("expected Shipped, got %q", conv.Status)
+	}
+}

@@ -43,6 +43,11 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 		if total == 0 {
 			// No tasks were ever added — close as Completed so it doesn't sit Active forever.
 			db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ?`, c.id)
+			// D11 Phase 2 (sub-task C): stamp ConvoyNotificationOverrides
+			// closure so notification-override-cleanup can purge after 7d.
+			if err := store.MarkConvoyOverrideClosed(db, c.id, ""); err != nil {
+				logger.Printf("warn: MarkConvoyOverrideClosed convoy=%d: %v", c.id, err)
+			}
 			logger.Printf("Convoy '%s' closed — no tasks were added", c.name)
 			continue
 		}
@@ -80,6 +85,11 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 
 			// Legacy path (no PR flow): mark convoy Completed outright.
 			db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ?`, c.id)
+			// D11 Phase 2 (sub-task C): stamp ConvoyNotificationOverrides
+			// closure so notification-override-cleanup can purge after 7d.
+			if err := store.MarkConvoyOverrideClosed(db, c.id, ""); err != nil {
+				logger.Printf("warn: MarkConvoyOverrideClosed convoy=%d: %v", c.id, err)
+			}
 			logger.Printf("Convoy '%s' COMPLETED (%d/%d tasks done)", c.name, completed, total)
 			telemetry.EmitEvent(telemetry.TelemetryEvent{
 				EventType: "convoy_completed",
@@ -104,6 +114,11 @@ func CheckConvoyCompletions(db *sql.DB, logger interface{ Printf(string, ...any)
 				0, store.MailTypeInfo)
 		} else if problemCount > 0 {
 			db.Exec(`UPDATE Convoys SET status = 'Failed' WHERE id = ?`, c.id)
+			// D11 Phase 2 (sub-task C): stamp ConvoyNotificationOverrides
+			// closure so notification-override-cleanup can purge after 7d.
+			if err := store.MarkConvoyOverrideClosed(db, c.id, ""); err != nil {
+				logger.Printf("warn: MarkConvoyOverrideClosed convoy=%d: %v", c.id, err)
+			}
 			logger.Printf("Convoy '%s' STALLED — %d problem task(s), %d/%d complete", c.name, problemCount, completed, total)
 			subject := fmt.Sprintf("[CONVOY STALLED] %s", c.name)
 			var existing int

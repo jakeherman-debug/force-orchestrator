@@ -209,6 +209,18 @@ func terminalConvoyTransitionTx(ctx context.Context, db *sql.DB, convoyID int, c
 	if err := store.SetConvoyStatusTx(tx, convoyID, newStatus); err != nil {
 		return fmt.Errorf("set convoy status: %w", err)
 	}
+	// D11 Phase 2 (sub-task C): stamp convoy_closed_at on the
+	// ConvoyNotificationOverrides row (if any) so the daily
+	// notification-override-cleanup dog can purge it after 7 days.
+	// Done inside the tx so override closure is atomic with the
+	// status flip — if the status set rolls back, we don't leave a
+	// stamped-closed row behind.
+	if _, err := tx.Exec(
+		`UPDATE ConvoyNotificationOverrides SET convoy_closed_at = ? WHERE convoy_id = ?`,
+		store.NowSQLite(), convoyID,
+	); err != nil {
+		return fmt.Errorf("stamp ConvoyNotificationOverrides convoy_closed_at: %w", err)
+	}
 	if _, err := QueueCleanupAskBranchTx(tx, convoyID); err != nil {
 		return fmt.Errorf("queue CleanupAskBranch: %w", err)
 	}

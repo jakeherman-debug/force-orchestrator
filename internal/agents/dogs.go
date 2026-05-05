@@ -195,6 +195,13 @@ var dogCooldowns = map[string]time.Duration{
 	// renderer's BuildRepoDigest call is cheap (filesystem walk +
 	// short git log) so cost stays low.
 	"architecture-doc-render": 1 * time.Hour,
+	// D11 Phase 2 (sub-task C) — notification-override-cleanup.
+	// Daily sweep that deletes ConvoyNotificationOverrides rows whose
+	// convoy_closed_at stamp is older than 7 days. The 7-day window
+	// preserves enough history for post-incident debugging while
+	// preventing indefinite accumulation. Daily cadence is plenty —
+	// rows are tiny and the operator tolerates a few days of staleness.
+	"notification-override-cleanup": 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -278,6 +285,13 @@ var dogOrder = []string{
 	// renderer reads RepoDigest (filesystem walk + recent commits)
 	// and ought to see the freshest post-tick state.
 	"architecture-doc-render",
+	// D11 Phase 2 — notification-override-cleanup. Pure bookkeeping
+	// on ConvoyNotificationOverrides; no dependencies on other dogs.
+	// Ordered last because the table is downstream of the convoy
+	// lifecycle paths (terminal transitions stamp convoy_closed_at);
+	// running after the rest of the cycle is finished is fine — the
+	// cleanup is silent and tolerant of a tick of staleness.
+	"notification-override-cleanup",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -485,6 +499,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogArchaeologistSweep(ctx, db, logger)
 	case "architecture-doc-render":
 		return dogArchitectureDocRender(ctx, db, lib, logger)
+	case "notification-override-cleanup":
+		return dogNotificationOverrideCleanup(db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
@@ -1122,6 +1138,11 @@ func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) 
 
 		if wantFailed {
 			db.Exec(`UPDATE Convoys SET status = 'Failed' WHERE id = ? AND status = 'Active'`, c.id)
+			// D11 Phase 2 (sub-task C): stamp ConvoyNotificationOverrides
+			// closure so notification-override-cleanup can purge after 7d.
+			if err := store.MarkConvoyOverrideClosed(db, int(c.id), ""); err != nil {
+				logger.Printf("warn: MarkConvoyOverrideClosed convoy=%d: %v", c.id, err)
+			}
 			// Operator mail — modeled on CheckConvoyCompletions's STALLED alert so
 			// dashboards and inbox filters treat the two paths identically.
 			subject := fmt.Sprintf("[CONVOY FAILED] %s", c.name)
@@ -1143,6 +1164,11 @@ func runStaleConvoysReport(db *sql.DB, logger interface{ Printf(string, ...any) 
 		}
 
 		db.Exec(`UPDATE Convoys SET status = 'Completed' WHERE id = ? AND status = 'Active'`, c.id)
+		// D11 Phase 2 (sub-task C): stamp ConvoyNotificationOverrides
+		// closure so notification-override-cleanup can purge after 7d.
+		if err := store.MarkConvoyOverrideClosed(db, int(c.id), ""); err != nil {
+			logger.Printf("warn: MarkConvoyOverrideClosed convoy=%d: %v", c.id, err)
+		}
 		store.SendMail(db, "inquisitor", "operator",
 			fmt.Sprintf("[CONVOY COMPLETE] %s", c.name),
 			fmt.Sprintf("Convoy '%s' was auto-completed by the stale-convoys-report dog (%s).", c.name, reason),
