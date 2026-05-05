@@ -147,6 +147,18 @@ func SpawnDiplomat(ctx context.Context, db *sql.DB, name string) {
 			runPRHandoffSynthesis(ctx, db, name, bounty, diplomatProfile, logger)
 			continue
 		}
+		// D8 Track 3 — synthetic integration tests of consumer repos
+		// against the producer's ask-branch. Spawned by
+		// DispatchConsumerIntegrationChecks (called from runShipConvoy on
+		// the DraftPROpen transition) when the convoy's parent Feature
+		// has a non-empty blast_radius_json.affected_consumer_repos.
+		// The handler runs deterministic shell + git operations (no LLM
+		// call) so the diplomat capability profile is passed but
+		// unused; the signature alignment keeps the claim loop uniform.
+		if bounty, claimed := store.ClaimBounty(db, "ConsumerIntegrationCheck", name); claimed {
+			runConsumerIntegrationCheck(ctx, db, name, bounty, diplomatProfile, logger)
+			continue
+		}
 		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
 	}
 }
@@ -223,6 +235,23 @@ func runShipConvoy(ctx context.Context, db *sql.DB, agentName string, bounty *st
 	if reviewID, err := QueueConvoyReview(db, payload.ConvoyID); err == nil && reviewID > 0 {
 		logger.Printf("ShipConvoy #%d: queued ConvoyReview #%d for convoy %d",
 			bounty.ID, reviewID, payload.ConvoyID)
+	}
+
+	// D8 Track 3 — fan out one ConsumerIntegrationCheck task per
+	// affected consumer repo from the parent Feature's blast-radius.
+	// Idempotent: re-running ShipConvoy on a convoy already in
+	// DraftPROpen sees existing rows in ConsumerIntegrationResults and
+	// queues nothing new (per QueueConsumerIntegrationCheck's
+	// HasConsumerIntegrationResult gate). Failure to dispatch does NOT
+	// block the ship transition — the operator sees the gap as missing
+	// rows in ConsumerIntegrationResults; the convoy is still open for
+	// human ratification.
+	if dispatched, ciErr := DispatchConsumerIntegrationChecks(db, payload.ConvoyID, branches, logger); ciErr != nil {
+		logger.Printf("ShipConvoy #%d: DispatchConsumerIntegrationChecks for convoy %d failed: %v — ship transition continues; missing rows will be visible in dashboard",
+			bounty.ID, payload.ConvoyID, ciErr)
+	} else if dispatched > 0 {
+		logger.Printf("ShipConvoy #%d: dispatched %d ConsumerIntegrationCheck task(s) for convoy %d",
+			bounty.ID, dispatched, payload.ConvoyID)
 	}
 
 	// P27 burn-down: budget-gate the operator emit before SendMail.

@@ -1359,6 +1359,29 @@ func createSchema(db *sql.DB) {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_provider ON CrossRepoDependencies(provider_symbol_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_consumer ON CrossRepoDependencies(consumer_repo_name);`)
 
+	// ── D8 Track 3 — Consumer integration test results ──────────────────────
+	// One row per (feature_id, consumer_repo_name) pair. Diplomat queues a
+	// ConsumerIntegrationCheck task per affected consumer when a convoy
+	// enters DraftPROpen with a non-empty blast-radius; the task handler
+	// runs the consumer's tests against the producer's ask-branch and writes
+	// the outcome here. UNIQUE(feature_id, consumer_repo_name) enforces the
+	// "run once per Feature in DraftPROpen" budget — re-queues are no-ops at
+	// the SQL layer.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConsumerIntegrationResults (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		feature_id          INTEGER NOT NULL,
+		consumer_repo_name  TEXT    NOT NULL,
+		test_command        TEXT    NOT NULL DEFAULT '',
+		exit_code           INTEGER NOT NULL DEFAULT 0,
+		status              TEXT    NOT NULL,
+		stdout_tail         TEXT    NOT NULL DEFAULT '',
+		stderr_tail         TEXT    NOT NULL DEFAULT '',
+		duration_seconds    INTEGER NOT NULL DEFAULT 0,
+		ran_at              TEXT    NOT NULL,
+		UNIQUE(feature_id, consumer_repo_name)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_consumer_integ_results_feature ON ConsumerIntegrationResults(feature_id, status);`)
+
 	// D9 Phase 1 — ArchHealthAggregates (Architecture Health Report).
 	// One row per (report_month, rule_id, repo_id, author_type) tuple. The
 	// dog dogArchitectureHealthReport scans the full codebase monthly, runs
@@ -2658,6 +2681,26 @@ func runMigrations(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_provider ON CrossRepoDependencies(provider_symbol_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_deps_consumer ON CrossRepoDependencies(consumer_repo_name)`)
+
+	// ── D8 Track 3 — ConsumerIntegrationResults (upgrade path) ──────────────
+	// Mirrors the createSchema declaration above. CREATE TABLE IF NOT EXISTS
+	// keeps the migration idempotent — a fresh DB already has the table from
+	// createSchema; an upgraded DB lands it here. TestSchemaParity enforces
+	// column-set agreement with schema/schema.sql.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConsumerIntegrationResults (
+		id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+		feature_id          INTEGER NOT NULL,
+		consumer_repo_name  TEXT    NOT NULL,
+		test_command        TEXT    NOT NULL DEFAULT '',
+		exit_code           INTEGER NOT NULL DEFAULT 0,
+		status              TEXT    NOT NULL,
+		stdout_tail         TEXT    NOT NULL DEFAULT '',
+		stderr_tail         TEXT    NOT NULL DEFAULT '',
+		duration_seconds    INTEGER NOT NULL DEFAULT 0,
+		ran_at              TEXT    NOT NULL,
+		UNIQUE(feature_id, consumer_repo_name)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_consumer_integ_results_feature ON ConsumerIntegrationResults(feature_id, status)`)
 
 	// ── D9 Phase 1 — ArchHealthAggregates (upgrade path) ────────────────────
 	// Mirror of the createSchema declaration above. CREATE TABLE IF NOT
