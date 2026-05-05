@@ -265,6 +265,155 @@ func TestSPA_ArchHealthTab_Wired(t *testing.T) {
 	}
 }
 
+// TestSPA_NotificationsTab_Wired — D11 Phase 2 SPA wiring regression.
+//
+// The /notifications tab is a full SPA surface backed by seven endpoints.
+// This test pins:
+//
+//   1. The tab pane exists in index.html.
+//   2. switchTab routes 'notifications' to loadNotificationsTab.
+//   3. loadNotificationsTab is defined in app.js.
+//   4. All seven backend endpoint URLs are referenced in app.js.
+//   5. The DND modal, Tier-1 confirm modal, and save-preset modal exist.
+//
+// If any one element is removed in a future refactor, the SPA's tab will
+// silently no-op or 404 — the same failure mode the D9 ArchHealth wiring
+// regression caught.
+func TestSPA_NotificationsTab_Wired(t *testing.T) {
+	root := repoRootSPA(t)
+
+	indexHTMLBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/index.html"))
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	indexHTML := string(indexHTMLBytes)
+
+	appJSBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	appJS := string(appJSBytes)
+
+	// (1) Content pane MUST exist in index.html.
+	if !strings.Contains(indexHTML, `id="tab-notifications"`) {
+		t.Errorf(`SPA wiring (D11 P2): index.html missing <div id="tab-notifications"> — clicking the Notifications tab silently no-ops`)
+	}
+	// Required UI scaffolding.
+	for _, marker := range []string{
+		`id="notif-dnd-band"`,
+		`id="notif-dnd-modal"`,
+		`id="notif-tier1-confirm-modal"`,
+		`id="notif-save-preset-modal"`,
+		`id="notif-category-table"`,
+		`data-preset="default"`,
+		`data-preset="focus"`,
+		`data-preset="verbose"`,
+	} {
+		if !strings.Contains(indexHTML, marker) {
+			t.Errorf("SPA wiring (D11 P2): index.html missing required marker %q", marker)
+		}
+	}
+
+	// (2) switchTab MUST route 'notifications' to loadNotificationsTab.
+	if !strings.Contains(appJS, `case 'notifications':`) {
+		t.Errorf("SPA wiring (D11 P2): app.js switchTab missing `case 'notifications':` — tab button click does not trigger any loader")
+	}
+
+	// (3) loadNotificationsTab() MUST be defined.
+	if !strings.Contains(appJS, `function loadNotificationsTab(`) {
+		t.Errorf("SPA wiring (D11 P2): app.js missing `function loadNotificationsTab(`")
+	}
+	if !strings.Contains(appJS, `window.loadNotificationsTab = loadNotificationsTab`) {
+		t.Errorf("SPA wiring (D11 P2): app.js does not export window.loadNotificationsTab")
+	}
+
+	// (4) All seven backend endpoint URLs referenced in app.js.
+	for _, endpoint := range []string{
+		"/api/notifications/state",
+		"/api/notifications/catalog",
+		"/api/notifications/preset",
+		"/api/notifications/preset/save",
+		"/api/notifications/dnd",
+		"/api/notifications/dnd/clear",
+		"/api/notifications/category/",
+	} {
+		if !strings.Contains(appJS, endpoint) {
+			t.Errorf("SPA wiring (D11 P2): app.js does not reference %q — the loader cannot reach the backend", endpoint)
+		}
+	}
+}
+
+// TestSPA_ConvoyWatchChip_Wired — D11 P2 sub-task B regression.
+//
+// The "👁 Watch:" chip on every convoy card is the operator's entry
+// point to per-convoy notification overrides. This test pins:
+//
+//  1. The chip's display label ("Watch:") is in index.html / app.js so a
+//     refactor that drops it fails CI.
+//  2. The watch popover modal element exists in index.html.
+//  3. loadConvoyWatchPopover() and saveConvoyWatch() are defined in app.js
+//     and exposed on window.
+//  4. The three backend endpoints are referenced by the loader.
+func TestSPA_ConvoyWatchChip_Wired(t *testing.T) {
+	root := repoRootSPA(t)
+
+	indexHTMLBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/index.html"))
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	indexHTML := string(indexHTMLBytes)
+
+	appJSBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	appJS := string(appJSBytes)
+
+	// (1) Chip label substring appears in app.js (the chip is rendered
+	// dynamically). The "Watch:" prefix is what the operator sees.
+	if !strings.Contains(appJS, "Watch:") {
+		t.Errorf("SPA wiring (D11 P2 watch): app.js missing chip label %q — operator can't see the override state", "Watch:")
+	}
+	if !strings.Contains(appJS, "renderConvoyWatchChip(") {
+		t.Errorf("SPA wiring (D11 P2 watch): app.js missing renderConvoyWatchChip — chip will not render")
+	}
+
+	// (2) Modal element + label in index.html.
+	for _, marker := range []string{
+		`id="convoy-watch-modal"`,
+		`id="convoy-watch-id"`,
+		`id="convoy-watch-body"`,
+		`onclick="saveConvoyWatch()"`,
+	} {
+		if !strings.Contains(indexHTML, marker) {
+			t.Errorf("SPA wiring (D11 P2 watch): index.html missing %q — popover cannot mount", marker)
+		}
+	}
+
+	// (3) Loader + saver defined and exposed.
+	for _, marker := range []string{
+		"function loadConvoyWatchPopover(",
+		"function saveConvoyWatch(",
+		"window.loadConvoyWatchPopover = loadConvoyWatchPopover",
+		"window.saveConvoyWatch = saveConvoyWatch",
+	} {
+		if !strings.Contains(appJS, marker) {
+			t.Errorf("SPA wiring (D11 P2 watch): app.js missing %q", marker)
+		}
+	}
+
+	// (4) Backend endpoints referenced.
+	for _, endpoint := range []string{
+		"/api/convoys/${convoyID}/watch",
+		"/api/convoys/${id}/watch",
+		"/api/convoys/${id}/watch/clear",
+	} {
+		if !strings.Contains(appJS, endpoint) {
+			t.Errorf("SPA wiring (D11 P2 watch): app.js does not reference %q — loader cannot reach backend", endpoint)
+		}
+	}
+}
+
 func repoRootSPA(t *testing.T) string {
 	t.Helper()
 	wd, _ := os.Getwd()

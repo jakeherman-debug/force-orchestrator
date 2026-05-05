@@ -242,6 +242,11 @@
        `architecture-health-report` is the only writer; this tab is read-only. -->
   <button class="tab-btn"        data-tab="arch-health" onclick="switchTab('arch-health')">Arch Health <span class="tab-badge" id="tbadge-arch-health"></span></button>
   <button class="tab-btn"        data-tab="senate"      onclick="switchTab('senate')">Senate <span class="tab-badge" id="tbadge-senate"></span></button>
+  <!-- D11 Phase 2 — Notifications tab. Reads /api/notifications/state +
+       /api/notifications/catalog and writes preset / DND / per-category
+       overrides. All state mutations route through SystemConfig via the
+       internal/notify resolution chain. -->
+  <button class="tab-btn"        data-tab="notifications" onclick="switchTab('notifications')">Notifications <span class="tab-badge" id="tbadge-notifications"></span></button>
   <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
   <div id="tab-spacer"></div>
   <span id="last-refresh" style="font-size:11px;color:var(--text2);align-self:center"></span>
@@ -655,6 +660,101 @@
     </div>
   </div>
 
+  <!-- ── D11 Phase 2 — Notifications tab ───────────────────────────────────────
+       Endpoints (loaded by loadNotificationsTab() in app.js):
+         - GET  /api/notifications/state          → preset, DND, per-cat overrides
+         - GET  /api/notifications/catalog        → category roster + 7d fires
+         - POST /api/notifications/preset         → set active preset
+         - POST /api/notifications/dnd            → set DND window (server caps at 14d)
+         - POST /api/notifications/dnd/clear      → clear DND
+         - POST /api/notifications/category/<n>   → per-cat override (Tier-1 needs confirm)
+         - POST /api/notifications/category/<n>/clear → restore default
+         - POST /api/notifications/preset/save    → export YAML diff for PR review -->
+  <div class="tab-pane" id="tab-notifications">
+    <div style="padding:10px 14px">
+      <h3>Notifications</h3>
+      <p class="reflection-help">Mode-of-the-day for operator-facing alerts. The active preset routes most categories; per-category overrides + DND layer on top. Tier-1 categories require a confirmation modal before silencing — the carve-out exists to prevent the fleet from going silent on a real escalation.</p>
+
+      <!-- DND active band — only visible when DND is set. -->
+      <div id="notif-dnd-band" hidden style="margin-bottom:10px;padding:10px;border:1px solid var(--border);background:rgba(255,200,0,0.08)">
+        <span id="notif-dnd-band-text" style="font-weight:600"></span>
+        <button class="hdr-btn" id="notif-dnd-end-now-btn" style="margin-left:10px" onclick="window.notifClearDND && window.notifClearDND()">End now</button>
+      </div>
+
+      <!-- Mode selector row. -->
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+        <span style="font-size:11px;color:var(--text2)">Mode:</span>
+        <button class="hdr-btn notif-preset-btn" data-preset="default" onclick="window.notifSetPreset && window.notifSetPreset('default')">Default</button>
+        <button class="hdr-btn notif-preset-btn" data-preset="focus"   onclick="window.notifSetPreset && window.notifSetPreset('focus')">Focus</button>
+        <button class="hdr-btn notif-preset-btn" data-preset="verbose" onclick="window.notifSetPreset && window.notifSetPreset('verbose')">Verbose</button>
+        <button class="hdr-btn" onclick="window.notifShowDNDModal && window.notifShowDNDModal()">DND…</button>
+        <button class="hdr-btn" style="margin-left:auto" onclick="window.loadNotificationsTab && window.loadNotificationsTab()">Refresh</button>
+        <button class="hdr-btn" onclick="window.notifShowSavePresetModal && window.notifShowSavePresetModal()">Save current as preset…</button>
+      </div>
+
+      <!-- Per-category grid. -->
+      <div id="notif-category-table" class="reflection-table"></div>
+    </div>
+
+    <!-- DND modal. -->
+    <div id="notif-dnd-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
+      <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:480px">
+        <h4 style="margin-top:0">Set Do Not Disturb</h4>
+        <p class="reflection-help">DND silences every category except <code>spend_cap_e_stop</code> and <code>consumer_breakage</code>. Server-side cap: 14 days from now.</p>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label>Until date (max today + 14d)
+            <input id="notif-dnd-date" type="date" class="field-input" required>
+          </label>
+          <label>Time
+            <input id="notif-dnd-time" type="time" class="field-input" value="23:59" required>
+          </label>
+          <label>Reason (required)
+            <input id="notif-dnd-reason" type="text" class="field-input" placeholder="vacation 5/12-5/15" required>
+          </label>
+          <div id="notif-dnd-error" style="color:#e88;font-size:11px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="hdr-btn" onclick="window.notifHideDNDModal && window.notifHideDNDModal()">Cancel</button>
+            <button class="hdr-btn" onclick="window.notifSubmitDND && window.notifSubmitDND()">Set</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tier-1 confirm modal. -->
+    <div id="notif-tier1-confirm-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
+      <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:480px">
+        <h4 style="margin-top:0">Tier-1 silencing — confirm</h4>
+        <p>Tier-1 categories signal the fleet is blocked. Silencing them means a real escalation will be invisible until you actively check the dashboard.</p>
+        <p id="notif-tier1-target" style="font-family:monospace;font-size:12px"></p>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="hdr-btn" onclick="window.notifHideTier1Modal && window.notifHideTier1Modal()">Cancel</button>
+          <button class="hdr-btn" onclick="window.notifConfirmTier1 && window.notifConfirmTier1()">I understand — silence anyway</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Save-as-preset modal. -->
+    <div id="notif-save-preset-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
+      <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:520px">
+        <h4 style="margin-top:0">Save current overrides as a preset</h4>
+        <p class="reflection-help">Captures the current per-category overrides as a YAML preset block. The block is written to <code>/tmp/notifications-preset-&lt;name&gt;-&lt;ts&gt;.yaml.diff</code>; paste it into <code>config/notifications.yaml</code> via a normal PR.</p>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label>Preset name
+            <input id="notif-save-preset-name" type="text" class="field-input" placeholder="weekend_quiet">
+          </label>
+          <label>Description
+            <input id="notif-save-preset-desc" type="text" class="field-input" placeholder="What this preset is for">
+          </label>
+          <div id="notif-save-preset-result" style="font-family:monospace;font-size:11px;white-space:pre-wrap;color:var(--text2)"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="hdr-btn" onclick="window.notifHideSavePresetModal && window.notifHideSavePresetModal()">Close</button>
+            <button class="hdr-btn" onclick="window.notifSubmitSavePreset && window.notifSubmitSavePreset()">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Logs tab -->
   <div class="tab-pane" id="tab-logs">
     <div class="filter-bar">
@@ -845,6 +945,28 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('stage-action-modal')">Cancel</button>
       <button class="btn btn-primary" id="stage-action-confirm" onclick="confirmStageAction()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── D11 P2 sub-task B — Per-convoy "Watch" notification override modal ──
+     Operator clicks the "👁 Watch:" chip on a convoy card to open this
+     popover. Picks a mode (Default / Verbose / Quiet / Custom), enters a
+     reason, and the override lands in ConvoyNotificationOverrides via
+     POST /api/convoys/<id>/watch (or /watch/clear for Default). The
+     dispatcher reads the row on every Dispatch call (Phase 1 layering). -->
+<div class="modal-backdrop hidden" id="convoy-watch-modal">
+  <div class="modal-box" style="width:680px;max-height:80vh;overflow:auto">
+    <div class="modal-header">
+      <h2>Watch — Convoy <span id="convoy-watch-id"></span></h2>
+      <button class="modal-close" onclick="closeModal('convoy-watch-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="convoy-watch-body"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('convoy-watch-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveConvoyWatch()">Save</button>
     </div>
   </div>
 </div>
