@@ -134,3 +134,150 @@ func TestHandleFeatureBlastRadius_405OnPost(t *testing.T) {
 	}
 }
 
+// TestHandleFeatureConsumerInteg_AggregatesPersistedRows asserts the
+// /consumer-integ subroute (D8 Track 3) returns the persisted
+// ConsumerIntegrationResults for a Feature with the precomputed
+// any_blocking + blocking_repos aggregation so the SPA doesn't have to
+// walk the array twice.
+func TestHandleFeatureConsumerInteg_AggregatesPersistedRows(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	res, err := db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+		VALUES (0, 'force', 'Feature', 'Completed', 'd8 t3 dashboard test', 0, datetime('now'))`)
+	if err != nil {
+		t.Fatalf("seed feature: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	featureID := int(id)
+
+	// Establish a blast-radius row so the existence-check passes.
+	if err := store.SetFeatureBlastRadius(db, featureID, store.BlastRadiusRecord{
+		AffectedConsumerRepos: []string{"consumer-green", "consumer-red"},
+	}); err != nil {
+		t.Fatalf("SetFeatureBlastRadius: %v", err)
+	}
+
+	// One green + one red row → aggregation must surface the red as blocking.
+	if _, err := store.UpsertConsumerIntegrationResult(db, store.ConsumerIntegrationResult{
+		FeatureID:        featureID,
+		ConsumerRepoName: "consumer-green",
+		Status:           store.CIStatusGreen,
+		ExitCode:         0,
+		TestCommand:      "go test ./...",
+		DurationSeconds:  3,
+		StdoutTail:       "PASS",
+		RanAt:            store.NowSQLite(),
+	}); err != nil {
+		t.Fatalf("upsert green: %v", err)
+	}
+	if _, err := store.UpsertConsumerIntegrationResult(db, store.ConsumerIntegrationResult{
+		FeatureID:        featureID,
+		ConsumerRepoName: "consumer-red",
+		Status:           store.CIStatusRed,
+		ExitCode:         1,
+		TestCommand:      "go test ./...",
+		DurationSeconds:  4,
+		StderrTail:       "compile error",
+		RanAt:            store.NowSQLite(),
+	}); err != nil {
+		t.Fatalf("upsert red: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet,
+		"/api/features/"+itoa(featureID)+"/consumer-integ", nil)
+	w := httptest.NewRecorder()
+	handleFeatureBlastRadius(db)(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200; body=%s", w.Code, w.Body.String())
+	}
+	var got consumerIntegResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, w.Body.String())
+	}
+	if got.FeatureID != featureID {
+		t.Errorf("FeatureID: got %d want %d", got.FeatureID, featureID)
+	}
+	if !got.AnyBlocking {
+		t.Errorf("AnyBlocking: got false want true (consumer-red is red)")
+	}
+	if !reflect.DeepEqual(got.BlockingRepos, []string{"consumer-red"}) {
+		t.Errorf("BlockingRepos: got %v want [consumer-red]", got.BlockingRepos)
+	}
+	if len(got.Results) != 2 {
+		t.Fatalf("Results: got %d rows want 2", len(got.Results))
+	}
+	// Ordered by consumer_repo_name ASC: green first, red second.
+	if got.Results[0].ConsumerRepoName != "consumer-green" || got.Results[0].Status != store.CIStatusGreen {
+		t.Errorf("Results[0]: got %+v want consumer-green/green", got.Results[0])
+	}
+	if got.Results[1].ConsumerRepoName != "consumer-red" || got.Results[1].Status != store.CIStatusRed {
+		t.Errorf("Results[1]: got %+v want consumer-red/red", got.Results[1])
+	}
+}
+
+// TestHandleFeatureConsumerInteg_EmptyArraysWhenNoResults asserts a
+// Feature with no ConsumerIntegrationResults rows yet returns the
+// canonical empty-arrays shape (not null) so the SPA can render "no
+// consumer integration runs yet" without branching on missing fields.
+func TestHandleFeatureConsumerInteg_EmptyArraysWhenNoResults(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	res, err := db.Exec(`INSERT INTO BountyBoard (parent_id, target_repo, type, status, payload, priority, created_at)
+		VALUES (0, 'force', 'Feature', 'Pending', 'd8 t3 empty', 0, datetime('now'))`)
+	if err != nil {
+		t.Fatalf("seed feature: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	if err := store.SetFeatureBlastRadius(db, int(id), store.BlastRadiusRecord{}); err != nil {
+		t.Fatalf("SetFeatureBlastRadius: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet,
+		"/api/features/"+itoa(int(id))+"/consumer-integ", nil)
+	w := httptest.NewRecorder()
+	handleFeatureBlastRadius(db)(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200; body=%s", w.Code, w.Body.String())
+	}
+	// Decode into a generic map so we can prove blocking_repos serializes
+	// as [] (not null) on the wire — reflect.DeepEqual on the typed struct
+	// would coerce []string(nil) and []string{} as equal.
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if blocking, ok := raw["any_blocking"].(bool); !ok || blocking {
+		t.Errorf("any_blocking: got %v want false", raw["any_blocking"])
+	}
+	if br, ok := raw["blocking_repos"].([]any); !ok {
+		t.Errorf("blocking_repos: got %T want [] (must serialize as JSON array, not null)", raw["blocking_repos"])
+	} else if len(br) != 0 {
+		t.Errorf("blocking_repos: got %v want []", br)
+	}
+	if rs, ok := raw["results"].([]any); !ok {
+		t.Errorf("results: got %T want []", raw["results"])
+	} else if len(rs) != 0 {
+		t.Errorf("results: got %v want []", rs)
+	}
+}
+
+// TestHandleFeatureBlastRadius_400OnUnknownSubroute asserts the
+// extended handler rejects unknown subroutes with 400 (rather than
+// 404'ing or silently routing to blast-radius).
+func TestHandleFeatureBlastRadius_400OnUnknownSubroute(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	r := httptest.NewRequest(http.MethodGet, "/api/features/1/bogus", nil)
+	w := httptest.NewRecorder()
+	handleFeatureBlastRadius(db)(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
