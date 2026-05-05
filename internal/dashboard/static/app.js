@@ -277,6 +277,7 @@ function switchTab(name) {
     case 'security':    window.loadSecurityFindings && window.loadSecurityFindings(); break;
     case 'arch-health': window.loadArchHealth       && window.loadArchHealth(); break;
     case 'senate':      window.loadSenateChambers   && window.loadSenateChambers(); break;
+    case 'notifications': window.loadNotificationsTab && window.loadNotificationsTab(); break;
     case 'logs':        startLogStream(); break;
   }
   if (name !== 'logs') stopLogStream();
@@ -3248,3 +3249,296 @@ async function loadArchHealth() {
   }
 }
 window.loadArchHealth = loadArchHealth;
+
+// ── D11 Phase 2 — Notifications tab ───────────────────────────────────────────
+//
+// Wires the /notifications tab in the SPA. Backend lives in
+// internal/dashboard/handlers_d11_notifications.go; this block only orchestrates
+// fetches + DOM updates + modal flows. All state mutations route through the
+// SystemConfig-backed endpoints; no direct dispatch is fired from here.
+const _notifEsc = (s) => String(s == null ? '' : s).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+
+let _notifState = null;     // last /api/notifications/state response
+let _notifCatalog = null;   // last /api/notifications/catalog response
+let _notifPendingTier1 = null; // {category, setting} captured while modal is open
+
+async function loadNotificationsTab() {
+  try {
+    const [stateRes, catRes] = await Promise.all([
+      fetch('/api/notifications/state'),
+      fetch('/api/notifications/catalog'),
+    ]);
+    const state = await stateRes.json();
+    const cat = await catRes.json();
+    _notifState = state;
+    _notifCatalog = cat;
+    _notifRenderState(state);
+    _notifRenderCatalog(state, cat);
+  } catch (e) {
+    const wrap = document.getElementById('notif-category-table');
+    if (wrap) wrap.innerHTML = '<div class="reflection-error">load failed: ' + _notifEsc(e.message) + '</div>';
+  }
+}
+window.loadNotificationsTab = loadNotificationsTab;
+
+function _notifRenderState(state) {
+  // Mode-button highlight.
+  document.querySelectorAll('.notif-preset-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.preset === state.active_preset);
+  });
+  // DND band.
+  const band = document.getElementById('notif-dnd-band');
+  const bandText = document.getElementById('notif-dnd-band-text');
+  if (band && bandText) {
+    if (state.dnd_until) {
+      band.hidden = false;
+      bandText.textContent = 'DND active until ' + state.dnd_until + ' — ' + (state.dnd_reason || '(no reason)');
+    } else {
+      band.hidden = true;
+    }
+  }
+}
+
+function _notifRenderCatalog(state, cat) {
+  const wrap = document.getElementById('notif-category-table');
+  if (!wrap) return;
+  const rows = (cat && cat.rows) || [];
+  if (!rows.length) {
+    wrap.textContent = 'No categories registered yet (NotificationCategoryRegistry is empty).';
+    return;
+  }
+  const html = ['<table class="data-table"><thead><tr>',
+    '<th>Category</th><th>Tier</th><th>Description</th><th>Default</th><th>Current</th><th>Fires (7d)</th><th>Toggle</th>',
+    '</tr></thead><tbody>'];
+  for (const r of rows) {
+    const overridden = state.per_category_overrides && state.per_category_overrides[r.category];
+    const currentLabel = overridden ? overridden : '(default → ' + r.yaml_default + ')';
+    const tierBadge = r.tier === 1 ? '<span title="Tier-1 — operator must act" style="color:#fc6">🛡</span> ' : '';
+    const dndBypassBadge = r.dnd_bypass ? ' <span title="DND-bypass" style="color:#fc6">DND-bypass</span>' : '';
+    html.push('<tr>');
+    html.push('<td>' + tierBadge + _notifEsc(r.category) + dndBypassBadge + '</td>');
+    html.push('<td>' + r.tier + '</td>');
+    html.push('<td>' + _notifEsc(r.description) + '</td>');
+    html.push('<td><code>' + _notifEsc(r.yaml_default) + '</code></td>');
+    html.push('<td><code>' + _notifEsc(currentLabel) + '</code></td>');
+    html.push('<td>' + (r.last_7d_fire_count || 0) + '</td>');
+    html.push('<td>');
+    for (const opt of ['off', 'mail', 'slack', 'mail+slack']) {
+      const isCurrent = (overridden === opt);
+      html.push('<button class="hdr-btn" style="margin-right:2px;' +
+        (isCurrent ? 'background:var(--accent);color:var(--bg);' : '') +
+        '" onclick="window.notifSetCategory && window.notifSetCategory(' +
+        JSON.stringify(r.category) + ',' + JSON.stringify(opt) + ',' + r.tier + ')">' +
+        opt + '</button>');
+    }
+    html.push(' <button class="hdr-btn" onclick="window.notifClearCategory && window.notifClearCategory(' + JSON.stringify(r.category) + ')">↺</button>');
+    html.push('</td>');
+    html.push('</tr>');
+  }
+  html.push('</tbody></table>');
+  wrap.innerHTML = html.join('');
+}
+
+async function notifSetPreset(name) {
+  try {
+    const res = await fetch('/api/notifications/preset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preset_name: name, operator: 'operator'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('preset switch failed: ' + txt);
+      return;
+    }
+    await loadNotificationsTab();
+  } catch (e) {
+    alert('preset switch failed: ' + e.message);
+  }
+}
+window.notifSetPreset = notifSetPreset;
+
+async function notifSetCategory(category, setting, tier) {
+  if (tier === 1) {
+    _notifPendingTier1 = {category, setting};
+    const target = document.getElementById('notif-tier1-target');
+    if (target) target.textContent = category + ' → ' + setting;
+    const modal = document.getElementById('notif-tier1-confirm-modal');
+    if (modal) modal.hidden = false;
+    return;
+  }
+  await _notifWriteCategory(category, setting, false);
+}
+window.notifSetCategory = notifSetCategory;
+
+async function _notifWriteCategory(category, setting, confirm) {
+  try {
+    const res = await fetch('/api/notifications/category/' + encodeURIComponent(category), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({setting, operator: 'operator', reason: 'dashboard toggle', confirm}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('category set failed: ' + txt);
+      return;
+    }
+    await loadNotificationsTab();
+  } catch (e) {
+    alert('category set failed: ' + e.message);
+  }
+}
+
+function notifHideTier1Modal() {
+  _notifPendingTier1 = null;
+  const modal = document.getElementById('notif-tier1-confirm-modal');
+  if (modal) modal.hidden = true;
+}
+window.notifHideTier1Modal = notifHideTier1Modal;
+
+async function notifConfirmTier1() {
+  if (!_notifPendingTier1) { notifHideTier1Modal(); return; }
+  const {category, setting} = _notifPendingTier1;
+  notifHideTier1Modal();
+  await _notifWriteCategory(category, setting, true);
+}
+window.notifConfirmTier1 = notifConfirmTier1;
+
+async function notifClearCategory(category) {
+  try {
+    const res = await fetch('/api/notifications/category/' + encodeURIComponent(category) + '/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({operator: 'operator'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('clear failed: ' + txt);
+      return;
+    }
+    await loadNotificationsTab();
+  } catch (e) {
+    alert('clear failed: ' + e.message);
+  }
+}
+window.notifClearCategory = notifClearCategory;
+
+function notifShowDNDModal() {
+  const modal = document.getElementById('notif-dnd-modal');
+  if (!modal) return;
+  // Set max date = today + 14d.
+  const today = new Date();
+  const max = new Date(today.getTime() + 14 * 24 * 60 * 60 * 1000);
+  const datePicker = document.getElementById('notif-dnd-date');
+  if (datePicker) {
+    datePicker.max = max.toISOString().slice(0, 10);
+    datePicker.min = today.toISOString().slice(0, 10);
+  }
+  const errEl = document.getElementById('notif-dnd-error');
+  if (errEl) errEl.textContent = '';
+  modal.hidden = false;
+}
+window.notifShowDNDModal = notifShowDNDModal;
+
+function notifHideDNDModal() {
+  const modal = document.getElementById('notif-dnd-modal');
+  if (modal) modal.hidden = true;
+}
+window.notifHideDNDModal = notifHideDNDModal;
+
+async function notifSubmitDND() {
+  const date = (document.getElementById('notif-dnd-date') || {}).value;
+  const time = (document.getElementById('notif-dnd-time') || {}).value || '23:59';
+  const reason = (document.getElementById('notif-dnd-reason') || {}).value;
+  const errEl = document.getElementById('notif-dnd-error');
+  const setErr = (msg) => { if (errEl) errEl.textContent = msg; };
+  setErr('');
+  if (!date || !reason) { setErr('date and reason are required'); return; }
+  // Client-side belt-and-suspenders: server enforces +14d cap too.
+  const dt = new Date(date + 'T' + time + ':00Z');
+  const max = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  if (dt > max) { setErr('Until cannot exceed today + 14 days'); return; }
+  if (dt < new Date()) { setErr('Until is in the past'); return; }
+  try {
+    const res = await fetch('/api/notifications/dnd', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({until: dt.toISOString().replace(/\.\d{3}Z$/, 'Z'), reason, operator: 'operator'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      setErr('server rejected: ' + txt);
+      return;
+    }
+    notifHideDNDModal();
+    await loadNotificationsTab();
+  } catch (e) {
+    setErr(e.message);
+  }
+}
+window.notifSubmitDND = notifSubmitDND;
+
+async function notifClearDND() {
+  try {
+    const res = await fetch('/api/notifications/dnd/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({operator: 'operator'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('DND clear failed: ' + txt);
+      return;
+    }
+    await loadNotificationsTab();
+  } catch (e) {
+    alert('DND clear failed: ' + e.message);
+  }
+}
+window.notifClearDND = notifClearDND;
+
+function notifShowSavePresetModal() {
+  const modal = document.getElementById('notif-save-preset-modal');
+  if (modal) modal.hidden = false;
+  const r = document.getElementById('notif-save-preset-result');
+  if (r) r.textContent = '';
+}
+window.notifShowSavePresetModal = notifShowSavePresetModal;
+
+function notifHideSavePresetModal() {
+  const modal = document.getElementById('notif-save-preset-modal');
+  if (modal) modal.hidden = true;
+}
+window.notifHideSavePresetModal = notifHideSavePresetModal;
+
+async function notifSubmitSavePreset() {
+  const name = (document.getElementById('notif-save-preset-name') || {}).value;
+  const desc = (document.getElementById('notif-save-preset-desc') || {}).value;
+  if (!name || !desc) { alert('name and description required'); return; }
+  // Snapshot the current overrides as the preset's rules.
+  const rules = (_notifState && _notifState.per_category_overrides) || {};
+  if (!Object.keys(rules).length) {
+    alert('No per-category overrides set; nothing to save. Toggle a category first, or this preset would be empty.');
+    return;
+  }
+  try {
+    const res = await fetch('/api/notifications/preset/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, description: desc, rules, operator: 'operator'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('save failed: ' + txt);
+      return;
+    }
+    const data = await res.json();
+    const out = document.getElementById('notif-save-preset-result');
+    if (out) {
+      out.textContent = 'Wrote: ' + (data.path || '?') + '\n\n' + (data.content || '');
+    }
+  } catch (e) {
+    alert('save failed: ' + e.message);
+  }
+}
+window.notifSubmitSavePreset = notifSubmitSavePreset;
