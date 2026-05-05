@@ -18,6 +18,7 @@ import (
 	"force-orchestrator/internal/clients/codeartifact"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/isb/supplydeferral"
+	"force-orchestrator/internal/notify"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
 )
@@ -333,12 +334,15 @@ func runConvoyReview(ctx context.Context, db *sql.DB, agentName string, bounty *
 			logger.Printf("ConvoyReview #%d: SetConvoyStatus(AwaitingSupplyRecheck) for convoy %d failed (%v); convoy-review-watch will retry",
 				bounty.ID, payload.ConvoyID, serr)
 		}
-		// Best-effort operator ping. notifyAfterFn is the same package
-		// var the supply-token-recheck dog uses; failures here are
-		// non-fatal — the dog will fire its own ping on the next tick.
+		// Best-effort operator ping via notify.Dispatch (D11 substrate).
+		// awaiting_supply_recheck is a Tier-2 category — defaults to mail
+		// only. Failures here are non-fatal — the supply-token-recheck dog
+		// fires its own ping (supply_token_expired, Tier-1) on the next tick.
 		label := fmt.Sprintf("[SUPPLY] Convoy #%d (%s) — %s", payload.ConvoyID, convoy.Name, reason)
-		if nerr := notifyAfterFn(ctx, label); nerr != nil {
-			logger.Printf("ConvoyReview #%d: notify-after failed (continuing): %v", bounty.ID, nerr)
+		body := fmt.Sprintf("ConvoyReview deferred convoy %d (%s): %s\n\nRun `umt artifacts` to refresh the CodeArtifact token; the supply-token-recheck dog will replay the deferrals on its next tick.",
+			payload.ConvoyID, convoy.Name, reason)
+		if nerr := notify.Dispatch(ctx, db, "awaiting_supply_recheck", payload.ConvoyID, label, body); nerr != nil {
+			logger.Printf("ConvoyReview #%d: notify.Dispatch failed (continuing): %v", bounty.ID, nerr)
 		}
 		// Mark the bounty Completed — we're not failing the review,
 		// we're deferring it pending recheck. The convoy-review-watch

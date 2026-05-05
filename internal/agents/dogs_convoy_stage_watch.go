@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"time"
 
+	"force-orchestrator/internal/notify"
 	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
 )
@@ -75,20 +76,23 @@ var (
 	// Production points at store.SendMail.
 	gateTimeoutSendMail = store.SendMail
 
-	// stageTransitionNotifyFn is the seam used by stage-transition pings.
-	// Default points at notifyAfterFn (the package-wide notify-after seam),
-	// but a per-feature seam lets tests instrument stage pings without
+	// stageTransitionNotifyFn is the seam used by stage-transition
+	// pings. The default closure routes through notify.Dispatch
+	// (D11 substrate; category stage_transition, Tier-2 / default=mail).
+	// A per-feature seam lets tests instrument stage pings without
 	// also affecting supply-token-recheck. See onStageTransition.
-	stageTransitionNotifyFn = func(ctx context.Context, label string) error {
-		return notifyAfterFn(ctx, label)
+	stageTransitionNotifyFn = func(ctx context.Context, db *sql.DB, convoyID int, label, body string) error {
+		return notify.Dispatch(ctx, db, "stage_transition", convoyID, label, body)
 	}
 )
 
-// SetStageTransitionNotifyForTest swaps the notify-after seam used by
-// stage-transition pings and returns a restore closure. Tests assert
-// that each transition fires (or doesn't, on debounce) by counting
-// invocations on the captured stub.
-func SetStageTransitionNotifyForTest(fn func(ctx context.Context, label string) error) (restore func()) {
+// SetStageTransitionNotifyForTest swaps the stage-transition dispatch
+// seam and returns a restore closure. Tests assert that each transition
+// fires (or doesn't, on debounce) by counting invocations on the
+// captured stub. The signature mirrors notify.Dispatch so tests that
+// were written against the legacy `(ctx, label)` shape need updating
+// alongside the D11 substrate landing.
+func SetStageTransitionNotifyForTest(fn func(ctx context.Context, db *sql.DB, convoyID int, label, body string) error) (restore func()) {
 	prev := stageTransitionNotifyFn
 	stageTransitionNotifyFn = fn
 	return func() { stageTransitionNotifyFn = prev }
@@ -566,13 +570,21 @@ func onStageTransition(ctx context.Context, db *sql.DB, s activeStage, oldStatus
 	}
 	label := fmt.Sprintf("Convoy %s stage %d \"%s\": %s → %s (gate: %s)",
 		convoyLabel, s.stageNum, intent, oldStatus, newStatus, gateLabel)
+	body := fmt.Sprintf("Convoy %s stage %d (%q) transitioned from %s to %s.\n\nGate: %s\nReason: %s",
+		convoyLabel, s.stageNum, intent, oldStatus, newStatus, gateLabel, reason)
 
-	if nErr := stageTransitionNotifyFn(ctx, label); nErr != nil {
-		logger.Printf("convoy-stage-watch: notify-after stage-transition ping failed (convoy=%d stage=%d): %v",
+	// D11 substrate: stage_transition is a Tier-2 category; routing flows
+	// through notify.Dispatch which resolves per the chain (per-convoy
+	// override → DND → preset → per-category override → YAML default).
+	// The stageTransitionNotifyFn seam below remains as the test seam (for
+	// SetStageTransitionNotifyForTest); production behaviour is identical
+	// to going straight through notify.Dispatch because the seam's default
+	// closure delegates to notify.Dispatch.
+	if nErr := stageTransitionNotifyFn(ctx, db, s.convoyID, label, body); nErr != nil {
+		logger.Printf("convoy-stage-watch: stage-transition dispatch failed (convoy=%d stage=%d): %v",
 			s.convoyID, s.stageNum, nErr)
 		// Don't write the debounce key on failure — we want a retry on
-		// the next tick. notify-after is best-effort but a transient
-		// failure shouldn't permanently suppress the ping.
+		// the next tick.
 		return
 	}
 	store.SetConfig(db, debounceKey, time.Now().UTC().Format(time.RFC3339))

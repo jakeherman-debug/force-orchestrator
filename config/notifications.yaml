@@ -1,0 +1,137 @@
+# config/notifications.yaml — D11 Phase 1 substrate.
+#
+# Canonical declaration of every operator-facing notification category in the
+# fleet. Adding a row here registers the category on the next daemon start
+# (cmd/force/fleet_cmds.go calls notify.SeedRegistryFromYAML which upserts
+# into NotificationCategoryRegistry).
+#
+# Routing precedence inside notify.Dispatch (highest → lowest priority):
+#
+#   1. Per-convoy override   (ConvoyNotificationOverrides row, mode + custom_json)
+#   2. DND active            (notification_dnd_until > now AND category is NOT
+#                             in the DND-bypass set: spend_cap_e_stop and
+#                             consumer_breakage always dispatch)
+#   3. Active preset         (notification_active_preset SystemConfig key
+#                             pointing at one of the presets below)
+#   4. Per-category override (notification_category_<name> SystemConfig key)
+#   5. YAML default          (the `default:` field on each category below)
+#
+# Tier semantics:
+#   tier 1 — operator must act to unblock the fleet (defaults to mail+slack)
+#   tier 2 — informational, useful but skippable    (defaults to mail)
+#   tier 3 — debug-trace, opt-in                    (defaults to off)
+#
+# Setting values:
+#   off, mail, slack, mail+slack
+#
+# DND-bypass: spend_cap_e_stop and consumer_breakage are dispatched even when
+# DND is active. The operator's "but for real emergencies" carve-out — a
+# Tier-1 category may still ping during DND if it's on the bypass set. The
+# bypass set lives in code (internal/notify/dispatcher.go: dndBypassCategories)
+# rather than YAML so it can't be silently disabled by a config edit.
+
+version: 1
+
+# All operator-facing notification categories. Adding a new category here registers
+# it on the next daemon start. Tier defines default routing in absence of operator
+# overrides; tier_defaults map: 1 → mail+slack, 2 → mail, 3 → off.
+categories:
+  # === Tier 1 — operator must act to unblock the fleet ===
+  supply_token_expired:
+    tier: 1
+    default: mail+slack
+    description: umt artifacts token died; supply-chain deferred
+  spend_cap_e_stop:
+    tier: 1
+    default: mail+slack
+    description: Auto-stop fired on $/h cap breach (DND-bypass)
+  gate_timeout_failed:
+    tier: 1
+    default: mail+slack
+    description: D5.5 stage gate hung past timeout; stage moved to Failed
+  operator_confirm_required:
+    tier: 1
+    default: mail+slack
+    description: D5.5 operator-confirm gate awaits operator action
+  consumer_breakage:
+    tier: 1
+    default: mail+slack
+    description: D8 ConsumerIntegrationCheck flagged consumer-repo test breakage (DND-bypass)
+  senate_dissent_block:
+    tier: 1
+    default: mail+slack
+    description: D4 Senate severity=block dissent; Chancellor cannot proceed
+  promotion_proposal_pending:
+    tier: 1
+    default: mail+slack
+    description: D7/D9 PromotionProposal awaiting operator ratification
+  task_escalated:
+    tier: 1
+    default: mail+slack
+    description: Captain or Council escalated to operator
+  convoy_review_needs_work:
+    tier: 1
+    default: mail+slack
+    description: ConvoyReview spawned fix tasks; convoy not yet shippable
+
+  # === Tier 2 — informational, useful but skippable ===
+  stage_transition:
+    tier: 2
+    default: mail
+    description: D5.5 convoy stage flipped state (Open→AllPRsMerged etc.)
+  convoy_review_clean:
+    tier: 2
+    default: mail
+    description: ConvoyReview pass found no issues
+  pr_handoff_posted:
+    tier: 2
+    default: mail
+    description: D10 PRHandoffSynthesis posted reviewer narrative on draft PR
+  daily_digest:
+    tier: 2
+    default: mail
+    description: Daily fleet activity rollup
+  fleet_learning_panel_render:
+    tier: 2
+    default: mail
+    description: Weekly D3 fleet learning panel auto-rendered
+  senate_concur_with_amendments:
+    tier: 2
+    default: mail
+    description: D4 Senate concurred but recorded amendments
+  awaiting_supply_recheck:
+    tier: 2
+    default: mail
+    description: ConvoyReview hit AwaitingSupplyRecheck (token re-auth pending)
+
+  # === Tier 3 — debug-trace, opt-in ===
+  supply_token_recovered:
+    tier: 3
+    default: off
+    description: umt artifacts token recovered; deferred findings replayed
+  supply_per_branch_summary:
+    tier: 3
+    default: off
+    description: Per-ask-branch supply-chain summary on token recovery
+  archaeologist_unsupported_lang_first_seen:
+    tier: 3
+    default: off
+    description: First encounter of an unsupported language for D9-Archaeologist patterns
+
+# Named presets the operator can apply globally or per-convoy.
+presets:
+  default:
+    description: Per-tier defaults (Tier 1 → mail+slack, Tier 2 → mail, Tier 3 → off)
+    rules: tier_defaults
+  focus:
+    description: Quiet mode — only the most urgent
+    rules:
+      "*": off
+      spend_cap_e_stop: mail+slack
+      consumer_breakage: mail+slack
+      task_escalated: mail+slack
+      operator_confirm_required: mail+slack
+      gate_timeout_failed: mail+slack
+  verbose:
+    description: Loud mode — everything to mail+slack
+    rules: { "*": mail+slack }
