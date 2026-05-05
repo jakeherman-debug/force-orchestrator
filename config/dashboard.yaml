@@ -1,0 +1,107 @@
+# config/dashboard.yaml — D11 Phase 3 substrate.
+#
+# Canonical operator-personalization config. Backs the resolution chain in
+# internal/dashboard/config: YAML default (this file) → SystemConfig override.
+#
+# At daemon-startup, cmd/force/fleet_cmds.go calls dashconfig.LoadConfig +
+# dashconfig.SeedRegistryFromYAML, which upserts each tab into
+# DashboardCatalogRegistry. The dashboard-config GET endpoint
+# (/api/dashboard/config) composes YAML defaults + SystemConfig overrides on
+# every request.
+#
+# SystemConfig override keys (absent = fall through to yaml_default):
+#
+#   dashboard_tab_visible_<id>           — "0" | "1"
+#   dashboard_tab_order_<id>             — integer (sort key)
+#   dashboard_tab_refresh_<id>           — integer seconds
+#   dashboard_display_theme              — "light" | "dark" | "system"
+#   dashboard_display_density            — "compact" | "comfortable"
+#   dashboard_display_sort_<tab>         — sort-key string
+#   dashboard_display_pagination         — integer rows-per-page
+#
+# Tabs present in DashboardCatalogRegistry but absent from this YAML are
+# preserved by the seeder (operators may have removed-then-re-added a tab
+# mid-rollout) — same shape as notify.SeedRegistryFromYAML.
+#
+# Sub-task B (tab + display) and sub-task C (saved filters) build on this
+# substrate. Sub-task C populates `saved_filters:` per tab; substrate just
+# declares the empty-list section so the parser shape is stable.
+#
+# Tab IDs match the SPA (internal/dashboard/static/index.html) data-tab
+# attributes exactly. If a tab is added to / removed from the SPA, this
+# YAML must follow.
+
+version: 1
+
+# === Tab management ===
+# Each tab on the dashboard. Operator can hide tabs they don't use, reorder,
+# or tune per-tab refresh intervals. Defaults are committed here; SystemConfig
+# overrides at runtime.
+tabs:
+  - id: tasks
+    visible: true
+    order: 1
+    refresh_seconds: 5
+  - id: escalations
+    visible: true
+    order: 2
+    refresh_seconds: 5
+  - id: convoys
+    visible: true
+    order: 3
+    refresh_seconds: 10
+  - id: agents
+    visible: true
+    order: 4
+    refresh_seconds: 10
+  - id: mail
+    visible: true
+    order: 5
+    refresh_seconds: 10
+  - id: knowledge
+    visible: true
+    order: 6
+    refresh_seconds: 60
+  - id: experiments
+    visible: true
+    order: 7
+    refresh_seconds: 30
+  - id: ec
+    visible: true
+    order: 8
+    refresh_seconds: 30
+  - id: security
+    visible: true
+    order: 9
+    refresh_seconds: 30
+  - id: arch-health
+    visible: true
+    order: 10
+    refresh_seconds: 60
+  - id: senate
+    visible: true
+    order: 11
+    refresh_seconds: 30
+  - id: notifications      # D11 P2-A
+    visible: true
+    order: 12
+    refresh_seconds: 30
+  - id: logs
+    visible: true
+    order: 13
+    refresh_seconds: 5
+
+# === Display preferences ===
+display:
+  theme: light             # light | dark | system
+  density: comfortable     # compact | comfortable
+  default_sort:
+    tasks: created_at_desc
+    convoys: id_desc
+    escalations: severity_desc
+    mail: created_at_desc
+  per_table_pagination: 50
+
+# === Saved filters (sub-task C populates; substrate just declares the section) ===
+# Format documented for sub-task C; empty list at substrate ship time.
+saved_filters: []

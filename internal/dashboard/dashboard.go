@@ -179,6 +179,13 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/notifications/dnd/clear", handleNotificationsDNDClear(db))
 	mux.HandleFunc("/api/notifications/category/", handleNotificationsCategory(db))
 
+	// ── D11 Phase 3 — Dashboard personalization (substrate sub-task A).
+	// GET-only read endpoint that composes YAML defaults
+	// (config/dashboard.yaml, parsed at daemon startup) with SystemConfig
+	// per-operator overrides. Sub-tasks B (tab + display) and C (saved
+	// filters) add the corresponding POST endpoints.
+	mux.HandleFunc("/api/dashboard/config", handleDashboardConfig(db))
+
 	// ── D3 P6A.5 — OperatorSessionState (resume-where-you-left-off).
 	mux.HandleFunc("/api/session/state", handleSessionState(db))
 

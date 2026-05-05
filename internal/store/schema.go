@@ -1450,6 +1450,25 @@ func createSchema(db *sql.DB) {
 		yaml_version  INTEGER NOT NULL DEFAULT 1
 	);`)
 
+	// ── D11 Phase 3 — Dashboard personalization substrate ─────────────────
+	// DashboardCatalogRegistry: canonical operator-dashboard tab roster.
+	// Seeded from config/dashboard.yaml at daemon startup via
+	// dashconfig.SeedRegistryFromYAML. Stores per-tab YAML defaults
+	// (visibility / order / refresh) so the dashboard-config resolver can
+	// compose YAML default + SystemConfig override without re-reading the
+	// YAML on every request. Tabs present in DB but absent from YAML are
+	// NOT auto-deleted — same preservation rule as
+	// NotificationCategoryRegistry.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DashboardCatalogRegistry (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		tab_id          TEXT    NOT NULL UNIQUE,
+		visible_default INTEGER NOT NULL DEFAULT 1,
+		order_default   INTEGER NOT NULL,
+		refresh_default INTEGER NOT NULL DEFAULT 30,
+		registered_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+		yaml_version    INTEGER NOT NULL DEFAULT 1
+	);`)
+
 	// ConvoyNotificationOverrides: per-convoy operator override of the
 	// fleet-wide preset. mode ∈ {'verbose','quiet','custom_json'}; when
 	// mode='custom_json' the custom_json column carries a JSON object
@@ -2817,6 +2836,20 @@ func runMigrations(db *sql.DB) {
 		description   TEXT    NOT NULL DEFAULT '',
 		registered_at TEXT    NOT NULL DEFAULT (datetime('now')),
 		yaml_version  INTEGER NOT NULL DEFAULT 1
+	)`)
+	// ── D11 Phase 3 — Dashboard personalization substrate (upgrade path) ────
+	// Mirror of the createSchema declaration above. Idempotent via IF NOT
+	// EXISTS. Fresh DBs land it from createSchema; upgraded DBs land it
+	// here on the next runMigrations sweep. TestSchemaParity enforces
+	// createSchema ↔ schema/schema.sql parity.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DashboardCatalogRegistry (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		tab_id          TEXT    NOT NULL UNIQUE,
+		visible_default INTEGER NOT NULL DEFAULT 1,
+		order_default   INTEGER NOT NULL,
+		refresh_default INTEGER NOT NULL DEFAULT 30,
+		registered_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+		yaml_version    INTEGER NOT NULL DEFAULT 1
 	)`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyNotificationOverrides (
 		convoy_id        INTEGER PRIMARY KEY,

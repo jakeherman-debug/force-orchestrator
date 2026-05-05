@@ -1420,6 +1420,26 @@ CREATE TABLE IF NOT EXISTS NotificationCategoryRegistry (
     yaml_version  INTEGER NOT NULL DEFAULT 1
 );
 
+-- ── D11 Phase 3 — Dashboard personalization substrate ────────────────────────
+-- Canonical operator-dashboard tab roster, seeded from config/dashboard.yaml
+-- by dashconfig.SeedRegistryFromYAML at daemon startup. Each row carries the
+-- YAML-default visibility / order / refresh; per-operator overrides live in
+-- SystemConfig (dashboard_tab_visible_<id>, dashboard_tab_order_<id>,
+-- dashboard_tab_refresh_<id>). The /api/dashboard/config GET endpoint composes
+-- YAML defaults + SystemConfig overrides on every request. Tabs present in DB
+-- but absent from YAML are NOT auto-deleted — same preservation rule as
+-- NotificationCategoryRegistry (operators may have removed-then-re-added a
+-- tab mid-rollout and we don't want to lose their override history).
+CREATE TABLE IF NOT EXISTS DashboardCatalogRegistry (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tab_id          TEXT    NOT NULL UNIQUE,         -- e.g. 'tasks', 'arch-health'
+    visible_default INTEGER NOT NULL DEFAULT 1,      -- 0 | 1
+    order_default   INTEGER NOT NULL,                -- sort key (1-based)
+    refresh_default INTEGER NOT NULL DEFAULT 30,     -- seconds
+    registered_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    yaml_version    INTEGER NOT NULL DEFAULT 1
+);
+
 -- Per-convoy operator override of fleet-wide preset routing. mode ∈
 -- {'verbose','quiet','custom_json'}; when mode='custom_json' the custom_json
 -- column carries a JSON object {"category": "off|mail|slack|mail+slack",

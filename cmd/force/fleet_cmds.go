@@ -27,6 +27,7 @@ import (
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/holdout"
 	"force-orchestrator/internal/isb/scanners/osv"
+	dashconfig "force-orchestrator/internal/dashboard/config"
 	"force-orchestrator/internal/notify"
 	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
@@ -366,6 +367,23 @@ func cmdDaemon(db *sql.DB) {
 		notify.SetGlobalConfig(notifCfg)
 		if seedErr := notify.SeedRegistryFromYAML(db, notifCfg); seedErr != nil {
 			fmt.Fprintf(os.Stderr, "[NOTIFY] registry seed failed (continuing): %v\n", seedErr)
+		}
+	}
+
+	// D11 Phase 3 substrate — load + seed the dashboard personalization
+	// config. Same fail-closed shape as notify.LoadConfig: a missing or
+	// malformed config/dashboard.yaml aborts daemon startup so a typo
+	// can't silently render the dashboard with no tabs. The seeder
+	// upserts each YAML tab into DashboardCatalogRegistry; rows present
+	// in DB but absent from YAML are preserved (same rule as
+	// NotificationCategoryRegistry).
+	if dashCfg, dcErr := dashconfig.LoadConfig("config/dashboard.yaml"); dcErr != nil {
+		fmt.Fprintf(os.Stderr, "[DASHCONFIG] daemon start aborted: %v\n", dcErr)
+		os.Exit(1)
+	} else {
+		dashconfig.SetGlobalConfig(dashCfg)
+		if seedErr := dashconfig.SeedRegistryFromYAML(db, dashCfg); seedErr != nil {
+			fmt.Fprintf(os.Stderr, "[DASHCONFIG] registry seed failed (continuing): %v\n", seedErr)
 		}
 	}
 
