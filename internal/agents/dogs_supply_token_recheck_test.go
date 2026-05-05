@@ -14,6 +14,7 @@ import (
 	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/isb/supplydeferral"
+	"force-orchestrator/internal/notify"
 	"force-orchestrator/internal/store"
 
 	// Force-register the gemfile parser for branch-tip parsing.
@@ -103,13 +104,58 @@ func (r *notifyRecorder) snapshot() []string {
 	return out
 }
 
-// withNotifyStub replaces the package-level notifyAfterFn for the
-// duration of a test, restoring the original on cleanup.
+// withNotifyStub replaces the side-effect path for notify.Dispatch's
+// Slack ping AND keeps the legacy notifyAfterFn seam pointing at the
+// stub so tests written against either contract pass. D11 substrate:
+// production calls now route through notify.Dispatch, which fires
+// notify.SlackNotify under the hood for slack/mail+slack settings; the
+// stub captures via the SlackNotify seam. The legacy notifyAfterFn
+// remains pointed at the stub for compatibility, even though the
+// production path no longer goes through it.
+//
+// In addition, this helper seeds a verbose-preset notify.Config so the
+// dispatcher resolves "mail+slack" for every category — which matches
+// the pre-D11 test expectation that "every notify call fires exactly
+// one slack ping with the same label".
 func withNotifyStub(t *testing.T, fn func(context.Context, string) error) {
 	t.Helper()
 	orig := notifyAfterFn
 	notifyAfterFn = fn
 	t.Cleanup(func() { notifyAfterFn = orig })
+	// Slack-side stub for notify.Dispatch.
+	restoreSlack := notify.SetSlackNotifierForTest(func(ctx context.Context, label string) error {
+		return fn(ctx, label)
+	})
+	t.Cleanup(restoreSlack)
+	// Install a Config that routes every D11 category to mail+slack so
+	// the dispatcher actually invokes the slack notifier.
+	prevCfg := notify.GetGlobalConfig()
+	notify.SetGlobalConfig(testNotifyConfig(t))
+	t.Cleanup(func() { notify.SetGlobalConfig(prevCfg) })
+}
+
+// testNotifyConfig returns a Config with the supply-chain + stage +
+// awaiting categories all routed to mail+slack so any production call
+// site under test dispatches a slack ping that the stub captures.
+func testNotifyConfig(t *testing.T) *notify.Config {
+	t.Helper()
+	cfg, err := notify.ParseConfig([]byte(`
+version: 1
+categories:
+  supply_token_expired:    {tier: 1, default: mail+slack, description: x}
+  supply_token_recovered:  {tier: 3, default: mail+slack, description: x}
+  supply_per_branch_summary: {tier: 3, default: mail+slack, description: x}
+  awaiting_supply_recheck: {tier: 2, default: mail+slack, description: x}
+  stage_transition:        {tier: 2, default: mail+slack, description: x}
+  spend_cap_e_stop:        {tier: 1, default: mail+slack, description: x}
+  consumer_breakage:       {tier: 1, default: mail+slack, description: x}
+presets:
+  default: {description: d, rules: tier_defaults}
+`), "test.yaml")
+	if err != nil {
+		t.Fatalf("testNotifyConfig parse: %v", err)
+	}
+	return cfg
 }
 
 // withDeps registers SupplyRecheckDeps for the duration of a test.
@@ -292,12 +338,17 @@ func TestSupplyTokenRecheck_HealthRecovered_ClearsNotified(t *testing.T) {
 		t.Errorf("notified flag should be cleared after recovery")
 	}
 
-	// 3. Token expires AGAIN → fresh ping (count = 2 now).
+	// 3. Token expires AGAIN → fresh ping (count = 3 now).
+	// D11 substrate: recovery now emits a supply_token_recovered ping in
+	// addition to clearing the debounce flag, so the per-tick sequence is
+	//   tick 1: expired ping (1)
+	//   tick 2: recovered ping (2)
+	//   tick 3: expired ping (3)
 	ca.setErr(codeartifact.ErrTokenExpired)
 	_ = runSupplyTokenRecheck(context.Background(), db, deps, testLogger{})
 	labels := rec.snapshot()
-	if len(labels) != 2 {
-		t.Errorf("expected 2 pings (initial + re-expiry), got %d: %v", len(labels), labels)
+	if len(labels) != 3 {
+		t.Errorf("expected 3 pings (initial + recovered + re-expiry), got %d: %v", len(labels), labels)
 	}
 }
 

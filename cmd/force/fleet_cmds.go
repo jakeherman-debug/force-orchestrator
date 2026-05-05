@@ -27,6 +27,7 @@ import (
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/holdout"
 	"force-orchestrator/internal/isb/scanners/osv"
+	"force-orchestrator/internal/notify"
 	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
@@ -348,6 +349,25 @@ func cmdDaemon(db *sql.DB) {
 	stagegate.RegisterBaselineGates(stageGateRegistry)
 	stagegate.RegisterAllP3Gates(stageGateRegistry, gh.NewClient(), ddClient, dbxClient)
 	agents.RegisterStageGateRegistry(stageGateRegistry)
+
+	// D11 Phase 1 substrate — load + seed the notification routing config.
+	// LoadConfig is fail-closed: a missing or malformed
+	// config/notifications.yaml aborts daemon startup so a typo in the YAML
+	// can't silently route every operator alert into "no preset, no
+	// fallback" oblivion. The seeder upserts each YAML category into
+	// NotificationCategoryRegistry; rows present in DB but absent from YAML
+	// are preserved (operators may have removed-then-re-added a category
+	// mid-rollout). Pattern P-NotificationDispatch (audittools) enforces
+	// that every notify call site routes through notify.Dispatch.
+	if notifCfg, ncErr := notify.LoadConfig("config/notifications.yaml"); ncErr != nil {
+		fmt.Fprintf(os.Stderr, "[NOTIFY] daemon start aborted: %v\n", ncErr)
+		os.Exit(1)
+	} else {
+		notify.SetGlobalConfig(notifCfg)
+		if seedErr := notify.SeedRegistryFromYAML(db, notifCfg); seedErr != nil {
+			fmt.Fprintf(os.Stderr, "[NOTIFY] registry seed failed (continuing): %v\n", seedErr)
+		}
+	}
 
 	// D2 T1-2 — wire the per-agent context-size guard. The DB handle
 	// drives SystemConfig reads (per-agent caps) and persists

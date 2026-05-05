@@ -597,7 +597,7 @@ func TestConvoyStageWatch_GateTimeout_RespectsNotificationBudget_BudgetError_Fai
 func cswCaptureStageTransitionNotifies(t *testing.T) (calls *[]string, restore func()) {
 	t.Helper()
 	captured := []string{}
-	restore = SetStageTransitionNotifyForTest(func(_ context.Context, label string) error {
+	restore = SetStageTransitionNotifyForTest(func(_ context.Context, _ *sql.DB, _ int, label, _ string) error {
 		captured = append(captured, label)
 		return nil
 	})

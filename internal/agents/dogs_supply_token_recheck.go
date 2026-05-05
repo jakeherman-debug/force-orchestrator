@@ -46,13 +46,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os/exec"
 	"sync"
-	"testing"
-	"time"
 
 	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/isb/supplydeferral"
+	"force-orchestrator/internal/notify"
 	"force-orchestrator/internal/store"
 )
 
@@ -128,53 +126,31 @@ func DefaultRepoResolver(db *sql.DB) supplydeferral.RepoResolver {
 }
 
 // ── Notify-after seam ────────────────────────────────────────────────────
+//
+// D11 Phase 1: the dispatch surface moved into internal/notify. The seam
+// here remains as a thin compatibility shim so the existing migration
+// tests + the convoy-review caller below keep working during the bridge
+// window — but production pings now route through notify.Dispatch (the
+// 3-call-site migration) and notify.SlackNotify (when a caller really
+// needs the bare Slack ping without the dispatcher's resolution chain).
+//
+// Pattern P-NotificationDispatch (internal/audittools) rejects any new
+// production call site that uses notifyAfterFn / realNotifyAfter directly.
+// The two existing callers (the dog body below + convoy_review.go's
+// supply-recheck label) have been migrated to notify.Dispatch so this
+// seam now has zero remaining production-bypass callers. It survives
+// only because tests still pin to the var (withNotifyStub).
 
 // notifyAfterFn is the test seam for the operator-ping side effect.
-// The default implementation shells out to the long-running-notifier
-// binary; tests override this var to capture invocations without
-// touching the real Slack webhook.
+// Default delegates to notify.SlackNotify so the production behaviour
+// is identical to the pre-D11 path.
 var notifyAfterFn = realNotifyAfter
 
-// realNotifyAfter shells `notify-after "<label>" -- true`. Best-effort:
-// if the binary isn't on PATH (e.g. on CI without the plugin), the
-// call is a no-op and the dog logs a warning. We do NOT propagate
-// notify-after's exit code — the dog's primary purpose is the replay
-// sweep; webhook delivery is a UX bonus.
-//
-// Test-mode short-circuit: when the binary was built by `go test`
-// (testing.Testing() == true, Go 1.21+), realNotifyAfter returns nil
-// immediately without shelling out. Production paths are unaffected.
-//
-// Why: prior to this guard, integration-style tests that exercised the
-// dog's onStageTransition / convoy-review notify paths fired the real
-// long-running-notifier helper, flooding the operator's Slack channel
-// with `Convoy #1 "test-staged-1" stage 1: Open → AllPRsMerged ...`
-// pings every test run. Tests that explicitly want to assert on the
-// call path install a mock via `notifyAfterFn = ...` (see
-// withNotifyStub in dogs_supply_token_recheck_test.go) or
-// SetStageTransitionNotifyForTest — those overrides take precedence
-// because they replace the function pointer entirely; this guard only
-// fires when no override is installed.
+// realNotifyAfter is a compat shim that delegates to notify.SlackNotify.
+// Kept under this name so the existing test seam (withNotifyStub) keeps
+// working without a churn-y rename.
 func realNotifyAfter(ctx context.Context, label string) error {
-	if testing.Testing() {
-		// Production-only side effect; tests that need to verify the
-		// call path install a mock via the package-var seam.
-		return nil
-	}
-	bin, err := exec.LookPath("notify-after")
-	if err != nil {
-		// Helper not installed — silently no-op. Log line below is
-		// emitted by the dog itself so this stays out of the env's
-		// noisy "binary missing" tracks.
-		return nil
-	}
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, bin, label, "--", "true")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("notify-after: %w", err)
-	}
-	return nil
+	return notify.SlackNotify(ctx, label)
 }
 
 // ── State helpers (debounce flag) ────────────────────────────────────────
@@ -229,11 +205,12 @@ func runSupplyTokenRecheck(ctx context.Context, db *sql.DB, deps *SupplyRecheckD
 				return nil
 			}
 			label := "[SUPPLY] umt artifacts token expired — re-auth needed for SUPPLY-* deferral replay"
-			if notifyErr := notifyAfterFn(ctx, label); notifyErr != nil {
-				logger.Printf("Dog supply-token-recheck: notify-after failed (continuing): %v", notifyErr)
+			body := "umt artifacts token has expired. SUPPLY-* deferral replay is paused until the operator re-authenticates.\n\nRun `umt artifacts` to refresh the CodeArtifact token; the supply-token-recheck dog will replay deferrals on its next tick."
+			if notifyErr := notify.Dispatch(ctx, db, "supply_token_expired", 0, label, body); notifyErr != nil {
+				logger.Printf("Dog supply-token-recheck: notify.Dispatch failed (continuing): %v", notifyErr)
 			}
 			markSupplyTokenNotified(db)
-			logger.Printf("Dog supply-token-recheck: token expired — operator pinged via notify-after")
+			logger.Printf("Dog supply-token-recheck: token expired — operator pinged via notify.Dispatch")
 			return nil
 		}
 		// Other health-probe error class — surface to the operator
@@ -243,10 +220,15 @@ func runSupplyTokenRecheck(ctx context.Context, db *sql.DB, deps *SupplyRecheckD
 
 	// 2. Health OK. Clear the debounce flag (so the next expiry
 	// re-pings) before the replay so a replay-helper crash doesn't
-	// leave the flag stuck.
+	// leave the flag stuck. Fire the recovered ping (Tier-3, opt-in).
 	if supplyTokenAlreadyNotified(db) {
 		clearSupplyTokenNotified(db)
 		logger.Printf("Dog supply-token-recheck: codeartifact recovered — replay starting")
+		recoveredLabel := "[SUPPLY] umt artifacts token recovered — deferral replay starting"
+		recoveredBody := "CodeArtifact health probe is now succeeding. Deferred SUPPLY-* findings are being replayed against current manifests."
+		if notifyErr := notify.Dispatch(ctx, db, "supply_token_recovered", 0, recoveredLabel, recoveredBody); notifyErr != nil {
+			logger.Printf("Dog supply-token-recheck: recovered-ping notify.Dispatch failed (continuing): %v", notifyErr)
+		}
 	}
 
 	// 3. Replay deferred findings.
@@ -263,8 +245,9 @@ func runSupplyTokenRecheck(ctx context.Context, db *sql.DB, deps *SupplyRecheckD
 		summarised := summariseReplayResults(results)
 		for _, line := range summarised {
 			label := fmt.Sprintf("[SUPPLY] %s", line)
-			if err := notifyAfterFn(ctx, label); err != nil {
-				logger.Printf("Dog supply-token-recheck: per-branch notify-after failed: %v", err)
+			body := fmt.Sprintf("Per-branch supply-chain replay summary:\n\n%s", line)
+			if err := notify.Dispatch(ctx, db, "supply_per_branch_summary", 0, label, body); err != nil {
+				logger.Printf("Dog supply-token-recheck: per-branch notify.Dispatch failed: %v", err)
 			}
 		}
 	}

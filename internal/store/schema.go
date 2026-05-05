@@ -1433,6 +1433,41 @@ func createSchema(db *sql.DB) {
 		comment_id     INTEGER NOT NULL DEFAULT 0
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_handoff_convoy ON PRHandoffSyntheses(convoy_id);`)
+
+	// ── D11 Phase 1 — Notification routing substrate ────────────────────────
+	// NotificationCategoryRegistry: canonical category roster for the fleet.
+	// Seeded from config/notifications.yaml at daemon startup via
+	// notify.SeedRegistryFromYAML. yaml_default is one of
+	// 'off' | 'mail' | 'slack' | 'mail+slack'. Tier ∈ {1,2,3} where
+	// Tier-1 categories default to mail+slack, Tier-2 to mail, Tier-3 to off.
+	db.Exec(`CREATE TABLE IF NOT EXISTS NotificationCategoryRegistry (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		category      TEXT    NOT NULL UNIQUE,
+		tier          INTEGER NOT NULL,
+		yaml_default  TEXT    NOT NULL,
+		description   TEXT    NOT NULL DEFAULT '',
+		registered_at TEXT    NOT NULL DEFAULT (datetime('now')),
+		yaml_version  INTEGER NOT NULL DEFAULT 1
+	);`)
+
+	// ConvoyNotificationOverrides: per-convoy operator override of the
+	// fleet-wide preset. mode ∈ {'verbose','quiet','custom_json'}; when
+	// mode='custom_json' the custom_json column carries a JSON object
+	// {"category": "off|mail|slack|mail+slack", "*": "..."}. The
+	// convoy_closed_at column is populated by the convoy-stage / convoy-
+	// terminal sweep when the convoy hits a terminal status; the
+	// cleanup-dog (D11 Phase 2 wiring) deletes rows 7d after closure
+	// so override history doesn't accumulate forever.
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyNotificationOverrides (
+		convoy_id        INTEGER PRIMARY KEY,
+		mode             TEXT    NOT NULL,
+		custom_json      TEXT    NOT NULL DEFAULT '{}',
+		set_at           TEXT    NOT NULL,
+		set_by           TEXT    NOT NULL,
+		reason           TEXT    NOT NULL DEFAULT '',
+		convoy_closed_at TEXT    DEFAULT NULL
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_notification_overrides_closed ON ConvoyNotificationOverrides(convoy_closed_at);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -2767,4 +2802,30 @@ func runMigrations(db *sql.DB) {
 		comment_id     INTEGER NOT NULL DEFAULT 0
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_pr_handoff_convoy ON PRHandoffSyntheses(convoy_id)`)
+
+	// ── D11 Phase 1 — Notification routing substrate (upgrade path) ─────────
+	// Mirror of the createSchema declarations above. CREATE TABLE IF NOT
+	// EXISTS keeps the migration idempotent — fresh DBs already have the
+	// tables from createSchema; upgraded DBs land them here on the next
+	// runMigrations sweep. TestSchemaParity enforces createSchema ↔
+	// schema/schema.sql parity.
+	db.Exec(`CREATE TABLE IF NOT EXISTS NotificationCategoryRegistry (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		category      TEXT    NOT NULL UNIQUE,
+		tier          INTEGER NOT NULL,
+		yaml_default  TEXT    NOT NULL,
+		description   TEXT    NOT NULL DEFAULT '',
+		registered_at TEXT    NOT NULL DEFAULT (datetime('now')),
+		yaml_version  INTEGER NOT NULL DEFAULT 1
+	)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyNotificationOverrides (
+		convoy_id        INTEGER PRIMARY KEY,
+		mode             TEXT    NOT NULL,
+		custom_json      TEXT    NOT NULL DEFAULT '{}',
+		set_at           TEXT    NOT NULL,
+		set_by           TEXT    NOT NULL,
+		reason           TEXT    NOT NULL DEFAULT '',
+		convoy_closed_at TEXT    DEFAULT NULL
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_notification_overrides_closed ON ConvoyNotificationOverrides(convoy_closed_at)`)
 }

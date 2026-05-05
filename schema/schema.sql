@@ -1402,4 +1402,39 @@ CREATE TABLE IF NOT EXISTS PRHandoffSyntheses (
 );
 CREATE INDEX IF NOT EXISTS idx_pr_handoff_convoy ON PRHandoffSyntheses(convoy_id);
 
+-- ── D11 Phase 1 — Notification routing substrate ─────────────────────────────
+-- Canonical roster of every operator-facing notification category in the
+-- fleet. Seeded from config/notifications.yaml at daemon startup via
+-- notify.SeedRegistryFromYAML. yaml_default ∈ {'off','mail','slack','mail+slack'};
+-- tier ∈ {1,2,3} where Tier-1 categories default to mail+slack, Tier-2 to mail,
+-- Tier-3 to off. Categories present in DB but absent from YAML are NOT
+-- auto-deleted — operators may have removed-then-re-added a category mid-rollout
+-- and we don't want to lose their override history.
+CREATE TABLE IF NOT EXISTS NotificationCategoryRegistry (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    category      TEXT    NOT NULL UNIQUE,            -- e.g. 'supply_token_expired'
+    tier          INTEGER NOT NULL,                   -- 1 | 2 | 3
+    yaml_default  TEXT    NOT NULL,                   -- 'off' | 'mail' | 'slack' | 'mail+slack'
+    description   TEXT    NOT NULL DEFAULT '',
+    registered_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    yaml_version  INTEGER NOT NULL DEFAULT 1
+);
+
+-- Per-convoy operator override of fleet-wide preset routing. mode ∈
+-- {'verbose','quiet','custom_json'}; when mode='custom_json' the custom_json
+-- column carries a JSON object {"category": "off|mail|slack|mail+slack",
+-- "*": "..."}. convoy_closed_at is populated by the convoy-terminal sweep when
+-- the convoy hits a terminal status; the cleanup-dog (D11 Phase 2 wiring)
+-- deletes rows 7d after closure so override history doesn't accumulate forever.
+CREATE TABLE IF NOT EXISTS ConvoyNotificationOverrides (
+    convoy_id        INTEGER PRIMARY KEY,
+    mode             TEXT    NOT NULL,                 -- 'verbose' | 'quiet' | 'custom_json'
+    custom_json      TEXT    NOT NULL DEFAULT '{}',    -- per-category override map when mode='custom_json'
+    set_at           TEXT    NOT NULL,
+    set_by           TEXT    NOT NULL,
+    reason           TEXT    NOT NULL DEFAULT '',
+    convoy_closed_at TEXT    DEFAULT NULL              -- populated when convoy hits terminal status; cleanup dog deletes 7d after
+);
+CREATE INDEX IF NOT EXISTS idx_convoy_notification_overrides_closed ON ConvoyNotificationOverrides(convoy_closed_at);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
