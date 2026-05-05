@@ -34,6 +34,7 @@ import (
 
 	"force-orchestrator/internal/archaeologist"
 	"force-orchestrator/internal/archaeologist/patterns"
+	"force-orchestrator/internal/clients/graph"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
@@ -57,9 +58,17 @@ type archaeologistProposeMigrationPayload struct {
 // per spawned agent. Diplomat-pattern: poll for ArchaeologistSweep
 // first, then ArchaeologistProposeMigration. No LLM call site, so no
 // capability profile is loaded.
+//
+// The graph.Client is constructed at spawn-time (mirroring Chancellor's
+// shape in chancellor.go) and threaded into the propose-migration handler
+// so the EvidenceJSON payload can carry a blast-radius snapshot of which
+// downstream consumer repos a ratified migration would ripple into. Per
+// CLAUDE.md "Cross-agent service interfaces" + Pattern P16: agents
+// construct graph.Client via the package's NewInProcess factory.
 func SpawnArchaeologist(ctx context.Context, db *sql.DB, lib librarian.Client, name string) {
 	logger := NewLogger(name)
 	logger.Printf("Archaeologist %s coming online", name)
+	gc := graph.NewInProcess(db)
 	for {
 		if ctx.Err() != nil {
 			logger.Printf("Archaeologist %s exiting: %v", name, ctx.Err())
@@ -78,7 +87,7 @@ func SpawnArchaeologist(ctx context.Context, db *sql.DB, lib librarian.Client, n
 			continue
 		}
 		if bounty, claimed := store.ClaimBounty(db, "ArchaeologistProposeMigration", name); claimed {
-			runArchaeologistProposeMigration(ctx, db, lib, name, bounty, logger)
+			runArchaeologistProposeMigration(ctx, db, lib, gc, name, bounty, logger)
 			continue
 		}
 		time.Sleep(time.Duration(3000+rand.Intn(1000)) * time.Millisecond)
@@ -207,7 +216,18 @@ func persistArchaeologistHits(db *sql.DB, patternID string, repoID int, hits []a
 // internal/audittools/) asserts at AST level that this is the ONLY
 // place internal/archaeologist (and the agent) hands off to a
 // proposal-emission seam.
-func runArchaeologistProposeMigration(ctx context.Context, db *sql.DB, lib librarian.Client, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
+//
+// The supplied graph.Client (gc) is consulted via
+// computeArchaeologistBlastRadius to enrich the proposal's EvidenceJSON
+// with a blast-radius snapshot — the set of downstream consumer repos
+// (and per-symbol consumer call-sites) that depend on the producer
+// symbols whose source files contain the deprecated-API hits. This is
+// pure DATA enrichment: the seam is unchanged (still EmitCandidate),
+// and Pattern P-ArchaeologistOperatorGated remains satisfied. A
+// graph-side failure (ErrIndexNotReady, ErrNotImplemented, etc.) is
+// degraded — we log + emit the candidate without the blast_radius
+// block rather than failing the bounty.
+func runArchaeologistProposeMigration(ctx context.Context, db *sql.DB, lib librarian.Client, gc graph.Client, agentName string, bounty *store.Bounty, logger interface{ Printf(string, ...any) }) {
 	var payload archaeologistProposeMigrationPayload
 	if err := json.Unmarshal([]byte(bounty.Payload), &payload); err != nil {
 		if fbErr := store.FailBounty(db, bounty.ID, fmt.Sprintf("ArchaeologistProposeMigration: invalid payload: %v", err)); fbErr != nil {
@@ -250,7 +270,18 @@ func runArchaeologistProposeMigration(ctx context.Context, db *sql.DB, lib libra
 
 	hypothesisKey := fmt.Sprintf("archaeologist-%s-%s", strings.ToLower(payload.PatternID), strings.ToLower(repoTarget.Name))
 	body := buildArchaeologistMigrationBody(payload.PatternID, repoTarget.Name, findings, pattern.MinHitsForFeature())
-	evidence := buildArchaeologistMigrationEvidence(payload.PatternID, repoTarget, findings)
+	// D9 exit-#5 — enrich the candidate's evidence with a blast-radius
+	// snapshot. computeArchaeologistBlastRadius walks the producer's
+	// CrossRepoSymbols rows whose file_path matches a finding file_path
+	// and asks the graph for the consumer set. On graph failure
+	// (ErrIndexNotReady / dog hasn't run / non-Go repo) we degrade to the
+	// legacy evidence shape rather than failing the bounty — the
+	// candidate still reaches the operator queue.
+	br, brErr := computeArchaeologistBlastRadius(ctx, db, gc, repoTarget.Name, findings)
+	if brErr != nil {
+		logger.Printf("ArchaeologistProposeMigration #%d: blast-radius enrich failed (%v) — emitting candidate without blast_radius block", bounty.ID, brErr)
+	}
+	evidence := buildArchaeologistMigrationEvidence(payload.PatternID, repoTarget, findings, br, brErr == nil)
 
 	proposalID, eErr := lib.EmitCandidate(ctx, librarian.Candidate{
 		HypothesisKey: hypothesisKey,
@@ -302,9 +333,50 @@ func buildArchaeologistMigrationBody(patternID, repoName string, findings []stor
 	return b.String()
 }
 
+// archaeologistBlastRadiusBlock is the JSON shape merged into the
+// EvidenceJSON under the "blast_radius" key. It mirrors the subset of
+// graph.BlastRadius that survives JSON serialisation cleanly:
+//
+//   - modified_symbols: the producer's exported symbols whose source
+//     files contain at least one ARCH-XXX hit (the symbols a ratified
+//     migration would rewrite).
+//   - affected_consumer_repos: the alphabetised, de-duplicated set of
+//     downstream repos that import any of the modified symbols.
+//   - consumers_by_symbol: per-modified-symbol list of consumer
+//     (repo, file, line) call-sites — operator reads this to gauge the
+//     blast radius before ratifying.
+//
+// Field tags are snake_case to match the rest of evidence_summary_json.
+type archaeologistBlastRadiusBlock struct {
+	ModifiedSymbols       []archaeologistBlastRadiusSymbol            `json:"modified_symbols"`
+	AffectedConsumerRepos []string                                    `json:"affected_consumer_repos"`
+	ConsumersBySymbol     map[string][]archaeologistBlastRadiusSite   `json:"consumers_by_symbol"`
+}
+
+// archaeologistBlastRadiusSymbol is one entry in modified_symbols.
+type archaeologistBlastRadiusSymbol struct {
+	Repo       string `json:"repo"`
+	SymbolPath string `json:"symbol_path"`
+	Kind       string `json:"kind"`
+	FilePath   string `json:"file_path"`
+	LineNumber int    `json:"line_number"`
+}
+
+// archaeologistBlastRadiusSite is one entry in consumers_by_symbol's
+// per-symbol list.
+type archaeologistBlastRadiusSite struct {
+	Repo     string `json:"repo"`
+	FilePath string `json:"file_path"`
+	Line     int    `json:"line"`
+}
+
 // buildArchaeologistMigrationEvidence emits a JSON evidence block
-// consumable by the dashboard / EC ratification pipeline.
-func buildArchaeologistMigrationEvidence(patternID string, repoTarget store.ArchaeologistRepoTarget, findings []store.ArchaeologistFinding) string {
+// consumable by the dashboard / EC ratification pipeline. When
+// blastRadiusOK is true, the supplied block is merged under the
+// "blast_radius" key; otherwise the block is omitted (the candidate
+// still emits, but with the legacy shape) so operators can distinguish
+// "graph is wired and saw no consumers" from "graph couldn't run".
+func buildArchaeologistMigrationEvidence(patternID string, repoTarget store.ArchaeologistRepoTarget, findings []store.ArchaeologistFinding, blastRadius archaeologistBlastRadiusBlock, blastRadiusOK bool) string {
 	type site struct {
 		FilePath   string `json:"file_path"`
 		LineNumber int    `json:"line_number"`
@@ -318,15 +390,138 @@ func buildArchaeologistMigrationEvidence(patternID string, repoTarget store.Arch
 			DetailJSON: f.DetailJSON,
 		})
 	}
-	out, err := json.Marshal(map[string]any{
-		"pattern_id": patternID,
-		"repo_id":    repoTarget.ID,
-		"repo_name":  repoTarget.Name,
-		"site_count": len(findings),
-		"sites":      sites,
-	})
+	payload := map[string]any{
+		"pattern_id":  patternID,
+		"agent_scope": "archaeologist",
+		"category":    "migration_proposal",
+		"origin":      "archaeologist-migration-proposal",
+		"repo_id":     repoTarget.ID,
+		"repo_name":   repoTarget.Name,
+		"site_count":  len(findings),
+		"sites":       sites,
+	}
+	if blastRadiusOK {
+		// Normalise nil slices/maps to their empty equivalents so the
+		// JSON shape is stable regardless of whether the graph saw zero
+		// or N consumers.
+		if blastRadius.ModifiedSymbols == nil {
+			blastRadius.ModifiedSymbols = []archaeologistBlastRadiusSymbol{}
+		}
+		if blastRadius.AffectedConsumerRepos == nil {
+			blastRadius.AffectedConsumerRepos = []string{}
+		}
+		if blastRadius.ConsumersBySymbol == nil {
+			blastRadius.ConsumersBySymbol = map[string][]archaeologistBlastRadiusSite{}
+		}
+		payload["blast_radius"] = blastRadius
+	}
+	out, err := json.Marshal(payload)
 	if err != nil {
 		return "{}"
 	}
 	return string(out)
+}
+
+// computeArchaeologistBlastRadius asks the graph client for the
+// downstream consumer set of the producer-repo's exported symbols whose
+// source files contain at least one ARCH-XXX hit (i.e. the public
+// symbols a ratified migration would touch).
+//
+// The lookup is purely data-driven against the dog-populated
+// CrossRepoSymbols / CrossRepoDependencies tables — no LLM, no AST
+// re-parsing on the agent side. Algorithm:
+//
+//  1. Collect the de-duplicated set of file_paths from `findings`.
+//  2. Pull every CrossRepoSymbols row for `producerRepo` and keep the
+//     ones whose file_path is in the finding set.
+//  3. Build a SymbolModification per surviving symbol and call
+//     gc.BlastRadiusForModifications.
+//  4. Re-shape the result into archaeologistBlastRadiusBlock for the
+//     EvidenceJSON.
+//
+// Returns an empty block + error when the graph isn't ready or the
+// store helpers fail; the caller degrades gracefully.
+func computeArchaeologistBlastRadius(ctx context.Context, db *sql.DB, gc graph.Client, producerRepo string, findings []store.ArchaeologistFinding) (archaeologistBlastRadiusBlock, error) {
+	if gc == nil {
+		return archaeologistBlastRadiusBlock{}, fmt.Errorf("computeArchaeologistBlastRadius: graph client is nil")
+	}
+	if db == nil {
+		return archaeologistBlastRadiusBlock{}, fmt.Errorf("computeArchaeologistBlastRadius: db is nil")
+	}
+	if producerRepo == "" {
+		return archaeologistBlastRadiusBlock{}, fmt.Errorf("computeArchaeologistBlastRadius: producerRepo required")
+	}
+	// Step 1 — collect finding file_paths.
+	findingFiles := map[string]struct{}{}
+	for _, f := range findings {
+		if f.FilePath == "" {
+			continue
+		}
+		findingFiles[f.FilePath] = struct{}{}
+	}
+	if len(findingFiles) == 0 {
+		// No findings → no modifications → empty block (still successful).
+		return archaeologistBlastRadiusBlock{}, nil
+	}
+	// Step 2 — intersect against CrossRepoSymbols for the producer.
+	syms, err := store.ListCrossRepoSymbolsByRepo(db, producerRepo)
+	if err != nil {
+		return archaeologistBlastRadiusBlock{}, fmt.Errorf("computeArchaeologistBlastRadius: list symbols: %w", err)
+	}
+	mods := make([]graph.SymbolModification, 0, len(syms))
+	seenSymbols := map[string]struct{}{}
+	for _, s := range syms {
+		if _, hit := findingFiles[s.FilePath]; !hit {
+			continue
+		}
+		if _, dup := seenSymbols[s.SymbolPath]; dup {
+			continue
+		}
+		seenSymbols[s.SymbolPath] = struct{}{}
+		mods = append(mods, graph.SymbolModification{
+			Repo:       s.RepoName,
+			FilePath:   s.FilePath,
+			SymbolPath: s.SymbolPath,
+		})
+	}
+	if len(mods) == 0 {
+		// Producer has no indexed exported symbols matching the finding
+		// files (e.g. the dog hasn't run yet, or the deprecated calls
+		// live in unexported helpers). Empty block, no error — caller
+		// emits the candidate with a {} blast_radius (operator-visible
+		// signal that "graph saw nothing", distinct from "graph errored").
+		return archaeologistBlastRadiusBlock{}, nil
+	}
+	// Step 3 — query the graph.
+	br, err := gc.BlastRadiusForModifications(ctx, mods)
+	if err != nil {
+		return archaeologistBlastRadiusBlock{}, fmt.Errorf("computeArchaeologistBlastRadius: graph: %w", err)
+	}
+	// Step 4 — re-shape into the JSON-friendly block.
+	out := archaeologistBlastRadiusBlock{
+		ModifiedSymbols:       make([]archaeologistBlastRadiusSymbol, 0, len(br.ModifiedSymbols)),
+		AffectedConsumerRepos: append([]string(nil), br.AffectedConsumerRepos...),
+		ConsumersBySymbol:     map[string][]archaeologistBlastRadiusSite{},
+	}
+	for _, s := range br.ModifiedSymbols {
+		out.ModifiedSymbols = append(out.ModifiedSymbols, archaeologistBlastRadiusSymbol{
+			Repo:       s.Repo,
+			SymbolPath: s.Name,
+			Kind:       s.Kind,
+			FilePath:   s.Path,
+			LineNumber: s.Line,
+		})
+	}
+	for sym, sites := range br.ConsumersBySymbol {
+		bucket := make([]archaeologistBlastRadiusSite, 0, len(sites))
+		for _, s := range sites {
+			bucket = append(bucket, archaeologistBlastRadiusSite{
+				Repo:     s.Repo,
+				FilePath: s.FilePath,
+				Line:     s.Line,
+			})
+		}
+		out.ConsumersBySymbol[sym] = bucket
+	}
+	return out, nil
 }
