@@ -165,6 +165,20 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/notifications/budgets", handleNotificationBudgets(db))
 	mux.HandleFunc("/api/notifications/budgets/", handleNotificationBudgetUpsert(db))
 
+	// ── D11 Phase 2 — Notifications dashboard tab. Reads the YAML
+	// catalog, the resolution-chain SystemConfig keys, and surfaces the
+	// preset / DND / per-category override controls. All state mutations
+	// route through internal/notify SystemConfig keys (notify.SetDND for
+	// DND, store.SetConfig for everything else); none of this fires
+	// dispatches, so Pattern P-NotificationDispatch is unaffected.
+	mux.HandleFunc("/api/notifications/catalog", handleNotificationsCatalog(db))
+	mux.HandleFunc("/api/notifications/state", handleNotificationsState(db))
+	mux.HandleFunc("/api/notifications/preset", handleNotificationsPreset(db))
+	mux.HandleFunc("/api/notifications/preset/save", handleNotificationsPresetSave(db))
+	mux.HandleFunc("/api/notifications/dnd", handleNotificationsDND(db))
+	mux.HandleFunc("/api/notifications/dnd/clear", handleNotificationsDNDClear(db))
+	mux.HandleFunc("/api/notifications/category/", handleNotificationsCategory(db))
+
 	// ── D3 P6A.5 — OperatorSessionState (resume-where-you-left-off).
 	mux.HandleFunc("/api/session/state", handleSessionState(db))
 
