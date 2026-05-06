@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -14,11 +15,23 @@ import (
 )
 
 func cmdAsk(db *sql.DB, args []string) int {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "ask",
+		"Ask a free-form question against the fleet's knowledge.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force ask why is task 42 still pending"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force ask <question…>")
 		return 1
 	}
-	q := strings.Join(args, " ")
+	q := strings.Join(rest, " ")
 	a, err := agents.AskHandle(context.Background(), db, q)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ask failed: %v\n", err)
@@ -42,6 +55,9 @@ func cmdRetro(db *sql.DB, args []string) int {
 		return 1
 	}
 	switch args[0] {
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force retro generate|save")
+		return 0
 	case "generate":
 		retro, err := agents.GenerateRetro(context.Background(), db, time.Now())
 		if err != nil {

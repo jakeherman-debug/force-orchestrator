@@ -37,6 +37,9 @@ func cmdEC(ctx context.Context, db *sql.DB, args []string) {
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
+	case "--help", "-h", "help":
+		ecUsage()
+		return
 	case "list":
 		ecList(ctx, db, rest)
 	case "ratify":
@@ -74,11 +77,22 @@ Subcommands:
 }
 
 func ecList(ctx context.Context, db *sql.DB, args []string) {
-	fs := flag.NewFlagSet("ec list", flag.ExitOnError)
+	fs := flag.NewFlagSet("ec list", flag.ContinueOnError)
 	statusFilter := fs.String("status", "pending", "pending|ratified|rejected|all")
 	kindFilter := fs.String("kind", "", "candidate|promote (empty = both)")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+	helped, perr := parseSubcommandFlags(fs, args, "ec list",
+		"List PromotionProposals matching --status / --kind filters.",
+		[]flagDoc{
+			{Name: "--status S", Desc: "pending|ratified|rejected|all"},
+			{Name: "--kind K", Desc: "candidate|promote (empty = both)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force ec list", "force ec list --status all"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
 	}
 	query := `SELECT id, kind, IFNULL(rule_key,''), IFNULL(authored_by,''), IFNULL(authored_at,''),
 	                 IFNULL(ratified_at,''), IFNULL(ratified_by,''),
@@ -141,10 +155,20 @@ func ecList(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func ecRatify(ctx context.Context, db *sql.DB, args []string) {
-	fs := flag.NewFlagSet("ec ratify", flag.ExitOnError)
+	fs := flag.NewFlagSet("ec ratify", flag.ContinueOnError)
 	operator := fs.String("operator", "", "operator email — required, recorded in AuditLog")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+	helped, perr := parseSubcommandFlags(fs, args, "ec ratify",
+		"Operator-ratify a pending PromotionProposal.",
+		[]flagDoc{
+			{Name: "--operator E", Desc: "operator email (required, recorded in AuditLog)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force ec ratify 17", "force ec ratify 17 --operator jake@example.com"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
 	}
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force ec ratify <id> [--operator email]")
@@ -189,13 +213,26 @@ func ecRatify(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func ecReject(ctx context.Context, db *sql.DB, args []string) {
-	fs := flag.NewFlagSet("ec reject", flag.ExitOnError)
+	fs := flag.NewFlagSet("ec reject", flag.ContinueOnError)
 	operator := fs.String("operator", "", "operator email — required, recorded in AuditLog")
 	action := fs.String("action", "leave_as_is", "leave_as_is | clean_revert | cascade_revert | surgical_revert | escalate")
 	rationale := fs.String("rationale", "", "rejection rationale (≥ 20 chars when action != leave_as_is)")
 	reason := fs.String("reason", "", "free-form rejected_reason; defaults to rationale or action")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+	helped, perr := parseSubcommandFlags(fs, args, "ec reject",
+		"Operator-reject a pending PromotionProposal.",
+		[]flagDoc{
+			{Name: "--operator E", Desc: "operator email (required, recorded in AuditLog)"},
+			{Name: "--action A", Desc: "leave_as_is | clean_revert | cascade_revert | surgical_revert | escalate"},
+			{Name: "--rationale T", Desc: "rejection rationale (≥ 20 chars when action != leave_as_is)"},
+			{Name: "--reason T", Desc: "free-form rejected_reason"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force ec reject 17 --operator jake@example.com"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
 	}
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force ec reject <id> [--operator email] [--action ...] [--rationale ...] [--reason ...]")
@@ -263,11 +300,23 @@ func ecReject(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func ecStatus(ctx context.Context, db *sql.DB, args []string) {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("ec status", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "ec status",
+		"Print one PromotionProposal's current state.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force ec status 17"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force ec status <id>")
 		os.Exit(1)
 	}
-	id := mustParseID(args[0])
+	id := mustParseID(rest[0])
 	var kind, ruleKey, authoredBy, authoredAt string
 	var ratifiedAt, ratifiedBy, rejectedAt, rejectedReason, rejAction, rejRationale string
 	var content string

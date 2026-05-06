@@ -10,6 +10,12 @@ import (
 )
 
 func cmdMemories(db *sql.DB, args []string) {
+	// Top-level --help / -h interception (the leaf branches handle their
+	// own --flags; the top-level dispatch here only filters help shorthand).
+	if len(args) >= 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		fmt.Println("Usage: force memories [<repo>|delete <id>|search <repo> <query>]")
+		return
+	}
 	subCmd := ""
 	if len(args) >= 1 && !strings.HasPrefix(args[0], "--") {
 		subCmd = args[0]

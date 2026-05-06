@@ -19,6 +19,9 @@ func cmdLearning(db *sql.DB, args []string) int {
 		return 1
 	}
 	switch args[0] {
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force learning refresh|show")
+		return 0
 	case "refresh":
 		id, err := agents.RenderFleetLearningPanel(context.Background(), db, time.Now())
 		if err != nil {

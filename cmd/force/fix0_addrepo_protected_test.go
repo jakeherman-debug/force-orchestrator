@@ -58,7 +58,7 @@ func TestAddRepo_ProtectedBranchFlow(t *testing.T) {
 	devnull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	os.Stdout = devnull
 	defer func() { os.Stdout = origStdout; devnull.Close() }()
-	cmdAddRepo(db, "acceptance-repo", dir, "protected-branch acceptance")
+	cmdAddRepo(db, []string{"acceptance-repo", dir, "protected-branch acceptance"})
 
 	// The repo is now in the DB. Fix #0 invariant: UpsertConvoyAskBranch
 	// MUST reject "main" (and friends) despite the repo being registered.

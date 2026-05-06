@@ -12,6 +12,7 @@ package main
 
 import (
 	"database/sql"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -63,13 +64,22 @@ func printProposedFeaturesUsage(w io.Writer) {
 }
 
 func cmdProposedFeaturesList(db *sql.DB, args []string) int {
-	status := ""
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--status" && i+1 < len(args) {
-			status = args[i+1]
-			i++
-		}
+	fs := flag.NewFlagSet("proposed-features list", flag.ContinueOnError)
+	statusFlag := fs.String("status", "", "pending|promoted|archived|all")
+	helped, perr := parseSubcommandFlags(fs, args, "proposed-features list",
+		"List proposed features (filterable by status).",
+		[]flagDoc{
+			{Name: "--status S", Desc: "pending|promoted|archived|all"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force proposed-features list"})
+	if helped {
+		return 0
 	}
+	if perr != nil {
+		return 2
+	}
+	status := *statusFlag
 	if status == "all" {
 		status = ""
 	}
@@ -91,39 +101,38 @@ func cmdProposedFeaturesList(db *sql.DB, args []string) int {
 }
 
 func cmdProposedFeaturesSuppress(db *sql.DB, args []string) int {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("proposed-features suppress", flag.ContinueOnError)
+	operatorFlag := fs.String("operator", "default@operator", "operator email")
+	rationaleFlag := fs.String("rationale", "", "rationale (≥ 20 chars)")
+	daysFlag := fs.Int("days", 0, "suppression duration in days (0 = permanent)")
+	helped, perr := parseSubcommandFlags(fs, args, "proposed-features suppress",
+		"Suppress a proposed feature by fingerprint.",
+		[]flagDoc{
+			{Name: "--operator E", Desc: "operator email"},
+			{Name: "--rationale T", Desc: "rationale (≥ 20 chars)"},
+			{Name: "--days N", Desc: "suppression duration in days (0 = permanent)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force proposed-features suppress 7 --rationale not-needed-yet-this-quarter --days 30"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force proposed-features suppress <id> --rationale <txt> [--operator <email>] [--days <N>]")
 		return 1
 	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil || id <= 0 {
 		fmt.Fprintln(os.Stderr, "invalid feature id")
 		return 1
 	}
-	operator := "default@operator"
-	rationale := ""
-	days := 0
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--operator":
-			if i+1 < len(args) {
-				operator = args[i+1]
-				i++
-			}
-		case "--rationale":
-			if i+1 < len(args) {
-				rationale = args[i+1]
-				i++
-			}
-		case "--days":
-			if i+1 < len(args) {
-				if d, err := strconv.Atoi(args[i+1]); err == nil {
-					days = d
-				}
-				i++
-			}
-		}
-	}
+	operator := *operatorFlag
+	rationale := *rationaleFlag
+	days := *daysFlag
 	if len(strings.TrimSpace(rationale)) < 20 {
 		fmt.Fprintln(os.Stderr, "rationale must be ≥ 20 chars")
 		return 1
@@ -155,41 +164,41 @@ func cmdProposedFeaturesSuppress(db *sql.DB, args []string) int {
 }
 
 func cmdProposedFeaturesScore(db *sql.DB, args []string) int {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("proposed-features score", flag.ContinueOnError)
+	valueFlag := fs.String("value", "", "low|medium|high")
+	complexityFlag := fs.String("complexity", "", "low|medium|high")
+	rationaleFlag := fs.String("rationale", "", "rationale (required)")
+	operatorFlag := fs.String("operator", "default@operator", "operator email")
+	helped, perr := parseSubcommandFlags(fs, args, "proposed-features score",
+		"Override the system-computed value/complexity scores for a proposed feature.",
+		[]flagDoc{
+			{Name: "--value V", Desc: "low|medium|high"},
+			{Name: "--complexity V", Desc: "low|medium|high"},
+			{Name: "--rationale T", Desc: "rationale (required)"},
+			{Name: "--operator E", Desc: "operator email"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force proposed-features score 7 --value high --complexity low --rationale ..."})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force proposed-features score <id> [--value <low|medium|high>] [--complexity <low|medium|high>] --rationale <txt> [--operator <email>]")
 		return 1
 	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil || id <= 0 {
 		fmt.Fprintln(os.Stderr, "invalid feature id")
 		return 1
 	}
-	value, complexity, rationale := "", "", ""
-	operator := "default@operator"
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--value":
-			if i+1 < len(args) {
-				value = args[i+1]
-				i++
-			}
-		case "--complexity":
-			if i+1 < len(args) {
-				complexity = args[i+1]
-				i++
-			}
-		case "--rationale":
-			if i+1 < len(args) {
-				rationale = args[i+1]
-				i++
-			}
-		case "--operator":
-			if i+1 < len(args) {
-				operator = args[i+1]
-				i++
-			}
-		}
-	}
+	value := *valueFlag
+	complexity := *complexityFlag
+	rationale := *rationaleFlag
+	operator := *operatorFlag
 	if rationale == "" {
 		fmt.Fprintln(os.Stderr, "--rationale required")
 		return 1
@@ -206,31 +215,35 @@ func cmdProposedFeaturesScore(db *sql.DB, args []string) int {
 }
 
 func cmdProposedFeaturesPromote(db *sql.DB, args []string) int {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("proposed-features promote", flag.ContinueOnError)
+	deadlineFlag := fs.String("deadline", "", "deadline (ISO date)")
+	operatorFlag := fs.String("operator", "default@operator", "operator email")
+	helped, perr := parseSubcommandFlags(fs, args, "proposed-features promote",
+		"Promote a proposed feature to active status.",
+		[]flagDoc{
+			{Name: "--deadline D", Desc: "deadline (ISO date)"},
+			{Name: "--operator E", Desc: "operator email"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force proposed-features promote 7 --deadline 2026-12-31"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force proposed-features promote <id> [--deadline <date>] [--operator <email>]")
 		return 1
 	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil || id <= 0 {
 		fmt.Fprintln(os.Stderr, "invalid feature id")
 		return 1
 	}
-	deadline := ""
-	operator := "default@operator"
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--deadline":
-			if i+1 < len(args) {
-				deadline = args[i+1]
-				i++
-			}
-		case "--operator":
-			if i+1 < len(args) {
-				operator = args[i+1]
-				i++
-			}
-		}
-	}
+	deadline := *deadlineFlag
+	operator := *operatorFlag
 	if err := store.PromoteProposedFeature(db, id, deadline, operator); err != nil {
 		fmt.Fprintf(os.Stderr, "promote failed: %v\n", err)
 		return 1

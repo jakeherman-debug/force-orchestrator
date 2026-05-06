@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"force-orchestrator/internal/agents"
@@ -91,10 +89,6 @@ func main() {
 		dispatchDaemon(db, os.Args[2:])
 
 	case "add":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force add [--priority N] [--plan-only] [--type Feature|CodeEdit|Investigate|Audit] <task description>")
-			os.Exit(1)
-		}
 		cmdAdd(db, os.Args[2:])
 
 	case "add-task":
@@ -102,17 +96,9 @@ func main() {
 		os.Exit(1)
 
 	case "investigate", "add-investigate":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force investigate [--priority N] [--repo <name>] <question>")
-			os.Exit(1)
-		}
 		cmdAddInvestigate(db, os.Args[2:])
 
 	case "scan", "add-audit":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force scan [--priority N] [--repo <name>] <scope/question>")
-			os.Exit(1)
-		}
 		cmdAddAudit(db, os.Args[2:])
 
 	case "add-jira":
@@ -122,190 +108,71 @@ func main() {
 		cmdRepos(db, os.Args[2:])
 
 	case "repo":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force repo sync | force repo set-pr-flow <name> on|off")
-			os.Exit(1)
-		}
-		switch os.Args[2] {
-		case "sync":
-			cmdRepoSync(ctx, db)
-		case "set-pr-flow":
-			if len(os.Args) < 5 {
-				fmt.Println("Usage: force repo set-pr-flow <name> on|off")
-				os.Exit(1)
-			}
-			cmdRepoSetPRFlow(db, os.Args[3], os.Args[4])
-		default:
-			fmt.Printf("Unknown repo subcommand: %s\n", os.Args[2])
-			fmt.Println("Usage: force repo sync | force repo set-pr-flow <name> on|off")
-			os.Exit(1)
-		}
+		cmdRepo(db, os.Args[2:],
+			func(a []string) { cmdRepoSync(ctx, db, a) },
+			func(a []string) { cmdRepoSetPRFlow(db, a) })
 
 	case "migrate":
 		cmdMigrate(ctx, db, os.Args[2:])
 
 	case "add-repo":
-		if len(os.Args) < 5 {
-			fmt.Println("Usage: force add-repo <name> <local-path> <description>")
-			os.Exit(1)
-		}
-		cmdAddRepo(db, os.Args[2], os.Args[3], strings.Join(os.Args[4:], " "))
+		cmdAddRepo(db, os.Args[2:])
 
 	case "reset":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force reset <task-id>")
-			os.Exit(1)
-		}
-		cmdReset(db, mustParseID(os.Args[2]), "manual reset via CLI")
+		cmdReset(db, "reset", "manual reset via CLI", os.Args[2:])
 
 	case "retry":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force retry <task-id>")
-			os.Exit(1)
-		}
-		cmdReset(db, mustParseID(os.Args[2]), "retry via CLI")
+		cmdReset(db, "retry", "retry via CLI", os.Args[2:])
 
 	case "cancel":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force cancel <task-id> [--requeue <type>]")
-			os.Exit(1)
-		}
 		cmdCancel(db, os.Args[2:])
 
 	case "block":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: force block <task-id> <blocker-id>")
-			os.Exit(1)
-		}
-		cmdBlock(db, mustParseID(os.Args[2]), mustParseID(os.Args[3]))
+		cmdBlock(db, os.Args[2:])
 
 	case "unblock":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force unblock <task-id>")
-			os.Exit(1)
-		}
-		cmdUnblock(db, mustParseID(os.Args[2]))
+		cmdUnblock(db, os.Args[2:])
 
 	case "unblock-dependents":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force unblock-dependents <task-id>")
-			os.Exit(1)
-		}
-		cmdUnblockDependents(db, mustParseID(os.Args[2]))
+		cmdUnblockDependents(db, os.Args[2:])
 
 	case "tree":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force tree <task-id>")
-			os.Exit(1)
-		}
-		cmdTree(db, mustParseID(os.Args[2]))
+		cmdTree(db, os.Args[2:])
 
 	case "diff":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force diff <task-id>")
-			os.Exit(1)
-		}
-		cmdDiff(ctx, db, mustParseID(os.Args[2]))
+		cmdDiff(ctx, db, os.Args[2:])
 
 	case "approve":
 		// Operator manually approves a task, bypassing the Jedi Council
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force approve <task-id>")
-			os.Exit(1)
-		}
-		cmdApproveTask(ctx, db, mustParseID(os.Args[2]))
+		cmdApproveTask(ctx, db, os.Args[2:])
 
 	case "reject":
 		// Operator manually rejects a task, sending it back with feedback
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: force reject <task-id> <reason>")
-			os.Exit(1)
-		}
-		cmdRejectTask(db, mustParseID(os.Args[2]), strings.Join(os.Args[3:], " "))
+		cmdRejectTask(db, os.Args[2:])
 
 	case "prioritize":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: force prioritize <task-id> <priority>")
-			fmt.Println("  priority is an integer — higher values claim first (default 0)")
-			os.Exit(1)
-		}
-		cmdPrioritize(db, mustParseID(os.Args[2]), mustParseID(os.Args[3]))
+		cmdPrioritize(db, os.Args[2:])
 
 	case "retry-all-failed":
-		cmdRetryAllFailed(db)
+		cmdRetryAllFailed(db, os.Args[2:])
 
 	case "list":
-		// Usage: force list [status[,status2...]] [--status <s>] [--repo <name>] [--type <type>] [--limit N]
-		statusFilter := ""
-		repoFilter := ""
-		typeFilter := ""
-		limit := 0
-		listArgs := os.Args[2:]
-		for i := 0; i < len(listArgs); i++ {
-			switch listArgs[i] {
-			case "--limit":
-				if i+1 < len(listArgs) {
-					limit = mustParseID(listArgs[i+1])
-					i++
-				}
-			case "--repo":
-				if i+1 < len(listArgs) {
-					repoFilter = listArgs[i+1]
-					i++
-				}
-			case "--type":
-				if i+1 < len(listArgs) {
-					typeFilter = listArgs[i+1]
-					i++
-				}
-			case "--status":
-				if i+1 < len(listArgs) {
-					statusFilter = listArgs[i+1]
-					i++
-				}
-			default:
-				if !strings.HasPrefix(listArgs[i], "--") {
-					statusFilter = listArgs[i]
-					if strings.EqualFold(statusFilter, "active") {
-						statusFilter = "Pending,Locked,Planned,AwaitingCaptainReview,UnderCaptainReview,AwaitingCouncilReview,UnderReview,Failed,Escalated,ConflictPending"
-					}
-				}
-			}
-		}
-		printList(db, statusFilter, repoFilter, typeFilter, limit)
+		cmdList(db, os.Args[2:])
 
 	case "logs":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force logs <task-id>")
-			os.Exit(1)
-		}
-		printLogs(db, mustParseID(os.Args[2]))
+		cmdLogs(db, os.Args[2:])
 
 	case "history":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force history [--full] <task-id>")
-			os.Exit(1)
-		}
-		full := false
-		histArgs := os.Args[2:]
-		if histArgs[0] == "--full" {
-			full = true
-			histArgs = histArgs[1:]
-		}
-		if len(histArgs) == 0 {
-			fmt.Println("Usage: force history [--full] <task-id>")
-			os.Exit(1)
-		}
-		printHistory(db, mustParseID(histArgs[0]), full)
+		cmdHistory(db, os.Args[2:])
 
 	case "agents":
-		printAgents(db)
+		cmdAgents(db, os.Args[2:])
 
 	case "status":
-		cmdStatus(db)
+		cmdStatus(db, os.Args[2:])
 
 	case "who":
-		cmdWho(db)
+		cmdWho(db, os.Args[2:])
 
 	case "stats":
 		cmdStats(db, os.Args[2:])
@@ -314,109 +181,40 @@ func main() {
 		cmdLogsFleet(db, os.Args[2:])
 
 	case "tail":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force tail <task-id>")
-			os.Exit(1)
-		}
-		cmdTailTask(db, mustParseID(os.Args[2]))
+		cmdTailTask(db, os.Args[2:])
 
 	case "holonet":
 		cmdHolonet(db, os.Args[2:])
 
 	case "export":
-		outFile := "fleet-export.json"
-		if len(os.Args) >= 3 {
-			outFile = os.Args[2]
-		}
-		cmdExport(db, outFile)
+		cmdExport(db, os.Args[2:])
 
 	case "import":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force import <file.json>")
-			os.Exit(1)
-		}
-		cmdImport(db, os.Args[2])
+		cmdImport(db, os.Args[2:])
 
 	case "search":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force search <query>")
-			os.Exit(1)
-		}
-		cmdSearch(db, strings.Join(os.Args[2:], " "))
+		cmdSearch(db, os.Args[2:])
 
 	case "audit":
-		// Usage: force audit [--limit N]
-		limit := 50
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--limit" && i+1 < len(os.Args) {
-				limit = mustParseID(os.Args[i+1])
-				i++
-			}
-		}
-		cmdAudit(db, limit)
+		cmdAudit(db, os.Args[2:])
 
 	case "prune":
-		// Usage: force prune [--keep-days N] [--dry-run]
-		keepDays := 30
-		dryRun := false
-		for i := 2; i < len(os.Args); i++ {
-			switch os.Args[i] {
-			case "--keep-days":
-				if i+1 < len(os.Args) {
-					keepDays = mustParseID(os.Args[i+1])
-					i++
-				}
-			case "--dry-run":
-				dryRun = true
-			default:
-				fmt.Fprintf(os.Stderr, "prune: unknown flag %q\nUsage: force prune [--keep-days N] [--dry-run]\n", os.Args[i])
-				os.Exit(1)
-			}
-		}
-		cmdPrune(db, keepDays, dryRun)
+		cmdPrune(db, os.Args[2:])
 
 	case "purge":
-		// Usage: force purge [--confirm]
-		confirmed := false
-		for _, arg := range os.Args[2:] {
-			if arg == "--confirm" {
-				confirmed = true
-			}
-		}
-		cmdPurge(ctx, db, confirmed)
+		cmdPurge(ctx, db, os.Args[2:])
 
 	case "hard-reset":
-		// Usage: force hard-reset [--purge-repos] [--confirm]
-		confirmed := false
-		purgeRepos := false
-		for _, arg := range os.Args[2:] {
-			switch arg {
-			case "--confirm":
-				confirmed = true
-			case "--purge-repos":
-				purgeRepos = true
-			}
-		}
-		cmdHardReset(ctx, db, confirmed, purgeRepos)
+		cmdHardReset(ctx, db, os.Args[2:])
 
 	case "scale":
-		// Dynamically scale agent counts via named flags.
-		fs := flag.NewFlagSet("scale", flag.ExitOnError)
-		scaleAstromechs := fs.Int("astromechs", -1, "number of astromechs")
-		scaleCouncil := fs.Int("council", -1, "number of council members")
-		scaleCaptain := fs.Int("captain", -1, "number of captains")
-		scaleCommanders := fs.Int("commanders", -1, "number of commanders")
-		scaleInvestigators := fs.Int("investigators", -1, "number of investigators")
-		scaleAuditors := fs.Int("auditors", -1, "number of auditors")
-		scaleLibrarians := fs.Int("librarians", -1, "number of librarians")
-		fs.Parse(os.Args[2:])
-		cmdScale(db, *scaleAstromechs, *scaleCouncil, *scaleCaptain, *scaleCommanders, *scaleInvestigators, *scaleAuditors, *scaleLibrarians)
+		cmdScale(db, os.Args[2:])
 
 	case "estop":
-		cmdEstop(db)
+		cmdEstop(db, os.Args[2:])
 
 	case "resume":
-		cmdResume(db)
+		cmdResume(db, os.Args[2:])
 
 	case "escalations":
 		cmdEscalations(db, os.Args[2:])
@@ -425,22 +223,16 @@ func main() {
 		cmdDogs(ctx, db, os.Args[2:])
 
 	case "cleanup":
-		cmdCleanup(ctx, db)
+		cmdCleanup(ctx, db, os.Args[2:])
 
 	case "doctor":
-		clean := false
-		for _, arg := range os.Args[2:] {
-			if arg == "--clean" {
-				clean = true
-			}
-		}
-		cmdDoctor(db, clean)
+		cmdDoctor(db, os.Args[2:])
 
 	case "leaderboard":
-		cmdLeaderboard(db)
+		cmdLeaderboard(db, os.Args[2:])
 
 	case "costs":
-		cmdCosts(db)
+		cmdCosts(db, os.Args[2:])
 
 	case "notifications":
 		// D3 P6A.4 — `force notifications budget ...` parity with PUT
@@ -493,50 +285,21 @@ func main() {
 		os.Exit(cmdProposedFeatures(db, os.Args[2:]))
 
 	case "dashboard":
-		// D3 P6A.2 — `force dashboard status` reads the latest heartbeat
-		// row from the DB and exits 0 (fresh) / 1 (stale). The full
-		// `force dashboard` (no subcommand) starts the live server as
-		// before. Status is checked first so it doesn't get confused
-		// with a stray --port=status.
-		if len(os.Args) >= 3 && os.Args[2] == "status" {
-			os.Exit(cmdDashboardStatus(db))
-		}
-		port := 8080
-		if len(os.Args) >= 4 && os.Args[2] == "--port" {
-			port = mustParseID(os.Args[3])
-		} else if len(os.Args) >= 3 && strings.HasPrefix(os.Args[2], "--port=") {
-			port = mustParseID(strings.TrimPrefix(os.Args[2], "--port="))
-		} else if len(os.Args) >= 3 {
-			if p := mustParseID(os.Args[2]); p > 0 {
-				port = p
-			}
-		}
-		cmdDashboard(db, port)
+		// `force dashboard status` reads the latest heartbeat (handled
+		// inside cmdDashboard) and exits 0/1. `force dashboard [--port N]`
+		// starts the server.
+		cmdDashboard(db, os.Args[2:])
 
 	case "watch":
-		cmdWatch(db)
+		cmdWatch(db, os.Args[2:])
 
 	case "run":
-		// One-shot foreground mode: claim and run a specific task with streamed output.
-		// Usage: force run <task-id>
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: force run <task-id>")
-			os.Exit(1)
-		}
-		agents.RunTaskForeground(ctx, db, mustParseID(os.Args[2]))
+		cmdRunForeground(db, os.Args[2:], func(id int) {
+			agents.RunTaskForeground(ctx, db, id)
+		})
 
 	case "bounty":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: force bounty <subcommand>\n  stats   — print bounty board statistics\n")
-			os.Exit(1)
-		}
-		switch os.Args[2] {
-		case "stats":
-			cmdBountyStats(db)
-		default:
-			fmt.Fprintf(os.Stderr, "Unknown bounty subcommand: %s\nUsage: force bounty stats\n", os.Args[2])
-			os.Exit(1)
-		}
+		cmdBounty(db, os.Args[2:])
 
 	case "convoy":
 		cmdConvoy(db, os.Args[2:])
@@ -554,21 +317,7 @@ func main() {
 		cmdMail(db, os.Args[2:])
 
 	case "task":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: force task <subcommand>\n  note <id> <text>  — append an operator note to a task\n")
-			os.Exit(1)
-		}
-		switch os.Args[2] {
-		case "note":
-			if len(os.Args) < 5 {
-				fmt.Fprintln(os.Stderr, "Usage: force task note <id> <text>")
-				os.Exit(1)
-			}
-			cmdTaskNote(db, mustParseID(os.Args[3]), strings.Join(os.Args[4:], " "))
-		default:
-			fmt.Fprintf(os.Stderr, "Unknown task subcommand: %s\nUsage: force task note <id> <text>\n", os.Args[2])
-			os.Exit(1)
-		}
+		cmdTask(db, os.Args[2:])
 
 	case "render-rules":
 		cmdRenderRules(ctx, db, os.Args[2:])

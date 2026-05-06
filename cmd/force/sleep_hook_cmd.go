@@ -28,6 +28,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,29 +60,28 @@ var sleepHookOS = func() string { return runtime.GOOS }
 // cmdInstallSleepHook is the entry point for `force install-sleep-hook`.
 // Returns the desired process exit code (0 = success, 1 = error).
 func cmdInstallSleepHook(_ context.Context, _ *sql.DB, args []string) int {
-	force := false
-	check := false
-	uninstall := false
-	for _, a := range args {
-		switch a {
-		case "--force":
-			force = true
-		case "--check":
-			check = true
-		case "--uninstall":
-			uninstall = true
-		case "-h", "--help":
-			fmt.Println("Usage: force install-sleep-hook [--check | --uninstall | --force]")
-			fmt.Println("  Without flags : install ~/.sleep and ~/.wakeup hook scripts (idempotent).")
-			fmt.Println("  --check       : report current install state; do not modify files.")
-			fmt.Println("  --uninstall   : remove force-owned hook scripts (preserves operator-authored versions).")
-			fmt.Println("  --force       : overwrite even operator-authored ~/.sleep / ~/.wakeup scripts.")
-			return 0
-		default:
-			fmt.Fprintf(os.Stderr, "install-sleep-hook: unknown flag %q\n", a)
-			return 2
-		}
+	fs := flag.NewFlagSet("install-sleep-hook", flag.ContinueOnError)
+	forceFlag := fs.Bool("force", false, "overwrite operator-authored ~/.sleep / ~/.wakeup scripts")
+	checkFlag := fs.Bool("check", false, "report current install state; do not modify files")
+	uninstallFlag := fs.Bool("uninstall", false, "remove force-owned hook scripts")
+	helped, perr := parseSubcommandFlags(fs, args, "install-sleep-hook",
+		"Install ~/.sleep and ~/.wakeup hook scripts so the daemon's heartbeat-based sleep/wake detection runs immediately after wake.",
+		[]flagDoc{
+			{Name: "--force", Desc: "overwrite operator-authored scripts"},
+			{Name: "--check", Desc: "report install state without modifying"},
+			{Name: "--uninstall", Desc: "remove force-owned hook scripts"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force install-sleep-hook", "force install-sleep-hook --check"})
+	if helped {
+		return 0
 	}
+	if perr != nil {
+		return 2
+	}
+	force := *forceFlag
+	check := *checkFlag
+	uninstall := *uninstallFlag
 
 	switch sleepHookOS() {
 	case "darwin":
