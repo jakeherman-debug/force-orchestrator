@@ -190,6 +190,15 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/dashboard/config/display", handleDashboardConfigDisplayWrite(db))
 	mux.HandleFunc("/api/dashboard/config/display/clear", handleDashboardConfigDisplayWrite(db))
 
+	// ── D11 Phase 3 sub-task C — Per-tab saved filters.
+	// GET (list) + POST (create) at the leaf; DELETE + POST /export at
+	// the /<id> sub-route. Yaml-source filters are seeded by
+	// dashconfig.SeedSavedFiltersFromYAML at daemon startup; dashboard-
+	// source filters are operator-saved at runtime and exportable as a
+	// YAML diff for review (never auto-written).
+	mux.HandleFunc("/api/dashboard/saved-filter", handleDashboardSavedFilter(db))
+	mux.HandleFunc("/api/dashboard/saved-filter/", handleDashboardSavedFilterByID(db))
+
 	// ── D3 P6A.5 — OperatorSessionState (resume-where-you-left-off).
 	mux.HandleFunc("/api/session/state", handleSessionState(db))
 

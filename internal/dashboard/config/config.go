@@ -84,14 +84,23 @@ type DisplayConfig struct {
 	PerTablePagination int               `json:"per_table_pagination" yaml:"per_table_pagination"`
 }
 
-// SavedFilter is the placeholder shape for sub-task C. Substrate only
-// declares the type so the parser shape is stable; sub-task C wires
-// the write endpoint that populates it.
+// SavedFilter is one named, per-tab query the operator can recall
+// instantly. Sub-task C of D11 Phase 3 wires the parser, the seeder
+// (yaml-source rows are kept in sync with the YAML file at daemon
+// start), and the write endpoints (operator-saved rows live in
+// DashboardSavedFilters with source='dashboard').
+//
+// Filter semantics: a column-name → list-of-allowed-values map. The
+// SPA renders this as a multi-select per column (e.g.
+// {"status": ["Active","DraftPROpen"]}). SortBy / SortDir are optional
+// per-tab sort overrides; SortDir, when set, is "asc" or "desc".
 type SavedFilter struct {
-	ID    string            `json:"id" yaml:"id"`
-	TabID string            `json:"tab_id" yaml:"tab_id"`
-	Name  string            `json:"name" yaml:"name"`
-	Query map[string]string `json:"query" yaml:"query"`
+	Name        string              `yaml:"name" json:"name"`
+	Tab         string              `yaml:"tab" json:"tab"`
+	Description string              `yaml:"description" json:"description"`
+	Filter      map[string][]string `yaml:"filter" json:"filter"`
+	SortBy      string              `yaml:"sort_by,omitempty" json:"sort_by,omitempty"`
+	SortDir     string              `yaml:"sort_dir,omitempty" json:"sort_dir,omitempty"`
 }
 
 // DashboardConfig is the parsed dashboard.yaml document.
@@ -260,6 +269,45 @@ func ParseConfig(data []byte, sourceLabel string) (*DashboardConfig, error) {
 		Density:            density,
 		DefaultSort:        defaultSort,
 		PerTablePagination: pagination,
+	}
+
+	// Saved filters — validate name uniqueness (per tab+name pair),
+	// non-empty filter map, valid tab reference, and sort_dir.
+	// We intentionally permit the same filter NAME on different tabs
+	// (operators may have a "My active" on both convoys and tasks);
+	// the (name, tab) pair must be unique.
+	seenFilter := make(map[string]struct{}, len(cfg.SavedFilters))
+	for i := range cfg.SavedFilters {
+		f := &cfg.SavedFilters[i]
+		f.Name = strings.TrimSpace(f.Name)
+		f.Tab = strings.TrimSpace(f.Tab)
+		f.SortBy = strings.TrimSpace(f.SortBy)
+		f.SortDir = strings.TrimSpace(f.SortDir)
+		if f.Name == "" {
+			return nil, fmt.Errorf("dashconfig: %s: saved_filter[%d] has empty name", sourceLabel, i)
+		}
+		if f.Tab == "" {
+			return nil, fmt.Errorf("dashconfig: %s: saved_filter %q has empty tab", sourceLabel, f.Name)
+		}
+		if _, ok := seenTab[f.Tab]; !ok {
+			return nil, fmt.Errorf("dashconfig: %s: saved_filter %q references unknown tab %q", sourceLabel, f.Name, f.Tab)
+		}
+		key := f.Tab + "\x00" + f.Name
+		if _, dup := seenFilter[key]; dup {
+			return nil, fmt.Errorf("dashconfig: %s: duplicate saved_filter %q on tab %q", sourceLabel, f.Name, f.Tab)
+		}
+		seenFilter[key] = struct{}{}
+		if len(f.Filter) == 0 {
+			return nil, fmt.Errorf("dashconfig: %s: saved_filter %q on tab %q has empty filter", sourceLabel, f.Name, f.Tab)
+		}
+		for col := range f.Filter {
+			if strings.TrimSpace(col) == "" {
+				return nil, fmt.Errorf("dashconfig: %s: saved_filter %q on tab %q has empty filter column key", sourceLabel, f.Name, f.Tab)
+			}
+		}
+		if f.SortDir != "" && f.SortDir != "asc" && f.SortDir != "desc" {
+			return nil, fmt.Errorf("dashconfig: %s: saved_filter %q has invalid sort_dir %q (want asc or desc)", sourceLabel, f.Name, f.SortDir)
+		}
 	}
 
 	return cfg, nil

@@ -1440,6 +1440,33 @@ CREATE TABLE IF NOT EXISTS DashboardCatalogRegistry (
     yaml_version    INTEGER NOT NULL DEFAULT 1
 );
 
+-- D11 Phase 3 sub-task C — operator-defined per-tab saved filters. Each row is
+-- one named query (e.g. "My active convoys") that the dashboard can recall in
+-- one click. Two sources:
+--   - source='yaml':       seeded from config/dashboard.yaml at daemon start.
+--                          Yaml is canonical: rows whose name+tab is no longer
+--                          present in the YAML are DELETED on the next seed.
+--   - source='dashboard':  operator-created at runtime via the SPA. The
+--                          seeder NEVER touches them; the operator can
+--                          export them to a YAML diff via POST
+--                          /api/dashboard/saved-filter/export and commit.
+-- filter_json holds a JSON map[column][]values (multi-select per column).
+-- UNIQUE(name, tab) ensures one filter name per tab regardless of source.
+CREATE TABLE IF NOT EXISTS DashboardSavedFilters (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL,
+    tab          TEXT    NOT NULL,
+    description  TEXT    NOT NULL DEFAULT '',
+    filter_json  TEXT    NOT NULL,                 -- JSON map[column][]values
+    sort_by      TEXT    NOT NULL DEFAULT '',
+    sort_dir     TEXT    NOT NULL DEFAULT '',      -- '' | 'asc' | 'desc'
+    source       TEXT    NOT NULL DEFAULT 'dashboard',  -- 'yaml' | 'dashboard'
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    created_by   TEXT    NOT NULL DEFAULT '',
+    UNIQUE(name, tab)
+);
+CREATE INDEX IF NOT EXISTS idx_dashboard_saved_filters_tab ON DashboardSavedFilters(tab);
+
 -- Per-convoy operator override of fleet-wide preset routing. mode ∈
 -- {'verbose','quiet','custom_json'}; when mode='custom_json' the custom_json
 -- column carries a JSON object {"category": "off|mail|slack|mail+slack",

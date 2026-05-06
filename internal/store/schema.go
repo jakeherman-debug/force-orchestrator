@@ -1469,6 +1469,29 @@ func createSchema(db *sql.DB) {
 		yaml_version    INTEGER NOT NULL DEFAULT 1
 	);`)
 
+	// DashboardSavedFilters: per-tab named operator queries (D11 Phase 3
+	// sub-task C). source='yaml' rows are kept in sync with
+	// config/dashboard.yaml at daemon startup (yaml is canonical for
+	// yaml-source rows). source='dashboard' rows are operator-created at
+	// runtime via POST /api/dashboard/saved-filter; the seeder NEVER
+	// touches them. The filter_json column stores a JSON map[col][]values
+	// — multi-select per column. UNIQUE(name, tab) ensures one filter
+	// name per tab regardless of source.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DashboardSavedFilters (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		name         TEXT    NOT NULL,
+		tab          TEXT    NOT NULL,
+		description  TEXT    NOT NULL DEFAULT '',
+		filter_json  TEXT    NOT NULL,
+		sort_by      TEXT    NOT NULL DEFAULT '',
+		sort_dir     TEXT    NOT NULL DEFAULT '',
+		source       TEXT    NOT NULL DEFAULT 'dashboard',
+		created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+		created_by   TEXT    NOT NULL DEFAULT '',
+		UNIQUE(name, tab)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_dashboard_saved_filters_tab ON DashboardSavedFilters(tab);`)
+
 	// ConvoyNotificationOverrides: per-convoy operator override of the
 	// fleet-wide preset. mode ∈ {'verbose','quiet','custom_json'}; when
 	// mode='custom_json' the custom_json column carries a JSON object
@@ -2851,6 +2874,25 @@ func runMigrations(db *sql.DB) {
 		registered_at   TEXT    NOT NULL DEFAULT (datetime('now')),
 		yaml_version    INTEGER NOT NULL DEFAULT 1
 	)`)
+	// D11 Phase 3 sub-task C — saved-filters table (upgrade path).
+	// Mirror of the createSchema declaration above. Idempotent via IF NOT
+	// EXISTS. Fresh DBs land it from createSchema; upgraded DBs land it
+	// here on the next runMigrations sweep. TestSchemaParity enforces
+	// createSchema ↔ schema/schema.sql parity.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DashboardSavedFilters (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		name         TEXT    NOT NULL,
+		tab          TEXT    NOT NULL,
+		description  TEXT    NOT NULL DEFAULT '',
+		filter_json  TEXT    NOT NULL,
+		sort_by      TEXT    NOT NULL DEFAULT '',
+		sort_dir     TEXT    NOT NULL DEFAULT '',
+		source       TEXT    NOT NULL DEFAULT 'dashboard',
+		created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+		created_by   TEXT    NOT NULL DEFAULT '',
+		UNIQUE(name, tab)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_dashboard_saved_filters_tab ON DashboardSavedFilters(tab)`)
 	db.Exec(`CREATE TABLE IF NOT EXISTS ConvoyNotificationOverrides (
 		convoy_id        INTEGER PRIMARY KEY,
 		mode             TEXT    NOT NULL,
