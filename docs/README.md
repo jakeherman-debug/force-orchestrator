@@ -17,32 +17,42 @@ This is the canonical entry point. Everything in `docs/` is reachable from here 
 - [Architecture overview](overview.md) — how it all fits together (deeper than the README diagram)
 - [Operator runbook](operator-runbook.md) — things-go-wrong: daemon crash, stuck convoy, runaway spend
 - [Roadmap](roadmap.md) — what's planned (D0–D13+)
-- [PR flow invariants](pr-flow-invariants.md) — ConvoyReview, ask-branch conflict gating
-- [Dashboard conventions](dashboard-conventions.md) — security invariants for dashboard handlers
-- [Self-healing](self-healing.md) — CI stall self-heal, idempotent task spawners
+- [PR flow](subsystems/pr-flow.md) — operator summary; binding invariants in [pr-flow-invariants.md](pr-flow-invariants.md)
+- [Dashboard](subsystems/dashboard.md) — operator reference; security invariants in [dashboard-conventions.md](dashboard-conventions.md)
+- [Self-healing](subsystems/self-healing.md) — operator summary; binding invariants in [self-healing.md](self-healing.md)
 
 ## Subsystems
 
 Per-subsystem operator/user reference. P2 fills these out from the README + closure reports.
 
-- [Daemon lifecycle](subsystems/daemon-lifecycle.md) — D12
+- [Daemon lifecycle](subsystems/daemon-lifecycle.md) — D12 (planned)
 - [Notification routing](subsystems/notification-routing.md) — D11 (`config/notifications.yaml`, `notify.Dispatch`)
-- [Dashboard personalization](subsystems/dashboard.md) — D11 + D5.5 (`config/dashboard.yaml`)
-- [Convoy staging](subsystems/convoy-staging.md) — D5.5
-- [Supply chain hygiene](subsystems/supply-chain.md) — D5 (SUPPLY-001..005)
+- [Dashboard](subsystems/dashboard.md) — D11 + D5.5 (`config/dashboard.yaml`, tabs, JSON API, security)
+- [Dashboard implementation briefs](subsystems/dashboard-implementation.md) — D3 Phase 6 task briefs (agent-handoff artifact)
+- [Convoy staging](subsystems/convoy-staging.md) — D5.5 (planned)
+- [Convoy lifecycle](subsystems/convoy-lifecycle.md) — Feature → Convoy → ask-branch → ConvoyReview → Ship
+- [Supply chain hygiene](subsystems/supply-chain.md) — D5 (SUPPLY-001..005, planned)
 - [Cross-repo dependency graph](subsystems/cross-repo-graph.md) — D8
-- [Architecture health report](subsystems/arch-health.md) — D9 (`docs/arch-health-weights.yaml`)
-- [Archaeologist](subsystems/archaeologist.md) — D9
-- [Synthetic onboarding CLI](subsystems/onboarding-cli.md) — D6
-- [Synthetic handoff documentation](subsystems/handoff-docs.md) — D10
-- [Model-tier optimization experiments](subsystems/model-tier-experiments.md) — D7
-- [Paired runs (overview)](subsystems/paired-runs.md) — D3 (full design in [paired-runs.md](paired-runs.md))
-- [PR flow](subsystems/pr-flow.md) — ask-branches, sub-PRs, ConvoyReview, Diplomat
-- [Fleet memory + RAG](subsystems/fleet-memory.md) — Librarian curator
-- [Mail system](subsystems/mail-system.md) — roles, types, automatic triggers
-- [Directives](subsystems/directives.md) — standing operator directives loaded from disk
-- [Watchdog dogs](subsystems/dogs.md) — cooldowns + behavior reference
-- [Security posture](subsystems/security.md) — capability profiles, bash guard, scrubbing, repo-mode gating
+- [Architecture health report](subsystems/arch-health.md) — D9 (`docs/arch-health-weights.yaml`, planned)
+- [Archaeologist](subsystems/archaeologist.md) — D9 (operator-gated incident archive)
+- [Synthetic onboarding CLI](subsystems/onboarding-cli.md) — D6 (planned)
+- [Synthetic handoff documentation](subsystems/handoff-docs.md) — D10 (planned)
+- [Model-tier optimization experiments](subsystems/model-tier-experiments.md) — D7 (planned)
+- [Paired runs](subsystems/paired-runs.md) — D3 (full design)
+- [PR flow](subsystems/pr-flow.md) — operator summary; binding invariants in [pr-flow-invariants.md](pr-flow-invariants.md)
+- [Self-healing](subsystems/self-healing.md) — operator summary; binding invariants in [self-healing.md](self-healing.md)
+- [Gas Town pattern](subsystems/gas-town.md) — SQLite-only cross-agent coordination
+- [holocron.db schema discipline](subsystems/holocron-schema.md) — schema parity, migration shape
+- [Capability profiles](subsystems/capability-profiles.md) — per-agent YAML tool grants
+- [MCP registry](subsystems/mcp-registry.md) — MCP server allowlist + injection
+- [Worktree isolation](subsystems/worktree-isolation.md) — per-agent worktrees + base-drift
+- [CLI shelling for LLM calls](subsystems/cli-shelling.md) — `claude -p` invocation layering
+- [Escalation + Medic](subsystems/escalation-and-medic.md) — failure paths and the no-silent-failures rule
+- [Fleet memory + RAG](subsystems/fleet-memory.md) — Librarian curator (planned)
+- [Mail system](subsystems/mail-system.md) — roles, types, automatic triggers (planned)
+- [Directives](subsystems/directives.md) — standing operator directives loaded from disk (planned)
+- [Watchdog dogs](subsystems/dogs.md) — cooldowns + behavior reference (planned)
+- [Security posture](subsystems/security.md) — capability profiles, bash guard, scrubbing, repo-mode gating (planned)
 
 Subdirectory index: [`subsystems/README.md`](subsystems/README.md).
 
@@ -111,7 +121,7 @@ Plus campaign-fix closures: [Fix #8d](closures/FIX-8D-CLOSURE.md), [Fix #8e](clo
 ## Strategic
 
 - [Roadmap](roadmap.md) — full ordered deliverable list with merge-order appendix
-- [Paired runs](paired-runs.md) — D3 measurement substrate + full experimentation design
+- [Paired runs](subsystems/paired-runs.md) — D3 measurement substrate + full experimentation design
 - [Next-gen agents](next-gen-agents.md) — Senate, ISB, BoS, Engineering Corps design notes
 
 ## Operator archives
@@ -120,6 +130,6 @@ Historical investigation artifacts preserved for audit — see [`operator-archiv
 
 ## Implementation specs
 
-- [Dashboard implementation](dashboard-implementation.md) — D3 Phase 6 task briefs
+- [Dashboard implementation](subsystems/dashboard-implementation.md) — D3 Phase 6 task briefs
 - [PAIRED-RUNS-ROLLOUT](../PAIRED-RUNS-ROLLOUT.md) — D3 phase sign-off log
 - [FIX-LOG.md](../FIX-LOG.md) — operator narrative for each audit-fix PR (auto-rendered)
