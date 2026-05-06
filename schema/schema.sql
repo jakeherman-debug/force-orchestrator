@@ -1484,4 +1484,38 @@ CREATE TABLE IF NOT EXISTS ConvoyNotificationOverrides (
 );
 CREATE INDEX IF NOT EXISTS idx_convoy_notification_overrides_closed ON ConvoyNotificationOverrides(convoy_closed_at);
 
+-- ── D12 P3 — Daemon update history & start log ───────────────────────────────
+-- DaemonUpdateHistory: one row per `force daemon update` invocation.
+-- outcome ∈ {'success', 'rolled_back', 'failed'}. Replaces P1's trust-file-
+-- only history view — `force daemon history` reads this table first and
+-- offers `--from-trust-file` as a legacy fallback.
+CREATE TABLE IF NOT EXISTS DaemonUpdateHistory (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT    NOT NULL,                  -- datetime('now')
+    old_binary_sha  TEXT    NOT NULL,                  -- SHA256 before swap
+    new_binary_sha  TEXT    NOT NULL,                  -- SHA256 after swap
+    old_git_sha     TEXT    NOT NULL DEFAULT '',
+    new_git_sha     TEXT    NOT NULL DEFAULT '',
+    operator        TEXT    NOT NULL DEFAULT '',       -- $USER
+    outcome         TEXT    NOT NULL,                  -- 'success' | 'rolled_back' | 'failed'
+    notes           TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_daemon_update_history_ts ON DaemonUpdateHistory(ts);
+
+-- DaemonStartLog: one row per daemon start. The crash-budget guard reads
+-- RecentStartCount(...) before any agents.Spawn* and exits 2 with a clear
+-- stderr when the threshold is breached. This stops launchd / systemd from
+-- chewing CPU on a broken binary in an infinite restart loop. The threshold
+-- is configurable via SystemConfig: daemon_crash_budget_window_minutes
+-- (default 5) and daemon_crash_budget_max_starts (default 3).
+CREATE TABLE IF NOT EXISTS DaemonStartLog (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,                          -- datetime('now')
+    binary_sha  TEXT NOT NULL,
+    git_sha     TEXT NOT NULL DEFAULT '',
+    pid         INTEGER NOT NULL,
+    outcome     TEXT NOT NULL DEFAULT 'started'         -- 'started' | 'crash_loop_aborted'
+);
+CREATE INDEX IF NOT EXISTS idx_daemon_start_log_ts ON DaemonStartLog(ts);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────

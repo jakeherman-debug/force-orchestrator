@@ -1510,6 +1510,39 @@ func createSchema(db *sql.DB) {
 		convoy_closed_at TEXT    DEFAULT NULL
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_notification_overrides_closed ON ConvoyNotificationOverrides(convoy_closed_at);`)
+
+	// ── D12 P3 — Daemon update history & start log ────────────────────────────
+	// DaemonUpdateHistory: one row per `force daemon update` invocation.
+	// Records old/new binary SHA, old/new git SHA, operator, outcome,
+	// and any notes. Replaces P1's trust-file-only history. The `outcome`
+	// column is a small enum: 'success' | 'rolled_back' | 'failed'.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DaemonUpdateHistory (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts              TEXT    NOT NULL,
+		old_binary_sha  TEXT    NOT NULL,
+		new_binary_sha  TEXT    NOT NULL,
+		old_git_sha     TEXT    NOT NULL DEFAULT '',
+		new_git_sha     TEXT    NOT NULL DEFAULT '',
+		operator        TEXT    NOT NULL DEFAULT '',
+		outcome         TEXT    NOT NULL,
+		notes           TEXT    NOT NULL DEFAULT ''
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_daemon_update_history_ts ON DaemonUpdateHistory(ts);`)
+
+	// DaemonStartLog: one row per daemon start. The crash-budget guard
+	// (cmd/force/fleet_cmds.go) reads RecentStartCount(...) before the
+	// agent spawn loop and exits 2 with a clear message when the threshold
+	// is breached. This prevents launchd / systemd from chewing CPU on a
+	// broken binary in an infinite restart loop.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DaemonStartLog (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts          TEXT NOT NULL,
+		binary_sha  TEXT NOT NULL,
+		git_sha     TEXT NOT NULL DEFAULT '',
+		pid         INTEGER NOT NULL,
+		outcome     TEXT NOT NULL DEFAULT 'started'
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_daemon_start_log_ts ON DaemonStartLog(ts);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -2903,4 +2936,32 @@ func runMigrations(db *sql.DB) {
 		convoy_closed_at TEXT    DEFAULT NULL
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_convoy_notification_overrides_closed ON ConvoyNotificationOverrides(convoy_closed_at)`)
+
+	// ── D12 P3 — DaemonUpdateHistory + DaemonStartLog (upgrade path) ────────
+	// Mirror of the createSchema declarations above. CREATE TABLE IF NOT
+	// EXISTS keeps the migration idempotent — fresh DBs already have the
+	// tables from createSchema; upgraded DBs land them here on the next
+	// runMigrations sweep. TestSchemaParity enforces createSchema ↔
+	// schema/schema.sql parity.
+	db.Exec(`CREATE TABLE IF NOT EXISTS DaemonUpdateHistory (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts              TEXT    NOT NULL,
+		old_binary_sha  TEXT    NOT NULL,
+		new_binary_sha  TEXT    NOT NULL,
+		old_git_sha     TEXT    NOT NULL DEFAULT '',
+		new_git_sha     TEXT    NOT NULL DEFAULT '',
+		operator        TEXT    NOT NULL DEFAULT '',
+		outcome         TEXT    NOT NULL,
+		notes           TEXT    NOT NULL DEFAULT ''
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_daemon_update_history_ts ON DaemonUpdateHistory(ts)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS DaemonStartLog (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts          TEXT NOT NULL,
+		binary_sha  TEXT NOT NULL,
+		git_sha     TEXT NOT NULL DEFAULT '',
+		pid         INTEGER NOT NULL,
+		outcome     TEXT NOT NULL DEFAULT 'started'
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_daemon_start_log_ts ON DaemonStartLog(ts)`)
 }

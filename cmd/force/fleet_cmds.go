@@ -24,7 +24,9 @@ import (
 	"force-orchestrator/internal/clients/datadog"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/clients/metrics"
+	"force-orchestrator/internal/daemon/provenance"
 	"force-orchestrator/internal/daemon/singleton"
+	"force-orchestrator/internal/daemon/trust"
 	"force-orchestrator/internal/dashboard"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
@@ -476,6 +478,72 @@ func cmdDaemon(db *sql.DB) {
 	} else {
 		fmt.Println("Bundled dashboard: disabled (`dashboard_enabled=false`).")
 	}
+
+	// ─ D12 P3 crash recovery ─
+	// Crash-budget guard. If N successful starts have happened in the last
+	// W minutes (defaults: N=3, W=5), the next boot is treated as a crash-
+	// loop and aborts with exit 2 instead of running. This prevents a
+	// broken binary from chewing CPU forever via launchd/systemd's
+	// auto-restart contract. Re-arm via `force daemon clear-crash-budget`
+	// once the underlying issue is fixed.
+	//
+	// Configurable via SystemConfig:
+	//   daemon_crash_budget_window_minutes (default 5)
+	//   daemon_crash_budget_max_starts     (default 3)
+	{
+		windowMin := 5
+		if v := store.GetConfig(db, "daemon_crash_budget_window_minutes", ""); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				windowMin = n
+			}
+		}
+		maxStarts := 3
+		if v := store.GetConfig(db, "daemon_crash_budget_max_starts", ""); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				maxStarts = n
+			}
+		}
+
+		// Identify ourselves for the audit row. SHA hashing is best-effort
+		// (a binary that can't read itself shouldn't block the daemon, just
+		// log the SHA as empty in the row).
+		binSHA := ""
+		if exe, exeErr := os.Executable(); exeErr == nil {
+			if h, hErr := trust.HashFile(exe); hErr == nil {
+				binSHA = h
+			}
+		}
+		gitSHA := provenance.Get().GitSHA
+
+		n, scErr := store.RecentStartCount(db, time.Duration(windowMin)*time.Minute)
+		if scErr != nil {
+			log.Printf("daemon: failed to read DaemonStartLog: %v", scErr)
+		} else if n >= maxStarts {
+			// Trip — record the abort, then fail fast. Exit code 2 so launchd
+			// (which auto-restarts on Crashed=true / SuccessfulExit=false)
+			// distinguishes this from an ordinary crash via the log message.
+			if recErr := store.RecordDaemonStartAborted(db, binSHA, gitSHA, os.Getpid()); recErr != nil {
+				log.Printf("daemon: failed to record crash-loop abort: %v", recErr)
+			}
+			fmt.Fprintf(os.Stderr,
+				"daemon: crash-loop detected — %d successful starts in last %d minute(s); aborting.\n"+
+					"  binary SHA: %s\n"+
+					"  git SHA   : %s\n"+
+					"Run `force daemon clear-crash-budget` once you've fixed the underlying issue.\n",
+				n, windowMin, binSHA, gitSHA)
+			os.Exit(2)
+		}
+		if recErr := store.RecordDaemonStart(db, binSHA, gitSHA, os.Getpid()); recErr != nil {
+			log.Printf("daemon: failed to record start: %v", recErr)
+		}
+
+		// Boot-time recovery sweep — runs BEFORE any agent spawn so the
+		// fleet starts from a known-clean state. See cmd/force/daemon_boot_sweep.go.
+		if sweepErr := runBootSweep(ctx, db); sweepErr != nil {
+			log.Printf("daemon: boot sweep error (continuing): %v", sweepErr)
+		}
+	}
+	// ─ end D12 P3 ─
 
 	go agents.SpawnChancellor(ctx, db)
 	for i := 0; i < numCommanders; i++ {
