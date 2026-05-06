@@ -2,7 +2,7 @@ BINARY  := force
 TAGS    := sqlite_fts5
 GOFLAGS := -tags $(TAGS)
 
-.PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install render-rules render-rules-check protect-db unprotect-db install-snapshots uninstall-snapshots db-status
+.PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install render-rules render-rules-check protect-db unprotect-db install-snapshots uninstall-snapshots db-status docs-broken-links docs-orphan-check docs-architecture docs-check
 
 build:
 	go build $(GOFLAGS) -o $(BINARY) ./cmd/force/
@@ -43,6 +43,38 @@ fuzz:
 # Runs the guard as a real Go test so CI picks it up uniformly.
 test-audit:
 	go test $(GOFLAGS) -timeout 60s -run '^TestNoAuditSkipMarkersRemain$$' -count=1 ./internal/audittools
+
+# make docs-broken-links — D13 P3 drift detector. Walks every *.md
+# in the repo and verifies every relative-path Markdown link
+# `[text](path/to/file.md#anchor)` resolves: file exists, anchor
+# (if any) matches an H1/H2/H3 heading in the target. External
+# http(s):// links are skipped. Runs in `make test` automatically;
+# this target is the operator-friendly alias.
+docs-broken-links:
+	go test $(GOFLAGS) -timeout 60s -run '^TestPatternP_DocsBrokenLinks$$' -count=1 ./internal/audittools/...
+
+# make docs-orphan-check — D13 P3 drift detector. Asserts every
+# *.md under docs/{agents,subsystems,patterns}/ is linked from a
+# sibling README.md or from docs/README.md. Files that exist on
+# disk but are not reachable from an index are "orphans" and the
+# test fails.
+docs-orphan-check:
+	go test $(GOFLAGS) -timeout 60s -run '^TestPatternP_DocsOrphan$$' -count=1 ./internal/audittools/...
+
+# make docs-architecture — D13 P3 consolidated structural-invariant
+# test (H2 section floor on authored docs, auto-rendered exemption
+# honored, docs/README.md links to every category mini-index).
+docs-architecture:
+	go test $(GOFLAGS) -timeout 60s -run '^TestPatternP_DocsArchitecture$$' -count=1 ./internal/audittools/...
+
+# make docs-check — full docs gate. Runs all three D13 P3 drift
+# detectors plus the four P1 structural guards (README cap, index
+# stubs, metadata blocks). Used by the pre-commit hook
+# scripts/pre-commit/docs-check.sh and the D13 verifier.
+docs-check: docs-broken-links docs-orphan-check docs-architecture
+	go test $(GOFLAGS) -timeout 60s -count=1 \
+		-run '^(TestReadmeSizeUnder200Lines|TestDocsIndexExists|TestDocsSubdirsHaveIndex|TestMetadataBlockOnAllNewDocs)$$' \
+		./internal/audittools/...
 
 # make hooks-install — opt-in installer for the local pre-commit gate.
 # Symlinks scripts/pre-commit/forceignore-check.sh into .git/hooks/pre-commit.

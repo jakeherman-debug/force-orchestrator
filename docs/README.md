@@ -25,19 +25,19 @@ This is the canonical entry point. Everything in `docs/` is reachable from here 
 
 Per-subsystem operator/user reference. P2 fills these out from the README + closure reports.
 
-- [Daemon lifecycle](subsystems/daemon-lifecycle.md) — D12 (planned)
+- [Daemon lifecycle](subsystems/daemon-lifecycle.md) — D12 (stub — fills when D12 closes)
 - [Notification routing](subsystems/notification-routing.md) — D11 (`config/notifications.yaml`, `notify.Dispatch`)
 - [Dashboard](subsystems/dashboard.md) — D11 + D5.5 (`config/dashboard.yaml`, tabs, JSON API, security)
 - [Dashboard implementation briefs](subsystems/dashboard-implementation.md) — D3 Phase 6 task briefs (agent-handoff artifact)
-- [Convoy staging](subsystems/convoy-staging.md) — D5.5 (planned)
+- [Convoy staging](subsystems/convoy-staging.md) — D5.5 (stub — design lives in closure report)
 - [Convoy lifecycle](subsystems/convoy-lifecycle.md) — Feature → Convoy → ask-branch → ConvoyReview → Ship
-- [Supply chain hygiene](subsystems/supply-chain.md) — D5 (SUPPLY-001..005, planned)
+- [Supply chain hygiene](subsystems/supply-chain.md) — D5 (SUPPLY-001..005, stub — design lives in closure report)
 - [Cross-repo dependency graph](subsystems/cross-repo-graph.md) — D8
-- [Architecture health report](subsystems/arch-health.md) — D9 (`docs/arch-health-weights.yaml`, planned)
+- [Architecture health report](subsystems/arch-health.md) — D9 (`docs/arch-health-weights.yaml`, stub — design lives in closure report)
 - [Archaeologist](subsystems/archaeologist.md) — D9 (operator-gated incident archive)
-- [Synthetic onboarding CLI](subsystems/onboarding-cli.md) — D6 (planned)
-- [Synthetic handoff documentation](subsystems/handoff-docs.md) — D10 (planned)
-- [Model-tier optimization experiments](subsystems/model-tier-experiments.md) — D7 (planned)
+- [Synthetic onboarding CLI](subsystems/onboarding-cli.md) — D6 (stub — design lives in closure report)
+- [Synthetic handoff documentation](subsystems/handoff-docs.md) — D10 (stub — design lives in closure report)
+- [Model-tier optimization experiments](subsystems/model-tier-experiments.md) — D7 (stub — design lives in closure report)
 - [Paired runs](subsystems/paired-runs.md) — D3 (full design)
 - [PR flow](subsystems/pr-flow.md) — operator summary; binding invariants in [pr-flow-invariants.md](pr-flow-invariants.md)
 - [Self-healing](subsystems/self-healing.md) — operator summary; binding invariants in [self-healing.md](self-healing.md)
@@ -48,11 +48,11 @@ Per-subsystem operator/user reference. P2 fills these out from the README + clos
 - [Worktree isolation](subsystems/worktree-isolation.md) — per-agent worktrees + base-drift
 - [CLI shelling for LLM calls](subsystems/cli-shelling.md) — `claude -p` invocation layering
 - [Escalation + Medic](subsystems/escalation-and-medic.md) — failure paths and the no-silent-failures rule
-- [Fleet memory + RAG](subsystems/fleet-memory.md) — Librarian curator (planned)
-- [Mail system](subsystems/mail-system.md) — roles, types, automatic triggers (planned)
-- [Directives](subsystems/directives.md) — standing operator directives loaded from disk (planned)
-- [Watchdog dogs](subsystems/dogs.md) — cooldowns + behavior reference (planned)
-- [Security posture](subsystems/security.md) — capability profiles, bash guard, scrubbing, repo-mode gating (planned)
+- [Fleet memory + RAG](subsystems/fleet-memory.md) — Librarian curator (stub)
+- [Mail system](subsystems/mail-system.md) — roles, types, automatic triggers (stub)
+- [Directives](subsystems/directives.md) — standing operator directives loaded from disk (stub)
+- [Watchdog dogs](subsystems/dogs.md) — cooldowns + behavior reference (stub)
+- [Security posture](subsystems/security.md) — capability profiles, bash guard, scrubbing, repo-mode gating (stub)
 
 Subdirectory index: [`subsystems/README.md`](subsystems/README.md).
 
@@ -88,7 +88,7 @@ Subdirectory index: [`patterns/README.md`](patterns/README.md). Currently a stub
 
 ## For AI agents working on this codebase
 
-- [CLAUDE.md](CLAUDE.md) — invariants + commit discipline + schema conventions (auto-rendered from `internal/store/fleet_rules_audit.go` via `make render-rules`; do not edit by hand)
+- [CLAUDE.md](../CLAUDE.md) — invariants + commit discipline + schema conventions (auto-rendered from `internal/store/fleet_rules_audit.go` via `make render-rules`; do not edit by hand)
 - [Architecture: Claude CLI invocation layering](architecture/claude-cli-invocation.md) — which CWD each agent runs from, what CLAUDE.md auto-loads, where the fleet's invariants reach the model
 - [Patterns index](patterns/README.md) — every audit pattern with rationale + enforcement
 - [Closure reports](closures/) — per-deliverable evidence trails (D0–D11)
@@ -96,7 +96,7 @@ Subdirectory index: [`patterns/README.md`](patterns/README.md). Currently a stub
 ## References
 
 - [Configuration files index](references/README.md) — `config/notifications.yaml`, `config/dashboard.yaml`, `arch-health-weights.yaml`, capability profiles, license matrix
-- SystemConfig knob index — currently in [`README.md` § Configuration](../README.md#configuration); P2 migrates here
+- SystemConfig knob index — see [`references/README.md`](references/README.md); per-knob explainers land in subsequent deliverables
 
 ## Closure reports
 

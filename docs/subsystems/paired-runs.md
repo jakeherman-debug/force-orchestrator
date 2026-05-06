@@ -780,7 +780,7 @@ type RunAssignment struct {
 4. Reject overlap with already-assigned experiments on shared dimensions (factorial orthogonality invariant).
 5. Apply each assigned treatment's dimensions to `CallDescriptor` in a deterministic order. Conflicts on orthogonal dimensions are impossible by invariant (4); conflicts on non-dimensional fields are impossible because experiments don't modify non-dimensional fields.
 6. Record `RunAssignment` list.
-7. If any assigned experiment is in `confirming` status or the agent is in `tool_using_agent_set`, additionally enroll in paired-shadow: spawn the shadow arm (see [Shadow worktrees](#shadow-worktrees)).
+7. If any assigned experiment is in `confirming` status or the agent is in `tool_using_agent_set`, additionally enroll in paired-shadow: spawn the shadow arm (see [Shadow worktrees](#shadow-worktrees-level-3-paired-mode)).
 8. Return.
 
 **Determinism.** Given the same fleet state, the same call always yields the same assignment. This is the basis for inheritance — a convoy spawned from a feature inherits that feature's assignment without re-hashing.

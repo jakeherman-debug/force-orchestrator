@@ -18,7 +18,7 @@ Design sketch for four agents not yet built. Three are review layers at distinct
 
 Each is motivated by a concrete failure class surfaced in the Code Red audit (docs/operator-archives/AUDIT.md) and its fix campaign. The pipeline position, scope, and cost model of each is chosen so they're additive to existing review gates, not duplicative.
 
-**Companion doc.** Engineering Corps and the mechanisms it operates (experiments, holdout, metric/rule registries, three-layer versioning) are specified in detail in [paired-runs.md](./paired-runs.md). This doc covers the agent's role and boundaries; paired-runs covers the full experimentation primitive.
+**Companion doc.** Engineering Corps and the mechanisms it operates (experiments, holdout, metric/rule registries, three-layer versioning) are specified in detail in [paired-runs.md](subsystems/paired-runs.md). This doc covers the agent's role and boundaries; paired-runs covers the full experimentation primitive.
 
 **Prerequisite.** Senate and Engineering Corps both depend on the Librarian evolution outlined at the bottom — Senators can't function without curated per-repo memory, and Engineering Corps can't function without a hypothesis stream from Librarian. Raw FleetMemory is too noisy to serve either purpose.
 
@@ -76,7 +76,7 @@ Operator Ship It
 
 Five review layers total (Senate / ISB+BoS / Captain / Council / ConvoyReview). Each covers a different concern; overlap between layers is the exception, not the rule.
 
-Engineering Corps operates on an orthogonal axis — not inline with any call in the pipeline above, but running alongside as the experimentation orchestrator. It authors experiments from Librarian hypotheses, monitors running experiments' posteriors and budgets, declares winners/nulls, and assembles promotion proposals. Its effects reach every agent in the pipeline through the `treatments.Apply` ingress that wraps LLM calls. See [Engineering Corps](#engineering-corps) and [paired-runs.md](./paired-runs.md).
+Engineering Corps operates on an orthogonal axis — not inline with any call in the pipeline above, but running alongside as the experimentation orchestrator. It authors experiments from Librarian hypotheses, monitors running experiments' posteriors and budgets, declares winners/nulls, and assembles promotion proposals. Its effects reach every agent in the pipeline through the `treatments.Apply` ingress that wraps LLM calls. See [Engineering Corps](#engineering-corps) and [paired-runs.md](subsystems/paired-runs.md).
 
 ---
 
@@ -419,7 +419,7 @@ Engineering Corps CAN unilaterally: pull the plug on a running experiment that's
 
 ### Storage
 
-Fully specified in [paired-runs.md](./paired-runs.md). Tables introduced: `Experiments`, `ExperimentTreatments`, `ExperimentMetrics`, `ExperimentRuns`, `ExperimentOutcomes`, `TreatmentSpecs`, `MetricVersions`, `AnalysisFrameworks`, `FleetStateSnapshots`, `FleetRules`, `PromotionProposals`, `GlobalHoldouts`, `ModelAvailability`.
+Fully specified in [paired-runs.md](subsystems/paired-runs.md). Tables introduced: `Experiments`, `ExperimentTreatments`, `ExperimentMetrics`, `ExperimentRuns`, `ExperimentOutcomes`, `TreatmentSpecs`, `MetricVersions`, `AnalysisFrameworks`, `FleetStateSnapshots`, `FleetRules`, `PromotionProposals`, `GlobalHoldouts`, `ModelAvailability`.
 
 ### Cost model
 
@@ -500,7 +500,7 @@ Without the loop: agents forget, rules don't emerge, drift wins. Without experim
 
 ## Implementation order
 
-1. **FleetRules + rule-renderer** — shared substrate for BoS, ISB, Senate, and CLAUDE.md. Bootstrap migration parses the current CLAUDE.md into `FleetRules` rows; pre-commit hook rejects hand-edits to rendered files. Everything downstream assumes DB-as-SOT. Full design in [paired-runs.md](./paired-runs.md).
+1. **FleetRules + rule-renderer** — shared substrate for BoS, ISB, Senate, and CLAUDE.md. Bootstrap migration parses the current CLAUDE.md into `FleetRules` rows; pre-commit hook rejects hand-edits to rendered files. Everything downstream assumes DB-as-SOT. Full design in [paired-runs.md](subsystems/paired-runs.md).
 
 2. **BoS** — smallest new-surface-area for enforcement code; rule bodies already exist in CLAUDE.md form. Extract invariants into `FleetRules` rows + AST check bodies; render BoS's YAML files from the DB. Gives the fleet enforcement of what it already says it does.
 
@@ -532,4 +532,4 @@ Things not settled in this sketch; worth resolving before implementation:
 
 *Resolved elsewhere:*
 
-- ~~**Who authors the first SENATE.md for existing repos.**~~ Engineering Corps authors initial Senator rules as candidate `PromotionProposals` during the `SenatorOnboarding` task; operator ratifies through the standard flow. Rendered `SENATE.md` follows automatically from `FleetRules`. See [paired-runs.md](./paired-runs.md) §"Engineering Corps" and §"Rule Registry."
+- ~~**Who authors the first SENATE.md for existing repos.**~~ Engineering Corps authors initial Senator rules as candidate `PromotionProposals` during the `SenatorOnboarding` task; operator ratifies through the standard flow. Rendered `SENATE.md` follows automatically from `FleetRules`. See [paired-runs.md](subsystems/paired-runs.md) §"Engineering Corps" and §"Rule Registry."

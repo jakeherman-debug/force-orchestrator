@@ -26,7 +26,7 @@ Currently a stub directory — D13 Phase 2 fills the per-config explainers.
 
 ## SystemConfig knob index
 
-The `SystemConfig` table is a key/value store of runtime-tunable knobs. The full operator-facing list lives in [`README.md` § Configuration](../../README.md#configuration); D13 P2 migrates that table into a per-knob explainer here.
+The `SystemConfig` table is a key/value store of runtime-tunable knobs. The per-knob explainer table will be migrated into this references directory in a follow-up deliverable; until then, refer to inline `SystemConfig` keys in the relevant subsystem code (search for `store.GetSystemConfig` / `SystemConfigKey*` in `internal/store/`).
 
 ## .forceignore
 

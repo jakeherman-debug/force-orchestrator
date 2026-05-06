@@ -62,7 +62,7 @@ make build                                # produces ./force
 | See what shipped in each deliverable | [`docs/closures/`](docs/closures/) |
 | Browse the audit-pattern enforcement layer | [`docs/patterns/`](docs/patterns/README.md) |
 | See every config knob and YAML file | [`docs/references/`](docs/references/README.md) |
-| Read the agent-facing invariants (commit / schema / test discipline) | [`docs/CLAUDE.md`](docs/CLAUDE.md) — auto-rendered, do not hand-edit |
+| Read the agent-facing invariants (commit / schema / test discipline) | [`CLAUDE.md`](CLAUDE.md) — auto-rendered, do not hand-edit |
 
 The canonical entry into the docs tree is [`docs/README.md`](docs/README.md). Everything is reachable from there in 1–2 hops.
 
@@ -75,10 +75,10 @@ This is a single-operator project, but the hygiene is the same as a team codebas
 - **Conventional commits** (`feat:`, `fix:`, `docs:`, …). Body explains the **why**, not the what.
 - **No `--no-verify`.** Pre-commit hooks run for a reason; if one fails, fix the root cause and re-stage. Never `--amend` after a hook failure (the commit didn't happen).
 - **Tests gate every phase.** `make test` (with `-tags sqlite_fts5`) is the gate. New code paths need a happy-path test, a per-failure-mode test, and an idempotence test.
-- **`docs/CLAUDE.md` is the agent-facing rules contract.** It's auto-rendered from `internal/store/fleet_rules_audit.go` via `make render-rules`. To add a universal-load rule: insert a FleetRules row with `render_to='claude-md-file'`, add the justification comment in the audit file, then re-render.
+- **`CLAUDE.md` is the agent-facing rules contract.** It's auto-rendered from `internal/store/fleet_rules_audit.go` via `make render-rules`. To add a universal-load rule: insert a FleetRules row with `render_to='claude-md-file'`, add the justification comment in the audit file, then re-render.
 - **Pattern tests are not "nice-to-haves."** Each grep- or AST-based regression in `internal/audittools/` was earned the hard way; CI failure there means a real invariant has drifted.
 
-Full architecture invariants + commit + schema + testing rules live in [`docs/CLAUDE.md`](docs/CLAUDE.md).
+Full architecture invariants + commit + schema + testing rules live in [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
