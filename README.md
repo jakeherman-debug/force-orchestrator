@@ -38,13 +38,15 @@ Agents shell out to `claude -p` (never the Anthropic HTTP API directly), so each
 
 ```bash
 git clone <this repo> && cd force-orchestrator
-make build                                # produces ./force
+make build                                # produces ./force (provenance ldflags injected)
 ./force add-repo myapp /path/to/myapp "Backend API"
-./force daemon &                          # start the agent fleet
-./force dashboard                         # open http://localhost:8080
+./force daemon foreground                 # start fleet + bundled dashboard on :41977
+# or: ./force daemon install               # launchd (macOS) / systemd user-unit (linux)
 ```
 
-`force doctor` after install verifies `git`, `claude`, `gh`, repo paths, DB integrity, and e-stop state. Full step-by-step in [`docs/onboarding.md`](docs/onboarding.md).
+The daemon bundles the dashboard on `127.0.0.1:41977` (Star Wars: A New Hope, 1977 — operator-mnemonic). Standalone `./force dashboard` is still supported for back-compat.
+
+`force doctor` after install verifies `git`, `claude`, `gh`, repo paths, DB integrity, and e-stop state. `force daemon status` surfaces PID, provenance, and trust-file state. Full step-by-step in [`docs/onboarding.md`](docs/onboarding.md); the daemon lifecycle reference is [`docs/subsystems/daemon-lifecycle.md`](docs/subsystems/daemon-lifecycle.md).
 
 ---
 

@@ -4,6 +4,7 @@ import (
 	"log"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -23,6 +24,8 @@ import (
 	"force-orchestrator/internal/clients/datadog"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/clients/metrics"
+	"force-orchestrator/internal/daemon/singleton"
+	"force-orchestrator/internal/dashboard"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/holdout"
@@ -54,20 +57,34 @@ func readDaemonPID() (int, bool) {
 }
 
 func cmdDaemon(db *sql.DB) {
-	// Prevent double-daemon: write PID file, but verify if the existing one is still alive
-	pidFile := "fleet.pid"
-	if existing, err := os.ReadFile(pidFile); err == nil {
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(existing)))
-		if pid > 0 {
-			proc, procErr := os.FindProcess(pid)
-			if procErr == nil && proc.Signal(syscall.Signal(0)) == nil {
-				fmt.Printf("Daemon already running (PID %d). Run 'force estop' to halt agents.\n", pid)
-				os.Exit(1)
-			}
+	// D12 P1 — single-instance enforcement via flock + PID file.
+	// `singleton.Acquire` opens ~/.force/force.pid, takes a non-blocking
+	// exclusive flock, and writes our PID. If another live daemon holds
+	// the lock, we exit 1 with an operator-friendly message; if a stale
+	// PID file exists (prior daemon crashed), we take over and log it.
+	//
+	// Legacy fleet.pid is kept for backwards-compat (cmdScale +
+	// readDaemonPID still read it), but the SOURCE OF TRUTH for "is a
+	// daemon running" is the flock on ~/.force/force.pid.
+	pidPath := singleton.DefaultPIDPath()
+	release, stale, lockErr := singleton.Acquire(pidPath)
+	if lockErr != nil {
+		var alreadyErr *singleton.ErrAlreadyRunning
+		if errors.As(lockErr, &alreadyErr) {
+			fmt.Println(alreadyErr.Error())
+			os.Exit(1)
 		}
-		fmt.Printf("Stale fleet.pid found (PID %s) — previous daemon appears dead, restarting.\n",
-			strings.TrimSpace(string(existing)))
+		fmt.Fprintf(os.Stderr, "Daemon start aborted: cannot acquire singleton lock: %v\n", lockErr)
+		os.Exit(1)
 	}
+	defer release()
+	if stale.Stale {
+		fmt.Printf("stale PID file from PID %d — taking over.\n", stale.PriorPID)
+	}
+
+	// Legacy fleet.pid (kept for back-compat with cmdScale's
+	// readDaemonPID + any operator scripts that read fleet.pid).
+	pidFile := "fleet.pid"
 	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
 	defer os.Remove(pidFile)
 
@@ -440,6 +457,25 @@ func cmdDaemon(db *sql.DB) {
 		// The runner only emits --model when this is non-empty.
 		return applied.Model, nil
 	})
+
+	// D12 P1 Component 5 — bundled dashboard. Default port 41977
+	// (Star Wars: A New Hope, 1977 — operator-mnemonic, low collision
+	// risk). Loopback-only bind is enforced inside RunDashboardCtx via
+	// loopbackBindAddr. Disabling: `force config set dashboard_enabled false`.
+	dashEnabled := store.GetConfig(db, "dashboard_enabled", "")
+	bundledDashPort := 41977
+	if v := store.GetConfig(db, "dashboard_port", ""); v != "" {
+		fmt.Sscanf(v, "%d", &bundledDashPort)
+	}
+	if bundledDashPort <= 0 {
+		bundledDashPort = 41977
+	}
+	if dashEnabled == "" || (dashEnabled != "false" && dashEnabled != "0" && dashEnabled != "no") {
+		fmt.Printf("Bundled dashboard → http://127.0.0.1:%d/ (set `force config set dashboard_enabled false` to disable)\n", bundledDashPort)
+		go dashboard.RunDashboardCtx(ctx, db, bundledDashPort)
+	} else {
+		fmt.Println("Bundled dashboard: disabled (`dashboard_enabled=false`).")
+	}
 
 	go agents.SpawnChancellor(ctx, db)
 	for i := 0; i < numCommanders; i++ {

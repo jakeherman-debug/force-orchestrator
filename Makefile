@@ -2,10 +2,21 @@ BINARY  := force
 TAGS    := sqlite_fts5
 GOFLAGS := -tags $(TAGS)
 
+# D12 P1 — provenance ldflags. The Makefile is the authoritative build
+# path; binaries built without these vars carry "unknown" markers so
+# `force version` and the trust-file gate can refuse / warn. Captured
+# at make-invocation time, not per-go-build, so a single `make build`
+# stamps a coherent triple.
+GIT_SHA    := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+
+LDFLAGS := -ldflags "-X main.GitSHA=$(GIT_SHA) -X main.BuildTime=$(BUILD_TIME) -X main.GitBranch=$(GIT_BRANCH)"
+
 .PHONY: build build-bash-guard test cover clean help smoke fuzz test-audit hooks-install render-rules render-rules-check protect-db unprotect-db install-snapshots uninstall-snapshots db-status docs-broken-links docs-orphan-check docs-architecture docs-check
 
 build:
-	go build $(GOFLAGS) -o $(BINARY) ./cmd/force/
+	go build $(GOFLAGS) $(LDFLAGS) -o $(BINARY) ./cmd/force/
 
 # make build-bash-guard — compile the astromech Bash-tool gatekeeper.
 # Output goes to ./bin/force-bash-guard so the astromech wiring code

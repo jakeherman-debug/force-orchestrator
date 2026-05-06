@@ -13,9 +13,28 @@ import (
 
 	"force-orchestrator/internal/agents"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/daemon/provenance"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
+
+// Build-time provenance — injected by the Makefile via -ldflags.
+// See `make build` and provenance.Set wiring below. A binary built
+// outside the Makefile keeps the "unknown" defaults; `force version`
+// and `force daemon status` surface those as a hint to the operator
+// that the binary's history is unverified.
+var (
+	GitSHA    = "unknown"
+	BuildTime = "unknown"
+	GitBranch = "unknown"
+)
+
+func init() {
+	// Mirror the -ldflags-injected vars into the provenance package
+	// so non-main code (dashboard /api/version, daemon status, etc.)
+	// can read them without importing main.
+	provenance.Set(GitSHA, BuildTime, GitBranch)
+}
 
 func mustParseID(s string) int {
 	id, err := strconv.Atoi(s)
@@ -58,9 +77,18 @@ func main() {
 	case "version", "--version", "-v":
 		fmt.Println("force-orchestrator — Galactic Fleet Command System")
 		fmt.Printf("Built with %s\n", runtime.Version())
+		// D12 P1 — provenance from -ldflags. "unknown" means the binary
+		// was not built via `make build`; operators should rebuild via
+		// the Makefile so trust-file entries are auditable.
+		fmt.Printf("git-sha    %s\n", GitSHA)
+		fmt.Printf("git-branch %s\n", GitBranch)
+		fmt.Printf("build-time %s\n", BuildTime)
 
 	case "daemon":
-		cmdDaemon(db)
+		// D12 P1 — `force daemon <subcommand>` family. Bare `force daemon`
+		// (no subcommand) routes through dispatchDaemon and falls back to
+		// cmdDaemon (legacy foreground) so backwards compat is preserved.
+		dispatchDaemon(db, os.Args[2:])
 
 	case "add":
 		if len(os.Args) < 3 {

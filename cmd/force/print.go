@@ -631,7 +631,24 @@ func printUsage() {
 	fmt.Println(`Usage: force <command> [args]
 
 Agent control:
-  daemon                         Start the fleet daemon (all agents)
+  daemon                         Start the fleet daemon (legacy bare; alias for 'daemon foreground')
+  daemon <subcommand>            Daemon lifecycle control surface (D12 P1):
+                                   foreground         Run daemon in the foreground
+                                   install [--dry-run]
+                                                      Install launchd plist (darwin) or systemd unit (linux)
+                                   uninstall          Remove the installed plist/unit
+                                   status             PID, provenance, dashboard URL, trust file
+                                   stop               SIGTERM the running daemon
+                                   logs [-f] [-n N]   Tail fleet.log
+                                   update [--binary <p>] [--assume-yes]
+                                                      Replace binary with 4-diff trust gate
+                                   rollback           Restore the previous binary
+                                   trust list/add <p>/remove <sha>
+                                                      Manage ~/.force/trusted-binary-hashes
+                                   history [--limit N]
+                                                      DaemonUpdateHistory (P3 schema; trust-file fallback in P1)
+                                   validate-config    Parse config/*.yaml without starting
+                                   validate-schema    Schema parity check against the live DB
   estop                          Emergency stop — halt all agents immediately
   resume                         Clear e-stop and resume agents
   scale [--astromechs N] [--council N] [--captain N] [--commanders N] [--investigators N] [--auditors N] [--librarians N]

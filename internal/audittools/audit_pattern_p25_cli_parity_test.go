@@ -32,6 +32,7 @@ var p25Allowlist = map[string]string{
 	"/api/control/estop":     "operator e-stop already exposed via existing `force estop` command",
 	"/api/control/resume":    "operator resume already exposed via existing `force resume` command",
 	"/api/dashboard/health":  "read-only health probe; no mutation",
+	"/api/health":            "D12 P1 — read-only liveness alias for /healthz; smoke-test surface for `curl http://127.0.0.1:41977/api/health`; no mutation",
 	"/api/disagreement-rates": "read-only metrics view",
 	"/api/escalations/":      "operator escalation actions exposed via `force escalation ack` (existing)",
 	"/api/proposals/":        "operator ratification exposed via `force ratify` (existing)",
