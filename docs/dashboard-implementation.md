@@ -1,3 +1,10 @@
+---
+audience: agent
+scope: D3 Phase 6 dashboard redesign task briefs (Pulse, Briefing, Reflection IA + per-task implementation/validation prompts).
+owner: D3
+last_reviewed: 2026-05-05
+---
+
 # Dashboard Implementation — Task Briefs
 
 This document is the agent-handoff artifact for D3 Phase 6's dashboard redesign. Each task below carries:
