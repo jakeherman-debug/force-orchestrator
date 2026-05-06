@@ -23,7 +23,19 @@ var staticFiles embed.FS
 //     securityMiddleware (CSP, X-Frame-Options, etc.);
 //   - every mutating request (POST/PUT/PATCH/DELETE) is Origin-gated and
 //     body-capped at 256 KB before the handler sees it.
+//
+// Standalone CLI use blocks until the process is killed. The daemon-
+// bundled path (D12 P1) calls RunDashboardCtx with the daemon's ctx
+// so a SIGINT cleanly shuts the HTTP server down before the agents
+// drain.
 func RunDashboard(db *sql.DB, port int) {
+	RunDashboardCtx(context.Background(), db, port)
+}
+
+// RunDashboardCtx starts the dashboard with a cancellable context.
+// When ctx is cancelled, the HTTP server is gracefully shut down with
+// a 5s deadline and the function returns.
+func RunDashboardCtx(ctx context.Context, db *sql.DB, port int) {
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dashboard: failed to load static assets: %v\n", err)
@@ -127,6 +139,9 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/senate/reviews/", handleSenateReviewsSubroutes(db))
 
 	mux.HandleFunc("/healthz", handleHealthz)
+	// D12 P1 — `/api/health` alias so curl smoke tests don't need to
+	// guess between `/healthz` and `/api/health`.
+	mux.HandleFunc("/api/health", handleHealthz)
 
 	// ── D3 P6A.14 — Operator attention tags API.
 	mux.HandleFunc("/api/attention", handleAttentionList(db))
@@ -259,19 +274,39 @@ func RunDashboard(db *sql.DB, port int) {
 	fmt.Printf("Fleet Command Center → http://%s\n", addr)
 	fmt.Println("Press Ctrl+C to stop.")
 
-	// D3 P6A.2 — kick off the heartbeat goroutine. context.Background() is
-	// the right scope here: RunDashboard blocks on ListenAndServe and only
-	// returns on hard shutdown (os.Exit). When ctx threading lands across
-	// the daemon boundary, this swaps for the real ctx.
-	StartHeartbeat(context.Background(), db, addr)
+	// D3 P6A.2 — kick off the heartbeat goroutine. The daemon-bundled
+	// path passes the daemon ctx (so heartbeat stops on SIGTERM); the
+	// standalone CLI path passes context.Background() (RunDashboard
+	// wraps RunDashboardCtx with bg ctx).
+	StartHeartbeat(ctx, db, addr)
 
 	// Wrap mux in the security middleware stack: CSP headers, Origin allow-list
 	// on mutations, 256 KB body cap. Applied globally so no future handler can
 	// opt out by accident.
 	handler := securityMiddleware(port, mux)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+	}
+
+	// Shut down on ctx cancel. Standalone CLI ctx is bg, so this
+	// goroutine sleeps forever — no overhead. Daemon-bundled path
+	// cancels ctx on SIGTERM and the server drains within 5s.
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "dashboard: shutdown: %v\n", err)
+		}
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "dashboard: %v\n", err)
-		os.Exit(1)
+		// Standalone CLI path historically os.Exit'd. The daemon-bundled
+		// path can't os.Exit (the agents are still running). We log
+		// loudly and return — the daemon's ctx cancellation will already
+		// have triggered if this is the bundled path.
 	}
 }
 
