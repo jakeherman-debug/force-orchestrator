@@ -9,7 +9,7 @@ last_reviewed: 2026-05-05
 
 Technical design document for adding experimentation as a first-class fleet primitive. Every decision the fleet makes — prompts, memories, rules, models, context sizes, max_turns, tool availability, agent routing thresholds — becomes testable through the same mechanism. Rule promotions into the fleet's permanent configuration are gated by experimental evidence, not operator intuition.
 
-This is the infrastructure layer beneath the promotion pipeline in [next-gen-agents.md](./next-gen-agents.md). Senate, ISB, BoS, and the evolved Librarian all emit signals that become hypotheses; those hypotheses become experiments; winning experiments promote into the fleet's rule registry. This document specifies how that middle stage works.
+This is the infrastructure layer beneath the promotion pipeline in [next-gen-agents.md](../next-gen-agents.md). Senate, ISB, BoS, and the evolved Librarian all emit signals that become hypotheses; those hypotheses become experiments; winning experiments promote into the fleet's rule registry. This document specifies how that middle stage works.
 
 ---
 
@@ -735,7 +735,7 @@ FleetLearningPanels           -- 6B.12
   source_event_refs_json TEXT
 ```
 
-Per-task implementation prompts and validation prompts for every dashboard sub-track live in `docs/dashboard-implementation.md`. The schema additions above are the data-layer prerequisites that must land in Phase 1.
+Per-task implementation prompts and validation prompts for every dashboard sub-track live in `docs/subsystems/dashboard-implementation.md`. The schema additions above are the data-layer prerequisites that must land in Phase 1.
 
 ---
 
@@ -1519,7 +1519,7 @@ The phasing reflects the consolidated decisions from concerns #1–#5 in the pos
 
 ### Phase 0 (prerequisite)
 
-- Librarian evolution (per [next-gen-agents.md](./next-gen-agents.md)). EC cannot function without curated memory as a hypothesis source.
+- Librarian evolution (per [next-gen-agents.md](../next-gen-agents.md)). EC cannot function without curated memory as a hypothesis source.
 
 ---
 
