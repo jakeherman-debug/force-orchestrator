@@ -179,12 +179,25 @@ func RunDashboard(db *sql.DB, port int) {
 	mux.HandleFunc("/api/notifications/dnd/clear", handleNotificationsDNDClear(db))
 	mux.HandleFunc("/api/notifications/category/", handleNotificationsCategory(db))
 
-	// ── D11 Phase 3 — Dashboard personalization (substrate sub-task A).
-	// GET-only read endpoint that composes YAML defaults
+	// ── D11 Phase 3 — Dashboard personalization.
+	// GET-only read endpoint composes YAML defaults
 	// (config/dashboard.yaml, parsed at daemon startup) with SystemConfig
-	// per-operator overrides. Sub-tasks B (tab + display) and C (saved
-	// filters) add the corresponding POST endpoints.
+	// per-operator overrides (sub-task A — substrate).
+	// Sub-task B adds the tab + display WRITE endpoints (handlers below);
+	// sub-task C adds the saved-filter endpoints (separate handler).
 	mux.HandleFunc("/api/dashboard/config", handleDashboardConfig(db))
+	mux.HandleFunc("/api/dashboard/config/tab/", handleDashboardConfigTabWrite(db))
+	mux.HandleFunc("/api/dashboard/config/display", handleDashboardConfigDisplayWrite(db))
+	mux.HandleFunc("/api/dashboard/config/display/clear", handleDashboardConfigDisplayWrite(db))
+
+	// ── D11 Phase 3 sub-task C — Per-tab saved filters.
+	// GET (list) + POST (create) at the leaf; DELETE + POST /export at
+	// the /<id> sub-route. Yaml-source filters are seeded by
+	// dashconfig.SeedSavedFiltersFromYAML at daemon startup; dashboard-
+	// source filters are operator-saved at runtime and exportable as a
+	// YAML diff for review (never auto-written).
+	mux.HandleFunc("/api/dashboard/saved-filter", handleDashboardSavedFilter(db))
+	mux.HandleFunc("/api/dashboard/saved-filter/", handleDashboardSavedFilterByID(db))
 
 	// ── D3 P6A.5 — OperatorSessionState (resume-where-you-left-off).
 	mux.HandleFunc("/api/session/state", handleSessionState(db))

@@ -385,6 +385,13 @@ func cmdDaemon(db *sql.DB) {
 		if seedErr := dashconfig.SeedRegistryFromYAML(db, dashCfg); seedErr != nil {
 			fmt.Fprintf(os.Stderr, "[DASHCONFIG] registry seed failed (continuing): %v\n", seedErr)
 		}
+		// D11 Phase 3 sub-task C — saved-filters two-way sync (yaml-source
+		// rows are kept in sync with the YAML; dashboard-source rows are
+		// preserved). Failure here is recoverable (existing in-DB rows
+		// remain serviceable), but logged loudly so an operator notices.
+		if seedErr := dashconfig.SeedSavedFiltersFromYAML(db, dashCfg); seedErr != nil {
+			fmt.Fprintf(os.Stderr, "[DASHCONFIG] saved filters seed failed (continuing): %v\n", seedErr)
+		}
 	}
 
 	// D2 T1-2 — wire the per-agent context-size guard. The DB handle

@@ -281,6 +281,14 @@ function switchTab(name) {
     case 'logs':        startLogStream(); break;
   }
   if (name !== 'logs') stopLogStream();
+
+  // D11 P3-B — re-arm per-tab refresh interval to match the resolved
+  // refresh_seconds for the newly-active tab. dashTabRefreshSeconds
+  // reads from the config fetched at boot; absent config yields the
+  // legacy 12s default.
+  if (typeof rearmDashTabRefresh === 'function') {
+    rearmDashTabRefresh(name);
+  }
 }
 
 // ── Experiments tab (D3 Phase 2) ─────────────────────────────────────────
@@ -2347,15 +2355,152 @@ async function deleteMemFromModal() {
   closeModal('mem-modal');
 }
 
-// ── Polling ───────────────────────────────────────────────────────────────────
-function startPolling() {
-  pollStatus();
-  setInterval(pollStatus, 5000);
+// ── D11 P3-B — Dashboard personalization (tab visibility / order /
+//                                          refresh + theme + density) ──
+//
+// Reads /api/dashboard/config once at boot and applies:
+//
+//   1. Tab-bar filter   — only tabs where cfg.tabs[i].visible=true render.
+//   2. Tab-bar ordering — tabs sorted by cfg.tabs[i].order ascending.
+//   3. Theme            — body class theme-light|theme-dark applied
+//                         (system honours prefers-color-scheme).
+//   4. Density          — body class density-compact|density-comfortable.
+//   5. Per-tab refresh  — switchTab() reads cfg.tabs[active].refresh_seconds
+//                         and (re)installs the active-tab refresh interval.
+//   6. Default sort     — cfg.display.default_sort[active] seeds the sort
+//                         when first rendering the active tab.
+//   7. Pagination       — cfg.display.per_table_pagination seeds
+//                         S.dashPagination (consumers may opt-in).
+//
+// All overrides are server-side computed from SystemConfig + YAML; the
+// SPA never makes a personalization decision on its own. Failure to
+// fetch is non-fatal — the SPA falls back to a built-in default config
+// so the dashboard still renders.
+const DASH_DEFAULT_CONFIG = {
+  tabs: [],            // empty → no filtering / no ordering applied (every tab renders)
+  display: {
+    theme:                'dark',         // historical default of the legacy palette
+    density:              'comfortable',
+    default_sort:         {},
+    per_table_pagination: 50,
+  },
+};
 
-  pollStats();
-  setInterval(pollStats, 10000);
+let dashCfg = DASH_DEFAULT_CONFIG;
+let dashTabRefreshHandle = null;     // active-tab refresh interval id
 
-  setInterval(() => {
+async function loadDashboardConfig() {
+  try {
+    const r = await fetch('/api/dashboard/config');
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data && Array.isArray(data.tabs) && data.display) {
+      dashCfg = data;
+      applyDashboardConfig();
+    }
+  } catch (_) {
+    // Network error — leave dashCfg at the default; SPA still functions.
+  }
+}
+
+function applyDashboardConfig() {
+  applyDashTabVisibilityAndOrder();
+  applyDashTheme();
+  applyDashDensity();
+  applyDashPagination();
+  // Reinstall the active-tab refresh interval so it picks up the
+  // resolved refresh_seconds for the current tab.
+  rearmDashTabRefresh(S.activeTab);
+}
+
+function applyDashTabVisibilityAndOrder() {
+  const bar = document.getElementById('tab-bar');
+  if (!bar || !Array.isArray(dashCfg.tabs) || dashCfg.tabs.length === 0) return;
+
+  const buttons = Array.from(bar.querySelectorAll('.tab-btn'));
+  const cfgByID = {};
+  for (const t of dashCfg.tabs) { cfgByID[t.id] = t; }
+
+  // Visibility filter — tabs flagged visible:false get hidden. Tabs not
+  // declared in YAML (defensive case) keep their default visibility.
+  for (const btn of buttons) {
+    const id = btn.dataset.tab;
+    const tab = cfgByID[id];
+    if (tab) {
+      btn.style.display = tab.visible ? '' : 'none';
+    }
+  }
+
+  // Order: sort the visible buttons in DOM by cfg order ascending. Tabs
+  // not in cfg keep their original DOM order, but get appended after.
+  const ordered = buttons.slice().sort((a, b) => {
+    const oa = cfgByID[a.dataset.tab]?.order ?? 1e9;
+    const ob = cfgByID[b.dataset.tab]?.order ?? 1e9;
+    return oa - ob;
+  });
+  // Reinsert in order. The spacer + last-refresh stay at the end.
+  const spacer = document.getElementById('tab-spacer');
+  for (const btn of ordered) {
+    bar.insertBefore(btn, spacer);
+  }
+}
+
+function applyDashTheme() {
+  const theme = (dashCfg.display && dashCfg.display.theme) || 'dark';
+  document.body.classList.remove('theme-light', 'theme-dark');
+  if (theme === 'system') {
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.body.classList.add(prefersDark ? 'theme-dark' : 'theme-light');
+  } else if (theme === 'light') {
+    document.body.classList.add('theme-light');
+  } else {
+    document.body.classList.add('theme-dark');
+  }
+}
+
+function applyDashDensity() {
+  const density = (dashCfg.display && dashCfg.display.density) || 'comfortable';
+  document.body.classList.remove('density-compact', 'density-comfortable');
+  document.body.classList.add(density === 'compact' ? 'density-compact' : 'density-comfortable');
+}
+
+function applyDashPagination() {
+  const n = dashCfg.display && dashCfg.display.per_table_pagination;
+  if (typeof n === 'number' && n > 0) {
+    S.dashPagination = n;
+  }
+}
+
+// dashTabRefreshSeconds returns the resolved refresh_seconds for the
+// given tab, or 12 (the legacy default) if the tab is unknown.
+function dashTabRefreshSeconds(tabName) {
+  if (Array.isArray(dashCfg.tabs)) {
+    const t = dashCfg.tabs.find(x => x.id === tabName);
+    if (t && typeof t.refresh_seconds === 'number' && t.refresh_seconds > 0) {
+      return t.refresh_seconds;
+    }
+  }
+  return 12;
+}
+
+// dashTabDefaultSort returns the resolved default_sort for the active
+// tab, or '' if none configured. SPA tab renderers may consult this on
+// first render.
+function dashTabDefaultSort(tabName) {
+  return (dashCfg.display && dashCfg.display.default_sort && dashCfg.display.default_sort[tabName]) || '';
+}
+
+// rearmDashTabRefresh clears the existing tab-refresh interval and
+// installs a new one tuned to the active tab's refresh_seconds. Called
+// from switchTab() and from applyDashboardConfig() on initial load.
+function rearmDashTabRefresh(tabName) {
+  if (dashTabRefreshHandle !== null) {
+    clearInterval(dashTabRefreshHandle);
+    dashTabRefreshHandle = null;
+  }
+  const seconds = dashTabRefreshSeconds(tabName);
+  const ms = seconds * 1000;
+  dashTabRefreshHandle = setInterval(() => {
     switch(S.activeTab) {
       case 'tasks':       loadTasks();       break;
       case 'escalations': loadEscalations(); break;
@@ -2364,7 +2509,26 @@ function startPolling() {
       case 'mail':        loadMail();        break;
       case 'knowledge':   loadMemories();    break;
     }
-  }, 12000);
+  }, ms);
+}
+
+window.dashTabRefreshSeconds = dashTabRefreshSeconds;
+window.dashTabDefaultSort    = dashTabDefaultSort;
+window.applyDashboardConfig  = applyDashboardConfig;
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+function startPolling() {
+  pollStatus();
+  setInterval(pollStatus, 5000);
+
+  pollStats();
+  setInterval(pollStats, 10000);
+
+  // Per-tab refresh interval — replaces the historical 12s hardcoded
+  // poll. Reads cfg.tabs[active].refresh_seconds via dashTabRefreshSeconds
+  // (D11 P3-B). rearmDashTabRefresh installs the interval; switchTab
+  // re-arms it on tab change.
+  rearmDashTabRefresh(S.activeTab);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -2440,6 +2604,12 @@ $('task-search').addEventListener('input', () => {
 });
 
 initFromURL();
+// D11 P3-B — fetch dashboard personalization config + apply theme /
+// density / tab visibility / ordering / refresh-interval. Runs in
+// parallel with the boot sequence; failures are non-fatal (the SPA
+// keeps the legacy defaults so the dashboard still renders if the
+// /api/dashboard/config endpoint is unreachable).
+loadDashboardConfig();
 startPolling();
 switchTab(S.activeTab);
 renderSortHeaders();
@@ -3733,3 +3903,260 @@ async function notifSubmitSavePreset() {
   }
 }
 window.notifSubmitSavePreset = notifSubmitSavePreset;
+
+// ── D11 Phase 3 sub-task C — per-tab saved filters ───────────────────────────
+//
+// Each tab with a saved-filter-bar (currently `tasks` and `convoys`) loads its
+// saved filters from GET /api/dashboard/saved-filter?tab=<tab> and renders
+// them as pills above the table. Click a pill to apply the filter, click the
+// "+ Save current filter…" button to capture the current state, click "Export
+// to YAML…" to generate a paste-back diff for config/dashboard.yaml.
+//
+// Pills:
+//   - source='yaml'      → 📌 icon (canonical, committed via YAML)
+//   - source='dashboard' → 💾 icon (operator-saved, deletable)
+//
+// Right-click on a dashboard-source pill triggers a confirm-then-DELETE flow.
+
+const SAVED_FILTER_TABS = ['tasks', 'convoys'];
+
+// In-memory cache of saved filters per tab. Populated by
+// loadSavedFiltersForTab() on tab switch.
+const _savedFiltersCache = {};
+
+// Track which tab the save-modal is currently scoped to (set by
+// openSaveFilterModal, read by submitSaveFilter).
+let _savedFilterModalTab = '';
+
+async function loadSavedFiltersForTab(tab) {
+  if (!SAVED_FILTER_TABS.includes(tab)) return;
+  try {
+    const res = await fetch('/api/dashboard/saved-filter?tab=' + encodeURIComponent(tab));
+    if (!res.ok) {
+      _savedFiltersCache[tab] = [];
+      renderSavedFilterPills(tab);
+      return;
+    }
+    const data = await res.json();
+    _savedFiltersCache[tab] = data.filters || [];
+    renderSavedFilterPills(tab);
+  } catch (e) {
+    _savedFiltersCache[tab] = [];
+    renderSavedFilterPills(tab);
+  }
+}
+
+function renderSavedFilterPills(tab) {
+  const host = document.getElementById('saved-filter-pills-' + tab);
+  if (!host) return;
+  const filters = _savedFiltersCache[tab] || [];
+  if (!filters.length) {
+    host.innerHTML = '<span style="color:var(--text2);font-style:italic">none yet</span>';
+    return;
+  }
+  host.innerHTML = filters.map(f => {
+    const icon  = f.source === 'yaml' ? '📌' : '💾';
+    const title = (f.description || '') + (f.source === 'yaml' ? '\n(yaml-source — committed)' : '\n(dashboard-source — right-click to delete)');
+    const safe  = escHtml(f.name);
+    return `<button class="filter-btn saved-filter-pill" data-filter-id="${f.id}" data-source="${f.source}" title="${escHtml(title)}" onclick="applySavedFilter('${tab}', ${f.id})" oncontextmenu="onSavedFilterContextMenu(event, '${tab}', ${f.id});return false">${icon} ${safe}</button>`;
+  }).join(' ');
+}
+
+function applySavedFilter(tab, id) {
+  const filters = _savedFiltersCache[tab] || [];
+  const f = filters.find(x => x.id === id);
+  if (!f) return;
+  // Apply column filters. We currently surface convoy-status + task-status as
+  // first-class filters; multi-value selections collapse to the first matching
+  // legacy filter pill (the only shape today). Future iterations can wire
+  // richer column-level filtering once the legacy filter UI gets generalised.
+  if (tab === 'convoys' && f.filter && f.filter.status) {
+    const statuses = f.filter.status.map(s => String(s).toLowerCase());
+    if (statuses.includes('active') || statuses.some(s => s.includes('active') || s.includes('shipping') || s.includes('draft'))) {
+      setConvoyStatusFilter('active');
+    } else if (statuses.includes('completed') || statuses.includes('closed')) {
+      setConvoyStatusFilter('completed');
+    } else {
+      setConvoyStatusFilter('all');
+    }
+  } else if (tab === 'tasks' && f.filter && f.filter.status) {
+    const statuses = f.filter.status.map(s => String(s).toLowerCase());
+    if (statuses.includes('failed')) setTaskFilter('failed');
+    else if (statuses.includes('cancelled')) setTaskFilter('cancelled');
+    else if (statuses.includes('completed') || statuses.includes('done')) setTaskFilter('done');
+    else if (statuses.includes('pending')) setTaskFilter('pending');
+    else if (statuses.length === 1 && statuses[0] === 'all') setTaskFilter('all');
+    else setTaskFilter('active');
+  }
+  // Apply sort if specified.
+  if (f.sort_by) {
+    S.sortBy = f.sort_by;
+    if (f.sort_dir) S.sortDir = f.sort_dir;
+    if (typeof renderSortHeaders === 'function') renderSortHeaders();
+    if (tab === 'tasks' && typeof loadTasks === 'function') loadTasks();
+  }
+  showToast && showToast('Applied saved filter: ' + f.name, 'ok');
+}
+
+function onSavedFilterContextMenu(ev, tab, id) {
+  ev.preventDefault();
+  const filters = _savedFiltersCache[tab] || [];
+  const f = filters.find(x => x.id === id);
+  if (!f) return;
+  if (f.source === 'yaml') {
+    alert('"' + f.name + '" is a yaml-source filter. Remove it from config/dashboard.yaml and restart the daemon to delete.');
+    return;
+  }
+  if (!confirm('Delete saved filter "' + f.name + '"? This cannot be undone.')) return;
+  deleteSavedFilter(tab, id, f.name);
+}
+
+async function deleteSavedFilter(tab, id, name) {
+  try {
+    const res = await fetch('/api/dashboard/saved-filter/' + id, {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({operator: 'operator', reason: 'dashboard-delete'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('Delete failed: ' + txt);
+      return;
+    }
+    showToast && showToast('Deleted saved filter: ' + name, 'ok');
+    loadSavedFiltersForTab(tab);
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+function openSaveFilterModal(tab) {
+  _savedFilterModalTab = tab;
+  const modal = document.getElementById('saved-filter-save-modal');
+  if (!modal) return;
+  const lbl = document.getElementById('saved-filter-tab-label');
+  if (lbl) lbl.textContent = tab;
+  const nm = document.getElementById('saved-filter-name');
+  const ds = document.getElementById('saved-filter-desc');
+  const rs = document.getElementById('saved-filter-save-result');
+  if (nm) nm.value = '';
+  if (ds) ds.value = '';
+  if (rs) rs.textContent = '';
+  modal.hidden = false;
+}
+
+function closeSaveFilterModal() {
+  const modal = document.getElementById('saved-filter-save-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function submitSaveFilter() {
+  const tab = _savedFilterModalTab;
+  if (!tab) return;
+  const name = (document.getElementById('saved-filter-name').value || '').trim();
+  const desc = (document.getElementById('saved-filter-desc').value || '').trim();
+  if (!name) { alert('Filter name required'); return; }
+
+  // Build a snapshot of the current filter state for the active tab. We
+  // capture the legacy single-select status pill as a one-element array so
+  // the round-trip through the YAML stays well-formed.
+  let filter = {};
+  let sort_by = '';
+  let sort_dir = '';
+  if (tab === 'convoys') {
+    const cs = S.convoyStatusFilter || 'all';
+    filter = {status: [cs]};
+  } else if (tab === 'tasks') {
+    filter = {status: [S.taskFilter || 'active']};
+    sort_by = S.sortBy || '';
+    sort_dir = S.sortDir || '';
+  } else {
+    filter = {all: ['*']};
+  }
+
+  try {
+    const res = await fetch('/api/dashboard/saved-filter', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name, tab, description: desc,
+        filter, sort_by, sort_dir, operator: 'operator',
+      }),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      const out = document.getElementById('saved-filter-save-result');
+      if (out) out.textContent = 'Save failed: ' + txt;
+      return;
+    }
+    const data = await res.json();
+    const out = document.getElementById('saved-filter-save-result');
+    if (out) out.textContent = 'Saved (id=' + data.id + ')';
+    loadSavedFiltersForTab(tab);
+  } catch (e) {
+    alert('Save failed: ' + e.message);
+  }
+}
+
+function openExportSavedFiltersModal() {
+  const modal = document.getElementById('saved-filter-export-modal');
+  if (!modal) return;
+  const out = document.getElementById('saved-filter-export-result');
+  if (out) out.textContent = '(click Generate to produce the YAML diff)';
+  modal.hidden = false;
+}
+
+function closeExportSavedFiltersModal() {
+  const modal = document.getElementById('saved-filter-export-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function submitExportSavedFilters() {
+  const out = document.getElementById('saved-filter-export-result');
+  try {
+    const res = await fetch('/api/dashboard/saved-filter/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({operator: 'operator'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      if (out) out.textContent = 'Export failed: ' + txt;
+      return;
+    }
+    const data = await res.json();
+    if (out) {
+      out.textContent = 'Wrote: ' + (data.path || '?') +
+        '\n(' + (data.count || 0) + ' filter(s))\n\n' +
+        (data.content || '');
+    }
+  } catch (e) {
+    if (out) out.textContent = 'Export failed: ' + e.message;
+  }
+}
+
+window.openSaveFilterModal           = openSaveFilterModal;
+window.closeSaveFilterModal          = closeSaveFilterModal;
+window.submitSaveFilter              = submitSaveFilter;
+window.openExportSavedFiltersModal   = openExportSavedFiltersModal;
+window.closeExportSavedFiltersModal  = closeExportSavedFiltersModal;
+window.submitExportSavedFilters      = submitExportSavedFilters;
+window.applySavedFilter              = applySavedFilter;
+window.onSavedFilterContextMenu      = onSavedFilterContextMenu;
+window.deleteSavedFilter             = deleteSavedFilter;
+window.loadSavedFiltersForTab        = loadSavedFiltersForTab;
+
+// Hook into switchTab so saved filters refresh when the operator lands on
+// a tab that hosts a saved-filter-bar.
+const _origSwitchTabSavedFilters = window.switchTab || switchTab;
+window.switchTab = function(name) {
+  _origSwitchTabSavedFilters(name);
+  if (SAVED_FILTER_TABS.includes(name)) {
+    loadSavedFiltersForTab(name);
+  }
+};
+
+// Also load on initial page render for the default tab.
+if (SAVED_FILTER_TABS.includes(S.activeTab)) {
+  loadSavedFiltersForTab(S.activeTab);
+}
