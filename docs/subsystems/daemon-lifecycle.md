@@ -192,6 +192,77 @@ The unit tests in `cmd/force/daemon_wake_test.go` cover: happy path, idempotence
 - **No agent-attention clear.** The original spec called for an "AgentAttention" table reset — that table doesn't exist in this codebase. `OperatorAttentionTags` (operator-pinned UI hints) is preserved across sleep/wake since it represents operator intent, not agent runtime state.
 - **No Windows / *BSD support.** Only macOS (cgo) and Linux (systemd-logind) have real implementations. Other platforms degrade to a no-op.
 
+## Auto-restart and crash recovery
+
+D12 P3 lands the in-binary supervisor companion to launchd / systemd's auto-restart. The contract is: the OS supervisor restarts the daemon on crash, the daemon refuses to restart when it's in a crash-loop, and every binary swap leaves an audit row the operator can read with `force daemon history`.
+
+### Auto-restart contract
+
+Both unit files declare "restart on crash, do not restart on clean exit":
+
+- **launchd** (`~/Library/LaunchAgents/com.force-orchestrator.daemon.plist`) — `KeepAlive` dict carries `Crashed=true` and `SuccessfulExit=false`. A `force daemon stop` SIGTERM that exits cleanly will NOT trigger a restart. A panic / kill -9 / OOM-kill WILL.
+- **systemd user unit** (`~/.config/systemd/user/force-orchestrator.service`) — `Restart=on-failure` with `RestartSec=5`. Same semantics.
+
+### Crash budget
+
+A broken binary that panics on boot would otherwise be auto-restarted forever, chewing CPU. The crash-budget guard short-circuits this. On every successful daemon start, before any agent goroutine starts, the daemon records a row in `DaemonStartLog` with `outcome='started'`. Before recording, it queries `RecentStartCount(window)` — if at least N successful starts are within the window, the next start treats the system as crash-looping, records `outcome='crash_loop_aborted'`, and exits 2.
+
+Defaults:
+
+| `SystemConfig` key | Default | Purpose |
+| --- | --- | --- |
+| `daemon_crash_budget_window_minutes` | `5` | Window over which starts are counted. |
+| `daemon_crash_budget_max_starts` | `3` | Threshold — if reached, the next start aborts. |
+
+The operator clears the budget after fixing the underlying issue:
+
+```
+force daemon clear-crash-budget [--assume-yes]
+```
+
+This truncates `DaemonStartLog`, writes an `AuditLog` row, and re-arms the guard at zero.
+
+### `DaemonUpdateHistory` table
+
+`force daemon update` records every invocation in `DaemonUpdateHistory`:
+
+| Column | Purpose |
+| --- | --- |
+| `ts` | `datetime('now')` at write time. |
+| `old_binary_sha`, `new_binary_sha` | SHA256 before / after the swap. |
+| `old_git_sha`, `new_git_sha` | Best-effort `provenance.Get().GitSHA` snapshots. |
+| `operator` | `$USER` (or `$LOGNAME`, falling back to `unknown`). |
+| `outcome` | One of `success`, `rolled_back`, `failed`. |
+| `notes` | Short free-text reason / context. |
+
+Both `cmdDaemonUpdate` and `cmdDaemonRollback` use a `defer`-based recorder so every exit path lands a row — pattern `P_DaemonUpdateHistory` (`internal/audittools/audit_pattern_p_daemon_update_history_test.go`) walks the AST and confirms it.
+
+### `force daemon history`
+
+Replaces P1's trust-file fallback view. Default output reads `DaemonUpdateHistory` (newest first). `--from-trust-file` switches to the legacy ratification log:
+
+```
+force daemon history [--limit N] [--from-trust-file]
+```
+
+### Boot-time recovery sweep
+
+After the crash-budget check passes and BEFORE the agent spawn loop, `runBootSweep` (in `cmd/force/daemon_boot_sweep.go`) puts the fleet in a clean state:
+
+1. **Stale Locked / UnderReview / UnderCaptainReview tasks** — released back to `Pending` via `store.ReleaseInFlightTasks`. (Same primitive used on shutdown; calling it on boot recovers from a daemon that vanished without unwinding its locks.)
+2. **Stale `Dogs.heartbeat_at`** — entries older than 10 minutes are cleared so the liveness banner stops showing dead dogs as alive.
+3. **Half-baked `DraftPROpen` convoys** — convoys with `draft_pr_url` populated but no `PRHandoffSyntheses` row are logged; the operator can re-trigger the synthesis-handoff post.
+4. **Mid-update binary** — if the live binary's SHA doesn't match the most recent `DaemonUpdateHistory.outcome='success'` row's `new_binary_sha`, log a warning ("running binary doesn't match last recorded successful update — check trust file").
+
+Step failures are logged, never fatal — one stale row shouldn't block the daemon from booting.
+
+### Pattern tests
+
+| Test | Asserts |
+| --- | --- |
+| `TestPattern_P_DaemonCrashBudget` | `cmdDaemon` calls `store.RecentStartCount` BEFORE first `agents.Spawn*`; the threshold-breach path calls `os.Exit` / `log.Fatalf`; `launchdPlistTemplate` emits `Crashed`/`SuccessfulExit` keys; `systemdUnitTemplate` emits `Restart=on-failure`/`RestartSec=5`. |
+| `TestPattern_P_DaemonUpdateHistory` | `cmdDaemonUpdate` and `cmdDaemonRollback` invoke `store.RecordDaemonUpdate`; `DaemonUpdateHistory` and `DaemonStartLog` are declared in all three schema locations. |
+
 ## See also
 
 - [`subsystems/escalation-and-medic.md`](escalation-and-medic.md) — failure paths on stuck or crashed agents.
