@@ -28,6 +28,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -89,11 +90,60 @@ func dispatchDaemon(db *sql.DB, args []string) {
 	case "validate-schema":
 		os.Exit(cmdDaemonValidateSchema(db, rest))
 	case "help", "--help", "-h":
+		// `force daemon help [<sub>]` — delegate to the subcommand's
+		// own --help path so the same shared printer renders the body.
+		if len(rest) > 0 {
+			os.Exit(dispatchDaemonSubcommandHelp(db, rest[0]))
+		}
 		printDaemonUsage()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown daemon subcommand: %s\n", sub)
 		printDaemonUsage()
 		os.Exit(1)
+	}
+}
+
+// dispatchDaemonSubcommandHelp routes `force daemon help <sub>` through
+// the subcommand's own --help path. Returns the exit code from the
+// subcommand handler (always 0 for the --help path).
+func dispatchDaemonSubcommandHelp(db *sql.DB, sub string) int {
+	helpArgs := []string{"--help"}
+	switch sub {
+	case "foreground", "fg":
+		// Bare foreground has no flags of its own; render a minimal block.
+		printDaemonSubcommandHelp(os.Stdout, "foreground",
+			"Run the daemon in the foreground (legacy bare 'force daemon').",
+			[]flagDoc{{Name: "--help", Desc: "show this help and exit"}},
+			[]string{"force daemon foreground"})
+		return 0
+	case "install":
+		return cmdDaemonInstall(helpArgs)
+	case "uninstall":
+		return cmdDaemonUninstall(helpArgs)
+	case "status":
+		return cmdDaemonStatus(db, helpArgs)
+	case "stop":
+		return cmdDaemonStop(helpArgs)
+	case "logs":
+		return cmdDaemonLogs(helpArgs)
+	case "update":
+		return cmdDaemonUpdate(db, helpArgs)
+	case "rollback":
+		return cmdDaemonRollback(db, helpArgs)
+	case "clear-crash-budget":
+		return cmdDaemonClearCrashBudget(db, helpArgs)
+	case "trust":
+		return cmdDaemonTrust(helpArgs)
+	case "history":
+		return cmdDaemonHistory(db, helpArgs)
+	case "validate-config":
+		return cmdDaemonValidateConfig(helpArgs)
+	case "validate-schema":
+		return cmdDaemonValidateSchema(db, helpArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown daemon subcommand: %s\n", sub)
+		printDaemonUsage()
+		return 1
 	}
 }
 
@@ -124,6 +174,19 @@ func printDaemonUsage() {
 // ── status ──────────────────────────────────────────────────────────────────
 
 func cmdDaemonStatus(db *sql.DB, args []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	helped, err := parseDaemonFlags(fs, args, "status",
+		"Show running PID, trust file presence, provenance, and dashboard URL. Exit 0 if running, 1 if not.",
+		[]flagDoc{
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon status"})
+	if helped {
+		return 0
+	}
+	if err != nil {
+		return 2
+	}
 	pidPath := singleton.DefaultPIDPath()
 	locked, holder, err := singleton.IsLocked(pidPath)
 	if err != nil {
@@ -181,6 +244,19 @@ func cmdDaemonStatus(db *sql.DB, args []string) int {
 // ── stop ────────────────────────────────────────────────────────────────────
 
 func cmdDaemonStop(args []string) int {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	helped, err := parseDaemonFlags(fs, args, "stop",
+		"Send SIGTERM to the running daemon and wait up to 60s for a clean exit.",
+		[]flagDoc{
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon stop"})
+	if helped {
+		return 0
+	}
+	if err != nil {
+		return 2
+	}
 	pidPath := singleton.DefaultPIDPath()
 	locked, pid, err := singleton.IsLocked(pidPath)
 	if err != nil {
@@ -217,21 +293,30 @@ func cmdDaemonStop(args []string) int {
 // ── logs ────────────────────────────────────────────────────────────────────
 
 func cmdDaemonLogs(args []string) int {
-	follow := false
-	tailLines := 50
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-f", "--follow":
-			follow = true
-		case "-n":
-			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil {
-					tailLines = n
-				}
-				i++
-			}
-		}
+	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+	followPtr := fs.Bool("follow", false, "tail the log (like `tail -f`)")
+	fs.BoolVar(followPtr, "f", false, "alias for --follow")
+	tailLinesPtr := fs.Int("n", 50, "number of trailing lines to print before following")
+	helped, err := parseDaemonFlags(fs, args, "logs",
+		"Print the trailing N lines of fleet.log, optionally following the file as it grows.",
+		[]flagDoc{
+			{Name: "--follow, -f", Desc: "tail the log (like `tail -f`)"},
+			{Name: "-n <int>", Desc: "number of trailing lines to print before following (default 50)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force daemon logs",
+			"force daemon logs -f",
+			"force daemon logs -n 200",
+		})
+	if helped {
+		return 0
 	}
+	if err != nil {
+		return 2
+	}
+	follow := *followPtr
+	tailLines := *tailLinesPtr
 	path := "fleet.log"
 	f, err := os.Open(path)
 	if err != nil {
@@ -276,6 +361,21 @@ func cmdDaemonTrust(args []string) int {
 		return 1
 	}
 	switch args[0] {
+	case "--help", "-h", "help":
+		printDaemonSubcommandHelp(os.Stdout, "trust",
+			"Manage ~/.force/trusted-binary-hashes — the SHA256 ratification log read by `force daemon update`.",
+			[]flagDoc{
+				{Name: "list", Desc: "print all trusted SHAs"},
+				{Name: "add <path>", Desc: "compute SHA of <path> and append to the trust file"},
+				{Name: "remove <sha>", Desc: "remove a SHA from the trust file"},
+				{Name: "--help, -h", Desc: "show this help and exit"},
+			},
+			[]string{
+				"force daemon trust list",
+				"force daemon trust add ./force",
+				"force daemon trust remove abc123...",
+			})
+		return 0
 	case "list":
 		return cmdDaemonTrustList(args[1:])
 	case "add":
@@ -288,7 +388,20 @@ func cmdDaemonTrust(args []string) int {
 	}
 }
 
-func cmdDaemonTrustList(_ []string) int {
+func cmdDaemonTrustList(args []string) int {
+	fs := flag.NewFlagSet("trust list", flag.ContinueOnError)
+	helped, err := parseDaemonFlags(fs, args, "trust list",
+		"Print all trusted SHA256 entries from ~/.force/trusted-binary-hashes.",
+		[]flagDoc{
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon trust list"})
+	if helped {
+		return 0
+	}
+	if err != nil {
+		return 2
+	}
 	tp := trust.DefaultPath()
 	f, err := trust.Load(tp)
 	if err != nil {
@@ -316,11 +429,25 @@ func cmdDaemonTrustList(_ []string) int {
 }
 
 func cmdDaemonTrustAdd(args []string) int {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("trust add", flag.ContinueOnError)
+	helped, perr := parseDaemonFlags(fs, args, "trust add",
+		"Compute the SHA256 of <binary-path> and append it to the trust file.",
+		[]flagDoc{
+			{Name: "<binary-path>", Desc: "path to the binary to ratify (positional)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon trust add ./force"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force daemon trust add <binary-path>")
 		return 1
 	}
-	bin := args[0]
+	bin := fs.Arg(0)
 	abs, err := filepath.Abs(bin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "trust add: %v\n", err)
@@ -347,20 +474,35 @@ func cmdDaemonTrustAdd(args []string) int {
 }
 
 func cmdDaemonTrustRemove(args []string) int {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("trust remove", flag.ContinueOnError)
+	helped, perr := parseDaemonFlags(fs, args, "trust remove",
+		"Remove a SHA256 entry from the trust file.",
+		[]flagDoc{
+			{Name: "<sha>", Desc: "SHA256 to remove (positional)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon trust remove abc123..."})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force daemon trust remove <sha>")
 		return 1
 	}
-	n, err := trust.RemoveSHA(trust.DefaultPath(), args[0])
+	sha := fs.Arg(0)
+	n, err := trust.RemoveSHA(trust.DefaultPath(), sha)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "trust remove: %v\n", err)
 		return 1
 	}
 	if n == 0 {
-		fmt.Printf("sha %s not found in trust file\n", args[0])
+		fmt.Printf("sha %s not found in trust file\n", sha)
 		return 1
 	}
-	fmt.Printf("removed %d entry(ies) for %s\n", n, args[0])
+	fmt.Printf("removed %d entry(ies) for %s\n", n, sha)
 	return 0
 }
 
@@ -378,19 +520,29 @@ func cmdDaemonTrustRemove(args []string) int {
 // fatal). Pattern P_DaemonUpdateHistory walks this function's AST and
 // confirms every exit path is reachable from the recordOnExit closure.
 func cmdDaemonUpdate(db *sql.DB, args []string) int {
-	binaryFlag := ""
-	assumeYes := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--binary":
-			if i+1 < len(args) {
-				binaryFlag = args[i+1]
-				i++
-			}
-		case "--assume-yes", "-y":
-			assumeYes = true
-		}
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	binaryPtr := fs.String("binary", "", "path to the new binary (defaults to currently-running binary, useful for trust-only ratification)")
+	assumeYesPtr := fs.Bool("assume-yes", false, "skip the interactive trust-confirmation prompt")
+	fs.BoolVar(assumeYesPtr, "y", false, "alias for --assume-yes")
+	helped, err := parseDaemonFlags(fs, args, "update",
+		"Replace the running binary with a new one, gated by the 4-diff trust prompt and recorded in DaemonUpdateHistory.",
+		[]flagDoc{
+			{Name: "--binary <path>", Desc: "path to the new binary (default: currently-running binary)"},
+			{Name: "--assume-yes, -y", Desc: "skip the interactive trust-confirmation prompt"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force daemon update --binary ./force.new",
+			"force daemon update --assume-yes",
+		})
+	if helped {
+		return 0
 	}
+	if err != nil {
+		return 2
+	}
+	binaryFlag := *binaryPtr
+	assumeYes := *assumeYesPtr
 
 	// Outcome ledger — set before each exit; deferred recorder writes the
 	// row regardless of which return statement runs.
@@ -552,6 +704,19 @@ func cmdDaemonUpdate(db *sql.DB, args []string) int {
 // the outcome to DaemonUpdateHistory with outcome='rolled_back' on a
 // successful restore, 'failed' on an IO error.
 func cmdDaemonRollback(db *sql.DB, args []string) int {
+	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	helped, err := parseDaemonFlags(fs, args, "rollback",
+		"Restore the previous binary (force.previous) atomically and record the outcome in DaemonUpdateHistory.",
+		[]flagDoc{
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon rollback"})
+	if helped {
+		return 0
+	}
+	if err != nil {
+		return 2
+	}
 	var (
 		outcome = "failed"
 		oldSHA  string
@@ -637,12 +802,25 @@ func cmdDaemonRollback(db *sql.DB, args []string) int {
 // ── install / uninstall ─────────────────────────────────────────────────────
 
 func cmdDaemonInstall(args []string) int {
-	dryRun := false
-	for _, a := range args {
-		if a == "--dry-run" {
-			dryRun = true
-		}
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	dryRunPtr := fs.Bool("dry-run", false, "print the plist/unit that would be written, without writing it")
+	helped, err := parseDaemonFlags(fs, args, "install",
+		"Install launchd plist (darwin) or systemd user unit (linux) so the daemon boots at login.",
+		[]flagDoc{
+			{Name: "--dry-run", Desc: "print the plist/unit that would be written, without writing it"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force daemon install",
+			"force daemon install --dry-run",
+		})
+	if helped {
+		return 0
 	}
+	if err != nil {
+		return 2
+	}
+	dryRun := *dryRunPtr
 	binPath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "install: %v\n", err)
@@ -660,12 +838,25 @@ func cmdDaemonInstall(args []string) int {
 }
 
 func cmdDaemonUninstall(args []string) int {
-	dryRun := false
-	for _, a := range args {
-		if a == "--dry-run" {
-			dryRun = true
-		}
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	dryRunPtr := fs.Bool("dry-run", false, "print what would be unloaded/removed, without doing it")
+	helped, err := parseDaemonFlags(fs, args, "uninstall",
+		"Remove the installed launchd plist (darwin) or systemd user unit (linux).",
+		[]flagDoc{
+			{Name: "--dry-run", Desc: "print what would be unloaded/removed, without doing it"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force daemon uninstall",
+			"force daemon uninstall --dry-run",
+		})
+	if helped {
+		return 0
 	}
+	if err != nil {
+		return 2
+	}
+	dryRun := *dryRunPtr
 	switch runtime.GOOS {
 	case "darwin":
 		return uninstallLaunchd(dryRun)
@@ -830,21 +1021,29 @@ func daemonCwd() string {
 // `--from-trust-file` for operators who still want to scan the append-only
 // ratification log directly.
 func cmdDaemonHistory(db *sql.DB, args []string) int {
-	limit := 20
-	fromTrust := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--limit":
-			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil {
-					limit = n
-				}
-				i++
-			}
-		case "--from-trust-file":
-			fromTrust = true
-		}
+	fs := flag.NewFlagSet("history", flag.ContinueOnError)
+	limitPtr := fs.Int("limit", 20, "max rows to print")
+	fromTrustPtr := fs.Bool("from-trust-file", false, "show legacy trust-file ratification view instead of DaemonUpdateHistory")
+	helped, err := parseDaemonFlags(fs, args, "history",
+		"Print the most recent N rows of DaemonUpdateHistory, or the legacy trust-file ratification view.",
+		[]flagDoc{
+			{Name: "--limit <int>", Desc: "max rows to print (default 20)"},
+			{Name: "--from-trust-file", Desc: "show the legacy trust-file ratification view"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force daemon history",
+			"force daemon history --limit 50",
+			"force daemon history --from-trust-file",
+		})
+	if helped {
+		return 0
 	}
+	if err != nil {
+		return 2
+	}
+	limit := *limitPtr
+	fromTrust := *fromTrustPtr
 	fmt.Println("force daemon history")
 	fmt.Println("─────────────────────")
 
@@ -919,12 +1118,26 @@ func cmdDaemonHistoryFromTrustFile(limit int) int {
 // (mirrors the trust-file gate's UX). The clear is recorded in AuditLog so
 // the operator-facing audit trail captures the re-arm.
 func cmdDaemonClearCrashBudget(db *sql.DB, args []string) int {
-	assumeYes := false
-	for _, a := range args {
-		if a == "--assume-yes" || a == "-y" {
-			assumeYes = true
-		}
+	fs := flag.NewFlagSet("clear-crash-budget", flag.ContinueOnError)
+	assumeYesPtr := fs.Bool("assume-yes", false, "skip the interactive confirmation prompt")
+	fs.BoolVar(assumeYesPtr, "y", false, "alias for --assume-yes")
+	helped, err := parseDaemonFlags(fs, args, "clear-crash-budget",
+		"Truncate DaemonStartLog after fixing the underlying issue — re-arms launchd/systemd auto-restart at zero.",
+		[]flagDoc{
+			{Name: "--assume-yes, -y", Desc: "skip the interactive confirmation prompt"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force daemon clear-crash-budget",
+			"force daemon clear-crash-budget --assume-yes",
+		})
+	if helped {
+		return 0
 	}
+	if err != nil {
+		return 2
+	}
+	assumeYes := *assumeYesPtr
 	pre, err := store.RecentStartCount(db, 24*time.Hour)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "clear-crash-budget: read DaemonStartLog: %v\n", err)
@@ -967,6 +1180,19 @@ func cmdDaemonClearCrashBudget(db *sql.DB, args []string) int {
 // ── validate-config ─────────────────────────────────────────────────────────
 
 func cmdDaemonValidateConfig(args []string) int {
+	fs := flag.NewFlagSet("validate-config", flag.ContinueOnError)
+	helped, err := parseDaemonFlags(fs, args, "validate-config",
+		"Parse config/notifications.yaml and config/dashboard.yaml without starting the daemon.",
+		[]flagDoc{
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon validate-config"})
+	if helped {
+		return 0
+	}
+	if err != nil {
+		return 2
+	}
 	configs := []string{"config/notifications.yaml", "config/dashboard.yaml"}
 	failed := 0
 	for _, p := range configs {
@@ -991,6 +1217,19 @@ func cmdDaemonValidateConfig(args []string) int {
 // ── validate-schema ─────────────────────────────────────────────────────────
 
 func cmdDaemonValidateSchema(db *sql.DB, args []string) int {
+	fs := flag.NewFlagSet("validate-schema", flag.ContinueOnError)
+	helped, err := parseDaemonFlags(fs, args, "validate-schema",
+		"Spot-check schema parity against the live DB. TestSchemaParity is the full CI gate.",
+		[]flagDoc{
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force daemon validate-schema"})
+	if helped {
+		return 0
+	}
+	if err != nil {
+		return 2
+	}
 	// Lightweight invariant check — TestSchemaParity is the heavyweight
 	// CI gate; this surface lets the operator spot-check after a
 	// rollover. We probe a small representative set of tables/columns.
