@@ -20,7 +20,7 @@ Before starting any task, the agent reads:
 
 - `CLAUDE.md` (project root)
 - `docs/roadmap.md` § Deliverable 3 in full, with focused re-read of Phase 6
-- `docs/paired-runs.md` § Schema additions (Convoys, BountyBoard, ProposedFeatures, ConvoyReviewCycles, dashboard tables)
+- `docs/subsystems/paired-runs.md` § Schema additions (Convoys, BountyBoard, ProposedFeatures, ConvoyReviewCycles, dashboard tables)
 - `internal/dashboard/` directory structure (existing handlers, templates, static assets)
 - `internal/clients/` if the task touches a cross-agent service
 - `cmd/force/` for existing CLI command patterns (when adding CLI parity)
