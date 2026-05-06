@@ -1469,3 +1469,71 @@ select option { background: var(--bg2); color: var(--text); }
   padding: 2px 4px;
   font-size: 12px;
 }
+
+/* ── D11 P3-B — theme + density classes ─────────────────────────────────────
+ *
+ * The legacy palette in :root above is the dark default. The light theme
+ * overrides only the colour variables; structural styles stay untouched
+ * so the rebuild is non-invasive. `system` resolves to either
+ * theme-light or theme-dark in app.js based on prefers-color-scheme.
+ *
+ * Density classes scale row padding + cell font-size so a compact view
+ * fits more rows on screen without re-flowing tables. The variables are
+ * already centralised, so the override surface is minimal.
+ */
+body.theme-light {
+  --bg:        #ffffff;
+  --bg2:       #f6f8fa;
+  --bg3:       #eaeef2;
+  --border:    #d0d7de;
+  --text:      #1f2328;
+  --text2:     #656d76;
+  --accent:    #0969da;
+  --green:     #1a7f37;
+  --yellow:    #9a6700;
+  --red:       #cf222e;
+  --orange:    #bc4c00;
+  --purple:    #8250df;
+  --teal:      #1b7c83;
+}
+
+body.theme-dark {
+  /* Re-affirm the legacy dark palette so toggling away from `system` /
+   * `light` snaps cleanly back. */
+  --bg:        #0d1117;
+  --bg2:       #161b22;
+  --bg3:       #21262d;
+  --border:    #30363d;
+  --text:      #e6edf3;
+  --text2:     #8b949e;
+  --accent:    #58a6ff;
+  --green:     #3fb950;
+  --yellow:    #d29922;
+  --red:       #f85149;
+  --orange:    #e3652a;
+  --purple:    #bc8cff;
+  --teal:      #39c5cf;
+}
+
+body.density-compact {
+  font-size: 12px;
+}
+body.density-compact td,
+body.density-compact th {
+  padding: 3px 6px;
+}
+body.density-compact .tab-btn {
+  padding: 6px 10px;
+}
+body.density-compact .stat-cell {
+  padding: 4px 8px;
+}
+body.density-compact .row {
+  padding: 4px 8px;
+}
+
+body.density-comfortable td,
+body.density-comfortable th {
+  padding: 6px 10px;
+}
+

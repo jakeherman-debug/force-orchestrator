@@ -281,6 +281,14 @@ function switchTab(name) {
     case 'logs':        startLogStream(); break;
   }
   if (name !== 'logs') stopLogStream();
+
+  // D11 P3-B — re-arm per-tab refresh interval to match the resolved
+  // refresh_seconds for the newly-active tab. dashTabRefreshSeconds
+  // reads from the config fetched at boot; absent config yields the
+  // legacy 12s default.
+  if (typeof rearmDashTabRefresh === 'function') {
+    rearmDashTabRefresh(name);
+  }
 }
 
 // ── Experiments tab (D3 Phase 2) ─────────────────────────────────────────
@@ -2347,15 +2355,152 @@ async function deleteMemFromModal() {
   closeModal('mem-modal');
 }
 
-// ── Polling ───────────────────────────────────────────────────────────────────
-function startPolling() {
-  pollStatus();
-  setInterval(pollStatus, 5000);
+// ── D11 P3-B — Dashboard personalization (tab visibility / order /
+//                                          refresh + theme + density) ──
+//
+// Reads /api/dashboard/config once at boot and applies:
+//
+//   1. Tab-bar filter   — only tabs where cfg.tabs[i].visible=true render.
+//   2. Tab-bar ordering — tabs sorted by cfg.tabs[i].order ascending.
+//   3. Theme            — body class theme-light|theme-dark applied
+//                         (system honours prefers-color-scheme).
+//   4. Density          — body class density-compact|density-comfortable.
+//   5. Per-tab refresh  — switchTab() reads cfg.tabs[active].refresh_seconds
+//                         and (re)installs the active-tab refresh interval.
+//   6. Default sort     — cfg.display.default_sort[active] seeds the sort
+//                         when first rendering the active tab.
+//   7. Pagination       — cfg.display.per_table_pagination seeds
+//                         S.dashPagination (consumers may opt-in).
+//
+// All overrides are server-side computed from SystemConfig + YAML; the
+// SPA never makes a personalization decision on its own. Failure to
+// fetch is non-fatal — the SPA falls back to a built-in default config
+// so the dashboard still renders.
+const DASH_DEFAULT_CONFIG = {
+  tabs: [],            // empty → no filtering / no ordering applied (every tab renders)
+  display: {
+    theme:                'dark',         // historical default of the legacy palette
+    density:              'comfortable',
+    default_sort:         {},
+    per_table_pagination: 50,
+  },
+};
 
-  pollStats();
-  setInterval(pollStats, 10000);
+let dashCfg = DASH_DEFAULT_CONFIG;
+let dashTabRefreshHandle = null;     // active-tab refresh interval id
 
-  setInterval(() => {
+async function loadDashboardConfig() {
+  try {
+    const r = await fetch('/api/dashboard/config');
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data && Array.isArray(data.tabs) && data.display) {
+      dashCfg = data;
+      applyDashboardConfig();
+    }
+  } catch (_) {
+    // Network error — leave dashCfg at the default; SPA still functions.
+  }
+}
+
+function applyDashboardConfig() {
+  applyDashTabVisibilityAndOrder();
+  applyDashTheme();
+  applyDashDensity();
+  applyDashPagination();
+  // Reinstall the active-tab refresh interval so it picks up the
+  // resolved refresh_seconds for the current tab.
+  rearmDashTabRefresh(S.activeTab);
+}
+
+function applyDashTabVisibilityAndOrder() {
+  const bar = document.getElementById('tab-bar');
+  if (!bar || !Array.isArray(dashCfg.tabs) || dashCfg.tabs.length === 0) return;
+
+  const buttons = Array.from(bar.querySelectorAll('.tab-btn'));
+  const cfgByID = {};
+  for (const t of dashCfg.tabs) { cfgByID[t.id] = t; }
+
+  // Visibility filter — tabs flagged visible:false get hidden. Tabs not
+  // declared in YAML (defensive case) keep their default visibility.
+  for (const btn of buttons) {
+    const id = btn.dataset.tab;
+    const tab = cfgByID[id];
+    if (tab) {
+      btn.style.display = tab.visible ? '' : 'none';
+    }
+  }
+
+  // Order: sort the visible buttons in DOM by cfg order ascending. Tabs
+  // not in cfg keep their original DOM order, but get appended after.
+  const ordered = buttons.slice().sort((a, b) => {
+    const oa = cfgByID[a.dataset.tab]?.order ?? 1e9;
+    const ob = cfgByID[b.dataset.tab]?.order ?? 1e9;
+    return oa - ob;
+  });
+  // Reinsert in order. The spacer + last-refresh stay at the end.
+  const spacer = document.getElementById('tab-spacer');
+  for (const btn of ordered) {
+    bar.insertBefore(btn, spacer);
+  }
+}
+
+function applyDashTheme() {
+  const theme = (dashCfg.display && dashCfg.display.theme) || 'dark';
+  document.body.classList.remove('theme-light', 'theme-dark');
+  if (theme === 'system') {
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.body.classList.add(prefersDark ? 'theme-dark' : 'theme-light');
+  } else if (theme === 'light') {
+    document.body.classList.add('theme-light');
+  } else {
+    document.body.classList.add('theme-dark');
+  }
+}
+
+function applyDashDensity() {
+  const density = (dashCfg.display && dashCfg.display.density) || 'comfortable';
+  document.body.classList.remove('density-compact', 'density-comfortable');
+  document.body.classList.add(density === 'compact' ? 'density-compact' : 'density-comfortable');
+}
+
+function applyDashPagination() {
+  const n = dashCfg.display && dashCfg.display.per_table_pagination;
+  if (typeof n === 'number' && n > 0) {
+    S.dashPagination = n;
+  }
+}
+
+// dashTabRefreshSeconds returns the resolved refresh_seconds for the
+// given tab, or 12 (the legacy default) if the tab is unknown.
+function dashTabRefreshSeconds(tabName) {
+  if (Array.isArray(dashCfg.tabs)) {
+    const t = dashCfg.tabs.find(x => x.id === tabName);
+    if (t && typeof t.refresh_seconds === 'number' && t.refresh_seconds > 0) {
+      return t.refresh_seconds;
+    }
+  }
+  return 12;
+}
+
+// dashTabDefaultSort returns the resolved default_sort for the active
+// tab, or '' if none configured. SPA tab renderers may consult this on
+// first render.
+function dashTabDefaultSort(tabName) {
+  return (dashCfg.display && dashCfg.display.default_sort && dashCfg.display.default_sort[tabName]) || '';
+}
+
+// rearmDashTabRefresh clears the existing tab-refresh interval and
+// installs a new one tuned to the active tab's refresh_seconds. Called
+// from switchTab() and from applyDashboardConfig() on initial load.
+function rearmDashTabRefresh(tabName) {
+  if (dashTabRefreshHandle !== null) {
+    clearInterval(dashTabRefreshHandle);
+    dashTabRefreshHandle = null;
+  }
+  const seconds = dashTabRefreshSeconds(tabName);
+  const ms = seconds * 1000;
+  dashTabRefreshHandle = setInterval(() => {
     switch(S.activeTab) {
       case 'tasks':       loadTasks();       break;
       case 'escalations': loadEscalations(); break;
@@ -2364,7 +2509,26 @@ function startPolling() {
       case 'mail':        loadMail();        break;
       case 'knowledge':   loadMemories();    break;
     }
-  }, 12000);
+  }, ms);
+}
+
+window.dashTabRefreshSeconds = dashTabRefreshSeconds;
+window.dashTabDefaultSort    = dashTabDefaultSort;
+window.applyDashboardConfig  = applyDashboardConfig;
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+function startPolling() {
+  pollStatus();
+  setInterval(pollStatus, 5000);
+
+  pollStats();
+  setInterval(pollStats, 10000);
+
+  // Per-tab refresh interval — replaces the historical 12s hardcoded
+  // poll. Reads cfg.tabs[active].refresh_seconds via dashTabRefreshSeconds
+  // (D11 P3-B). rearmDashTabRefresh installs the interval; switchTab
+  // re-arms it on tab change.
+  rearmDashTabRefresh(S.activeTab);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -2440,6 +2604,12 @@ $('task-search').addEventListener('input', () => {
 });
 
 initFromURL();
+// D11 P3-B — fetch dashboard personalization config + apply theme /
+// density / tab visibility / ordering / refresh-interval. Runs in
+// parallel with the boot sequence; failures are non-fatal (the SPA
+// keeps the legacy defaults so the dashboard still renders if the
+// /api/dashboard/config endpoint is unreachable).
+loadDashboardConfig();
 startPolling();
 switchTab(S.activeTab);
 renderSortHeaders();
