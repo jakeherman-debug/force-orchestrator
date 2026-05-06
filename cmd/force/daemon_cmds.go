@@ -75,9 +75,11 @@ func dispatchDaemon(db *sql.DB, args []string) {
 	case "logs":
 		os.Exit(cmdDaemonLogs(rest))
 	case "update":
-		os.Exit(cmdDaemonUpdate(rest))
+		os.Exit(cmdDaemonUpdate(db, rest))
 	case "rollback":
-		os.Exit(cmdDaemonRollback(rest))
+		os.Exit(cmdDaemonRollback(db, rest))
+	case "clear-crash-budget":
+		os.Exit(cmdDaemonClearCrashBudget(db, rest))
 	case "trust":
 		os.Exit(cmdDaemonTrust(rest))
 	case "history":
@@ -110,7 +112,11 @@ func printDaemonUsage() {
   trust list               List trusted binary SHAs
   trust add <path>         Add the SHA of <path> to the trust file
   trust remove <sha>       Remove a trusted SHA
-  history [--limit N]      Show DaemonUpdateHistory (P3 schema; falls back to trust file)
+  history [--limit N] [--from-trust-file]
+                           Show DaemonUpdateHistory (D12 P3 schema)
+  clear-crash-budget [--assume-yes]
+                           Truncate DaemonStartLog after fixing the underlying
+                           issue (D12 P3 — re-arms launchd/systemd auto-restart)
   validate-config          Parse config/*.yaml without starting the daemon
   validate-schema          Run TestSchemaParity-equivalent against the live DB`)
 }
@@ -360,7 +366,18 @@ func cmdDaemonTrustRemove(args []string) int {
 
 // ── update ──────────────────────────────────────────────────────────────────
 
-func cmdDaemonUpdate(args []string) int {
+// cmdDaemonUpdate runs the binary-rollover trust gate and records the
+// outcome to DaemonUpdateHistory (D12 P3) on every exit path:
+//
+//   - "success"     — atomic swap completed, or new == live (trust ratified)
+//   - "rolled_back" — paranoia abort or stop-daemon failure
+//   - "failed"      — unrecoverable IO error during hash/swap
+//
+// `db` may be nil in tests that exercise update without a holocron handle —
+// the recording call is skipped gracefully (DB unavailability is logged, not
+// fatal). Pattern P_DaemonUpdateHistory walks this function's AST and
+// confirms every exit path is reachable from the recordOnExit closure.
+func cmdDaemonUpdate(db *sql.DB, args []string) int {
 	binaryFlag := ""
 	assumeYes := false
 	for i := 0; i < len(args); i++ {
@@ -374,9 +391,32 @@ func cmdDaemonUpdate(args []string) int {
 			assumeYes = true
 		}
 	}
+
+	// Outcome ledger — set before each exit; deferred recorder writes the
+	// row regardless of which return statement runs.
+	var (
+		outcome     = "failed" // pessimistic default
+		oldSHA      string
+		newSHA      string
+		oldGit      = provenance.Get().GitSHA
+		newGit      string
+		notes       string
+	)
+	defer func() {
+		// Skip recording when db is unavailable (test paths) or on a
+		// pre-SHA-resolution failure where we lack identifying info.
+		if db == nil {
+			return
+		}
+		if recErr := store.RecordDaemonUpdate(db, oldSHA, newSHA, oldGit, newGit, currentOperator(), outcome, notes); recErr != nil {
+			fmt.Fprintf(os.Stderr, "update: record DaemonUpdateHistory: %v\n", recErr)
+		}
+	}()
+
 	livePath, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "update: cannot determine current binary: %v\n", err)
+		notes = fmt.Sprintf("cannot determine current binary: %v", err)
+		fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 		return 1
 	}
 	newPath := binaryFlag
@@ -385,19 +425,22 @@ func cmdDaemonUpdate(args []string) int {
 	}
 	absNew, err := filepath.Abs(newPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "update: %v\n", err)
+		notes = fmt.Sprintf("filepath.Abs: %v", err)
+		fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 		return 1
 	}
 
 	// Identify SHAs.
-	oldSHA, err := trust.HashFile(livePath)
+	oldSHA, err = trust.HashFile(livePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "update: hash live binary: %v\n", err)
+		notes = fmt.Sprintf("hash live binary: %v", err)
+		fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 		return 1
 	}
-	newSHA, err := trust.HashFile(absNew)
+	newSHA, err = trust.HashFile(absNew)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "update: hash new binary: %v\n", err)
+		notes = fmt.Sprintf("hash new binary: %v", err)
+		fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 		return 1
 	}
 
@@ -413,6 +456,7 @@ func cmdDaemonUpdate(args []string) int {
 	fmt.Printf("trust file  : %s\n", tp)
 
 	provNow := provenance.Get()
+	newGit = provNow.GitSHA // best-effort: live binary's git-sha doubles as new git when binary == self
 	if tf != nil && tf.HasSHA(newSHA) {
 		fmt.Println("trust       : MATCH (new SHA is in the trust file)")
 	} else {
@@ -433,6 +477,8 @@ func cmdDaemonUpdate(args []string) int {
 			line, _ := reader.ReadString('\n')
 			line = strings.ToLower(strings.TrimSpace(line))
 			if line != "yes" && line != "y" {
+				outcome = "rolled_back"
+				notes = "operator declined trust confirmation"
 				fmt.Println("Aborted (no trust confirmation).")
 				return 1
 			}
@@ -447,7 +493,8 @@ func cmdDaemonUpdate(args []string) int {
 			GitBranchAtBuild: provNow.GitBranch,
 		})
 		if appendErr != nil {
-			fmt.Fprintf(os.Stderr, "update: append trust: %v\n", appendErr)
+			notes = fmt.Sprintf("append trust: %v", appendErr)
+			fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 			return 1
 		}
 		fmt.Println("Appended new SHA to trust file.")
@@ -458,7 +505,9 @@ func cmdDaemonUpdate(args []string) int {
 	if locked, pid, _ := singleton.IsLocked(pidPath); locked && pid > 0 {
 		fmt.Printf("Stopping running daemon (PID %d)...\n", pid)
 		if rc := cmdDaemonStop(nil); rc != 0 {
-			fmt.Fprintln(os.Stderr, "update: stop failed — abort")
+			outcome = "rolled_back"
+			notes = fmt.Sprintf("stop failed (rc=%d) — update aborted", rc)
+			fmt.Fprintln(os.Stderr, "update: "+notes)
 			return rc
 		}
 	}
@@ -467,41 +516,78 @@ func cmdDaemonUpdate(args []string) int {
 	if absNew != livePath {
 		previous := livePath + ".previous"
 		if err := os.Rename(livePath, previous); err != nil {
-			fmt.Fprintf(os.Stderr, "update: snapshot previous: %v\n", err)
+			notes = fmt.Sprintf("snapshot previous: %v", err)
+			fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 			return 1
 		}
 		// Move new binary to live path.
 		if err := copyBinaryFile(absNew, livePath); err != nil {
 			// Roll back the rename if the copy fails.
 			_ = os.Rename(previous, livePath)
-			fmt.Fprintf(os.Stderr, "update: install new: %v\n", err)
+			outcome = "rolled_back"
+			notes = fmt.Sprintf("install new: %v (live restored from .previous)", err)
+			fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 			return 1
 		}
 		if err := os.Chmod(livePath, 0o755); err != nil {
-			fmt.Fprintf(os.Stderr, "update: chmod: %v\n", err)
+			notes = fmt.Sprintf("chmod: %v", err)
+			fmt.Fprintf(os.Stderr, "update: %s\n", notes)
 			return 1
 		}
 		fmt.Printf("Replaced %s; previous saved as %s\n", livePath, previous)
+		notes = fmt.Sprintf("atomic rollover; previous=%s", previous)
 	} else {
 		fmt.Println("(new == live; no copy performed — trust entry recorded)")
+		notes = "trust ratification only (new == live)"
 	}
 
+	outcome = "success"
 	fmt.Println("Update complete. Start the daemon via `force daemon foreground` or your installed launchd/systemd unit.")
 	return 0
 }
 
 // ── rollback ────────────────────────────────────────────────────────────────
 
-func cmdDaemonRollback(args []string) int {
+// cmdDaemonRollback restores the previous binary (`.previous`) and records
+// the outcome to DaemonUpdateHistory with outcome='rolled_back' on a
+// successful restore, 'failed' on an IO error.
+func cmdDaemonRollback(db *sql.DB, args []string) int {
+	var (
+		outcome = "failed"
+		oldSHA  string
+		newSHA  string
+		oldGit  = provenance.Get().GitSHA
+		newGit  string
+		notes   string
+	)
+	defer func() {
+		if db == nil {
+			return
+		}
+		if recErr := store.RecordDaemonUpdate(db, oldSHA, newSHA, oldGit, newGit, currentOperator(), outcome, notes); recErr != nil {
+			fmt.Fprintf(os.Stderr, "rollback: record DaemonUpdateHistory: %v\n", recErr)
+		}
+	}()
+
 	livePath, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rollback: %v\n", err)
+		notes = fmt.Sprintf("Executable: %v", err)
+		fmt.Fprintf(os.Stderr, "rollback: %s\n", notes)
 		return 1
 	}
 	previous := livePath + ".previous"
 	if _, err := os.Stat(previous); err != nil {
-		fmt.Fprintf(os.Stderr, "rollback: no previous binary at %s\n", previous)
+		notes = fmt.Sprintf("no previous binary at %s", previous)
+		fmt.Fprintf(os.Stderr, "rollback: %s\n", notes)
 		return 1
+	}
+
+	// Best-effort SHA capture for the audit row.
+	if h, herr := trust.HashFile(livePath); herr == nil {
+		oldSHA = h
+	}
+	if h, herr := trust.HashFile(previous); herr == nil {
+		newSHA = h
 	}
 
 	tp := trust.DefaultPath()
@@ -520,18 +606,21 @@ func cmdDaemonRollback(args []string) int {
 	if locked, pid, _ := singleton.IsLocked(pidPath); locked && pid > 0 {
 		fmt.Printf("Stopping running daemon (PID %d)...\n", pid)
 		if rc := cmdDaemonStop(nil); rc != 0 {
+			notes = fmt.Sprintf("stop failed (rc=%d) — rollback aborted", rc)
 			return rc
 		}
 	}
 
 	tmp := livePath + ".rollback-tmp"
 	if err := copyBinaryFile(livePath, tmp); err != nil {
-		fmt.Fprintf(os.Stderr, "rollback: snapshot live: %v\n", err)
+		notes = fmt.Sprintf("snapshot live: %v", err)
+		fmt.Fprintf(os.Stderr, "rollback: %s\n", notes)
 		return 1
 	}
 	if err := copyBinaryFile(previous, livePath); err != nil {
 		_ = os.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "rollback: restore: %v\n", err)
+		notes = fmt.Sprintf("restore: %v", err)
+		fmt.Fprintf(os.Stderr, "rollback: %s\n", notes)
 		return 1
 	}
 	_ = os.Chmod(livePath, 0o755)
@@ -540,6 +629,8 @@ func cmdDaemonRollback(args []string) int {
 		// not fatal — previous still on disk under tmp name
 	}
 	fmt.Printf("Rolled back %s. Previous-of-previous saved as %s\n", livePath, previous)
+	outcome = "rolled_back"
+	notes = fmt.Sprintf("restored from %s", previous)
 	return 0
 }
 
@@ -692,6 +783,8 @@ func launchdPlistTemplate(binPath string) string {
     <true/>
     <key>KeepAlive</key>
     <dict>
+        <key>Crashed</key>
+        <true/>
         <key>SuccessfulExit</key>
         <false/>
     </dict>
@@ -732,24 +825,62 @@ func daemonCwd() string {
 
 // ── history ─────────────────────────────────────────────────────────────────
 
+// cmdDaemonHistory prints the most recent N rows from DaemonUpdateHistory
+// (P3 schema). The legacy trust-file view is reachable via
+// `--from-trust-file` for operators who still want to scan the append-only
+// ratification log directly.
 func cmdDaemonHistory(db *sql.DB, args []string) int {
 	limit := 20
+	fromTrust := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--limit" && i+1 < len(args) {
-			if n, err := strconv.Atoi(args[i+1]); err == nil {
-				limit = n
+		switch args[i] {
+		case "--limit":
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil {
+					limit = n
+				}
+				i++
 			}
-			i++
+		case "--from-trust-file":
+			fromTrust = true
 		}
 	}
-	// P3 will land DaemonUpdateHistory schema. P1 falls back to the
-	// trust file as a placeholder (each Append == one ratification
-	// event).
 	fmt.Println("force daemon history")
 	fmt.Println("─────────────────────")
-	fmt.Println("(P3 schema: DaemonUpdateHistory — awaiting impl)")
-	fmt.Println("Falling back to ~/.force/trusted-binary-hashes:")
-	fmt.Println()
+
+	if fromTrust {
+		return cmdDaemonHistoryFromTrustFile(limit)
+	}
+
+	entries, err := store.ListDaemonUpdateHistory(db, limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "history: query DaemonUpdateHistory: %v\n", err)
+		return 1
+	}
+	if len(entries) == 0 {
+		fmt.Println("(no entries — no `force daemon update` invocations recorded yet)")
+		fmt.Println("Run `force daemon history --from-trust-file` to view the legacy trust-file view.")
+		return 0
+	}
+	fmt.Printf("%-20s  %-12s  %-12s  %-12s  %s\n",
+		"TIMESTAMP", "OLD-SHA", "NEW-SHA", "OUTCOME", "OPERATOR")
+	for _, e := range entries {
+		fmt.Printf("%-20s  %-12s  %-12s  %-12s  %s\n",
+			e.TS,
+			truncStr(e.OldBinarySHA, 12),
+			truncStr(e.NewBinarySHA, 12),
+			e.Outcome,
+			truncStr(e.Operator, 20),
+		)
+	}
+	return 0
+}
+
+// cmdDaemonHistoryFromTrustFile is the legacy trust-file view, kept
+// behind the `--from-trust-file` flag. Each Append to the trust file is
+// one ratification event; this listing is useful when correlating an
+// in-DB DaemonUpdateHistory row against the underlying trust ratification.
+func cmdDaemonHistoryFromTrustFile(limit int) int {
 	tp := trust.DefaultPath()
 	f, err := trust.Load(tp)
 	if err != nil {
@@ -757,9 +888,10 @@ func cmdDaemonHistory(db *sql.DB, args []string) int {
 		return 1
 	}
 	if f == nil || len(f.Entries) == 0 {
-		fmt.Println("(no entries)")
+		fmt.Println("(trust file empty)")
 		return 0
 	}
+	fmt.Println("(showing trust-file ratifications, --from-trust-file)")
 	sorted := f.Sorted()
 	if limit > 0 && limit < len(sorted) {
 		sorted = sorted[:limit]
@@ -773,6 +905,62 @@ func cmdDaemonHistory(db *sql.DB, args []string) int {
 			e.GitBranchAtBuild,
 		)
 	}
+	return 0
+}
+
+// ── clear-crash-budget (D12 P3) ──────────────────────────────────────────────
+
+// cmdDaemonClearCrashBudget truncates DaemonStartLog after the operator has
+// investigated and fixed the underlying issue that triggered the crash-loop
+// detector. Re-arms the budget at zero so launchd / systemd's auto-restart
+// resumes its normal contract on the next boot.
+//
+// The command prompts for confirmation unless `--assume-yes` is supplied
+// (mirrors the trust-file gate's UX). The clear is recorded in AuditLog so
+// the operator-facing audit trail captures the re-arm.
+func cmdDaemonClearCrashBudget(db *sql.DB, args []string) int {
+	assumeYes := false
+	for _, a := range args {
+		if a == "--assume-yes" || a == "-y" {
+			assumeYes = true
+		}
+	}
+	pre, err := store.RecentStartCount(db, 24*time.Hour)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clear-crash-budget: read DaemonStartLog: %v\n", err)
+		return 1
+	}
+	fmt.Println("force daemon clear-crash-budget")
+	fmt.Println("─────────────────────────────────")
+	fmt.Printf("DaemonStartLog 'started' rows in last 24h: %d\n", pre)
+	fmt.Println()
+	fmt.Println("This truncates the entire DaemonStartLog table, re-arming the crash-budget")
+	fmt.Println("guard at zero. Use after you've investigated the root cause of a crash-loop.")
+	fmt.Println()
+
+	if !assumeYes {
+		fmt.Print("Proceed? [yes/no]: ")
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		line = strings.ToLower(strings.TrimSpace(line))
+		if line != "yes" && line != "y" {
+			fmt.Println("Aborted.")
+			return 1
+		}
+	} else {
+		fmt.Println("(--assume-yes — skipping interactive prompt)")
+	}
+
+	n, err := store.ClearDaemonStartLog(db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clear-crash-budget: %v\n", err)
+		return 1
+	}
+	op := currentOperator()
+	store.LogAudit(db, op, "daemon.clear-crash-budget", 0,
+		fmt.Sprintf("truncated DaemonStartLog (%d rows) at %s", n,
+			time.Now().UTC().Format("2006-01-02T15:04:05Z")))
+	fmt.Printf("Cleared %d row(s) from DaemonStartLog. Crash-budget re-armed.\n", n)
 	return 0
 }
 
