@@ -1,3 +1,10 @@
+---
+audience: both
+scope: Strategic deliverable list — D0 through D13+ with merge order, exit criteria, and closure pointers.
+owner: D13
+last_reviewed: 2026-05-05
+---
+
 # Roadmap
 
 Ten deliverables that take Force from post–Code-Red closure through its next-generation architecture. Each deliverable is written to be handed directly to a Claude Code agent as a work brief: required reading, scope, file paths, exit criteria as grep-verifiable checks, anti-cheat directives, verification procedure, and a closure-report artifact.

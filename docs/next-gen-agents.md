@@ -1,3 +1,10 @@
+---
+audience: both
+scope: Design sketch for next-gen agents (Senate, ISB, BoS, Engineering Corps); D4 + D3 substrate framing.
+owner: D13
+last_reviewed: 2026-05-05
+---
+
 # Next-Generation Agents
 
 Design sketch for four agents not yet built. Three are review layers at distinct lifecycle points; the fourth orchestrates experimentation across the whole fleet:

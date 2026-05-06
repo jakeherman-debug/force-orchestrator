@@ -1,3 +1,10 @@
+---
+audience: agent
+scope: Durable reference for how Force agents invoke claude -p, what CLAUDE.md auto-loads, and where invariants reach the model.
+owner: D4
+last_reviewed: 2026-05-05
+---
+
 # Claude CLI invocation layering
 
 This document is the durable reference for how Force agents invoke

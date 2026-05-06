@@ -1,3 +1,10 @@
+---
+audience: both
+scope: D3 paired-runs design — experimentation as a fleet primitive with global holdout and evidence-gated rule promotion.
+owner: D3
+last_reviewed: 2026-05-05
+---
+
 # Paired Runs — Fleet Experimentation as a Primitive
 
 Technical design document for adding experimentation as a first-class fleet primitive. Every decision the fleet makes — prompts, memories, rules, models, context sizes, max_turns, tool availability, agent routing thresholds — becomes testable through the same mechanism. Rule promotions into the fleet's permanent configuration are gated by experimental evidence, not operator intuition.
