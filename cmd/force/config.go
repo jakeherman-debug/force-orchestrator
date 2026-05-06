@@ -16,6 +16,9 @@ func cmdConfig(db *sql.DB, args []string) {
 		subCmd = args[0]
 	}
 	switch subCmd {
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force config [list|get <key>|set <key> <value>]")
+		return
 	case "get":
 		if len(args) < 2 {
 			fmt.Println("Usage: force config get <key>")

@@ -1,11 +1,12 @@
 package main
 
 import (
-	"log"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -684,7 +685,23 @@ func purgeFilesystem(ctx context.Context, db *sql.DB) {
 // cmdPurge cleans all filesystem run artifacts and dog timers without touching
 // task data in the database.
 // Fix #8e: ctx threads from main's signal-cancellation ctx.
-func cmdPurge(ctx context.Context, db *sql.DB, confirmed bool) {
+func cmdPurge(ctx context.Context, db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("purge", flag.ContinueOnError)
+	confirmFlag := fs.Bool("confirm", false, "skip the interactive DELETE prompt")
+	helped, perr := parseSubcommandFlags(fs, args, "purge",
+		"Clean filesystem run artifacts (worktrees, branches, log files, dog timers). Task DB rows are NOT touched.",
+		[]flagDoc{
+			{Name: "--confirm", Desc: "skip the interactive DELETE prompt"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force purge", "force purge --confirm"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	confirmed := *confirmFlag
 	// Always print the warning regardless of --confirm (defense-in-depth).
 	fmt.Fprintln(os.Stderr, "WARNING: This will permanently delete:")
 	fmt.Fprintln(os.Stderr, "  - fleet.log and holonet.jsonl log files")
@@ -715,7 +732,26 @@ func cmdPurge(ctx context.Context, db *sql.DB, confirmed bool) {
 // and resets the fleet to a factory-fresh state. Repositories and SystemConfig are
 // preserved unless --purge-repos is passed.
 // Fix #8e: ctx threads from main's signal-cancellation ctx.
-func cmdHardReset(ctx context.Context, db *sql.DB, confirmed, purgeRepos bool) {
+func cmdHardReset(ctx context.Context, db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("hard-reset", flag.ContinueOnError)
+	confirmFlag := fs.Bool("confirm", false, "skip the interactive DELETE prompt")
+	purgeReposFlag := fs.Bool("purge-repos", false, "also clear Repositories + SystemConfig")
+	helped, perr := parseSubcommandFlags(fs, args, "hard-reset",
+		"Wipe all task data + filesystem artifacts. Repositories + SystemConfig preserved unless --purge-repos.",
+		[]flagDoc{
+			{Name: "--confirm", Desc: "skip the interactive DELETE prompt"},
+			{Name: "--purge-repos", Desc: "also clear Repositories + SystemConfig"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force hard-reset --confirm", "force hard-reset --purge-repos --confirm"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	confirmed := *confirmFlag
+	purgeRepos := *purgeReposFlag
 	// Always print the warning regardless of --confirm (defense-in-depth).
 	fmt.Fprintln(os.Stderr, "WARNING: This permanently destroys ALL fleet state:")
 	fmt.Fprintln(os.Stderr, "  - All task data, history, and dependencies")

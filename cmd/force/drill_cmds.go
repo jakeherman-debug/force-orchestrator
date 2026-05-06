@@ -5,9 +5,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"force-orchestrator/internal/agents"
@@ -15,70 +15,78 @@ import (
 )
 
 func cmdAnnotate(db *sql.DB, args []string) int {
-	if len(args) < 4 {
+	fs := flag.NewFlagSet("annotate", flag.ContinueOnError)
+	operatorFlag := fs.String("operator", "default@operator", "operator email")
+	helped, perr := parseSubcommandFlags(fs, args, "annotate",
+		"Insert an operator annotation against a kind/ref pair (drill diagnostic).",
+		[]flagDoc{
+			{Name: "--operator E", Desc: "operator email"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force annotate captain_ruling 42 problem something looked off"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 4 {
 		fmt.Fprintln(os.Stderr, "Usage: force annotate <kind> <ref> <flag> <text...> [--operator <email>]")
 		fmt.Fprintln(os.Stderr, "       flag in: problem | interesting | follow_up | none")
 		return 1
 	}
-	kind, ref, flag := args[0], args[1], args[2]
-	if flag == "none" {
-		flag = ""
+	kind, ref, flagVal := rest[0], rest[1], rest[2]
+	if flagVal == "none" {
+		flagVal = ""
 	}
-	operator := "default@operator"
-	textParts := []string{}
-	for i := 3; i < len(args); i++ {
-		if args[i] == "--operator" && i+1 < len(args) {
-			operator = args[i+1]
-			i++
-			continue
-		}
-		textParts = append(textParts, args[i])
-	}
-	noteText := strings.Join(textParts, " ")
+	noteText := strings.Join(rest[3:], " ")
 	if noteText == "" {
 		fmt.Fprintln(os.Stderr, "annotate: note text required")
 		return 1
 	}
 	id, err := store.InsertAnnotation(context.Background(), db, store.Annotation{
-		OperatorEmail: operator, EventKind: kind, EventRef: ref, NoteText: noteText, Flag: flag,
+		OperatorEmail: *operatorFlag, EventKind: kind, EventRef: ref, NoteText: noteText, Flag: flagVal,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "annotate failed: %v\n", err)
 		return 1
 	}
-	fmt.Printf("OK — annotation %d created (kind=%s ref=%s flag=%q)\n", id, kind, ref, flag)
+	fmt.Printf("OK — annotation %d created (kind=%s ref=%s flag=%q)\n", id, kind, ref, flagVal)
 	return 0
 }
 
 func cmdReplay(db *sql.DB, args []string) int {
-	if len(args) < 2 {
+	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+	pvFlag := fs.String("prompt-version", "current", "prompt version to replay against")
+	operatorFlag := fs.String("operator", "default@operator", "operator email")
+	helped, perr := parseSubcommandFlags(fs, args, "replay",
+		"Re-run a recorded decision against a prompt version. Writes a ReplayResults row.",
+		[]flagDoc{
+			{Name: "--prompt-version V", Desc: "prompt version to replay against"},
+			{Name: "--operator E", Desc: "operator email"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force replay captain_ruling 42"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: force replay <kind> <event_id> [--prompt-version <v>] [--operator <email>]")
 		fmt.Fprintln(os.Stderr, "       kind in: captain_ruling | council_ruling | medic_decision | convoy_review_cycle")
 		return 1
 	}
-	kind := args[0]
-	id, err := strconv.ParseInt(args[1], 10, 64)
-	if err != nil || id <= 0 {
+	kind := rest[0]
+	id := int64(mustParseID(rest[1]))
+	if id <= 0 {
 		fmt.Fprintln(os.Stderr, "replay: invalid event id")
 		return 1
 	}
-	pv := "current"
-	operator := "default@operator"
-	for i := 2; i < len(args); i++ {
-		switch args[i] {
-		case "--prompt-version":
-			if i+1 < len(args) {
-				pv = args[i+1]
-				i++
-			}
-		case "--operator":
-			if i+1 < len(args) {
-				operator = args[i+1]
-				i++
-			}
-		}
-	}
-	res, err := agents.ReplayDecision(context.Background(), db, kind, id, pv, operator)
+	res, err := agents.ReplayDecision(context.Background(), db, kind, id, *pvFlag, *operatorFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "replay failed: %v\n", err)
 		return 1

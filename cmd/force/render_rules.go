@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,39 +35,32 @@ import (
 // the operator explicitly asks via --use-runtime-db — typically to
 // inspect renders that include operator-direct-write rules.
 func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
-	check := false
-	useRuntimeDB := false
-	// D3-P1 follow-up C: FIX-LOG.md is now rendered + drift-checked by
-	// default. The audit covers every ## Fix #N narrative; the legacy
-	// `--include-fix-log` flag is retained as a no-op for ergonomic
-	// continuity (operators / scripts that pass it still work). The
-	// new `--skip-fix-log` flag is the escape hatch if a future
-	// situation calls for a partial render.
-	includeFixLog := true
-	for _, a := range args {
-		switch a {
-		case "--check":
-			check = true
-		case "--use-runtime-db":
-			useRuntimeDB = true
-		case "--include-fix-log":
-			// Now the default. Kept as a no-op so older invocations
-			// don't trip on "unknown flag".
-			includeFixLog = true
-		case "--skip-fix-log":
-			includeFixLog = false
-		case "-h", "--help":
-			fmt.Println("Usage: force render-rules [--check] [--use-runtime-db] [--skip-fix-log]")
-			fmt.Println("  Without flags    : bootstraps FleetRules into a fresh in-memory DB + renders CLAUDE.md + FIX-LOG.md + docs/* from the audit.")
-			fmt.Println("  --check          : renders to memory and exits 1 if any on-disk file disagrees (drift detector).")
-			fmt.Println("  --use-runtime-db : use the persistent holocron.db instead of fresh in-memory (lets you see renders that include operator-direct-write rules).")
-			fmt.Println("  --skip-fix-log   : skip FIX-LOG.md rendering on this invocation (useful for partial renders).")
-			fmt.Println("  --include-fix-log: legacy no-op (now the default; flag retained for back-compat).")
-			return
-		default:
-			fmt.Fprintf(os.Stderr, "render-rules: unknown flag %q\nUsage: force render-rules [--check] [--use-runtime-db] [--skip-fix-log]\n", a)
-			os.Exit(2)
-		}
+	fs := flag.NewFlagSet("render-rules", flag.ContinueOnError)
+	checkFlag := fs.Bool("check", false, "renders to memory and exits 1 if any on-disk file disagrees (drift detector)")
+	useRuntimeDBFlag := fs.Bool("use-runtime-db", false, "use the persistent holocron.db instead of a fresh in-memory DB")
+	includeFixLogFlag := fs.Bool("include-fix-log", true, "legacy no-op (now the default)")
+	skipFixLogFlag := fs.Bool("skip-fix-log", false, "skip FIX-LOG.md rendering on this invocation")
+	helped, perr := parseSubcommandFlags(fs, args, "render-rules",
+		"Bootstrap FleetRules into a fresh in-memory DB + render CLAUDE.md + FIX-LOG.md + docs/* from the audit. --check exits non-zero on drift.",
+		[]flagDoc{
+			{Name: "--check", Desc: "exit 1 if any on-disk file disagrees with the rendered output"},
+			{Name: "--use-runtime-db", Desc: "use the persistent holocron.db"},
+			{Name: "--skip-fix-log", Desc: "skip FIX-LOG.md rendering on this invocation"},
+			{Name: "--include-fix-log", Desc: "legacy no-op (now the default)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force render-rules", "force render-rules --check"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	check := *checkFlag
+	useRuntimeDB := *useRuntimeDBFlag
+	includeFixLog := *includeFixLogFlag
+	if *skipFixLogFlag {
+		includeFixLog = false
 	}
 
 	repoRoot := findRepoRoot()

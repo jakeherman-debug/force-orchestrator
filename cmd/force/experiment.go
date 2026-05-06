@@ -27,6 +27,9 @@ func cmdExperiment(ctx context.Context, db *sql.DB, args []string) {
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
+	case "--help", "-h", "help":
+		experimentUsage()
+		return
 	case "author":
 		experimentAuthor(ctx, db, rest)
 	case "ratify":
@@ -56,11 +59,23 @@ Subcommands:
 }
 
 func experimentAuthor(ctx context.Context, db *sql.DB, args []string) {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("experiment author", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "experiment author",
+		"Author an experiment from a manifest YAML file.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force experiment author manifest.yaml"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force experiment author <yaml-path>")
 		os.Exit(1)
 	}
-	path := args[0]
+	path := rest[0]
 	id, err := experiments.AuthorFromYAML(ctx, db, path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "author: %v\n", err)
@@ -71,10 +86,20 @@ func experimentAuthor(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func experimentRatify(ctx context.Context, db *sql.DB, args []string) {
-	fs := flag.NewFlagSet("ratify", flag.ExitOnError)
+	fs := flag.NewFlagSet("experiment ratify", flag.ContinueOnError)
 	operator := fs.String("operator", "", "operator email — required, recorded in AuditLog")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+	helped, perr := parseSubcommandFlags(fs, args, "experiment ratify",
+		"Operator-pre-approve an authored experiment to start running.",
+		[]flagDoc{
+			{Name: "--operator E", Desc: "operator email (recorded in AuditLog)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force experiment ratify 7", "force experiment ratify 7 --operator jake@example.com"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
 	}
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force experiment ratify <id> [--operator email]")
@@ -97,10 +122,20 @@ func experimentRatify(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func experimentTerminate(ctx context.Context, db *sql.DB, args []string) {
-	fs := flag.NewFlagSet("terminate", flag.ExitOnError)
+	fs := flag.NewFlagSet("experiment terminate", flag.ContinueOnError)
 	reason := fs.String("reason", "operator_closed", "free-form reason recorded on the outcome row")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+	helped, perr := parseSubcommandFlags(fs, args, "experiment terminate",
+		"Terminate a running experiment and compute its outcome.",
+		[]flagDoc{
+			{Name: "--reason T", Desc: "free-form reason recorded on the outcome row"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force experiment terminate 7"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
 	}
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force experiment terminate <id> [--reason text]")
@@ -124,11 +159,23 @@ func experimentTerminate(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func experimentStatus(ctx context.Context, db *sql.DB, args []string) {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("experiment status", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "experiment status",
+		"Show one experiment's lifecycle state and enrollment.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force experiment status 7"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force experiment status <id>")
 		os.Exit(1)
 	}
-	id := mustParseID(args[0])
+	id := mustParseID(rest[0])
 	st, err := experiments.GetStatus(ctx, db, id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "status: %v\n", err)
@@ -157,10 +204,20 @@ func experimentStatus(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func experimentList(ctx context.Context, db *sql.DB, args []string) {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	fs := flag.NewFlagSet("experiment list", flag.ContinueOnError)
 	statusFilter := fs.String("status", "all", "filter by status (authored|running|terminated|all)")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+	helped, perr := parseSubcommandFlags(fs, args, "experiment list",
+		"List experiments matching a status filter.",
+		[]flagDoc{
+			{Name: "--status S", Desc: "authored|running|terminated|all"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force experiment list", "force experiment list --status running"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
 	}
 	query := `SELECT id, name, status, IFNULL(subject_agent, ''), IFNULL(stakes_tier, ''), IFNULL(created_at, '') FROM Experiments`
 	queryArgs := []any{}

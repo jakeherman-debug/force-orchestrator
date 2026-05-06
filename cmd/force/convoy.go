@@ -31,6 +31,9 @@ func cmdConvoy(db *sql.DB, args []string) {
 		subCmd = args[0]
 	}
 	switch subCmd {
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|review <id>|pr <id>|ship <id>]")
+		return
 	case "list", "":
 		printConvoys(db)
 	case "create":

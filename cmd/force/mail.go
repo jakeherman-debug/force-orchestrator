@@ -15,6 +15,9 @@ func cmdMail(db *sql.DB, args []string) {
 		subCmd = args[0]
 	}
 	switch subCmd {
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force mail <list|inbox [agent]|read <id>|send <to> <subject> [body]>")
+		return
 	case "send":
 		// force mail send <to> [--task <id>] [--type directive|feedback|alert|info] <subject> [body]
 		if len(args) < 3 {

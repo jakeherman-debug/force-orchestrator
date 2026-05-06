@@ -131,7 +131,7 @@ func TestCmdAddRepo_AutoQueueFindPRTemplate(t *testing.T) {
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
-	cmdAddRepo(db, "api", repoDir, "test")
+	cmdAddRepo(db, []string{"api", repoDir, "test"})
 	w.Close()
 	os.Stdout = oldStdout
 	buf := new(bytes.Buffer)

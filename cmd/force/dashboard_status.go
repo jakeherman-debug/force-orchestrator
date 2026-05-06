@@ -9,6 +9,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -19,7 +20,18 @@ import (
 // cmdDashboardStatus is the entry point for `force dashboard status`.
 // Returns the exit code so main.go can route through os.Exit at the
 // appropriate moment.
-func cmdDashboardStatus(db *sql.DB) int {
+func cmdDashboardStatus(db *sql.DB, args []string) int {
+	fs := flag.NewFlagSet("dashboard status", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "dashboard status",
+		"Read the most recent DashboardHealthHeartbeats row and exit 0 (fresh) or 1 (stale).",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force dashboard status"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
 	row, err := dashboard.LatestHeartbeat(db)
 	if errors.Is(err, sql.ErrNoRows) {
 		fmt.Fprintln(os.Stderr, "STALE — no heartbeat ever recorded (dashboard process never ran or DB drifted)")

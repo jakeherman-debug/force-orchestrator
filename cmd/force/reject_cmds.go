@@ -7,43 +7,40 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 
 	"force-orchestrator/internal/agents"
 )
 
-// cmdReject — `force reject <kind> <id> --counter-kind whole_thing|different_approach|defer --text "..."`
+// cmdReject — `force briefing-reject <kind> <id> --counter-kind whole_thing|different_approach|defer --text "..."`
 func cmdReject(db *sql.DB, args []string) int {
-	if len(args) < 4 {
-		fmt.Fprintln(os.Stderr, "Usage: force reject <kind> <id> --counter-kind <kind> --text <reason>")
+	fs := flag.NewFlagSet("briefing-reject", flag.ContinueOnError)
+	counterKind := fs.String("counter-kind", "", "whole_thing|different_approach|defer")
+	text := fs.String("text", "", "free-form rejection reason")
+	helped, perr := parseSubcommandFlags(fs, args, "briefing-reject",
+		"Reject a briefing and route a CounterProposal of the chosen kind.",
+		[]flagDoc{
+			{Name: "--counter-kind K", Desc: "whole_thing|different_approach|defer"},
+			{Name: "--text T", Desc: "free-form rejection reason"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force briefing-reject convoy 42 --counter-kind whole_thing --text \"...\""})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: force briefing-reject <kind> <id> --counter-kind <kind> --text <reason>")
 		return 1
 	}
-	kind := args[0]
-	id, err := strconv.ParseInt(args[1], 10, 64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "id must be integer: %v\n", err)
-		return 1
-	}
-	counterKind := ""
-	text := ""
-	for i := 2; i < len(args); i++ {
-		switch args[i] {
-		case "--counter-kind":
-			if i+1 < len(args) {
-				counterKind = args[i+1]
-				i++
-			}
-		case "--text":
-			if i+1 < len(args) {
-				text = args[i+1]
-				i++
-			}
-		}
-	}
-	if counterKind == "" {
+	kind := rest[0]
+	id := int64(mustParseID(rest[1]))
+	if *counterKind == "" {
 		fmt.Fprintln(os.Stderr, "--counter-kind required")
 		return 1
 	}
@@ -53,7 +50,7 @@ func cmdReject(db *sql.DB, args []string) int {
 		return 1
 	}
 	newID, err := agents.RouteCounterProposal(context.Background(), db, br.ID, kind,
-		agents.CounterProposalKind(counterKind), text)
+		agents.CounterProposalKind(*counterKind), *text)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reject failed: %v\n", err)
 		return 1
@@ -62,7 +59,6 @@ func cmdReject(db *sql.DB, args []string) int {
 	if newID != 0 {
 		suffix = fmt.Sprintf(" (routed_id=%d)", newID)
 	}
-	fmt.Printf("OK — rejected %s/%d via %s%s\n", kind, id, counterKind, suffix)
-	_ = strings.TrimSpace // keep `strings` import in case formatting expands
+	fmt.Printf("OK — rejected %s/%d via %s%s\n", kind, id, *counterKind, suffix)
 	return 0
 }

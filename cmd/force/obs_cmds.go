@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -23,21 +24,55 @@ import (
 	"force-orchestrator/internal/store"
 )
 
-func cmdStatus(db *sql.DB) {
+func cmdStatus(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "status",
+		"Print fleet status (agents, queue depth, convoys).",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force status"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	printStatus(db)
 }
 
-func cmdWho(db *sql.DB) {
+func cmdWho(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("who", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "who",
+		"List active agents and what they're working on.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force who"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	printWho(db)
 }
 
 func cmdStats(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
+	portFlag := fs.String("port", "", "dashboard port to query (default: SystemConfig dashboard_port or 8080)")
+	helped, perr := parseSubcommandFlags(fs, args, "stats",
+		"Hit the daemon's /api/stats endpoint and print fleet statistics.",
+		[]flagDoc{
+			{Name: "--port P", Desc: "dashboard port to query"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force stats", "force stats --port 8080"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	port := store.GetConfig(db, "dashboard_port", "8080")
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "--port" {
-			port = args[i+1]
-			break
-		}
+	if *portFlag != "" {
+		port = *portFlag
 	}
 
 	url := fmt.Sprintf("http://localhost:%s/api/stats", port)
@@ -86,69 +121,76 @@ func cmdStats(db *sql.DB, args []string) {
 	w2.Flush()
 }
 
-func cmdBountyStats(db *sql.DB) {
+func cmdBountyStats(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("bounty stats", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "bounty stats",
+		"Print BountyBoard statistics by status/type.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force bounty stats"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	printBountyStats(db)
 }
 
 func cmdLogsFleet(db *sql.DB, args []string) {
-	// Flags: --no-follow, --filter <pattern>, --agent <name>, --task <id>, --convoy <id>
-	noFollow := false
-	filterPattern := ""
-	fleetArgs := args
-	for i := 0; i < len(fleetArgs); i++ {
-		switch fleetArgs[i] {
-		case "--no-follow":
-			noFollow = true
-		case "--filter":
-			if i+1 < len(fleetArgs) {
-				filterPattern = fleetArgs[i+1]
-				i++
-			}
-		case "--agent":
-			if i+1 < len(fleetArgs) {
-				// Escape brackets so grep treats this as a literal match,
-				// not a character class — agent names like R2-D2 contain [-].
-				filterPattern = `\[` + fleetArgs[i+1] + `\]`
-				i++
-			}
-		case "--task":
-			if i+1 < len(fleetArgs) {
-				taskIDArg, taskArgErr := strconv.Atoi(fleetArgs[i+1])
-				if taskArgErr != nil {
-					fmt.Printf("Invalid task ID: %s\n", fleetArgs[i+1])
-					os.Exit(1)
+	fs := flag.NewFlagSet("logs-fleet", flag.ContinueOnError)
+	noFollowFlag := fs.Bool("no-follow", false, "print the tail without following")
+	filterFlagVal := fs.String("filter", "", "regex filter pattern")
+	agentFlag := fs.String("agent", "", "filter by agent name (escaped as `\\[name\\]`)")
+	taskFlag := fs.Int("task", 0, "filter by task ID")
+	convoyFlag := fs.Int("convoy", 0, "filter by convoy ID (resolves member tasks)")
+	helped, perr := parseSubcommandFlags(fs, args, "logs-fleet",
+		"Tail the fleet.log (or print last lines with --no-follow), optionally filtered.",
+		[]flagDoc{
+			{Name: "--no-follow", Desc: "print the tail without following"},
+			{Name: "--filter R", Desc: "regex filter pattern"},
+			{Name: "--agent N", Desc: "filter by agent name"},
+			{Name: "--task N", Desc: "filter by task ID"},
+			{Name: "--convoy N", Desc: "filter by convoy ID"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force logs-fleet", "force logs-fleet --task 42", "force logs-fleet --no-follow --agent R2-D2"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	noFollow := *noFollowFlag
+	filterPattern := *filterFlagVal
+	if *agentFlag != "" {
+		// Escape brackets so grep treats this as a literal match,
+		// not a character class — agent names like R2-D2 contain [-].
+		filterPattern = `\[` + *agentFlag + `\]`
+	}
+	if *taskFlag != 0 {
+		filterPattern = fmt.Sprintf("Task %d[^0-9]", *taskFlag)
+	}
+	if *convoyFlag != 0 {
+		taskRows, qErr := db.Query(`SELECT id FROM BountyBoard WHERE convoy_id = ?`, *convoyFlag)
+		if qErr == nil {
+			var parts []string
+			for taskRows.Next() {
+				var tid int
+				if err := taskRows.Scan(&tid); err != nil {
+					fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
+					continue
 				}
-				filterPattern = fmt.Sprintf("Task %d[^0-9]", taskIDArg)
-				i++
+				parts = append(parts, fmt.Sprintf("Task %d[^0-9]", tid))
 			}
-		case "--convoy":
-			if i+1 < len(fleetArgs) {
-				convoyIDStr := fleetArgs[i+1]
-				i++
-				var cid int
-				fmt.Sscanf(convoyIDStr, "%d", &cid)
-				taskRows, qErr := db.Query(`SELECT id FROM BountyBoard WHERE convoy_id = ?`, cid)
-				if qErr == nil {
-					var parts []string
-					for taskRows.Next() {
-						var tid int
-						if err := taskRows.Scan(&tid); err != nil {
-							fmt.Fprintf(os.Stderr, "warn: scan failed: %v\n", err)
-							continue
-						}
-						parts = append(parts, fmt.Sprintf("Task %d[^0-9]", tid))
-					}
-					if rErr := taskRows.Err(); rErr != nil {
-						log.Printf("obs_cmds.go:cmdLogsFleet: rows iter error: %v", rErr)
-					}
-					taskRows.Close()
-					if len(parts) > 0 {
-						filterPattern = strings.Join(parts, "|")
-					} else {
-						fmt.Printf("No tasks found for convoy %d.\n", cid)
-						os.Exit(0)
-					}
-				}
+			if rErr := taskRows.Err(); rErr != nil {
+				log.Printf("obs_cmds.go:cmdLogsFleet: rows iter error: %v", rErr)
+			}
+			taskRows.Close()
+			if len(parts) > 0 {
+				filterPattern = strings.Join(parts, "|")
+			} else {
+				fmt.Printf("No tasks found for convoy %d.\n", *convoyFlag)
+				os.Exit(0)
 			}
 		}
 	}
@@ -198,30 +240,30 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 }
 
 func cmdHolonet(db *sql.DB, args []string) {
-	// Flags: --no-follow (dump last 50), --filter <event_type> (grep by type), --task <id>
-	noFollow := false
-	filterType := ""
+	fs := flag.NewFlagSet("holonet", flag.ContinueOnError)
+	noFollowFlag := fs.Bool("no-follow", false, "dump the last 50 lines and exit")
+	filterFlagVal := fs.String("filter", "", "filter by event_type")
+	taskFlag := fs.Int("task", 0, "filter by task ID")
+	helped, perr := parseSubcommandFlags(fs, args, "holonet",
+		"Tail / dump the holonet.jsonl event stream, optionally filtered.",
+		[]flagDoc{
+			{Name: "--no-follow", Desc: "dump the last 50 lines and exit"},
+			{Name: "--filter T", Desc: "filter by event_type"},
+			{Name: "--task N", Desc: "filter by task ID"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force holonet", "force holonet --no-follow --filter audit"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	noFollow := *noFollowFlag
+	filterType := *filterFlagVal
 	filterTask := ""
-	holoArgs := args
-	for i := 0; i < len(holoArgs); i++ {
-		switch holoArgs[i] {
-		case "--no-follow":
-			noFollow = true
-		case "--filter":
-			if i+1 < len(holoArgs) {
-				filterType = holoArgs[i+1]
-				i++
-			}
-		case "--task":
-			if i+1 < len(holoArgs) {
-				if _, taskArgErr := strconv.Atoi(holoArgs[i+1]); taskArgErr != nil {
-					fmt.Printf("Invalid task ID: %s\n", holoArgs[i+1])
-					os.Exit(1)
-				}
-				filterTask = holoArgs[i+1]
-				i++
-			}
-		}
+	if *taskFlag != 0 {
+		filterTask = strconv.Itoa(*taskFlag)
 	}
 	// Build filter pattern for grep (applied before tail/follow)
 	if filterType != "" || filterTask != "" {
@@ -299,7 +341,23 @@ func cmdHolonet(db *sql.DB, args []string) {
 	}
 }
 
-func cmdExport(db *sql.DB, file string) {
+func cmdExport(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("export", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "export",
+		"Export the fleet's tasks/dependencies to a JSON file (default: fleet-export.json).",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force export", "force export /tmp/fleet.json"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	file := "fleet-export.json"
+	if len(rest) >= 1 {
+		file = rest[0]
+	}
 	if err := exportFleet(db, file); err != nil {
 		fmt.Printf("Export failed: %v\n", err)
 		os.Exit(1)
@@ -307,8 +365,24 @@ func cmdExport(db *sql.DB, file string) {
 	fmt.Printf("Fleet exported to %s\n", file)
 }
 
-func cmdImport(db *sql.DB, file string) {
-	n, err := importFleet(db, file)
+func cmdImport(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("import", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "import",
+		"Import a fleet export JSON file into the current holocron.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force import fleet-export.json"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fmt.Println("Usage: force import <file.json>")
+		os.Exit(1)
+	}
+	n, err := importFleet(db, rest[0])
 	if err != nil {
 		fmt.Printf("Import failed: %v\n", err)
 		os.Exit(1)
@@ -316,7 +390,24 @@ func cmdImport(db *sql.DB, file string) {
 	fmt.Printf("Imported %d task(s).\n", n)
 }
 
-func cmdSearch(db *sql.DB, query string) {
+func cmdSearch(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("search", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "search",
+		"Search BountyBoard.payload + error_log for the given LIKE-style query.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force search login flow"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fmt.Println("Usage: force search <query>")
+		os.Exit(1)
+	}
+	query := strings.Join(rest, " ")
 	escapedQuery := strings.ReplaceAll(query, `\`, `\\`)
 	escapedQuery = strings.ReplaceAll(escapedQuery, `%`, `\%`)
 	escapedQuery = strings.ReplaceAll(escapedQuery, `_`, `\_`)
@@ -351,8 +442,23 @@ func cmdSearch(db *sql.DB, query string) {
 	}
 }
 
-func cmdAudit(db *sql.DB, limit int) {
-	entries := store.ListAuditLog(db, limit)
+func cmdAudit(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
+	limitFlag := fs.Int("limit", 50, "max number of audit log entries")
+	helped, perr := parseSubcommandFlags(fs, args, "audit",
+		"Print the AuditLog (operator + agent actions).",
+		[]flagDoc{
+			{Name: "--limit N", Desc: "max number of audit log entries"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force audit", "force audit --limit 200"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	entries := store.ListAuditLog(db, *limitFlag)
 	if len(entries) == 0 {
 		fmt.Println("No audit log entries.")
 		return
@@ -370,8 +476,25 @@ func cmdAudit(db *sql.DB, limit int) {
 	}
 }
 
-func cmdPrune(db *sql.DB, keepDays int, dryRun bool) {
-	pruneFleet(db, keepDays, dryRun)
+func cmdPrune(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
+	keepDaysFlag := fs.Int("keep-days", 30, "keep tasks newer than N days")
+	dryRunFlag := fs.Bool("dry-run", false, "report what would be pruned without deleting")
+	helped, perr := parseSubcommandFlags(fs, args, "prune",
+		"Delete archived/cancelled tasks older than N days. Does NOT touch active tasks.",
+		[]flagDoc{
+			{Name: "--keep-days N", Desc: "keep tasks newer than N days"},
+			{Name: "--dry-run", Desc: "report what would be pruned without deleting"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force prune --keep-days 30", "force prune --dry-run"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	pruneFleet(db, *keepDaysFlag, *dryRunFlag)
 }
 
 // Fix #8e: ctx threads from main's signal-cancellation ctx so RunDogByName's
@@ -383,6 +506,21 @@ func cmdDogs(ctx context.Context, db *sql.DB, args []string) {
 	}
 	switch sub {
 	case "", "list":
+		fs := flag.NewFlagSet("dogs", flag.ContinueOnError)
+		listArgs := args
+		if sub == "list" {
+			listArgs = args[1:]
+		}
+		helped, perr := parseSubcommandFlags(fs, listArgs, "dogs",
+			"List registered dogs (background sweepers) with last/next-run times.",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force dogs", "force dogs run reaper"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
 		dogs := agents.ListDogs(db)
 		fmt.Printf("%-22s %-10s %-20s %s\n", "DOG", "RUNS", "LAST RUN", "NEXT RUN")
 		fmt.Println(strings.Repeat("-", 78))
@@ -393,8 +531,23 @@ func cmdDogs(ctx context.Context, db *sql.DB, args []string) {
 			}
 			fmt.Printf("%-22s %-10d %-20s %s\n", d.Name, d.RunCount, truncate(lastRun, 20), d.NextRun)
 		}
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force dogs [list|run <name>]")
+		return
 	case "run":
-		if len(args) < 2 {
+		fs := flag.NewFlagSet("dogs run", flag.ContinueOnError)
+		helped, perr := parseSubcommandFlags(fs, args[1:], "dogs run",
+			"Force-run a registered dog (background sweeper) immediately.",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force dogs run reaper"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
+		rest := fs.Args()
+		if len(rest) < 1 {
 			fmt.Println("Usage: force dogs run <name>")
 			fmt.Println()
 			fmt.Println("Available dogs:")
@@ -403,7 +556,7 @@ func cmdDogs(ctx context.Context, db *sql.DB, args []string) {
 			}
 			os.Exit(1)
 		}
-		name := args[1]
+		name := rest[0]
 		valid := false
 		for _, v := range agents.DogNames() {
 			if v == name {
@@ -452,20 +605,46 @@ func cmdEscalations(db *sql.DB, args []string) {
 	}
 	switch subCmd {
 	case "list", "":
+		fs := flag.NewFlagSet("escalations list", flag.ContinueOnError)
+		listArgs := args
+		if subCmd == "list" {
+			listArgs = args[1:]
+		}
+		helped, perr := parseSubcommandFlags(fs, listArgs, "escalations list",
+			"List escalations. Optional positional: status filter.",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force escalations", "force escalations list Open"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
 		statusFilter := ""
-		if len(args) >= 2 {
-			statusFilter = args[1]
+		if rest := fs.Args(); len(rest) >= 1 {
+			statusFilter = rest[0]
 		}
 		printEscalations(db, statusFilter)
 	case "ack":
-		if len(args) < 2 {
+		fs := flag.NewFlagSet("escalations ack", flag.ContinueOnError)
+		helped, perr := parseSubcommandFlags(fs, args[1:], "escalations ack",
+			"Acknowledge an escalation (operator has seen it).",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force escalations ack 17"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
+		rest := fs.Args()
+		if len(rest) < 1 {
 			fmt.Println("Usage: force escalations ack <id>")
 			os.Exit(1)
 		}
-		id := mustParseID(args[1])
+		id := mustParseID(rest[0])
 		agents.AckEscalation(db, id)
 		fmt.Printf("Escalation %d acknowledged.\n", id)
-		// Surface the task ID so the operator knows the next step
 		var e store.Escalation
 		db.QueryRow(`SELECT task_id FROM Escalations WHERE id = ?`, id).Scan(&e.TaskID)
 		if e.TaskID > 0 {
@@ -475,21 +654,47 @@ func cmdEscalations(db *sql.DB, args []string) {
 			fmt.Printf("  To manually reset it:     force reset %d\n", e.TaskID)
 		}
 	case "close":
-		if len(args) < 2 {
+		fs := flag.NewFlagSet("escalations close", flag.ContinueOnError)
+		helped, perr := parseSubcommandFlags(fs, args[1:], "escalations close",
+			"Close an escalation without re-queueing the task.",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force escalations close 17"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
+		rest := fs.Args()
+		if len(rest) < 1 {
 			fmt.Println("Usage: force escalations close <id>")
 			os.Exit(1)
 		}
-		id := mustParseID(args[1])
+		id := mustParseID(rest[0])
 		agents.CloseEscalation(db, id, false)
 		fmt.Printf("Escalation %d closed.\n", id)
 	case "requeue":
-		if len(args) < 2 {
+		fs := flag.NewFlagSet("escalations requeue", flag.ContinueOnError)
+		helped, perr := parseSubcommandFlags(fs, args[1:], "escalations requeue",
+			"Close an escalation AND re-queue the task for retry.",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force escalations requeue 17"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
+		rest := fs.Args()
+		if len(rest) < 1 {
 			fmt.Println("Usage: force escalations requeue <id>")
 			os.Exit(1)
 		}
-		id := mustParseID(args[1])
+		id := mustParseID(rest[0])
 		agents.CloseEscalation(db, id, true)
 		fmt.Printf("Escalation %d closed and task re-queued.\n", id)
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force escalations [list|ack <id>|close <id>|requeue <id>]")
 	default:
 		fmt.Printf("Unknown escalations subcommand: %s\n", subCmd)
 		fmt.Println("Usage: force escalations [list|ack <id>|close <id>|requeue <id>]")
@@ -497,13 +702,41 @@ func cmdEscalations(db *sql.DB, args []string) {
 	}
 }
 
-func cmdCosts(db *sql.DB) {
+func cmdCosts(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("costs", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "costs",
+		"Print cost summary (token spend by agent / convoy).",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force costs"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	printCosts(db)
 }
 
 // cmdTailTask streams the live Claude output for an actively running task.
 // The daemon writes fleet-task-<id>.log while Claude runs; this command tails it.
-func cmdTailTask(db *sql.DB, taskID int) {
+func cmdTailTask(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("tail", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "tail",
+		"Stream the live Claude output for an actively-running task.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force tail 42"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fmt.Println("Usage: force tail <task-id>")
+		os.Exit(1)
+	}
+	taskID := mustParseID(rest[0])
 	b, err := store.GetBounty(db, taskID)
 	if err != nil {
 		fmt.Printf("Task %d not found.\n", taskID)
@@ -554,7 +787,18 @@ func cmdTailTask(db *sql.DB, taskID int) {
 	tailCmd.Run()
 }
 
-func cmdLeaderboard(db *sql.DB) {
+func cmdLeaderboard(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("leaderboard", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "leaderboard",
+		"Print agent leaderboard (completion + turn counts).",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force leaderboard"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	entries := store.GetLeaderboard(db)
 	if len(entries) == 0 {
 		fmt.Println("No task history yet.")
@@ -577,7 +821,18 @@ func cmdLeaderboard(db *sql.DB) {
 	w.Flush()
 }
 
-func cmdWatch(db *sql.DB) {
+func cmdWatch(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "watch",
+		"Live Command Center TUI — fleet status auto-refreshed.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force watch"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	watchSigChan := make(chan os.Signal, 1)
 	signal.Notify(watchSigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

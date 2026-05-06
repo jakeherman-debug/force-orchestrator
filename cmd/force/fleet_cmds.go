@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -953,20 +954,47 @@ func cmdDaemon(db *sql.DB) {
 	}
 }
 
-func cmdScale(db *sql.DB, astromechs, council, captain, commanders, investigators, auditors, librarians int) {
+func cmdScale(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("scale", flag.ContinueOnError)
+	scaleAstromechs := fs.Int("astromechs", -1, "number of astromechs")
+	scaleCouncil := fs.Int("council", -1, "number of council members")
+	scaleCaptain := fs.Int("captain", -1, "number of captains")
+	scaleCommanders := fs.Int("commanders", -1, "number of commanders")
+	scaleInvestigators := fs.Int("investigators", -1, "number of investigators")
+	scaleAuditors := fs.Int("auditors", -1, "number of auditors")
+	scaleLibrarians := fs.Int("librarians", -1, "number of librarians")
+	helped, perr := parseSubcommandFlags(fs, args, "scale",
+		"Dynamically scale agent counts. Each flag sets a SystemConfig row + signals daemon.",
+		[]flagDoc{
+			{Name: "--astromechs N", Desc: "number of astromechs"},
+			{Name: "--council N", Desc: "number of council members"},
+			{Name: "--captain N", Desc: "number of captains"},
+			{Name: "--commanders N", Desc: "number of commanders"},
+			{Name: "--investigators N", Desc: "number of investigators"},
+			{Name: "--auditors N", Desc: "number of auditors"},
+			{Name: "--librarians N", Desc: "number of librarians"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force scale --astromechs 4 --council 1"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	type update struct {
 		key   string
 		label string
 		val   int
 	}
 	candidates := []update{
-		{"num_astromechs", "astromechs", astromechs},
-		{"num_council", "council", council},
-		{"num_captain", "captain", captain},
-		{"num_commanders", "commanders", commanders},
-		{"num_investigators", "investigators", investigators},
-		{"num_auditors", "auditors", auditors},
-		{"num_librarians", "librarians", librarians},
+		{"num_astromechs", "astromechs", *scaleAstromechs},
+		{"num_council", "council", *scaleCouncil},
+		{"num_captain", "captain", *scaleCaptain},
+		{"num_commanders", "commanders", *scaleCommanders},
+		{"num_investigators", "investigators", *scaleInvestigators},
+		{"num_auditors", "auditors", *scaleAuditors},
+		{"num_librarians", "librarians", *scaleLibrarians},
 	}
 
 	var updated []string
@@ -1003,23 +1031,50 @@ func cmdScale(db *sql.DB, astromechs, council, captain, commanders, investigator
 }
 
 func cmdRepos(db *sql.DB, args []string) {
+	// `force repos` (no subcommand) lists; `force repos remove <name>` removes.
+	// We intercept --help / unknown flags BEFORE dispatching to the subcommand
+	// branch so a stray --bogus-flag at the top level rejects.
 	subCmd := ""
 	if len(args) >= 1 {
 		subCmd = args[0]
 	}
 	switch subCmd {
 	case "remove":
-		if len(args) < 2 {
+		fs := flag.NewFlagSet("repos remove", flag.ContinueOnError)
+		helped, perr := parseSubcommandFlags(fs, args[1:], "repos remove",
+			"Unregister a repository from the orchestrator.",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force repos remove backend"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
+		rest := fs.Args()
+		if len(rest) < 1 {
 			fmt.Println("Usage: force repos remove <name>")
 			os.Exit(1)
 		}
-		repoName := args[1]
+		repoName := rest[0]
 		if store.RemoveRepo(db, repoName) {
 			fmt.Printf("Repository '%s' removed.\n", repoName)
 		} else {
 			fmt.Printf("Repository '%s' not found.\n", repoName)
 		}
 	default:
+		// Dispatch path. The leaf list operation accepts --help / no flags.
+		fs := flag.NewFlagSet("repos", flag.ContinueOnError)
+		helped, perr := parseSubcommandFlags(fs, args, "repos",
+			"List registered repositories. `force repos remove <name>` to unregister.",
+			[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+			[]string{"force repos", "force repos remove backend"})
+		if helped {
+			return
+		}
+		if perr != nil {
+			os.Exit(2)
+		}
 		// list repos (default)
 		rows, err := db.Query(`SELECT name, local_path, description FROM Repositories ORDER BY name`)
 		if err != nil {
@@ -1052,7 +1107,30 @@ func cmdRepos(db *sql.DB, args []string) {
 	}
 }
 
-func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
+func cmdAddRepo(db *sql.DB, args []string) {
+	// fix(cli) — flag prologue. Without it, `force add-repo --bogus-flag`
+	// silently passed through to the AddRepo write. parseSubcommandFlags
+	// rejects unknown flags + handles --help BEFORE any side-effect.
+	fs := flag.NewFlagSet("add-repo", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "add-repo",
+		"Register a git repository with the orchestrator. Validates the path is a git repo, populates remote_url + default_branch, and queues FindPRTemplate.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force add-repo myrepo /path/to/repo Short description here"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 3 {
+		fmt.Println("Usage: force add-repo <name> <local-path> <description>")
+		os.Exit(1)
+	}
+	name := rest[0]
+	repoRegPath := rest[1]
+	desc := strings.Join(rest[2:], " ")
+
 	// D3 polish-pass iteration 2 (B4r): operator-invoked CLI subcommand.
 	// The git probes here run BEFORE the daemon's holocron is wired,
 	// but igit.LogAndRun degrades gracefully when no DB is attached.
@@ -1165,7 +1243,18 @@ func cmdAddRepo(db *sql.DB, name, repoRegPath, desc string) {
 	}
 }
 
-func cmdEstop(db *sql.DB) {
+func cmdEstop(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("estop", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "estop",
+		"Activate emergency-stop. Agents halt after current sleep cycle.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force estop"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	agents.SetEstop(db, true)
 	telemetry.EmitEvent(telemetry.EventEstop(true))
 	store.LogAudit(db, "operator", "estop", 0, "emergency stop activated")
@@ -1173,7 +1262,18 @@ func cmdEstop(db *sql.DB) {
 	fmt.Println("Run 'force resume' to re-enable agents.")
 }
 
-func cmdResume(db *sql.DB) {
+func cmdResume(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "resume",
+		"Clear emergency-stop. Agents resume on their next cycle.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force resume"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	agents.SetEstop(db, false)
 	telemetry.EmitEvent(telemetry.EventEstop(false))
 	store.LogAudit(db, "operator", "resume", 0, "emergency stop cleared")
@@ -1181,10 +1281,36 @@ func cmdResume(db *sql.DB) {
 }
 
 // Fix #8e: ctx threads from main's signal-cancellation ctx.
-func cmdCleanup(ctx context.Context, db *sql.DB) {
+func cmdCleanup(ctx context.Context, db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "cleanup",
+		"Run housekeeping: prune git worktrees + clear stale Agents rows.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force cleanup"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	runCleanup(ctx, db)
 }
 
-func cmdDoctor(db *sql.DB, clean bool) {
-	runDoctor(db, clean)
+func cmdDoctor(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	cleanFlag := fs.Bool("clean", false, "clean up dangling state (worktrees, locks)")
+	helped, perr := parseSubcommandFlags(fs, args, "doctor",
+		"Diagnose fleet state. Optionally cleans dangling worktrees/locks.",
+		[]flagDoc{
+			{Name: "--clean", Desc: "clean up dangling state"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force doctor", "force doctor --clean"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	runDoctor(db, *cleanFlag)
 }

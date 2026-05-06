@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,15 @@ func cmdMigrate(ctx context.Context, db *sql.DB, args []string) {
 		fmt.Println("Usage: force migrate pr-flow [--dry-run] [--rollback --confirm]")
 		os.Exit(1)
 	}
+	// Top-level --help is intercepted here before dispatching.
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		fmt.Println("Usage: force migrate pr-flow [--dry-run] [--rollback --confirm]")
+		fmt.Println()
+		fmt.Println("Subcommands:")
+		fmt.Println("  pr-flow [--dry-run] [--rollback --confirm]")
+		fmt.Println("        Migrate / rollback the PR-flow schema add-on.")
+		return
+	}
 	switch args[0] {
 	case "pr-flow":
 		cmdMigratePRFlow(ctx, db, args[1:])
@@ -46,20 +56,28 @@ func cmdMigrate(ctx context.Context, db *sql.DB, args []string) {
 }
 
 func cmdMigratePRFlow(ctx context.Context, db *sql.DB, args []string) {
-	var dryRun, rollback, confirm bool
-	for _, a := range args {
-		switch a {
-		case "--dry-run":
-			dryRun = true
-		case "--rollback":
-			rollback = true
-		case "--confirm":
-			confirm = true
-		default:
-			fmt.Printf("Unknown flag: %s\n", a)
-			os.Exit(1)
-		}
+	fs := flag.NewFlagSet("migrate pr-flow", flag.ContinueOnError)
+	dryRunFlag := fs.Bool("dry-run", false, "show what the migration would do without writing")
+	rollbackFlag := fs.Bool("rollback", false, "restore the latest pre-migration snapshot")
+	confirmFlag := fs.Bool("confirm", false, "required with --rollback (gate on the destructive restore)")
+	helped, perr := parseSubcommandFlags(fs, args, "migrate pr-flow",
+		"Run / preview / rollback the PR-flow schema migration. Snapshot is taken automatically.",
+		[]flagDoc{
+			{Name: "--dry-run", Desc: "show what would change without writing"},
+			{Name: "--rollback", Desc: "restore the latest pre-migration snapshot"},
+			{Name: "--confirm", Desc: "required with --rollback"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force migrate pr-flow", "force migrate pr-flow --dry-run", "force migrate pr-flow --rollback --confirm"})
+	if helped {
+		return
 	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	dryRun := *dryRunFlag
+	rollback := *rollbackFlag
+	confirm := *confirmFlag
 	if dryRun && rollback {
 		fmt.Println("Error: --dry-run and --rollback are mutually exclusive.")
 		os.Exit(1)
@@ -315,7 +333,18 @@ func copyFile(src, dst string) error {
 // but runnable as a one-shot so operators can refresh after adding repos or
 // after a `git remote set-url` change.
 
-func cmdRepoSync(ctx context.Context, db *sql.DB) {
+func cmdRepoSync(ctx context.Context, db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("repo sync", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "repo sync",
+		"Re-run PR-flow preflight + remote-info backfill + enqueue FindPRTemplate.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force repo sync"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
 	ghClient := gh.NewClient()
 	checks := agents.PRFlowPreflight(ctx, db, ghClient)
 	fmt.Println("Preflight:")
@@ -338,7 +367,25 @@ func cmdRepoSync(ctx context.Context, db *sql.DB) {
 
 // ── `force repo set-pr-flow <name> on|off` ───────────────────────────────────
 
-func cmdRepoSetPRFlow(db *sql.DB, name, onOff string) {
+func cmdRepoSetPRFlow(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("repo set-pr-flow", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "repo set-pr-flow",
+		"Toggle pr_flow_enabled for a registered repository.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force repo set-pr-flow backend on", "force repo set-pr-flow backend off"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		fmt.Println("Usage: force repo set-pr-flow <name> on|off")
+		os.Exit(1)
+	}
+	name := rest[0]
+	onOff := rest[1]
 	var enabled bool
 	switch strings.ToLower(onOff) {
 	case "on", "true", "1", "yes":

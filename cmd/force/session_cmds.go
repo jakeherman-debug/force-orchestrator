@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 
@@ -16,6 +17,10 @@ func cmdSession(db *sql.DB, args []string) int {
 		return 1
 	}
 	switch args[0] {
+	case "--help", "-h", "help":
+		fmt.Println("Usage: force session save <route> [--operator <email>] [--surface <surface>]")
+		fmt.Println("       force session clear [--operator <email>]")
+		return 0
 	case "save":
 		return cmdSessionSave(db, args[1:])
 	case "clear":
@@ -27,51 +32,61 @@ func cmdSession(db *sql.DB, args []string) int {
 }
 
 func cmdSessionSave(db *sql.DB, args []string) int {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("session save", flag.ContinueOnError)
+	operatorFlag := fs.String("operator", "default@operator", "operator email")
+	surfaceFlag := fs.String("surface", "", "surface name (pulse|briefing|reflection)")
+	helped, perr := parseSubcommandFlags(fs, args, "session save",
+		"Persist the operator's last-viewed route + surface.",
+		[]flagDoc{
+			{Name: "--operator E", Desc: "operator email"},
+			{Name: "--surface S", Desc: "surface name (pulse|briefing|reflection)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force session save /pulse"})
+	if helped {
+		return 0
+	}
+	if perr != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: force session save <route> [--operator <email>] [--surface <surface>]")
 		return 1
 	}
-	route := args[0]
-	operator := "default@operator"
-	surface := ""
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "--operator":
-			if i+1 < len(args) {
-				operator = args[i+1]
-				i++
-			}
-		case "--surface":
-			if i+1 < len(args) {
-				surface = args[i+1]
-				i++
-			}
-		}
-	}
+	route := rest[0]
 	if err := store.SaveOperatorSession(context.Background(), db, store.OperatorSession{
-		OperatorEmail:     operator,
-		LastViewedSurface: surface,
+		OperatorEmail:     *operatorFlag,
+		LastViewedSurface: *surfaceFlag,
 		LastViewedRoute:   route,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "save failed: %v\n", err)
 		return 1
 	}
-	fmt.Printf("OK — session saved: %s @ %s\n", operator, route)
+	fmt.Printf("OK — session saved: %s @ %s\n", *operatorFlag, route)
 	return 0
 }
 
 func cmdSessionClear(db *sql.DB, args []string) int {
-	operator := "default@operator"
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--operator" && i+1 < len(args) {
-			operator = args[i+1]
-			i++
-		}
+	fs := flag.NewFlagSet("session clear", flag.ContinueOnError)
+	operatorFlag := fs.String("operator", "default@operator", "operator email")
+	helped, perr := parseSubcommandFlags(fs, args, "session clear",
+		"Clear the operator's saved session row.",
+		[]flagDoc{
+			{Name: "--operator E", Desc: "operator email"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force session clear"})
+	if helped {
+		return 0
 	}
-	if err := store.ClearOperatorSession(context.Background(), db, operator); err != nil {
+	if perr != nil {
+		return 2
+	}
+	if err := store.ClearOperatorSession(context.Background(), db, *operatorFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "clear failed: %v\n", err)
 		return 1
 	}
-	fmt.Printf("OK — session cleared: %s\n", operator)
+	fmt.Printf("OK — session cleared: %s\n", *operatorFlag)
 	return 0
 }
