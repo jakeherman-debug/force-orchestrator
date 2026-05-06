@@ -30,17 +30,19 @@ D13 P2 Wave B authored the per-subsystem pages below. Pages tagged "(planned)" a
 - [`cross-repo-graph.md`](cross-repo-graph.md) — D8 dependency graph
 - [`archaeologist.md`](archaeologist.md) — D9 operator-gated incident archive
 
-## Planned (later deliverables fill)
+## Stub pages (navigation slots; later deliverables fill)
 
-- `daemon-lifecycle.md` — D12 daemon lifecycle, drain, supervisor, foreground mode
-- `convoy-staging.md` — D5.5 staged convoys (Commander-drafted phase pipelines)
-- `supply-chain.md` — D5 supply-chain hygiene (SUPPLY-001..005)
-- `arch-health.md` — D9 architecture health report (`docs/arch-health-weights.yaml`)
-- `onboarding-cli.md` — D6 synthetic onboarding CLI
-- `handoff-docs.md` — D10 synthetic handoff documentation
-- `model-tier-experiments.md` — D7 model-tier optimization experiments
-- `fleet-memory.md` — Fleet Memory + RAG + Librarian curator
-- `mail-system.md` — Fleet mail (roles, types, automatic triggers)
-- `directives.md` — Standing operator directives loaded from disk
-- `dogs.md` — Watchdog dogs (cooldowns + behavior reference)
-- `security.md` — Security posture overview (capability profiles, bash guard, scrubbing, repo-mode gating)
+Each stub carries the canonical metadata block plus a `## Status: Stub` H2 + a forward-pointer to the closure report or pattern doc that already covers the design. The stub-vs-allowlist call (D13 P3) lands a stub instead of suppressing the link so the navigation contract holds and the orphan-checker stays clean.
+
+- [`daemon-lifecycle.md`](daemon-lifecycle.md) — D12 daemon lifecycle, drain, supervisor, foreground mode
+- [`convoy-staging.md`](convoy-staging.md) — D5.5 staged convoys (Commander-drafted phase pipelines)
+- [`supply-chain.md`](supply-chain.md) — D5 supply-chain hygiene (SUPPLY-001..005)
+- [`arch-health.md`](arch-health.md) — D9 architecture health report (`docs/arch-health-weights.yaml`)
+- [`onboarding-cli.md`](onboarding-cli.md) — D6 synthetic onboarding CLI
+- [`handoff-docs.md`](handoff-docs.md) — D10 synthetic handoff documentation
+- [`model-tier-experiments.md`](model-tier-experiments.md) — D7 model-tier optimization experiments
+- [`fleet-memory.md`](fleet-memory.md) — Fleet Memory + RAG + Librarian curator
+- [`mail-system.md`](mail-system.md) — Fleet mail (roles, types, automatic triggers)
+- [`directives.md`](directives.md) — Standing operator directives loaded from disk
+- [`dogs.md`](dogs.md) — Watchdog dogs (cooldowns + behavior reference)
+- [`security.md`](security.md) — Security posture overview (capability profiles, bash guard, scrubbing, repo-mode gating)
