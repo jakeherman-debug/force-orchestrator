@@ -25,6 +25,7 @@ import (
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/clients/metrics"
 	"force-orchestrator/internal/daemon/singleton"
+	"force-orchestrator/internal/daemon/wake"
 	"force-orchestrator/internal/dashboard"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
@@ -476,6 +477,22 @@ func cmdDaemon(db *sql.DB) {
 	} else {
 		fmt.Println("Bundled dashboard: disabled (`dashboard_enabled=false`).")
 	}
+
+	// ─ D12 P2 sleep/wake hooks ─
+	// Subscribe to the platform-specific power-state notifier
+	// (IOKit on macOS, logind on Linux). On Woke events the
+	// reconcilePostWakeLoop driver runs reconcilePostWake which
+	// sweeps stuck Locked tasks back to Pending and re-issues the
+	// system_event notification. Subscribe returns (nil, nil) on
+	// platforms without a power hook (Windows, *BSD, no-cgo macOS) —
+	// the daemon still runs, just without sleep/wake reconciliation.
+	wakeEvents, wakeErr := wake.Subscribe(ctx)
+	if wakeErr != nil {
+		log.Printf("daemon: wake subscription failed: %v (continuing without sleep/wake hooks)", wakeErr)
+	} else if wakeEvents != nil {
+		go reconcilePostWakeLoop(ctx, db, wakeEvents)
+	}
+	// ─ end D12 P2 ─
 
 	go agents.SpawnChancellor(ctx, db)
 	for i := 0; i < numCommanders; i++ {

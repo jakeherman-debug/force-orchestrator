@@ -103,6 +103,10 @@ categories:
     tier: 2
     default: mail
     description: ConvoyReview hit AwaitingSupplyRecheck (token re-auth pending)
+  system_event:
+    tier: 2
+    default: mail
+    description: Daemon lifecycle events (resumed from sleep, post-wake reconcile complete) — D12 P2
 
   # === Tier 3 — debug-trace, opt-in ===
   supply_token_recovered:

@@ -147,6 +147,51 @@ Step-by-step:
 
 `force daemon` reference — see the table in [Components](#components) above. The full per-subcommand help is reachable via `force daemon help`.
 
+## Sleep/wake survival
+
+D12 P2 hardens the daemon against laptop sleep/wake transitions. Without this layer, sleeping the host while a daemon is running leaves Locked tasks orphaned (the agent that owned them was suspended mid-call, and the kernel may have closed half-open HTTP connections), and cron-driven dogs miss their windows for the duration of sleep.
+
+### Subscribe API — `internal/daemon/wake`
+
+```go
+events, err := wake.Subscribe(ctx)
+// events delivers wake.GoingToSleep / wake.Woke until ctx cancels
+```
+
+Platform support matrix:
+
+| Platform | Implementation | Source of events |
+| --- | --- | --- |
+| macOS (cgo enabled) | `wake_darwin.go` — IOKit `IORegisterForSystemPower` | kIOMessageSystemWillSleep / kIOMessageSystemHasPoweredOn |
+| macOS (`CGO_ENABLED=0`) | `wake_darwin_nocgo.go` — graceful no-op | none — `Subscribe` returns `(nil, nil)` |
+| Linux (systemd) | `wake_linux.go` — D-Bus subscription | `org.freedesktop.login1.Manager.PrepareForSleep` |
+| Other (Windows, *BSD) | `wake_other.go` — graceful no-op | none — `Subscribe` returns `(nil, nil)` |
+
+`Subscribe` returns `(nil, nil)` on platforms with no power hook. The daemon still runs — the wiring code in `cmdDaemon` checks for the nil channel and skips spawning the reconcile goroutine. Operators on unsupported platforms get a warning-free start; the daemon just won't auto-reconcile after sleep. (Manual `force daemon stop && force daemon` after a long sleep recovers the same way.)
+
+### Post-wake reconciliation — `cmd/force/daemon_wake.go`
+
+When a `Woke` event arrives, `reconcilePostWake(ctx, db)` runs four idempotent steps:
+
+1. **DB liveness ping** — 5 s timeout. A dead handle returns `ErrPostWakeDBDead` and the goroutine driver calls `log.Fatalf`. P3's auto-restart relies on this exit.
+2. **Singleton-lock recheck** — if a different live PID holds `~/.force/force.pid`, return `ErrPostWakeForeignSingleton`. The driver exits so the new owner stays authoritative. (Rare on local disk; possible on networked filesystems where flock state can be reaped during sleep.)
+3. **Stuck-task sweep** — `store.ReleaseInFlightTasks` resets every Locked / UnderReview / UnderCaptainReview row back to Pending. Idempotent: a re-run finds nothing to release and is a no-op.
+4. **Notification kick** — emit a `system_event` (Tier 2, mail-default) ping describing the resume. Operators see "Daemon resumed from sleep at <ts>; reconciliation complete (released=N)" in their inbox.
+
+`GoingToSleep` events log only — the daemon does not block sleep. (TODO: a future P3 hook may snapshot the holocron pre-sleep into DaemonUpdateHistory; today `store.SnapshotHolocron` does not exist.)
+
+### Idempotence guarantee
+
+`reconcilePostWake` is idempotent: running it N times in a row produces the same fleet state as running it once. The pattern test [`TestPattern_P_DaemonWakeReconcile`](../../internal/audittools/audit_pattern_p_daemon_wake_test.go) is the AST-level regression — it confirms the wake import, the `wake.Subscribe(ctx)` call inside `cmdDaemon`, the routing of both `wake.GoingToSleep` and `wake.Woke` events, and the existence of all four platform build-tagged files.
+
+The unit tests in `cmd/force/daemon_wake_test.go` cover: happy path, idempotence (3x re-run), the Locked-task sweep matrix, OperatorAttentionTags survival, the goroutine driver routing, `ctx` cancellation cleanup, and the `ErrPostWakeDBDead` sentinel.
+
+### Limitations
+
+- **No pre-sleep snapshot.** `wake.GoingToSleep` is observed but not acted on beyond a log line. A future deliverable can wire holocron snapshots here.
+- **No agent-attention clear.** The original spec called for an "AgentAttention" table reset — that table doesn't exist in this codebase. `OperatorAttentionTags` (operator-pinned UI hints) is preserved across sleep/wake since it represents operator intent, not agent runtime state.
+- **No Windows / *BSD support.** Only macOS (cgo) and Linux (systemd-logind) have real implementations. Other platforms degrade to a no-op.
+
 ## See also
 
 - [`subsystems/escalation-and-medic.md`](escalation-and-medic.md) — failure paths on stuck or crashed agents.
