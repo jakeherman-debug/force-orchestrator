@@ -3733,3 +3733,260 @@ async function notifSubmitSavePreset() {
   }
 }
 window.notifSubmitSavePreset = notifSubmitSavePreset;
+
+// ── D11 Phase 3 sub-task C — per-tab saved filters ───────────────────────────
+//
+// Each tab with a saved-filter-bar (currently `tasks` and `convoys`) loads its
+// saved filters from GET /api/dashboard/saved-filter?tab=<tab> and renders
+// them as pills above the table. Click a pill to apply the filter, click the
+// "+ Save current filter…" button to capture the current state, click "Export
+// to YAML…" to generate a paste-back diff for config/dashboard.yaml.
+//
+// Pills:
+//   - source='yaml'      → 📌 icon (canonical, committed via YAML)
+//   - source='dashboard' → 💾 icon (operator-saved, deletable)
+//
+// Right-click on a dashboard-source pill triggers a confirm-then-DELETE flow.
+
+const SAVED_FILTER_TABS = ['tasks', 'convoys'];
+
+// In-memory cache of saved filters per tab. Populated by
+// loadSavedFiltersForTab() on tab switch.
+const _savedFiltersCache = {};
+
+// Track which tab the save-modal is currently scoped to (set by
+// openSaveFilterModal, read by submitSaveFilter).
+let _savedFilterModalTab = '';
+
+async function loadSavedFiltersForTab(tab) {
+  if (!SAVED_FILTER_TABS.includes(tab)) return;
+  try {
+    const res = await fetch('/api/dashboard/saved-filter?tab=' + encodeURIComponent(tab));
+    if (!res.ok) {
+      _savedFiltersCache[tab] = [];
+      renderSavedFilterPills(tab);
+      return;
+    }
+    const data = await res.json();
+    _savedFiltersCache[tab] = data.filters || [];
+    renderSavedFilterPills(tab);
+  } catch (e) {
+    _savedFiltersCache[tab] = [];
+    renderSavedFilterPills(tab);
+  }
+}
+
+function renderSavedFilterPills(tab) {
+  const host = document.getElementById('saved-filter-pills-' + tab);
+  if (!host) return;
+  const filters = _savedFiltersCache[tab] || [];
+  if (!filters.length) {
+    host.innerHTML = '<span style="color:var(--text2);font-style:italic">none yet</span>';
+    return;
+  }
+  host.innerHTML = filters.map(f => {
+    const icon  = f.source === 'yaml' ? '📌' : '💾';
+    const title = (f.description || '') + (f.source === 'yaml' ? '\n(yaml-source — committed)' : '\n(dashboard-source — right-click to delete)');
+    const safe  = escHtml(f.name);
+    return `<button class="filter-btn saved-filter-pill" data-filter-id="${f.id}" data-source="${f.source}" title="${escHtml(title)}" onclick="applySavedFilter('${tab}', ${f.id})" oncontextmenu="onSavedFilterContextMenu(event, '${tab}', ${f.id});return false">${icon} ${safe}</button>`;
+  }).join(' ');
+}
+
+function applySavedFilter(tab, id) {
+  const filters = _savedFiltersCache[tab] || [];
+  const f = filters.find(x => x.id === id);
+  if (!f) return;
+  // Apply column filters. We currently surface convoy-status + task-status as
+  // first-class filters; multi-value selections collapse to the first matching
+  // legacy filter pill (the only shape today). Future iterations can wire
+  // richer column-level filtering once the legacy filter UI gets generalised.
+  if (tab === 'convoys' && f.filter && f.filter.status) {
+    const statuses = f.filter.status.map(s => String(s).toLowerCase());
+    if (statuses.includes('active') || statuses.some(s => s.includes('active') || s.includes('shipping') || s.includes('draft'))) {
+      setConvoyStatusFilter('active');
+    } else if (statuses.includes('completed') || statuses.includes('closed')) {
+      setConvoyStatusFilter('completed');
+    } else {
+      setConvoyStatusFilter('all');
+    }
+  } else if (tab === 'tasks' && f.filter && f.filter.status) {
+    const statuses = f.filter.status.map(s => String(s).toLowerCase());
+    if (statuses.includes('failed')) setTaskFilter('failed');
+    else if (statuses.includes('cancelled')) setTaskFilter('cancelled');
+    else if (statuses.includes('completed') || statuses.includes('done')) setTaskFilter('done');
+    else if (statuses.includes('pending')) setTaskFilter('pending');
+    else if (statuses.length === 1 && statuses[0] === 'all') setTaskFilter('all');
+    else setTaskFilter('active');
+  }
+  // Apply sort if specified.
+  if (f.sort_by) {
+    S.sortBy = f.sort_by;
+    if (f.sort_dir) S.sortDir = f.sort_dir;
+    if (typeof renderSortHeaders === 'function') renderSortHeaders();
+    if (tab === 'tasks' && typeof loadTasks === 'function') loadTasks();
+  }
+  showToast && showToast('Applied saved filter: ' + f.name, 'ok');
+}
+
+function onSavedFilterContextMenu(ev, tab, id) {
+  ev.preventDefault();
+  const filters = _savedFiltersCache[tab] || [];
+  const f = filters.find(x => x.id === id);
+  if (!f) return;
+  if (f.source === 'yaml') {
+    alert('"' + f.name + '" is a yaml-source filter. Remove it from config/dashboard.yaml and restart the daemon to delete.');
+    return;
+  }
+  if (!confirm('Delete saved filter "' + f.name + '"? This cannot be undone.')) return;
+  deleteSavedFilter(tab, id, f.name);
+}
+
+async function deleteSavedFilter(tab, id, name) {
+  try {
+    const res = await fetch('/api/dashboard/saved-filter/' + id, {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({operator: 'operator', reason: 'dashboard-delete'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      alert('Delete failed: ' + txt);
+      return;
+    }
+    showToast && showToast('Deleted saved filter: ' + name, 'ok');
+    loadSavedFiltersForTab(tab);
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+function openSaveFilterModal(tab) {
+  _savedFilterModalTab = tab;
+  const modal = document.getElementById('saved-filter-save-modal');
+  if (!modal) return;
+  const lbl = document.getElementById('saved-filter-tab-label');
+  if (lbl) lbl.textContent = tab;
+  const nm = document.getElementById('saved-filter-name');
+  const ds = document.getElementById('saved-filter-desc');
+  const rs = document.getElementById('saved-filter-save-result');
+  if (nm) nm.value = '';
+  if (ds) ds.value = '';
+  if (rs) rs.textContent = '';
+  modal.hidden = false;
+}
+
+function closeSaveFilterModal() {
+  const modal = document.getElementById('saved-filter-save-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function submitSaveFilter() {
+  const tab = _savedFilterModalTab;
+  if (!tab) return;
+  const name = (document.getElementById('saved-filter-name').value || '').trim();
+  const desc = (document.getElementById('saved-filter-desc').value || '').trim();
+  if (!name) { alert('Filter name required'); return; }
+
+  // Build a snapshot of the current filter state for the active tab. We
+  // capture the legacy single-select status pill as a one-element array so
+  // the round-trip through the YAML stays well-formed.
+  let filter = {};
+  let sort_by = '';
+  let sort_dir = '';
+  if (tab === 'convoys') {
+    const cs = S.convoyStatusFilter || 'all';
+    filter = {status: [cs]};
+  } else if (tab === 'tasks') {
+    filter = {status: [S.taskFilter || 'active']};
+    sort_by = S.sortBy || '';
+    sort_dir = S.sortDir || '';
+  } else {
+    filter = {all: ['*']};
+  }
+
+  try {
+    const res = await fetch('/api/dashboard/saved-filter', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name, tab, description: desc,
+        filter, sort_by, sort_dir, operator: 'operator',
+      }),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      const out = document.getElementById('saved-filter-save-result');
+      if (out) out.textContent = 'Save failed: ' + txt;
+      return;
+    }
+    const data = await res.json();
+    const out = document.getElementById('saved-filter-save-result');
+    if (out) out.textContent = 'Saved (id=' + data.id + ')';
+    loadSavedFiltersForTab(tab);
+  } catch (e) {
+    alert('Save failed: ' + e.message);
+  }
+}
+
+function openExportSavedFiltersModal() {
+  const modal = document.getElementById('saved-filter-export-modal');
+  if (!modal) return;
+  const out = document.getElementById('saved-filter-export-result');
+  if (out) out.textContent = '(click Generate to produce the YAML diff)';
+  modal.hidden = false;
+}
+
+function closeExportSavedFiltersModal() {
+  const modal = document.getElementById('saved-filter-export-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function submitExportSavedFilters() {
+  const out = document.getElementById('saved-filter-export-result');
+  try {
+    const res = await fetch('/api/dashboard/saved-filter/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({operator: 'operator'}),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      if (out) out.textContent = 'Export failed: ' + txt;
+      return;
+    }
+    const data = await res.json();
+    if (out) {
+      out.textContent = 'Wrote: ' + (data.path || '?') +
+        '\n(' + (data.count || 0) + ' filter(s))\n\n' +
+        (data.content || '');
+    }
+  } catch (e) {
+    if (out) out.textContent = 'Export failed: ' + e.message;
+  }
+}
+
+window.openSaveFilterModal           = openSaveFilterModal;
+window.closeSaveFilterModal          = closeSaveFilterModal;
+window.submitSaveFilter              = submitSaveFilter;
+window.openExportSavedFiltersModal   = openExportSavedFiltersModal;
+window.closeExportSavedFiltersModal  = closeExportSavedFiltersModal;
+window.submitExportSavedFilters      = submitExportSavedFilters;
+window.applySavedFilter              = applySavedFilter;
+window.onSavedFilterContextMenu      = onSavedFilterContextMenu;
+window.deleteSavedFilter             = deleteSavedFilter;
+window.loadSavedFiltersForTab        = loadSavedFiltersForTab;
+
+// Hook into switchTab so saved filters refresh when the operator lands on
+// a tab that hosts a saved-filter-bar.
+const _origSwitchTabSavedFilters = window.switchTab || switchTab;
+window.switchTab = function(name) {
+  _origSwitchTabSavedFilters(name);
+  if (SAVED_FILTER_TABS.includes(name)) {
+    loadSavedFiltersForTab(name);
+  }
+};
+
+// Also load on initial page render for the default tab.
+if (SAVED_FILTER_TABS.includes(S.activeTab)) {
+  loadSavedFiltersForTab(S.activeTab);
+}
