@@ -29,15 +29,15 @@ Per-subsystem operator/user reference. P2 fills these out from the README + clos
 - [Notification routing](subsystems/notification-routing.md) — D11 (`config/notifications.yaml`, `notify.Dispatch`)
 - [Dashboard](subsystems/dashboard.md) — D11 + D5.5 (`config/dashboard.yaml`, tabs, JSON API, security)
 - [Dashboard implementation briefs](subsystems/dashboard-implementation.md) — D3 Phase 6 task briefs (agent-handoff artifact)
-- [Convoy staging](subsystems/convoy-staging.md) — D5.5 (stub — design lives in closure report)
+- [Convoy staging](subsystems/convoy-staging.md) — D5.5 multi-stage convoy primitive (9 gates, dispatch fence, dashboard surface)
 - [Convoy lifecycle](subsystems/convoy-lifecycle.md) — Feature → Convoy → ask-branch → ConvoyReview → Ship
-- [Supply chain hygiene](subsystems/supply-chain.md) — D5 (SUPPLY-001..005, stub — design lives in closure report)
+- [Supply chain hygiene](subsystems/supply-chain.md) — D5 (SUPPLY-001..005, license matrix, deferral substrate, recovery dogs)
 - [Cross-repo dependency graph](subsystems/cross-repo-graph.md) — D8
 - [Architecture health report](subsystems/arch-health.md) — D9 (`docs/arch-health-weights.yaml`, stub — design lives in closure report)
 - [Archaeologist](subsystems/archaeologist.md) — D9 (operator-gated incident archive)
 - [Synthetic onboarding CLI](subsystems/onboarding-cli.md) — D6 (stub — design lives in closure report)
 - [Synthetic handoff documentation](subsystems/handoff-docs.md) — D10 (stub — design lives in closure report)
-- [Model-tier optimization experiments](subsystems/model-tier-experiments.md) — D7 (stub — design lives in closure report)
+- [Model-tier optimization experiments](subsystems/model-tier-experiments.md) — D7 paired-runs Haiku-downgrade harness (8 manifests, ship gates)
 - [Paired runs](subsystems/paired-runs.md) — D3 (full design)
 - [PR flow](subsystems/pr-flow.md) — operator summary; binding invariants in [pr-flow-invariants.md](pr-flow-invariants.md)
 - [Self-healing](subsystems/self-healing.md) — operator summary; binding invariants in [self-healing.md](self-healing.md)
@@ -49,7 +49,7 @@ Per-subsystem operator/user reference. P2 fills these out from the README + clos
 - [CLI shelling for LLM calls](subsystems/cli-shelling.md) — `claude -p` invocation layering
 - [Escalation + Medic](subsystems/escalation-and-medic.md) — failure paths and the no-silent-failures rule
 - [Fleet memory + RAG](subsystems/fleet-memory.md) — Librarian curator (stub)
-- [Mail system](subsystems/mail-system.md) — roles, types, automatic triggers (stub)
+- [Mail system](subsystems/mail-system.md) — D11 mail/notification delivery channel (Slack + Tier 1/2/3 mapping)
 - [Directives](subsystems/directives.md) — standing operator directives loaded from disk (stub)
 - [Watchdog dogs](subsystems/dogs.md) — cooldowns + behavior reference (stub)
 - [Security posture](subsystems/security.md) — capability profiles, bash guard, scrubbing, repo-mode gating (stub)
