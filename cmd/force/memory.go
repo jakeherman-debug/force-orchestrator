@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,12 @@ import (
 	"force-orchestrator/internal/store"
 )
 
+// cmdMemories handles the `force memories` subcommands.
+//
+// Read-only verbs (search, default list) keep their inline switch-case
+// bodies. Destructive verbs (delete) are extracted into per-verb
+// cmdMemories<Verb> handlers that route through parseSubcommandFlags so
+// --help short-circuits BEFORE any FleetMemory row is removed.
 func cmdMemories(db *sql.DB, args []string) {
 	// Top-level --help / -h interception (the leaf branches handle their
 	// own --flags; the top-level dispatch here only filters help shorthand).
@@ -23,16 +30,7 @@ func cmdMemories(db *sql.DB, args []string) {
 
 	switch subCmd {
 	case "delete":
-		if len(args) < 2 {
-			fmt.Println("Usage: force memories delete <id>")
-			os.Exit(1)
-		}
-		memID := mustParseID(args[1])
-		if store.DeleteFleetMemory(db, memID) {
-			fmt.Printf("Memory #%d deleted.\n", memID)
-		} else {
-			fmt.Printf("Memory #%d not found.\n", memID)
-		}
+		cmdMemoriesDelete(db, args[1:])
 
 	case "search":
 		if len(args) < 3 {
@@ -94,5 +92,32 @@ func cmdMemories(db *sql.DB, args []string) {
 				fmt.Printf("  Recorded: %s\n\n", m.CreatedAt)
 			}
 		}
+	}
+}
+
+// cmdMemoriesDelete — `force memories delete <id>`. DESTRUCTIVE: removes
+// the FleetMemory row with the given id.
+func cmdMemoriesDelete(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("memories delete", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "memories delete",
+		"Delete a FleetMemory row by ID.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force memories delete 42"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fmt.Println("Usage: force memories delete <id>")
+		os.Exit(1)
+	}
+	memID := mustParseID(rest[0])
+	if store.DeleteFleetMemory(db, memID) {
+		fmt.Printf("Memory #%d deleted.\n", memID)
+	} else {
+		fmt.Printf("Memory #%d not found.\n", memID)
 	}
 }

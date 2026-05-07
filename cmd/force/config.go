@@ -1,15 +1,22 @@
 package main
 
 import (
-	"log"
 	"database/sql"
+	"flag"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 
 	"force-orchestrator/internal/store"
 )
 
+// cmdConfig handles the `force config` subcommands.
+//
+// Read-only verbs (get, list) keep their inline switch-case bodies.
+// Destructive verbs (set) are extracted into per-verb cmdConfig<Verb>
+// handlers that route through parseSubcommandFlags so --help short-circuits
+// BEFORE any SystemConfig row is written.
 func cmdConfig(db *sql.DB, args []string) {
 	subCmd := ""
 	if len(args) >= 1 {
@@ -31,61 +38,7 @@ func cmdConfig(db *sql.DB, args []string) {
 			fmt.Printf("%s = %s\n", args[1], val)
 		}
 	case "set":
-		if len(args) < 3 {
-			fmt.Println("Usage: force config set <key> <value>")
-			os.Exit(1)
-		}
-		cfgKey, cfgVal := args[1], args[2]
-		// Validate integer-only keys to catch bad values before they cause
-		// cryptic claude CLI errors at runtime.
-		integerKeys := map[string]bool{
-			"num_astromechs": true,
-			"num_captain":    true,
-			"num_council":    true,
-			"max_concurrent": true,
-			"spawn_delay_ms": true,
-			"batch_size":     true,
-			"max_turns":      true,
-		}
-		if integerKeys[cfgKey] {
-			if n, err := strconv.Atoi(cfgVal); err != nil || n < 0 {
-				fmt.Printf("Error: '%s' requires a non-negative integer, got: %s\n", cfgKey, cfgVal)
-				os.Exit(1)
-			}
-		}
-		// Outbound URL keys must pass the shared allow-list (scheme is
-		// http/https; host does NOT resolve to loopback, link-local,
-		// private, or metadata space). This is the write-time gate for
-		// AUDIT-016 / AUDIT-056 — the daemon re-validates before every
-		// POST (defense in depth), but catching it here fails fast for
-		// the operator instead of silently dropping webhooks at runtime.
-		if cfgKey == "webhook_url" && cfgVal != "" {
-			if err := store.ValidateOutboundURL(cfgVal); err != nil {
-				fmt.Printf("Error: webhook_url failed validation: %v\n", err)
-				os.Exit(1)
-			}
-		}
-		knownKeys := map[string]string{
-			"num_astromechs": "integer (number of astromech agents to spawn)",
-			"num_captain":    "integer (number of captain agents to spawn, default 1)",
-			"num_council":    "integer (number of Jedi Council reviewers to spawn)",
-			"max_concurrent": "integer (max simultaneous CodeEdit tasks)",
-			"spawn_delay_ms": "integer (ms to sleep between successive task claims, 0=off)",
-			"batch_size":     "integer (max tasks claimed fleet-wide per 60s window, 0=off)",
-			"max_turns":      "integer (max claude CLI turns per task, default 40)",
-			"estop":          "true/false (emergency stop — use 'force estop'/'force resume' instead)",
-			"rl_hits_*":      "integer (persisted rate-limit hit count per agent — managed automatically)",
-			"webhook_url":    "string (URL to POST task status notifications to on Completed/Failed/Escalated)",
-		}
-		if _, ok := knownKeys[cfgKey]; !ok {
-			fmt.Printf("Warning: '%s' is not a known config key.\nKnown keys:\n", cfgKey)
-			for k, desc := range knownKeys {
-				fmt.Printf("  %-20s %s\n", k, desc)
-			}
-			fmt.Println("Setting anyway — unknown keys are ignored by the daemon.")
-		}
-		store.SetConfig(db, cfgKey, cfgVal)
-		fmt.Printf("%s = %s\n", cfgKey, cfgVal)
+		cmdConfigSet(db, args[1:])
 	case "list", "":
 		rows, cfgErr := db.Query(`SELECT key, value FROM SystemConfig ORDER BY key`)
 		if cfgErr != nil {
@@ -114,4 +67,77 @@ func cmdConfig(db *sql.DB, args []string) {
 		fmt.Println("Usage: force config [list|get <key>|set <key> <value>]")
 		os.Exit(1)
 	}
+}
+
+// cmdConfigSet — `force config set <key> <value>`. DESTRUCTIVE: writes a
+// row to SystemConfig (after passing per-key validation for integer-typed
+// keys and outbound-URL allow-listing for webhook_url).
+func cmdConfigSet(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("config set", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "config set",
+		"Set a SystemConfig key. Integer-typed keys are validated; webhook_url is allow-listed.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force config set num_astromechs 4", "force config set webhook_url https://hooks.example.com/x"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		fmt.Println("Usage: force config set <key> <value>")
+		os.Exit(1)
+	}
+	cfgKey, cfgVal := rest[0], rest[1]
+	// Validate integer-only keys to catch bad values before they cause
+	// cryptic claude CLI errors at runtime.
+	integerKeys := map[string]bool{
+		"num_astromechs": true,
+		"num_captain":    true,
+		"num_council":    true,
+		"max_concurrent": true,
+		"spawn_delay_ms": true,
+		"batch_size":     true,
+		"max_turns":      true,
+	}
+	if integerKeys[cfgKey] {
+		if n, err := strconv.Atoi(cfgVal); err != nil || n < 0 {
+			fmt.Printf("Error: '%s' requires a non-negative integer, got: %s\n", cfgKey, cfgVal)
+			os.Exit(1)
+		}
+	}
+	// Outbound URL keys must pass the shared allow-list (scheme is
+	// http/https; host does NOT resolve to loopback, link-local,
+	// private, or metadata space). This is the write-time gate for
+	// AUDIT-016 / AUDIT-056 — the daemon re-validates before every
+	// POST (defense in depth), but catching it here fails fast for
+	// the operator instead of silently dropping webhooks at runtime.
+	if cfgKey == "webhook_url" && cfgVal != "" {
+		if err := store.ValidateOutboundURL(cfgVal); err != nil {
+			fmt.Printf("Error: webhook_url failed validation: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	knownKeys := map[string]string{
+		"num_astromechs": "integer (number of astromech agents to spawn)",
+		"num_captain":    "integer (number of captain agents to spawn, default 1)",
+		"num_council":    "integer (number of Jedi Council reviewers to spawn)",
+		"max_concurrent": "integer (max simultaneous CodeEdit tasks)",
+		"spawn_delay_ms": "integer (ms to sleep between successive task claims, 0=off)",
+		"batch_size":     "integer (max tasks claimed fleet-wide per 60s window, 0=off)",
+		"max_turns":      "integer (max claude CLI turns per task, default 40)",
+		"estop":          "true/false (emergency stop — use 'force estop'/'force resume' instead)",
+		"rl_hits_*":      "integer (persisted rate-limit hit count per agent — managed automatically)",
+		"webhook_url":    "string (URL to POST task status notifications to on Completed/Failed/Escalated)",
+	}
+	if _, ok := knownKeys[cfgKey]; !ok {
+		fmt.Printf("Warning: '%s' is not a known config key.\nKnown keys:\n", cfgKey)
+		for k, desc := range knownKeys {
+			fmt.Printf("  %-20s %s\n", k, desc)
+		}
+		fmt.Println("Setting anyway — unknown keys are ignored by the daemon.")
+	}
+	store.SetConfig(db, cfgKey, cfgVal)
+	fmt.Printf("%s = %s\n", cfgKey, cfgVal)
 }

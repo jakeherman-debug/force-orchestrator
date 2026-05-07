@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,17 @@ import (
 	"force-orchestrator/internal/store"
 )
 
+// cmdMail handles the `force mail` subcommands.
+//
+// Read-only verbs (list, inbox, read) keep their inline switch-case bodies.
+// `read` does flip the read_at marker on the row, but is intentionally not
+// extracted here — the destructive-verb extraction targets verbs that send
+// external messages, mutate config, or delete records. Marking-as-read is
+// a benign UI side-effect that the operator already explicitly opts into.
+//
+// Destructive verbs (send) are extracted into per-verb cmdMail<Verb>
+// handlers that route through parseSubcommandFlags so --help short-circuits
+// BEFORE the mail row is written / Slack webhook fires.
 func cmdMail(db *sql.DB, args []string) {
 	subCmd := ""
 	if len(args) >= 1 {
@@ -19,50 +31,7 @@ func cmdMail(db *sql.DB, args []string) {
 		fmt.Println("Usage: force mail <list|inbox [agent]|read <id>|send <to> <subject> [body]>")
 		return
 	case "send":
-		// force mail send <to> [--task <id>] [--type directive|feedback|alert|info] <subject> [body]
-		if len(args) < 3 {
-			fmt.Println("Usage: force mail send <to-agent> [--task <id>] [--type directive|feedback|alert|info] <subject> [body]")
-			os.Exit(1)
-		}
-		toAgent := args[1]
-		taskID := 0
-		msgType := store.MailTypeInfo
-		mailArgs := args[2:]
-		for i := 0; i < len(mailArgs); i++ {
-			switch mailArgs[i] {
-			case "--task":
-				if i+1 < len(mailArgs) {
-					taskID = mustParseID(mailArgs[i+1])
-					mailArgs = append(mailArgs[:i], mailArgs[i+2:]...)
-					i--
-				}
-			case "--type":
-				if i+1 < len(mailArgs) {
-					t := store.MailType(mailArgs[i+1])
-					switch t {
-					case store.MailTypeDirective, store.MailTypeFeedback, store.MailTypeAlert,
-						store.MailTypeRemediation, store.MailTypeInfo:
-						msgType = t
-					default:
-						fmt.Printf("Unknown mail type '%s'. Valid types: directive, feedback, alert, remediation, info\n", mailArgs[i+1])
-						os.Exit(1)
-					}
-					mailArgs = append(mailArgs[:i], mailArgs[i+2:]...)
-					i--
-				}
-			}
-		}
-		if len(mailArgs) == 0 {
-			fmt.Println("Usage: force mail send <to-agent> [--task <id>] [--type directive|feedback|alert|info] <subject> [body]")
-			os.Exit(1)
-		}
-		subject := mailArgs[0]
-		body := ""
-		if len(mailArgs) > 1 {
-			body = strings.Join(mailArgs[1:], " ")
-		}
-		mailID := store.SendMail(db, "operator", toAgent, subject, body, taskID, msgType)
-		fmt.Printf("Mail #%d sent to %s [%s]: %s\n", mailID, toAgent, string(msgType), subject)
+		cmdMailSend(db, args[1:])
 
 	case "list":
 		mails := store.ListMail(db, "")
@@ -136,4 +105,68 @@ func cmdMail(db *sql.DB, args []string) {
 	default:
 		fmt.Println("Usage: force mail <list|inbox [agent]|read <id>|send <to> <subject> [body]>")
 	}
+}
+
+// cmdMailSend — `force mail send <to-agent> [--task <id>] [--type ...] <subject> [body]`.
+// DESTRUCTIVE: writes a Mail row AND, if a webhook is configured for the
+// recipient, fires an external Slack notification.
+//
+// The legacy parser supported --task / --type as inline pair tokens. We keep
+// that contract: `parseSubcommandFlags` peels off --help / unknown --flag and
+// then the legacy inline scanner handles --task / --type. The unknown-flag
+// rejection guards the safety contract; the legacy inline parser doesn't get
+// a chance to see "--bogus-flag" because parseSubcommandFlags rejects it
+// first. The --task / --type tokens slip past parseSubcommandFlags because
+// the Go flag.FlagSet only knows about --help (we don't register them); but
+// the FlagSet stops at the first non-flag positional, so the leading
+// to-agent positional protects them. To avoid an unknown-flag false-positive
+// when a real "--task 5" appears, we register them as no-op string flags
+// here and read them back ourselves.
+func cmdMailSend(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("mail send", flag.ContinueOnError)
+	taskFlag := fs.String("task", "", "associate this mail with a task ID")
+	typeFlag := fs.String("type", "", "directive | feedback | alert | remediation | info")
+	helped, perr := parseSubcommandFlags(fs, args, "mail send",
+		"Send mail from operator to another agent. May fire an external Slack webhook.",
+		[]flagDoc{
+			{Name: "--task N", Desc: "associate this mail with a task ID"},
+			{Name: "--type T", Desc: "directive | feedback | alert | remediation | info"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{"force mail send commander 'wake up' 'please re-plan convoy 17'"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		fmt.Println("Usage: force mail send <to-agent> [--task <id>] [--type directive|feedback|alert|info] <subject> [body]")
+		os.Exit(1)
+	}
+	toAgent := rest[0]
+	taskID := 0
+	if *taskFlag != "" {
+		taskID = mustParseID(*taskFlag)
+	}
+	msgType := store.MailTypeInfo
+	if *typeFlag != "" {
+		t := store.MailType(*typeFlag)
+		switch t {
+		case store.MailTypeDirective, store.MailTypeFeedback, store.MailTypeAlert,
+			store.MailTypeRemediation, store.MailTypeInfo:
+			msgType = t
+		default:
+			fmt.Printf("Unknown mail type '%s'. Valid types: directive, feedback, alert, remediation, info\n", *typeFlag)
+			os.Exit(1)
+		}
+	}
+	subject := rest[1]
+	body := ""
+	if len(rest) > 2 {
+		body = strings.Join(rest[2:], " ")
+	}
+	mailID := store.SendMail(db, "operator", toAgent, subject, body, taskID, msgType)
+	fmt.Printf("Mail #%d sent to %s [%s]: %s\n", mailID, toAgent, string(msgType), subject)
 }

@@ -639,3 +639,204 @@ func countAnnotationRows(t *testing.T, dbPath string) int {
 // table is absent. We never actually use it; it just keeps the import
 // of database/sql honest.
 type sqlError struct{ _ sql.NullString }
+
+// ── fix(cli)/cli-destructive-verbs — extracted-verb behavioral tests ───────
+//
+// The following tests cover the 8 destructive verbs that fix(cli)/
+// cli-destructive-verbs extracted out of the inline-switch dispatchers
+// in convoy.go / mail.go / config.go / memory.go. Each is the same shape
+// as TestAddRepo_HelpFlag_DoesNotWriteRow: build the binary, sandbox HOME
+// + cwd to a tempdir, run `<verb> --help`, assert exit 0 and that the
+// destructive table is unchanged (or empty).
+
+// countConvoyRows returns the number of rows in Convoys.
+func countConvoyRows(t *testing.T, dbPath string) int {
+	t.Helper()
+	db := store.InitHolocronDSN(dbPath)
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM Convoys`).Scan(&n); err != nil {
+		t.Fatalf("count Convoys: %v", err)
+	}
+	return n
+}
+
+// countMailRows returns the number of rows in Fleet_Mail.
+func countMailRows(t *testing.T, dbPath string) int {
+	t.Helper()
+	db := store.InitHolocronDSN(dbPath)
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM Fleet_Mail`).Scan(&n); err != nil {
+		t.Fatalf("count Fleet_Mail: %v", err)
+	}
+	return n
+}
+
+// countSystemConfigRows returns the number of rows in SystemConfig.
+func countSystemConfigRows(t *testing.T, dbPath string) int {
+	t.Helper()
+	db := store.InitHolocronDSN(dbPath)
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM SystemConfig`).Scan(&n); err != nil {
+		t.Fatalf("count SystemConfig: %v", err)
+	}
+	return n
+}
+
+// countFleetMemoryRows returns the number of rows in FleetMemory.
+func countFleetMemoryRows(t *testing.T, dbPath string) int {
+	t.Helper()
+	db := store.InitHolocronDSN(dbPath)
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM FleetMemory`).Scan(&n); err != nil {
+		t.Fatalf("count FleetMemory: %v", err)
+	}
+	return n
+}
+
+// ── convoy create / approve / reset / reject / ship ────────────────────────
+
+func TestConvoyCreate_HelpFlag_NoMutation(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countConvoyRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "convoy", "create", "--help")
+	if err != nil {
+		t.Fatalf("convoy create --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force convoy create") {
+		t.Errorf("expected convoy create help, got stdout=%q", stdout)
+	}
+	if got := countConvoyRows(t, dbPath); got != pre {
+		t.Errorf("convoy create --help inserted %d row(s) — must be no-op", got-pre)
+	}
+}
+
+func TestConvoyApprove_HelpFlag_NoMutation(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countAuditRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "convoy", "approve", "--help")
+	if err != nil {
+		t.Fatalf("convoy approve --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force convoy approve") {
+		t.Errorf("expected convoy approve help, got stdout=%q", stdout)
+	}
+	if got := countAuditRows(t, dbPath); got != pre {
+		t.Errorf("convoy approve --help wrote %d AuditLog row(s) — must be no-op", got-pre)
+	}
+}
+
+func TestConvoyReset_HelpFlag_NoMutation(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countAuditRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "convoy", "reset", "--help")
+	if err != nil {
+		t.Fatalf("convoy reset --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force convoy reset") {
+		t.Errorf("expected convoy reset help, got stdout=%q", stdout)
+	}
+	if got := countAuditRows(t, dbPath); got != pre {
+		t.Errorf("convoy reset --help wrote %d AuditLog row(s) — must be no-op", got-pre)
+	}
+}
+
+func TestConvoyReject_HelpFlag_NoMutation(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countAuditRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "convoy", "reject", "--help")
+	if err != nil {
+		t.Fatalf("convoy reject --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force convoy reject") {
+		t.Errorf("expected convoy reject help, got stdout=%q", stdout)
+	}
+	if got := countAuditRows(t, dbPath); got != pre {
+		t.Errorf("convoy reject --help wrote %d AuditLog row(s) — must be no-op", got-pre)
+	}
+}
+
+func TestConvoyShip_HelpFlag_NoMutation(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countConvoyRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "convoy", "ship", "--help")
+	if err != nil {
+		t.Fatalf("convoy ship --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force convoy ship") {
+		t.Errorf("expected convoy ship help, got stdout=%q", stdout)
+	}
+	if got := countConvoyRows(t, dbPath); got != pre {
+		t.Errorf("convoy ship --help mutated Convoys (%d → %d)", pre, got)
+	}
+}
+
+// ── mail send ──────────────────────────────────────────────────────────────
+
+func TestMailSend_HelpFlag_NoSend(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countMailRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "mail", "send", "--help")
+	if err != nil {
+		t.Fatalf("mail send --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force mail send") {
+		t.Errorf("expected mail send help, got stdout=%q", stdout)
+	}
+	if got := countMailRows(t, dbPath); got != pre {
+		t.Errorf("mail send --help wrote %d Fleet_Mail row(s) — must be no-op (no Slack call either)", got-pre)
+	}
+}
+
+// ── config set ─────────────────────────────────────────────────────────────
+
+func TestConfigSet_HelpFlag_NoMutation(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countSystemConfigRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "config", "set", "--help")
+	if err != nil {
+		t.Fatalf("config set --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force config set") {
+		t.Errorf("expected config set help, got stdout=%q", stdout)
+	}
+	if got := countSystemConfigRows(t, dbPath); got != pre {
+		t.Errorf("config set --help wrote %d SystemConfig row(s) — must be no-op", got-pre)
+	}
+}
+
+// ── memories delete ────────────────────────────────────────────────────────
+
+func TestMemoriesDelete_HelpFlag_NoMutation(t *testing.T) {
+	bin := buildForceForCLITest(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "holocron.db")
+	pre := countFleetMemoryRows(t, dbPath)
+	stdout, _, err := runForceCLI(t, bin, home, "memories", "delete", "--help")
+	if err != nil {
+		t.Fatalf("memories delete --help should exit 0, got %v\nstdout: %s", err, stdout)
+	}
+	if !strings.Contains(stdout, "Usage: force memories delete") {
+		t.Errorf("expected memories delete help, got stdout=%q", stdout)
+	}
+	if got := countFleetMemoryRows(t, dbPath); got != pre {
+		t.Errorf("memories delete --help removed %d FleetMemory row(s) — must be no-op", pre-got)
+	}
+}

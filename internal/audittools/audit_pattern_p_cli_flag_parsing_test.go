@@ -66,10 +66,16 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 		"cmdRepos":            "dispatcher — routes to list/remove (leaves call helper)",
 		"cmdEscalations":      "dispatcher — routes to list/ack/close/requeue (leaves call helper)",
 		"cmdDogs":             "dispatcher — routes to list/run (leaves call helper)",
-		"cmdConvoy":           "dispatcher — routes to many subcommands; leaves call helper or are read-only",
-		"cmdConfig":           "dispatcher — routes to get/set/list",
-		"cmdMemories":         "dispatcher — routes to delete/search/list",
-		"cmdMail":             "dispatcher — routes to send/list/inbox/read",
+		// Inline-switch dispatchers whose destructive verbs were extracted by
+		// fix(cli)/cli-destructive-verbs. Read-only verbs stay inline; every
+		// destructive verb now delegates to a parseSubcommandFlags-using
+		// cmd<Name><Verb> handler. The destructive-verb sub-audit below
+		// (assertDispatcherDestructiveVerbsDelegate) walks the dispatcher
+		// bodies and asserts that delegation is intact.
+		"cmdConvoy":           "dispatcher — destructive verbs (create/approve/reset/reject/ship) extracted; read-only verbs (list/show/pr/pr-review) inline",
+		"cmdConfig":           "dispatcher — destructive verb (set) extracted; read-only verbs (get/list) inline",
+		"cmdMemories":         "dispatcher — destructive verb (delete) extracted; read-only verbs (search/list) inline",
+		"cmdMail":             "dispatcher — destructive verb (send) extracted; read-only verbs (list/inbox/read) inline",
 		"cmdEC":               "dispatcher — routes to list/ratify/reject/status",
 		"cmdExperiment":       "dispatcher — routes to author/ratify/terminate/status/list",
 		"cmdMigrate":          "dispatcher — routes to pr-flow",
@@ -131,6 +137,18 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 		"cmdMigratePRFlow":      true,
 		"cmdRepoSetPRFlow":      true,
 		"cmdAttention":          true,
+		// Destructive verbs extracted from inline-switch dispatchers by
+		// fix(cli)/cli-destructive-verbs. See dispatcherDestructiveVerbs
+		// below for the dispatcher → leaf mapping that the
+		// assertDispatcherDestructiveVerbsDelegate walker enforces.
+		"cmdConvoyCreate":  true,
+		"cmdConvoyApprove": true,
+		"cmdConvoyReset":   true,
+		"cmdConvoyReject":  true,
+		"cmdConvoyShipCLI": true,
+		"cmdMailSend":      true,
+		"cmdConfigSet":     true,
+		"cmdMemoriesDelete": true,
 	}
 
 	// Mutating call detectors. Mirrors P_DaemonFlagParsing's set,
@@ -188,14 +206,7 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 		"runPRFlowRollback":          true,
 	}
 
-	type handler struct {
-		name       string
-		fn         *ast.FuncDecl
-		filename   string
-		isDestruct bool
-	}
-
-	handlers := map[string]*handler{}
+	handlers := map[string]*cliHandler{}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -239,7 +250,7 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 			if !hasArgsParam {
 				return true
 			}
-			handlers[fname] = &handler{
+			handlers[fname] = &cliHandler{
 				name:       fname,
 				fn:         fn,
 				filename:   name,
@@ -319,4 +330,160 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 				name, h.filename, parsePos, firstMutPos)
 		}
 	}
+
+	// (3) Destructive-verb sub-audit: each allowlisted inline-switch
+	// dispatcher must delegate every destructive verb to the
+	// corresponding extracted cmd<Name><Verb> handler. This guards the
+	// fix(cli)/cli-destructive-verbs contract: read-only verbs may stay
+	// inline (they print and exit, no safety relevance), but destructive
+	// verbs MUST hop into a parseSubcommandFlags-using leaf so --help
+	// short-circuits BEFORE any mutation.
+	t.Run("DispatcherDestructiveVerbsDelegate", func(t *testing.T) {
+		assertDispatcherDestructiveVerbsDelegate(t, handlers)
+	})
+}
+
+// dispatcherDestructiveVerbs maps each inline-switch dispatcher (from
+// the allowlist above) to the destructive verbs it handles and the
+// extracted leaf handler each must delegate to. If you extract a new
+// destructive verb out of a dispatcher, add it here AND to the
+// `destructive` map above; the walker below is the regression guard.
+var dispatcherDestructiveVerbs = map[string]map[string]string{
+	"cmdConvoy": {
+		"create":  "cmdConvoyCreate",
+		"approve": "cmdConvoyApprove",
+		"reset":   "cmdConvoyReset",
+		"reject":  "cmdConvoyReject",
+		"ship":    "cmdConvoyShipCLI",
+	},
+	"cmdConfig": {
+		"set": "cmdConfigSet",
+	},
+	"cmdMemories": {
+		"delete": "cmdMemoriesDelete",
+	},
+	"cmdMail": {
+		"send": "cmdMailSend",
+	},
+}
+
+// assertDispatcherDestructiveVerbsDelegate walks each dispatcher's
+// switch statement(s) and asserts that for every destructive verb in
+// dispatcherDestructiveVerbs[<dispatcher>], the corresponding case body
+// is a single-call delegation to the expected leaf handler.
+//
+// The walker is permissive about positional checks (the case body may
+// also bail out with `os.Exit` on a malformed positional after the
+// helper short-circuits), but it REJECTS any case body that performs a
+// mutating call directly (DB Exec/Query that mutates, store mutators,
+// SendMail, LogAudit, etc.) without first hopping into the extracted
+// handler. Practically, we check that the case body contains a call to
+// the expected leaf handler — the existing destructive-handler-must-
+// call-helper-first audit (clause 2) guards the leaf itself.
+//
+// We tolerate cases that wrap the leaf in additional positional-arg
+// boilerplate (e.g. `cmdConvoyPR(db, mustParseID(args[1]))` for the
+// pr verb) because the destructive map only lists the truly destructive
+// verbs; non-listed verbs are not constrained.
+// cliHandler is the package-scope record describing a discovered cmd<X>
+// handler — we lift it out of the test function so the
+// DispatcherDestructiveVerbsDelegate sub-audit (which lives at package
+// scope) can take it as a parameter.
+type cliHandler struct {
+	name       string
+	fn         *ast.FuncDecl
+	filename   string
+	isDestruct bool
+}
+
+func assertDispatcherDestructiveVerbsDelegate(t *testing.T, handlers map[string]*cliHandler) {
+	t.Helper()
+	for dispatcher, verbs := range dispatcherDestructiveVerbs {
+		h, ok := handlers[dispatcher]
+		if !ok {
+			t.Errorf("Pattern P_CLIFlagParsing/DispatcherDestructiveVerbsDelegate: dispatcher %q not found among cmd<X> handlers — was it renamed or removed?", dispatcher)
+			continue
+		}
+		// For each (verb, expectedHandler), find the matching case clause
+		// in the dispatcher body and assert the case body calls
+		// expectedHandler.
+		caseBodies := collectSwitchCaseBodies(h.fn)
+		for verb, expectedHandler := range verbs {
+			body, found := caseBodies[verb]
+			if !found {
+				t.Errorf("Pattern P_CLIFlagParsing/DispatcherDestructiveVerbsDelegate: dispatcher %s has no `case %q:` clause — expected delegation to %s",
+					dispatcher, verb, expectedHandler)
+				continue
+			}
+			if !caseBodyCallsHandler(body, expectedHandler) {
+				t.Errorf("Pattern P_CLIFlagParsing/DispatcherDestructiveVerbsDelegate: dispatcher %s `case %q:` does NOT delegate to %s — destructive verbs must hop into the parseSubcommandFlags-using leaf so --help short-circuits BEFORE mutation",
+					dispatcher, verb, expectedHandler)
+			}
+		}
+	}
+}
+
+// collectSwitchCaseBodies walks fn's body for every top-level switch
+// statement and returns a map of case-string-literal → list of
+// statements in that case. If multiple case clauses share the same
+// string literal, last-write-wins (we're only asking yes/no questions
+// per verb, so collisions are impossible in practice).
+func collectSwitchCaseBodies(fn *ast.FuncDecl) map[string][]ast.Stmt {
+	out := map[string][]ast.Stmt{}
+	if fn == nil || fn.Body == nil {
+		return out
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok || sw.Body == nil {
+			return true
+		}
+		for _, c := range sw.Body.List {
+			cc, ok := c.(*ast.CaseClause)
+			if !ok {
+				continue
+			}
+			for _, e := range cc.List {
+				lit, ok := e.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				// Strip surrounding quotes.
+				s := lit.Value
+				if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
+					s = s[1 : len(s)-1]
+				}
+				out[s] = cc.Body
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// caseBodyCallsHandler reports whether any statement in body contains
+// (recursively) a call to a function named handlerName.
+func caseBodyCallsHandler(body []ast.Stmt, handlerName string) bool {
+	found := false
+	for _, stmt := range body {
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if id.Name == handlerName {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
