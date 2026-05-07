@@ -26,13 +26,13 @@ The Librarian also exposes a Go interface (`librarian.Client`) consumed by other
 
 ## Capability profile
 
-Profile: [`agents/capabilities/librarian.yaml`](../../agents/capabilities/librarian.yaml). The librarian-curator background curation flow uses [`agents/capabilities/librarian-curator.yaml`](../../agents/capabilities/librarian-curator.yaml). Loaded via `capabilities.LoadProfile("librarian")` in `internal/agents/librarian.go`.
+Profile: [`agents/capabilities/librarian.yaml`](../../agents/capabilities/librarian.yaml). Loaded via `capabilities.LoadProfile("librarian")` in `internal/agents/librarian.go`.
 
 ## Key files
 
 - `internal/agents/librarian.go` — `SpawnLibrarian(ctx, db, name)` claim loop + memory-rendering flow.
 - `internal/clients/librarian/` — the cross-agent service interface (`Client`, `NewInProcess`, etc.) per the CLAUDE.md cross-agent-service-interfaces invariant.
-- `agents/capabilities/librarian.yaml`, `agents/capabilities/librarian-curator.yaml` — capability profiles.
+- `agents/capabilities/librarian.yaml` — capability profile.
 
 ## Tests
 
