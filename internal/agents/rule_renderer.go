@@ -75,6 +75,27 @@ func RenderClaudeMdFile(ctx context.Context, db *sql.DB) ([]byte, error) {
 	return body, nil
 }
 
+// RenderSenateMdFile produces the SENATE.md bytes — the per-repo Senate
+// rule export. Senate rules carry render_to='senate-md-file' (per the
+// D4 closure narrative); this branch was a documentation residual until
+// hygiene-code Wave E wired it up. First operator-ratification of a
+// Senate PromotionProposal will land a row that this branch picks up.
+//
+// Shape mirrors RenderClaudeMdFile: assemble grouped by category +
+// AUTO-GENERATED preamble + alphabetic stable order. Empty rule set
+// produces an empty byte slice (no header, nothing to write) so an
+// unbootstrapped repo doesn't get a content-free SENATE.md.
+func RenderSenateMdFile(ctx context.Context, db *sql.DB) ([]byte, error) {
+	rules, err := selectActiveRules(ctx, db, `render_to = 'senate-md-file'`)
+	if err != nil {
+		return nil, err
+	}
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	return assembleSenateMd(rules), nil
+}
+
 // RenderFixLog produces the FIX-LOG.md bytes from the historical-narrative
 // rules. Append-only narrative; no size cap (FIX-LOG.md is operator-browsed,
 // not auto-loaded).
@@ -221,6 +242,31 @@ func WriteRenderedFixLog(ctx context.Context, db *sql.DB, path string) (int, boo
 	return len(body), true, nil
 }
 
+// WriteRenderedSenateMd mirrors WriteRenderedClaudeMd for SENATE.md.
+// When the rule set is empty (no operator-ratified Senate rule yet),
+// the rendered body is nil — the writer skips writing rather than
+// produce a header-only stub, and reports (0, false, nil). This keeps
+// the on-disk surface clean for repos that have not yet ratified a
+// first Senate rule (per Pattern P34: ratification is operator-gated).
+func WriteRenderedSenateMd(ctx context.Context, db *sql.DB, path string) (int, bool, error) {
+	body, err := RenderSenateMdFile(ctx, db)
+	if err != nil {
+		return 0, false, err
+	}
+	if body == nil {
+		// No active senate-md-file rules — nothing to write.
+		return 0, false, nil
+	}
+	existing, _ := os.ReadFile(path)
+	if sameContent(existing, body) {
+		return len(body), false, nil
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return 0, false, fmt.Errorf("write %s: %w", path, err)
+	}
+	return len(body), true, nil
+}
+
 // WriteRenderedPerDomainDocs writes every per-domain doc to its target
 // path under repoRoot. Returns the per-path byte counts and a list of
 // paths that actually changed.
@@ -283,6 +329,20 @@ func CheckRenderDrift(ctx context.Context, db *sql.DB, repoRoot string) ([]strin
 		diverged = append(diverged, "FIX-LOG.md")
 	}
 
+	// SENATE.md: only checked when at least one senate-md-file rule
+	// is active. With no Senate rules ratified yet, an absent SENATE.md
+	// is the correct state — drift detection here would false-positive
+	// on every fresh clone before D4 ratification fires.
+	senateMd, err := RenderSenateMdFile(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if senateMd != nil {
+		if existing, _ := os.ReadFile(repoRoot + "/SENATE.md"); !sameContent(existing, senateMd) {
+			diverged = append(diverged, "SENATE.md")
+		}
+	}
+
 	docs, err := RenderPerDomainDocs(ctx, db)
 	if err != nil {
 		return nil, err
@@ -319,6 +379,42 @@ func assembleClaudeMd(rules []activeRule) []byte {
 	b.WriteString("via `--append-system-prompt`; fix narratives live in `FIX-LOG.md`.\n\n")
 	b.WriteString("To add a universal-load rule: insert a FleetRules row with `render_to='claude-md-file'` ")
 	b.WriteString("AND a justification comment in `internal/store/fleet_rules_audit.go`, then `make render-rules`.\n\n")
+
+	currentCategory := ""
+	for _, r := range rules {
+		if r.Category != currentCategory {
+			currentCategory = r.Category
+			b.WriteString("\n## " + categoryHeading(r.Category) + "\n\n")
+		}
+		b.WriteString(r.Content)
+		b.WriteString("\n\n")
+	}
+
+	return []byte(strings.TrimRight(b.String(), "\n") + "\n")
+}
+
+// assembleSenateMd produces the markdown body for the per-repo Senate
+// memory export (SENATE.md). Sections are grouped by category and
+// ordered for stable output, mirroring assembleClaudeMd's shape so
+// `make render-rules-check` (Pattern P18) can compare bytes
+// deterministically.
+func assembleSenateMd(rules []activeRule) []byte {
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].Category != rules[j].Category {
+			return rules[i].Category < rules[j].Category
+		}
+		return rules[i].RuleKey < rules[j].RuleKey
+	})
+
+	var b strings.Builder
+	b.WriteString(renderHeader)
+	b.WriteString("# SENATE.md — per-repo Senator memory\n\n")
+	b.WriteString("Auto-rendered from FleetRules where `render_to='senate-md-file'`. ")
+	b.WriteString("Senate rules are operator-ratified PromotionProposals (Pattern P34: ")
+	b.WriteString("Senators NEVER mutate FleetRules directly — every rule routes through ")
+	b.WriteString("Librarian.EmitCandidate → Engineering Corps experiment → operator ratify).\n\n")
+	b.WriteString("To propose a Senate rule: file a PromotionProposal candidate via the ")
+	b.WriteString("Librarian client; do NOT hand-edit this file.\n\n")
 
 	currentCategory := ""
 	for _, r := range rules {

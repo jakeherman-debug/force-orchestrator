@@ -30,7 +30,7 @@ D12 set out to make the force daemon a supervised, paranoid, sleep-wake-tolerant
 - **Merge SHA:** `0180cd1`
 - **Headline:** **13 `force daemon` subcommands** + ldflags provenance wired through the Makefile + flock-backed singleton at `~/.force/force.pid` + default-on operator trust file at `~/.force/trusted-binary-hashes` with a 4-diff preview before every binary swap + bundled dashboard at `127.0.0.1:41977` + **4 audit pattern tests** anchoring the new invariants.
 - Subcommands shipped: `install` / `uninstall` / `status` / `stop` / `logs` / `foreground` / `update` / `rollback` / `trust` / `history` / `validate-config` / `validate-schema` / `clear-crash-budget` (the last lands in P3 as part of the crash-budget guard but is dispatched from the same router). All subcommands route through `cmd/force/daemon_cmds.go:dispatchDaemon`.
-- New Go packages: `internal/daemon/singleton` (flock + PID file), `internal/daemon/provenance` (mirrors `main.GitSHA` / `main.BuildTime` / `main.GitBranch` so non-main code can read them without an import cycle), `internal/daemon/trust` (parses + writes `~/.force/trusted-binary-hashes` line-format `<sha256>  <git-sha>  <git-branch>  <build-time>  <added-at>  <added-by>  <reason>`).
+- New Go packages: `internal/daemon/singleton` (flock + PID file), `internal/daemon/provenance` (mirrors `main.GitSHA` / `main.BuildTime` / `main.GitBranch` so non-main code can read them without an import cycle), `internal/daemon/trust` (parses + writes `~/.force/trusted-binary-hashes` line-format `<sha256> <utc-rfc3339> <trusted-by> <git-sha-at-build-time> <git-branch>`).
 - The Makefile `LDFLAGS` line (`-X main.GitSHA=$(GIT_SHA) -X main.BuildTime=$(BUILD_TIME) -X main.GitBranch=$(GIT_BRANCH)`) is the authoritative provenance wiring; `force version` (and `--version` / `-v`) prints those three values, with `unknown` defaults if the binary was built outside the Makefile.
 - The trust file is `~/.force/trusted-binary-hashes`; `force daemon update` computes the SHA-256 of the candidate binary, looks it up against the trust file, and refuses the swap if the hash is unknown unless the operator passes `--trust` (which appends a row with `--reason` recording the rationale). Before every swap, a 4-diff preview is printed: `git log <old>..<new>`, `git diff --stat <old>..<new>`, `git diff <old>..<new> -- 'config/*.yaml'`, `git diff <old>..<new> -- internal/`.
 - The bundled dashboard runs on port `41977` (Star Wars: A New Hope) on the loopback interface only; controlled by `dashboard_enabled` (default `true`) and `dashboard_port` (default `41977`) SystemConfig keys.
@@ -118,7 +118,7 @@ All under `force daemon <subcommand>`. Dispatched from `cmd/force/daemon_cmds.go
 |---|---|---|
 | `internal/daemon/singleton` | Flock + PID file. `Acquire(pidPath)` opens the PID file, takes a non-blocking exclusive flock, writes the current PID, returns a release closure. `DefaultPIDPath()` resolves `~/.force/force.pid` portably (falls back to `/tmp/force.pid` if `$HOME` is unset). | 187 (`singleton.go`) |
 | `internal/daemon/provenance` | Mirrors `main.GitSHA` / `main.BuildTime` / `main.GitBranch` into a non-main package so non-main code (dashboard `/api/version`, daemon status, etc.) can read them without an import cycle. `Set` is called from `main.init`; `Get` returns the current snapshot. | 61 (`provenance.go`) |
-| `internal/daemon/trust` | Parses + writes `~/.force/trusted-binary-hashes` line-format (`<sha256>  <git-sha>  <git-branch>  <build-time>  <added-at>  <added-by>  <reason>`). `DefaultPath()` resolves `~/.force/trusted-binary-hashes` portably. | 269 (`trust.go`) |
+| `internal/daemon/trust` | Parses + writes `~/.force/trusted-binary-hashes` line-format (`<sha256> <utc-rfc3339> <trusted-by> <git-sha-at-build-time> <git-branch>`). `DefaultPath()` resolves `~/.force/trusted-binary-hashes` portably. | 269 (`trust.go`) |
 | `internal/daemon/wake` | Sleep/wake hooks. Cross-platform `Subscribe` interface; 4 build-tagged implementations (`wake_darwin.go` cgo, `wake_darwin_nocgo.go` no-cgo fallback, `wake_linux.go` logind D-Bus, `wake_other.go` graceful no-op). | 53 (`wake.go`) + 235 (darwin) + 95 (linux) + others |
 
 ### New tables (3-place schema parity)
@@ -149,7 +149,7 @@ Indexes:
 | Path | Owner | Format |
 |---|---|---|
 | `~/.force/force.pid` | `singleton` | `<pid>\n` (the flock is the source of truth; the PID file is observability only). |
-| `~/.force/trusted-binary-hashes` | `trust` | Append-only audit. One line per trusted binary: `<sha256>  <git-sha>  <git-branch>  <build-time>  <added-at>  <added-by>  <reason>`. |
+| `~/.force/trusted-binary-hashes` | `trust` | Append-only audit. One line per trusted binary: `<sha256> <utc-rfc3339> <trusted-by> <git-sha-at-build-time> <git-branch>`. |
 
 ### New pattern tests (7)
 
@@ -271,7 +271,7 @@ docs/closures/DELIVERABLE-13-CLOSURE.md                 # (lands as part of the 
 | `cmd/force/main.go` | P1: declares `var (GitSHA, BuildTime, GitBranch = "unknown", ...)`; calls `provenance.Set` in `init`; `version` / `--version` / `-v` extended to print provenance; `daemon` case routes through `dispatchDaemon`. |
 | `cmd/force/fleet_cmds.go` | P1: legacy `cmdDaemon` extended with bundled-dashboard goroutine + crash-budget guard hook + boot-sweep call before agent fleet spawn. |
 | `cmd/force/print.go` | P1: status output extended with provenance + dashboard URL + crash-budget status. |
-| `config/notifications.yaml` | P2: adds `system_event` category (Tier-3 default-off; the post-wake ping fires through this category). |
+| `config/notifications.yaml` | P2: adds `system_event` category (Tier-2 default-mail; the post-wake ping fires through this category). |
 | `docs/subsystems/daemon-lifecycle.md` | P1+P2+P3: filled out from the D13 stub into a 270-line operator-facing reference covering the singleton lock, provenance, trust file, sleep/wake hooks, crash-budget guard, boot sweep, and bundled dashboard. |
 | `go.mod` | P2: adds `github.com/godbus/dbus/v5` for the Linux logind path. |
 | `internal/audittools/audit_pattern_p25_cli_parity_test.go` | P1: extended to recognize the 13 new daemon subcommands so the CLI-parity audit doesn't false-positive on them. |

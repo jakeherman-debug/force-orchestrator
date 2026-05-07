@@ -38,6 +38,13 @@ Pattern tests are grep- or AST-based regressions that fail CI when a specific ar
 
 ## Named Pattern tests
 
+- [P-DaemonCrashBudget — D12 crash-loop guard + auto-restart contract](p-daemon-crash-budget.md) — `cmdDaemon` calls `store.RecentStartCount` before any `agents.Spawn*`; launchd plist + systemd unit declare the auto-restart contract.
+- [P-DaemonProvenance — D12 build provenance wiring](p-daemon-provenance.md) — `GitSHA` / `BuildTime` / `GitBranch` vars wired through ldflags; `provenance.Set` called from `main.init`.
+- [P-DaemonSingleton — D12 single-instance enforcement](p-daemon-singleton.md) — `cmdDaemon` acquires the singleton flock at `~/.force/force.pid` before any `agents.Spawn*`.
+- [P-DaemonTrustFile — D12 binary-swap trust gate](p-daemon-trust-file.md) — `force daemon update` looks up SHA-256 against `~/.force/trusted-binary-hashes`; 4-diff preview + interactive paranoia prompt required.
+- [P-DaemonUpdateHistory — D12 binary-swap audit-trail integrity](p-daemon-update-history.md) — `cmdDaemonUpdate` and `cmdDaemonRollback` record a `DaemonUpdateHistory` row on every exit path; schema parity across `createSchema` / `runMigrations` / `schema/schema.sql`.
+- [P-DaemonWakeReconcile — D12 sleep/wake survival](p-daemon-wake-reconcile.md) — `cmdDaemon` calls `wake.Subscribe(ctx)`; `Woke` events route through `reconcilePostWake`; all four platform build-tagged files present.
+- [P-DashboardBundled — D12 bundled-dashboard wiring](p-dashboard-bundled.md) — `cmdDaemon` spawns `dashboard.RunDashboardCtx` on `127.0.0.1:41977`; legacy `dashboard.RunDashboard` rejected from the daemon path.
 - [P-Docs — documentation structure substrate](p-docs.md) — README size cap, sub-index files, metadata blocks.
 - [P-StageGate — staged-convoy gate enforcement](p-stage-gate.md) — D5.5 dispatch SQL includes `stage_id IS NULL` predicate; package wiring present.
 - [P-StagingPromotionConfirm — post-hoc promotion gate](p-staging-promotion-confirm.md) — `SetConvoyStaging` has zero ungated production callers.
