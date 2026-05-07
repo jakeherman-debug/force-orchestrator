@@ -1,34 +1,122 @@
 ---
 audience: operator
-scope: D6 synthetic onboarding CLI (`force onboard`) — placeholder until subsystem reference is authored.
+scope: D6 synthetic onboarding CLI — `force onboard <repo>` renders ONBOARDING.md against the registered or on-disk repo via the shared BuildRepoDigest seam.
 owner: D6
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-07
 ---
 
 # Synthetic onboarding CLI
 
-## Status: Stub
+`force onboard <repo>` is the operator-triggered renderer that produces an `ONBOARDING.md` Markdown file at a target repo's root. It exists so a new contributor (human OR Astromech) can read one auto-generated page that summarises what a repo does, what it exposes, what it has been doing recently, and what's known to be fragile — without burning manual write-up time.
 
-This page is a placeholder reserved by [D13 P1](../closures/) for the synthetic-onboarding-CLI reference. The closure report for D6 — [`closures/DELIVERABLE-6-CLOSURE.md`](../closures/DELIVERABLE-6-CLOSURE.md) — carries the design + evidence trail; this stub holds the navigation slot.
+The CLI is intentionally a thin wrapper. The knowledge synthesis itself lives on the Librarian Client interface as `BuildRepoDigest`, which the SenatorOnboarding bootstrap path also calls. A single edit to the digest assembly therefore moves both consumers in lockstep — the anti-cheat seam called out in roadmap §D6.
 
-## What this will cover
+## Overview
 
-- `force onboard <repo>` — what it generates, where it writes, what it reads.
-- The auto-generated `ONBOARDING.md` contract — pre-commit gate refuses hand-edits (see [`scripts/pre-commit/onboarding-md-check.sh`](../../scripts/pre-commit/onboarding-md-check.sh)).
-- How the CLI integrates with the Repositories table and what it reads from `agents/capabilities/`.
-- Operator workflow: when to run, when to refresh, how to interpret the output.
+The onboarding renderer answers a specific operator question: "I just got asked to work in a repo I haven't touched in months — what's the 60-second briefing?" It produces a 6-section Markdown page covering:
 
-## Until then
+1. **What this repo does** — registered description + first README paragraph + top-level packages.
+2. **Public API surface** — exported Go interfaces, HTTP routes, CLI subcommands (regex-detected, deterministic order).
+3. **Key modules** — one bullet per top-level directory.
+4. **Recent activity** — 90-day commit pulse + top contributors + 5 newest subjects.
+5. **Known fragility areas** — aggregated rejection / failure summaries from the last 20 failure-outcome `FleetMemory` rows scoped to the repo.
+6. **Common conventions** — collapsible inline excerpts from `CLAUDE.md`, `CONTRIBUTING.md`, `SENATE.md` (first 4 KB each).
 
-Read the D6 closure report and the pre-commit check that fences the renderer's output:
+The rendered page is operator-triggered, NOT dog-fired. There is no scheduled cadence; the operator runs the CLI when they want a fresh briefing. This is the deliberate counterpart to D10's `ARCHITECTURE.md` dog (`docs/subsystems/handoff-docs.md`) — onboarding is on-demand, architecture-handoff is on-cadence.
 
-- [`closures/DELIVERABLE-6-CLOSURE.md`](../closures/DELIVERABLE-6-CLOSURE.md)
-- [`scripts/pre-commit/onboarding-md-check.sh`](../../scripts/pre-commit/onboarding-md-check.sh)
+## Components
+
+- **`cmd/force/onboard.go`** — `cmdOnboard` flag parsing + dispatch; `runOnboarding` is the testable seam that calls `librarian.Client.BuildRepoDigest` and renders to Markdown. The renderer is pure: same digest in → same bytes out (modulo the digest's `GeneratedAt` date in the AUTO-GENERATED header).
+- **`cmd/force/onboard_test.go`** — covers exit criterion #4 (`TestOnboardingSynthesizesFromSenatorPipeline`) two ways: AST walks both `inprocess_d4.go` and `onboard.go` looking for the `BuildRepoDigest` selector; a behavioural test runs `runOnboarding` against a `MockClient` and asserts exactly one call. Six other tests cover help output, section structure, the disk-only path, the registered-repo path, the `--refresh` alias, and the missing-repo error path.
+- **`internal/clients/librarian/inprocess_d6.go`** — `BuildRepoDigest` implementation. Resolves `repoSpec` (registered name first via `store.GetRepo`; falls back to a literal directory path), scans the repo's working tree with bounded caps (200 files, 60 symbols), reads up to 4 KB of each conventions file, queries up to 20 failure-outcome `FleetMemory` rows, and returns a pure-data `RepoDigest`. Disk-only paths route through `igit.LogAndRun` with an empty `OpContext{}` so the call still appears in `GitOperationLog` (Pattern P32 compliant).
+- **`internal/clients/librarian/inprocess_d4.go`** — `BootstrapSenatorRules` LIVE_HAIKU branch calls the same `BuildRepoDigest` to assemble its prompt context. This is the call-site-level guarantee that the onboarding CLI and the Senator-bootstrap LLM call cannot diverge.
+- **`scripts/pre-commit/onboarding-md-check.sh`** — pre-commit hook that rejects a staged `ONBOARDING.md` whose first staged line does not start with the AUTO-GENERATED prefix `<!-- AUTO-GENERATED by \`force onboard`. Reads the staged blob (not the working tree) so a hand-edit-then-add is detected even if the working tree was reverted.
+- **`.gitignore`** — `/ONBOARDING.md` at the repo root keeps the orchestrator's own auto-generated onboarding page out of git. Operators who want a renderer-produced sample committed must rename it.
+
+The `RepoDigest` data shape carried between layers contains:
+
+- `RepoName`, `LocalPath`, `Description`, `GeneratedAt` — resolution metadata.
+- `READMESample` — first 4 KB of `README.md` / `.rst` / `.txt` / no-extension (in that fallback order).
+- `TopLevelDirs` — alphabetised top-level directory list, excluding hidden / `vendor` / `node_modules` / `target` / `dist` / `build`.
+- `PublicAPISymbols` — `[]APISymbol` covering Go interfaces (`type Foo interface {`), HTTP routes (`mux.HandleFunc("/path", …)`), and CLI subcommands (`case "foo":` in `cmd/`-rooted files).
+- `RecentCommits` — `CommitsDigest` shaped from `git log --shortstat` with a 90-day window and a 50-commit cap (truncation flag set when hit).
+- `Conventions` — `map[string]string` keyed by `CLAUDE.md` / `CONTRIBUTING.md` / `SENATE.md`, each up to 4 KB.
+- `FragilityMemories` — up to 20 failure-outcome `FleetMemory` rows scoped to the registered repo (always empty for disk-only paths because `FleetMemory.repo` is keyed by registered name).
+
+## Invariants
+
+1. **One digest assembly seam.** Both call sites (`cmd/force/onboard.go` and `internal/clients/librarian/inprocess_d4.go`) reference `BuildRepoDigest`. The AST sub-test `TestOnboardingSynthesizesFromSenatorPipeline/AST_BothPathsCallBuildRepoDigest` rejects any change that strips the selector from either file.
+2. **AUTO-GENERATED header is the first line of every render.** `onboardingAutoGeneratedHeaderPrefix` (`<!-- AUTO-GENERATED by \`force onboard`) is stamped before any title; the pre-commit hook compares the staged blob's first line against this prefix.
+3. **Idempotent on a fixed digest.** `--refresh` produces the same bytes as a bare re-run on the same UTC day (the header carries a date, not a timestamp). `TestOnboardRefreshFlagIsAlias` pins this.
+4. **Repo-spec resolution: registered first, on-disk second.** A registered repo with a readable `local_path` wins over a same-named directory; if neither resolves, the CLI returns an explicit `"neither a registered repo nor a directory"` error (`TestOnboardErrorOnMissingRepo`).
+5. **Pure-data digest, deferred rendering.** `RepoDigest` carries no Markdown. The CLI renders Markdown; the Senator-bootstrap path renders a prompt fragment. A third consumer would be a renderer-only addition.
+6. **Bounded work.** 200 files scanned, 60 symbols emitted, 20 failure-outcome rows pulled, 4 KB cap per conventions file, 90-day commit window. Even a huge monorepo's render is cheap.
+7. **Deterministic public-API symbol ordering.** `scanPublicAPISurface` sorts emitted symbols by `(Kind, Name, Location)` and re-caps at 60 after the sort, so the rendered "Public API surface" section is byte-identical across runs on the same working tree. Tests assert ordering so a renderer change cannot silently reshuffle.
+
+## Configuration
+
+There is no SystemConfig knob. The CLI takes one positional arg (a registered repo name OR a directory path) and one optional flag:
+
+```text
+Usage: force onboard <repo-spec> [--refresh]
+
+Args:
+  <repo-spec>     Either a repo name registered with 'force add-repo'
+                  OR a path to a directory on disk.
+  --refresh       Same as a bare re-run; explicit "I want to refresh"
+                  signal for cron / scripted invocations.
+```
+
+`--refresh` is a behaviour alias only — it produces the same bytes as a bare re-run. The flag exists so an operator who wires a cron job has an explicit "I intended a refresh" signal in the command, rather than relying on knowledge that the bare form already regenerates.
+
+The conventions list is hard-coded: `CLAUDE.md`, `CONTRIBUTING.md`, `SENATE.md`. Each is read up to 4 KB and emitted as a collapsed `<details>` block. Adding a new conventions file means editing `d6ConventionsFiles` in `inprocess_d6.go` (and updating the renderer in `onboard.go` if a new section is wanted).
+
+The Public-API regex scan is best-effort and Go-specific in v1: an interface declaration (`type Foo interface {`), a `mux.HandleFunc("/path", ...)` route registration, and the `case "subcommand":` form used in `cmd/force/main.go`'s dispatcher. Non-Go repos render the section's empty-state placeholder (`_No exported interfaces, HTTP routes, or CLI subcommands detected by the lightweight regex scan._`); adding a language-specific scanner is a follow-up enhancement, not a closure-blocking gap.
+
+## Operator surface
+
+```bash
+force onboard backend                                # registered repo
+force onboard backend --refresh                      # explicit refresh
+force onboard /path/to/clone-on-disk                 # disk-only path (unregistered repo)
+force onboard --help                                 # help text
+```
+
+Exit codes:
+
+- `0` — `ONBOARDING.md` was rendered (or refreshed).
+- `1` — error (missing repo, write failure, etc.).
+- `2` — usage error (bad flags / missing arg).
+
+The output file lands at `<digest.LocalPath>/ONBOARDING.md`. For an unregistered disk path, the title falls back to `# ONBOARDING — <basename(path)>`.
+
+When an Astromech opens a PR that touches `ONBOARDING.md`, the pre-commit hook (`scripts/pre-commit/onboarding-md-check.sh`) rejects the commit unless the staged file's first line carries the AUTO-GENERATED prefix. The error message is operator-actionable: it names the offending paths and points the operator at `force onboard --refresh <repo>`.
+
+The orchestrator's own `ONBOARDING.md` is `.gitignore`'d at the root so a smoke-run of the CLI doesn't accidentally pollute `git status`. If the operator wants to commit a renderer-produced sample (e.g. for a closure-report attachment), they must copy it under a non-`ONBOARDING.md` name.
+
+The CLI does not render to a remote (e.g. GitHub Wiki); it writes a plain file at the repo's local-path root. Operators who want the page on a remote surface should commit it to the target repo (under a non-`ONBOARDING.md` filename) or pipe the output through their own publishing flow.
+
+## Failure modes
+
+- **Repo not registered AND not on disk.** `BuildRepoDigest` returns `"neither a registered repo nor a directory on disk"`; the CLI exits 1.
+- **Registered repo with empty / unreadable `local_path`.** Same error — the registry lookup is sanity-checked with `os.Stat`. Operator action: re-run `force add-repo <name> --local-path <path>` to repair.
+- **Disk-only path with no `.git` directory.** The recent-commits digest silently empties; the rest of the render still runs. The "Recent activity" section shows `_No commits in the last 90 days, or the repo is not a registered git clone._`.
+- **No README at any of the fallback names.** `READMESample` is empty; `firstReadmeParagraph` returns "" and the renderer falls back to description + top-level packages for the "What this repo does" section.
+- **Repo with no fleet activity yet.** Common case for a fresh-onboard target — `FragilityMemories` is empty and the "Known fragility areas" section emits the canonical placeholder string `_No fleet activity yet — once tasks land in this repo, rejection patterns will surface here._`.
+- **`git log` shell-out failure.** Tolerated; the recent-commits digest empties and rendering continues. The CLI does not propagate the git error to the operator — the rendered placeholder is the visible signal.
+
+## Architectural notes
+
+**Why `BuildRepoDigest` lives on the Librarian Client interface.** Pattern P16 in CLAUDE.md mandates that cross-agent dependencies route through interfaces in `internal/clients/<service>/`. The CLI needs the digest assembly; the SenatorOnboarding task type needs the same digest assembly; both are agent-equivalent consumers of a Librarian-side data primitive. Putting `BuildRepoDigest` on the Client interface is the canonical shape — the CLI gets a `librarian.NewInProcess(db)` and calls the method, exactly as the daemon's Senate agent does inside the SenatorOnboarding task.
+
+**Why the digest is pure data, not Markdown.** A third consumer (e.g. a Slack `/summarise <repo>` command) is a renderer-only addition, not another digest re-implementation. Mixing rendering into the digest layer would force every consumer to either eat the CLI's Markdown shape or fork the assembly. Pure data + per-consumer renderer keeps the surface narrow.
+
+**Why fall back to the disk-only path.** Operators commonly run `force onboard` against a freshly-cloned target before they've registered it (the registry workflow involves `force add-repo`, which requires a running daemon and a planned remote URL). The disk-path fallback lets the CLI be the very first thing an operator runs against a new repo — no registration prerequisite.
 
 ## See also
 
-- [`onboarding.md`](../onboarding.md) — operator onboarding for Force itself (a different doc).
-
-## When this page lands
-
-The next round of subsystem-doc authoring lifts the operator-facing prose out of the closure report into this stub.
+- [`docs/closures/DELIVERABLE-6-CLOSURE.md`](../closures/DELIVERABLE-6-CLOSURE.md) — D6 closure with the full design + evidence trail.
+- [`docs/subsystems/handoff-docs.md`](handoff-docs.md) — D10 sibling. Onboarding is operator-triggered + on-demand; handoff-docs (`ARCHITECTURE.md`) is dog-rendered + on-cadence.
+- [`docs/onboarding.md`](../onboarding.md) — operator onboarding for Force itself (a different doc that introduces the orchestrator to a new operator).
+- [`scripts/pre-commit/onboarding-md-check.sh`](../../scripts/pre-commit/onboarding-md-check.sh) — the AUTO-GENERATED-header pre-commit gate.
+- [`docs/agents/librarian.md`](../agents/librarian.md) — `BuildRepoDigest` is a Client method on the Librarian; the CLI consumes the interface, not the in-process struct.
