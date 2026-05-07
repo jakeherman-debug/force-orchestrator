@@ -106,61 +106,6 @@ func cmdAdd(db *sql.DB, args []string) {
 	fmt.Printf("Queued as task #%d: '%s'%s\n", id, strings.Join(addArgs, " "), planSuffix)
 }
 
-func cmdAddTask(db *sql.DB, args []string) {
-	// Direct CodeEdit task, skips Commander decomposition
-	fs := flag.NewFlagSet("add-task", flag.ContinueOnError)
-	blockedBy := fs.Int("blocked-by", 0, "task ID this task is blocked by")
-	convoyID := fs.Int("convoy", 0, "convoy ID to attach this task to")
-	priority := fs.Int("priority", 0, "task priority")
-	taskTimeout := fs.Int("timeout", 0, "per-task timeout in seconds")
-	helped, perr := parseSubcommandFlags(fs, args, "add-task",
-		"Queue a CodeEdit task directly (skips Commander decomposition).",
-		[]flagDoc{
-			{Name: "--blocked-by N", Desc: "task ID this task is blocked by"},
-			{Name: "--convoy N", Desc: "convoy ID to attach this task to"},
-			{Name: "--priority N", Desc: "task priority"},
-			{Name: "--timeout S", Desc: "per-task timeout in seconds"},
-			{Name: "--help, -h", Desc: "show this help and exit"},
-		},
-		[]string{"force add-task backend Refactor /api/users handler"})
-	if helped {
-		return
-	}
-	if perr != nil {
-		os.Exit(2)
-	}
-	taskArgs := fs.Args()
-	if len(taskArgs) < 2 {
-		fmt.Println("Usage: force add-task [--blocked-by <id>] [--convoy <id>] [--priority N] [--timeout <secs>] <repo> <description>")
-		os.Exit(1)
-	}
-	repo := taskArgs[0]
-	taskPayload := strings.Join(taskArgs[1:], " ")
-	repoPath := store.GetRepoPath(db, repo)
-	if repoPath == "" {
-		fmt.Printf("Unknown repo '%s'. Register it first with: force add-repo\n", repo)
-		os.Exit(1)
-	}
-	newID := store.AddCodeEditTask(db, repo, taskPayload, *convoyID, *priority, *taskTimeout)
-	if *blockedBy > 0 {
-		store.AddDependency(db, newID, *blockedBy)
-	}
-	var suffix string
-	if *blockedBy > 0 {
-		suffix += fmt.Sprintf(" (blocked by #%d)", *blockedBy)
-	}
-	if *convoyID > 0 {
-		suffix += fmt.Sprintf(" (convoy %d)", *convoyID)
-	}
-	if *priority != 0 {
-		suffix += fmt.Sprintf(" (priority %d)", *priority)
-	}
-	if *taskTimeout > 0 {
-		suffix += fmt.Sprintf(" (timeout %ds)", *taskTimeout)
-	}
-	fmt.Printf("CodeEdit task #%d queued for '%s'%s: %s\n", newID, repo, suffix, taskPayload)
-}
-
 func cmdAddInvestigate(db *sql.DB, args []string) {
 	fs := flag.NewFlagSet("investigate", flag.ContinueOnError)
 	priority := fs.Int("priority", 0, "task priority")

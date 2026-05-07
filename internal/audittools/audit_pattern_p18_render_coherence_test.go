@@ -69,6 +69,20 @@ func TestPattern_P18_RenderCoherence(t *testing.T) {
 	}
 	targets = append(targets, target{path: "FIX-LOG.md", want: fixLog})
 
+	// SENATE.md: render only if at least one senate-md-file rule is
+	// active. Until the first PromotionProposal ratifies, the rule
+	// set is empty and the renderer returns nil — there should be no
+	// SENATE.md on disk to compare against. Pattern P34 enforces that
+	// Senators cannot self-promote, so this branch stays inert in the
+	// pre-ratification steady state.
+	senateMd, err := agents.RenderSenateMdFile(ctx, db)
+	if err != nil {
+		t.Fatalf("render SENATE.md: %v", err)
+	}
+	if senateMd != nil {
+		targets = append(targets, target{path: "SENATE.md", want: senateMd})
+	}
+
 	perDomain, err := agents.RenderPerDomainDocs(ctx, db)
 	if err != nil {
 		t.Fatalf("render per-domain docs: %v", err)

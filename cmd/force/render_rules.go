@@ -133,6 +133,19 @@ func cmdRenderRules(ctx context.Context, db *sql.DB, args []string) {
 		fmt.Println("  skip    FIX-LOG.md (--skip-fix-log requested)")
 	}
 
+	// SENATE.md — per-repo Senator memory export. Empty rule set is
+	// the steady state until the first PromotionProposal ratifies
+	// (Pattern P34: ratification is operator-gated). The writer
+	// reports (0, false, nil) in that case and we skip the report.
+	n, changed, err = agents.WriteRenderedSenateMd(ctx, renderDB, filepath.Join(repoRoot, "SENATE.md"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "render-rules: SENATE.md: %v\n", err)
+		os.Exit(1)
+	}
+	if n > 0 {
+		report("SENATE.md", n, changed)
+	}
+
 	// Per-domain docs
 	sizes, changedPaths, err := agents.WriteRenderedPerDomainDocs(ctx, renderDB, repoRoot)
 	if err != nil {
