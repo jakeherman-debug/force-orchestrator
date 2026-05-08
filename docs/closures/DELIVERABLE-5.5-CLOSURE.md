@@ -93,11 +93,11 @@ Output validated by `commander.ValidateStagingPlan` (`internal/agents/commander.
 
 ## ConvoyReview per-stage scoping
 
-`runConvoyReview` in `internal/agents/convoy_review.go:442-547` scopes each pass to the convoy's currently in-flight stage:
+`runConvoyReview` in `internal/agents/convoy_review.go` scopes each pass to the convoy's currently in-flight stage:
 
-1. Resolves the active stage via `store.CurrentInFlightStage(db, convoyID)` (line 442) — lowest-numbered stage in `{Open, AllPRsMerged, AwaitingGate, GatePassed}`.
-2. Filters `ListConvoyAskBranches` by `stage_id` (line 452) so the diff only includes the stage's branches.
-3. Prefixes the LLM prompt with `ConvoyStages.intent_text` (line 543) so the review reads the stage's stated goal.
+1. Resolves the active stage via `store.CurrentInFlightStage(db, convoyID)` — lowest-numbered stage in `{Open, AllPRsMerged, AwaitingGate, GatePassed}`.
+2. Filters `ListConvoyAskBranches` by `stage_id` so the diff only includes the stage's branches.
+3. Prefixes the LLM prompt with `ConvoyStages.intent_text` so the review reads the stage's stated goal.
 
 End-to-end coverage (`internal/agents/convoy_review_per_stage_test.go`):
 
@@ -109,7 +109,7 @@ End-to-end coverage (`internal/agents/convoy_review_per_stage_test.go`):
 
 ## Astromech dispatch gating (Pattern P-StageGate)
 
-Dispatch-time gate at the SQL layer (`internal/store/tasks.go:129-132` in `ClaimBounty`, `:201-204` in `ClaimBountyForWrite`):
+Dispatch-time gate at the SQL layer (the `stage_id IS NULL OR EXISTS (...)` predicate inside `ClaimBounty` and `ClaimBountyForWrite` in `internal/store/tasks.go`):
 
 ```sql
 ... AND (stage_id IS NULL
@@ -137,18 +137,18 @@ All 4 PASS.
 
 | Verb | Path | Handler | Purpose |
 |---|---|---|---|
-| GET | `/api/convoys/<id>/stages` | `internal/dashboard/handlers_staged_convoys.go:170-191` (`listStages`) | List convoy's ConvoyStages (1 row for single-mode convoys, N rows for staged). |
-| GET | `/api/convoys/<id>/stages/<num>` | `:195-264` (`getStageDetail`) | Stage row + ask-branches (filtered by `stage_id`) + per-branch sub-PRs + audit-log history. |
-| POST | `/api/convoys/<id>/stages/<num>/advance` | `:272-374` (`advanceStageHandler`) | Two modes: **(a) normal advance** — writes `SystemConfig.stage_advance_<convoy>_<stage>` rendezvous key for the `operator_confirm` gate; **(b) emergency bypass** — when `audit_id` matches `^AUDIT-\d+$`, calls `store.BypassStage` to flip status directly to `GatePassed` regardless of gate type, then `LogStageAudit(action=stage_bypass)` carrying both AUDIT id and reason in detail. Required by D5.5 exit criterion #10. |
-| POST | `/api/convoys/<id>/stages/<num>/abort` | `:380-444` (`abortStageHandler`) | Forces stage to `Failed` (terminal); convoy itself stays in `DraftPROpen`. |
+| GET | `/api/convoys/<id>/stages` | `listStages` in `internal/dashboard/handlers_staged_convoys.go` | List convoy's ConvoyStages (1 row for single-mode convoys, N rows for staged). |
+| GET | `/api/convoys/<id>/stages/<num>` | `getStageDetail` in `internal/dashboard/handlers_staged_convoys.go` | Stage row + ask-branches (filtered by `stage_id`) + per-branch sub-PRs + audit-log history. |
+| POST | `/api/convoys/<id>/stages/<num>/advance` | `advanceStageHandler` in `internal/dashboard/handlers_staged_convoys.go` | Two modes: **(a) normal advance** — writes `SystemConfig.stage_advance_<convoy>_<stage>` rendezvous key for the `operator_confirm` gate; **(b) emergency bypass** — when `audit_id` matches `^AUDIT-\d+$`, calls `store.BypassStage` to flip status directly to `GatePassed` regardless of gate type, then `LogStageAudit(action=stage_bypass)` carrying both AUDIT id and reason in detail. Required by D5.5 exit criterion #10. |
+| POST | `/api/convoys/<id>/stages/<num>/abort` | `abortStageHandler` in `internal/dashboard/handlers_staged_convoys.go` | Forces stage to `Failed` (terminal); convoy itself stays in `DraftPROpen`. |
 
-All 4 method-gated (`http.StatusMethodNotAllowed` for wrong verbs); all require non-empty `operator` + `reason` payload; bypass additionally validates `^AUDIT-\d+$` BEFORE any state mutation so malformed IDs never reach the audit trail. Routing wired at `internal/dashboard/handlers.go:929-937` → `dashboard.go:45`.
+All 4 method-gated (`http.StatusMethodNotAllowed` for wrong verbs); all require non-empty `operator` + `reason` payload; bypass additionally validates `^AUDIT-\d+$` BEFORE any state mutation so malformed IDs never reach the audit trail. Routing wired in `internal/dashboard/handlers.go` (`handleConvoyStages` dispatch) → `dashboard.go` mux registration.
 
-SPA wiring at `internal/dashboard/static/index.html:778-820` (stages-modal + stage-action-modal) and `internal/dashboard/static/app.js:1294, 1574-1737` (`showConvoyStages`, `renderStagesPanel`, `toggleStageHistory`, `openStageActionModal`, `confirmStageAction`).
+SPA wiring in `internal/dashboard/static/index.html` (the stages-modal + stage-action-modal blocks) and `internal/dashboard/static/app.js` (`showConvoyStages`, `renderStagesPanel`, `toggleStageHistory`, `openStageActionModal`, `confirmStageAction`).
 
-Stage-transition notify-after at `internal/agents/dogs_convoy_stage_watch.go:535-579` (`onStageTransition`), called from all 5 dog-driven transitions (Open→AllPRsMerged, AllPRsMerged→AwaitingGate, AwaitingGate→GatePassed, AwaitingGate→Failed timeout, AwaitingGate→Failed gate-fail). Debounce key `stage_transition_notified_<convoy>_<stage>_<new_status>` prevents re-pings.
+Stage-transition notify-after in `onStageTransition` (`internal/agents/dogs_convoy_stage_watch.go`), called from all 5 dog-driven transitions (Open→AllPRsMerged, AllPRsMerged→AwaitingGate, AwaitingGate→GatePassed, AwaitingGate→Failed timeout, AwaitingGate→Failed gate-fail). Debounce key `stage_transition_notified_<convoy>_<stage>_<new_status>` prevents re-pings.
 
-Audit trail via `LogStageAudit` + `ListStageAuditLog` (`internal/store/convoy_stages.go:364-428`) — re-uses `AuditLog` table, action prefix `stage_*`, 4 actions: `stage_advance`, `stage_abort`, `stage_auto_advance`, `stage_bypass`.
+Audit trail via `LogStageAudit` + `ListStageAuditLog` in `internal/store/convoy_stages.go` — re-uses `AuditLog` table, action prefix `stage_*`, 4 actions: `stage_advance`, `stage_abort`, `stage_auto_advance`, `stage_bypass`.
 
 ---
 
@@ -156,13 +156,13 @@ Audit trail via `LogStageAudit` + `ListStageAuditLog` (`internal/store/convoy_st
 
 | # | Directive | Enforcement (file:line) | Test (file:line) | Status |
 |---|---|---|---|---|
-| A | **No silent gate skip** — `gate_passed_at` flips ONLY after a real gate evaluation. | Sole `gate_passed_at` writer in production: `internal/store/convoy_stages.go:175` (`AdvanceStage`, only on `StageStatusGatePassed`). Sole production caller for the dog-driven path: `internal/agents/dogs_convoy_stage_watch.go:297`, gated by `if passed { ... }` from `evaluateGate(...)` at line 285. The new bypass path (`store.BypassStage` at `convoy_stages.go:215`) ALSO writes `gate_passed_at` BUT only via the explicit `^AUDIT-\d+$`-gated handler branch — every bypass leaves a `stage_bypass` audit row carrying the AUDIT id, so the durable trail distinguishes "real gate pass" from "operator bypass." | `dogs_convoy_stage_watch_test.go:196,242`; `convoy_stages_test.go:TestBypassStage_*` (4 tests) | ✅ |
+| A | **No silent gate skip** — `gate_passed_at` flips ONLY after a real gate evaluation. | Sole `gate_passed_at` writer in production: `AdvanceStage` in `internal/store/convoy_stages.go` (writes only on `StageStatusGatePassed`). Sole production caller for the dog-driven path: `runConvoyStageWatch` in `internal/agents/dogs_convoy_stage_watch.go`, gated by `if passed { ... }` from `evaluateGate(...)`. The new bypass path (`store.BypassStage` in `convoy_stages.go`) ALSO writes `gate_passed_at` BUT only via the explicit `^AUDIT-\d+$`-gated handler branch — every bypass leaves a `stage_bypass` audit row carrying the AUDIT id, so the durable trail distinguishes "real gate pass" from "operator bypass." | `dogs_convoy_stage_watch_test.go` (gate-passed paths); `convoy_stages_test.go:TestBypassStage_*` (4 tests) | ✅ |
 | B | **No post-hoc single→multi promotion without operator confirm** — `staging_mode` mutator audit. | `store.SetConvoyStaging` is the sole production mutator of `staging_mode`. Pattern P-StagingPromotionConfirm AST-walks production `.go`, rejects any unallowlisted call site. | `internal/audittools/audit_pattern_p_staging_promotion_confirm_test.go` — `TestPattern_PStagingPromotionConfirm_NoUngatedSetConvoyStaging`. Allowlist empty — zero production callers today. | ✅ |
-| C | **No null-gate non-terminal** — `gate_type=null` allowed only on terminal stage. | `internal/agents/commander/staging_validator.go:212-217` rejects `Gate==nil` on non-terminal stages with explicit error mentioning `gate=null` + `terminal` + anti-cheat. | `staging_validator_test.go:200,220` (`NullGateOnNonTerminalStage_Errors`, `NullGateOnTerminalStage_OK`) | ✅ |
-| D | **No skip-stage out-of-order** — out-of-order merges trigger escalation, NOT silent advance. | Dog query (`dogs_convoy_stage_watch.go:204`) walks only `status IN ('Open','AllPRsMerged','AwaitingGate')` — `Pending` stages never advance. Astromech claim SQL (`internal/store/tasks.go:129-132`) blocks dispatch on Pending stages. | `dogs_convoy_stage_watch_test.go:294` (`LegacySingleStageNullGate_NoOp`) | ✅ |
-| E | **No astromech pre-staging** — astromechs cannot hold a worktree on `Pending` stage. | Pattern P-StageGate AST audit (4 tests, see "Astromech dispatch gating" section above). | `audit_pattern_p_stage_gate_test.go:95,180,295,434` | ✅ |
-| F | **No Slack-message-triggers-stage-advance** — only operator dashboard action or real gate evaluation can advance. | The two Slack-touching code paths in `dogs_convoy_stage_watch.go` (`emitGateTimeoutEscalation` at line 454, `onStageTransition` at line 535) are **read-side** — both fire AFTER `store.AdvanceStage` succeeds. There's no inbound webhook handler that mutates ConvoyStages. | Verified by grep audit: no `mux.HandleFunc.*stages.*POST` outside the dashboard `/advance|/abort` endpoints. | ✅ |
-| **+1** (new) | **Bypass mechanism (D5.5 exit criterion #10)** — emergency stage advancement is operator-only and durable. | `^AUDIT-\d+$` regex enforced at `internal/dashboard/handlers_staged_convoys.go:121,320-324` BEFORE any stage lookup. Reason field still required. Bypass writes `stage_bypass` audit row carrying both AUDIT id and reason. Works regardless of gate type. | `handlers_staged_convoys_test.go:TestAdvanceStageHandler_Bypass_*` (5 tests covering happy path, from-Pending, malformed AUDIT ids × 6 cases, requires-reason, terminal-rejected) + `convoy_stages_test.go:TestBypassStage_*` (4 store-level tests) | ✅ |
+| C | **No null-gate non-terminal** — `gate_type=null` allowed only on terminal stage. | `internal/agents/commander/staging_validator.go` rejects `Gate==nil` on non-terminal stages with explicit error mentioning `gate=null` + `terminal` + anti-cheat. | `staging_validator_test.go` (`NullGateOnNonTerminalStage_Errors`, `NullGateOnTerminalStage_OK`) | ✅ |
+| D | **No skip-stage out-of-order** — out-of-order merges trigger escalation, NOT silent advance. | The dog's stage-selection query in `runConvoyStageWatch` (`internal/agents/dogs_convoy_stage_watch.go`) walks only `status IN ('Open','AllPRsMerged','AwaitingGate')` — `Pending` stages never advance. Astromech claim SQL (`ClaimBounty` / `ClaimBountyForWrite` in `internal/store/tasks.go`) blocks dispatch on Pending stages via the `stage_id IS NULL OR EXISTS (...)` predicate. | `dogs_convoy_stage_watch_test.go` (`LegacySingleStageNullGate_NoOp`) | ✅ |
+| E | **No astromech pre-staging** — astromechs cannot hold a worktree on `Pending` stage. | Pattern P-StageGate AST audit (4 tests, see "Astromech dispatch gating" section above). | `audit_pattern_p_stage_gate_test.go` (4 tests) | ✅ |
+| F | **No Slack-message-triggers-stage-advance** — only operator dashboard action or real gate evaluation can advance. | The two Slack-touching code paths in `dogs_convoy_stage_watch.go` (`emitGateTimeoutEscalation`, `onStageTransition`) are **read-side** — both fire AFTER `store.AdvanceStage` succeeds. There's no inbound webhook handler that mutates ConvoyStages. | Verified by grep audit: no `mux.HandleFunc.*stages.*POST` outside the dashboard `/advance|/abort` endpoints. | ✅ |
+| **+1** (new) | **Bypass mechanism (D5.5 exit criterion #10)** — emergency stage advancement is operator-only and durable. | `^AUDIT-\d+$` regex enforced inside `advanceStageHandler` (`internal/dashboard/handlers_staged_convoys.go`) BEFORE any stage lookup. Reason field still required. Bypass writes `stage_bypass` audit row carrying both AUDIT id and reason. Works regardless of gate type. | `handlers_staged_convoys_test.go:TestAdvanceStageHandler_Bypass_*` (5 tests covering happy path, from-Pending, malformed AUDIT ids × 6 cases, requires-reason, terminal-rejected) + `convoy_stages_test.go:TestBypassStage_*` (4 store-level tests) | ✅ |
 
 ---
 
