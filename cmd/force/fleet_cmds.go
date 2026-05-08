@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -1166,11 +1167,36 @@ func cmdAddRepo(db *sql.DB, args []string) {
 	// fix(cli) — flag prologue. Without it, `force add-repo --bogus-flag`
 	// silently passed through to the AddRepo write. parseSubcommandFlags
 	// rejects unknown flags + handles --help BEFORE any side-effect.
+	//
+	// Sweep D smart-defaults: --name and --description are now optional
+	// flags with auto-derivation from `git remote get-url origin` +
+	// README.md. The legacy 3-positional form
+	// (`force add-repo <name> <path> <desc>`) still works for muscle-
+	// memory and shell history.
+	// Go's stdlib flag package stops parsing at the first positional, so
+	// `force add-repo /path --name foo` would treat `--name` as another
+	// positional. reorderFlagsFirst hoists every `--key`/`--key=val`/`-k`
+	// arg ahead of the positionals so the FlagSet sees them all.
+	args = reorderFlagsFirst(args, addRepoBoolFlags)
+
 	fs := flag.NewFlagSet("add-repo", flag.ContinueOnError)
+	nameFlag := fs.String("name", "", "Override the auto-derived name (defaults to git remote tail or basename)")
+	descFlag := fs.String("description", "", "Override the auto-derived description (defaults to README.md first paragraph)")
+	pathFlag := fs.String("path", "", "Repo path (alternative to passing the path positionally)")
 	helped, perr := parseSubcommandFlags(fs, args, "add-repo",
-		"Register a git repository with the orchestrator. Validates the path is a git repo, populates remote_url + default_branch, and queues FindPRTemplate.",
-		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
-		[]string{"force add-repo myrepo /path/to/repo Short description here"})
+		"Register a git repository with the orchestrator. Name and description auto-derive from the repo when omitted (git remote tail / README first paragraph). Validates the path is a git repo, populates remote_url + default_branch, and queues FindPRTemplate.",
+		[]flagDoc{
+			{Name: "--name <name>", Desc: "override auto-derived name"},
+			{Name: "--description <desc>", Desc: "override auto-derived description"},
+			{Name: "--path <path>", Desc: "repo path (alternative to positional)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force add-repo /path/to/repo                                  # smart defaults",
+			"force add-repo /path/to/repo --name api                       # override name",
+			"force add-repo /path/to/repo --description \"My service\"       # override desc",
+			"force add-repo myrepo /path/to/repo \"Short description\"       # legacy 3-positional",
+		})
 	if helped {
 		return
 	}
@@ -1178,13 +1204,74 @@ func cmdAddRepo(db *sql.DB, args []string) {
 		os.Exit(2)
 	}
 	rest := fs.Args()
-	if len(rest) < 3 {
-		fmt.Println("Usage: force add-repo <name> <local-path> <description>")
+
+	// Detect legacy 3-positional form: NO flags were used AND we got 3+
+	// positionals. This mirrors the prior behavior byte-for-byte for
+	// operator muscle memory + scripts.
+	flagsUsed := *nameFlag != "" || *descFlag != "" || *pathFlag != ""
+	var name, repoRegPath, desc string
+	switch {
+	case !flagsUsed && len(rest) >= 3:
+		// Legacy: <name> <path> <description...>
+		name = rest[0]
+		repoRegPath = rest[1]
+		desc = strings.Join(rest[2:], " ")
+	case *pathFlag != "" && len(rest) == 0:
+		repoRegPath = *pathFlag
+	case len(rest) == 1:
+		repoRegPath = rest[0]
+	case len(rest) == 0 && *pathFlag == "":
+		fmt.Println("Usage: force add-repo <path> [--name <name>] [--description <desc>]")
+		fmt.Println("       force add-repo <name> <path> <description>   # legacy positional")
+		os.Exit(1)
+	default:
+		fmt.Println("Usage: force add-repo <path> [--name <name>] [--description <desc>]")
+		fmt.Println("       force add-repo <name> <path> <description>   # legacy positional")
 		os.Exit(1)
 	}
-	name := rest[0]
-	repoRegPath := rest[1]
-	desc := strings.Join(rest[2:], " ")
+
+	// Apply explicit flag overrides. In legacy mode flagsUsed==false, so
+	// these branches are skipped and the positional values win.
+	if *nameFlag != "" {
+		name = *nameFlag
+	}
+	if *descFlag != "" {
+		desc = *descFlag
+	}
+
+	if err := registerRepo(db, &repoRegistration{
+		Name:        name,
+		Path:        repoRegPath,
+		Description: desc,
+		Out:         os.Stdout,
+	}); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
+
+// repoRegistration holds the operator-supplied (or smart-default-derived)
+// inputs for a single repo registration. Keeping the shape explicit lets
+// `cmdAddRepos` reuse the same write path without duplicating the eager
+// PR-flow probe + SenatorOnboarding queue logic.
+type repoRegistration struct {
+	Name        string    // optional; auto-derived from path if empty
+	Path        string    // required
+	Description string    // optional; auto-derived from README if empty
+	Out         io.Writer // os.Stdout in normal use; tests can capture
+}
+
+// registerRepo runs the full add-repo write pipeline for one repo. Returns
+// an error (without calling os.Exit) so the batch caller can keep going on
+// per-repo failures. A nil Out is treated as io.Discard.
+func registerRepo(db *sql.DB, r *repoRegistration) error {
+	if r == nil {
+		return errors.New("registerRepo: nil registration")
+	}
+	out := r.Out
+	if out == nil {
+		out = io.Discard
+	}
 
 	// D3 polish-pass iteration 2 (B4r): operator-invoked CLI subcommand.
 	// The git probes here run BEFORE the daemon's holocron is wired,
@@ -1194,32 +1281,48 @@ func cmdAddRepo(db *sql.DB, args []string) {
 	// NUL / newline / non-absolute paths all fail here. Absolute form is
 	// resolved via filepath.Abs so a caller that passes a relative path
 	// from an unknown cwd still gets a meaningful check.
-	absPath, absErr := filepath.Abs(repoRegPath)
+	absPath, absErr := filepath.Abs(r.Path)
 	if absErr != nil {
-		fmt.Printf("Cannot resolve path %q: %v\n", repoRegPath, absErr)
-		os.Exit(1)
+		return fmt.Errorf("cannot resolve path %q: %v", r.Path, absErr)
 	}
 	if err := igit.ValidateRepoPath(absPath, igit.RepoPathOptions{RejectSymlinks: false}); err != nil {
-		fmt.Printf("Invalid repo path: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid repo path: %v", err)
 	}
 	// Verify the path exists and is a git repository.
 	if _, statErr := os.Stat(absPath); statErr != nil {
-		fmt.Printf("Path does not exist: %s\n", absPath)
-		os.Exit(1)
+		return fmt.Errorf("path does not exist: %s", absPath)
 	}
 	// Trailing `--` keeps the arg positional (Fix #9 defence-in-depth;
 	// absPath already passed the validator so this is belt-and-suspenders).
-	if out, gitErr := igit.LogAndRun(ctx,
+	if gitOut, gitErr := igit.LogAndRun(ctx,
 		igit.OpContext{Repo: absPath},
 		"add-repo-rev-parse",
 		"git", "-C", absPath, "rev-parse", "--git-dir", "--",
 	); gitErr != nil {
-		fmt.Printf("'%s' does not appear to be a git repository: %s\n", absPath, strings.TrimSpace(string(out)))
-		os.Exit(1)
+		return fmt.Errorf("'%s' does not appear to be a git repository: %s", absPath, strings.TrimSpace(string(gitOut)))
 	}
+
+	// Smart-default derivation. Done AFTER the path validator so we never
+	// shell out to git on an attacker-controlled path. Both helpers are
+	// defensive — they return "" on any error and we surface a clear
+	// message to the operator if the result is unusable.
+	name := r.Name
+	if name == "" {
+		name = deriveRepoName(absPath)
+	}
+	if name == "" {
+		return fmt.Errorf("could not derive repo name from %q — pass --name explicitly", absPath)
+	}
+	desc := r.Description
+	if desc == "" {
+		desc = deriveRepoDescription(absPath)
+	}
+
 	store.AddRepo(db, name, absPath, desc)
-	fmt.Printf("Repository '%s' registered at %s\n", name, absPath)
+	fmt.Fprintf(out, "Repository '%s' registered at %s\n", name, absPath)
+	if desc != "" && r.Description == "" {
+		fmt.Fprintf(out, "  description (auto-derived): %s\n", desc)
+	}
 
 	// Eagerly populate PR-flow fields (remote_url, default_branch) and queue
 	// FindPRTemplate so the repo is ready for the PR flow immediately. This
@@ -1242,20 +1345,20 @@ func cmdAddRepo(db *sql.DB, args []string) {
 			if urlErr != nil {
 				reason = fmt.Sprintf("origin URL rejected: %v", urlErr)
 			}
-			fmt.Printf("  (note) %s — PR flow will fall back to legacy local-merge for this repo.\n", reason)
-			fmt.Printf("  Fix: `git -C %s remote add origin <url>` then `force repo sync`.\n", absPath)
+			fmt.Fprintf(out, "  (note) %s — PR flow will fall back to legacy local-merge for this repo.\n", reason)
+			fmt.Fprintf(out, "  Fix: `git -C %s remote add origin <url>` then `force repo sync`.\n", absPath)
 			if err := store.SetRepoPRFlowEnabled(db, name, false); err != nil {
-				fmt.Printf("  (warn) failed to persist pr_flow=false for %s: %v — re-run `force repo set-pr-flow %s off`\n", name, err, name)
+				fmt.Fprintf(out, "  (warn) failed to persist pr_flow=false for %s: %v — re-run `force repo set-pr-flow %s off`\n", name, err, name)
 			}
 		} else {
 			// Detect default branch via symbolic-ref, fall back to common names.
 			var defaultBranch string
-			if out, symErr := igit.LogAndRun(ctx,
+			if out2, symErr := igit.LogAndRun(ctx,
 				igit.OpContext{Repo: absPath},
 				"add-repo-symbolic-ref",
 				"git", "-C", absPath, "symbolic-ref", "--short", "--", "refs/remotes/origin/HEAD",
 			); symErr == nil {
-				parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
+				parts := strings.SplitN(strings.TrimSpace(string(out2)), "/", 2)
 				if len(parts) == 2 {
 					defaultBranch = parts[1]
 				}
@@ -1276,10 +1379,10 @@ func cmdAddRepo(db *sql.DB, args []string) {
 				defaultBranch = "main"
 			}
 			if err := store.SetRepoRemoteInfo(db, name, remoteURL, defaultBranch); err == nil {
-				fmt.Printf("  remote=%s default=%s\n", remoteURL, defaultBranch)
+				fmt.Fprintf(out, "  remote=%s default=%s\n", remoteURL, defaultBranch)
 			}
 			if _, err := agents.QueueFindPRTemplate(db, name, absPath); err == nil {
-				fmt.Printf("  queued FindPRTemplate task to locate the repo's PR template.\n")
+				fmt.Fprintf(out, "  queued FindPRTemplate task to locate the repo's PR template.\n")
 			}
 		}
 	}
@@ -1291,11 +1394,12 @@ func cmdAddRepo(db *sql.DB, args []string) {
 	// re-add the repo if a re-onboard is needed).
 	if chamber, _ := store.GetSenateChamber(db, name); chamber == nil {
 		if _, qErr := store.QueueSenatorOnboarding(db, name, "operator-add-repo"); qErr != nil {
-			fmt.Printf("  (warn) SenatorOnboarding queue failed: %v\n", qErr)
+			fmt.Fprintf(out, "  (warn) SenatorOnboarding queue failed: %v\n", qErr)
 		} else {
-			fmt.Printf("  queued SenatorOnboarding for %s (Librarian will bootstrap candidate Senator rules).\n", name)
+			fmt.Fprintf(out, "  queued SenatorOnboarding for %s (Librarian will bootstrap candidate Senator rules).\n", name)
 		}
 	}
+	return nil
 }
 
 func cmdEstop(db *sql.DB, args []string) {

@@ -52,10 +52,21 @@ It verifies `git`, `claude`, repo paths, DB integrity, e-stop state, and permane
 The fleet only touches **registered** repos. New registrations land in `Repositories.mode = 'read_only'` by default — astromechs cannot claim work against them until the operator promotes the mode (see step 4 below).
 
 ```bash
-./force add-repo myapp /path/to/myapp "Backend API service in Go"
+./force add-repo /path/to/myapp                                       # smart defaults
+./force add-repo /path/to/myapp --name myapp --description "Go API"   # explicit overrides
+./force add-repo myapp /path/to/myapp "Backend API service in Go"     # legacy 3-positional
 ```
 
-`add-repo` verifies the path is a git repo, populates `remote_url` and `default_branch` from `git remote -v`, and queues a `FindPRTemplate` task so the repo is ready for the PR flow before the first feature lands.
+`add-repo` verifies the path is a git repo, populates `remote_url` and `default_branch` from `git remote -v`, and queues a `FindPRTemplate` task so the repo is ready for the PR flow before the first feature lands. With no flags, the name auto-derives from `git remote get-url origin` (trailing component, stripping `.git`) or `basename(path)`, and the description auto-derives from the README's first non-blank paragraph (frontmatter, badges, and headings are skipped). Pass `--name` / `--description` to override either, or use the legacy 3-positional form.
+
+To bulk-register every git repo under a parent directory (e.g. `~/code`), use:
+
+```bash
+./force add-repos ~/code              # interactive — prints preview, prompts to confirm
+./force add-repos ~/code --assume-yes # unattended — registers each repo immediately
+```
+
+`add-repos` enumerates immediate subdirectories that contain a `.git/`, applies the same smart-default derivation, prints a preview table, and skips repos that are already in `Repositories`. Each new repo flows through the same write path as `add-repo` (same FindPRTemplate queue + git probe).
 
 Inspect what's registered:
 

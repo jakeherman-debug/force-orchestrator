@@ -118,6 +118,9 @@ func main() {
 	case "add-repo":
 		cmdAddRepo(db, os.Args[2:])
 
+	case "add-repos":
+		cmdAddRepos(db, os.Args[2:])
+
 	case "reset":
 		cmdReset(db, "reset", "manual reset via CLI", os.Args[2:])
 
