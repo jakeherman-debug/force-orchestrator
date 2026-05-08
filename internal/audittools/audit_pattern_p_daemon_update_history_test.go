@@ -23,6 +23,7 @@
 package audittools
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -32,19 +33,21 @@ import (
 	"testing"
 )
 
-func TestPattern_P_DaemonUpdateHistory(t *testing.T) {
-	root := moduleRoot(t)
-	target := filepath.Join(root, "cmd", "force", "daemon_cmds.go")
+// updateHistoryRequiredTables is the set of tables that must be
+// declared in all three schema locations.
+var updateHistoryRequiredTables = []string{"DaemonUpdateHistory", "DaemonStartLog"}
 
+// checkDaemonUpdateHistory asserts the update-history contract holds
+// for the source tree rooted at rootDir. Returns nil on success,
+// otherwise the first violation as an error.
+func checkDaemonUpdateHistory(rootDir string) error {
+	target := filepath.Join(rootDir, "cmd", "force", "daemon_cmds.go")
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, target, nil, parser.ParseComments)
 	if err != nil {
-		t.Fatalf("parse %s: %v", target, err)
+		return fmt.Errorf("parse %s: %w", target, err)
 	}
 
-	// (1) Both cmdDaemonUpdate and cmdDaemonRollback must invoke
-	//     store.RecordDaemonUpdate. We accept either a direct call or a
-	//     deferred call (`defer func() { ... store.RecordDaemonUpdate(...) ... }()`).
 	wantFuncs := map[string]bool{
 		"cmdDaemonUpdate":   false,
 		"cmdDaemonRollback": false,
@@ -79,31 +82,38 @@ func TestPattern_P_DaemonUpdateHistory(t *testing.T) {
 	})
 	for name, found := range wantFuncs {
 		if !found {
-			t.Errorf("Pattern P_DaemonUpdateHistory: %s does not call store.RecordDaemonUpdate — operator-facing history will silently drop this exit path", name)
+			return fmt.Errorf("%s does not call store.RecordDaemonUpdate — operator-facing history will silently drop this exit path", name)
 		}
 	}
 
-	// (2) Schema parity: DaemonUpdateHistory and DaemonStartLog must be
-	//     declared in all three locations (createSchema, runMigrations,
-	//     schema/schema.sql).
-	schemaGo := mustReadAudit(t, filepath.Join(root, "internal", "store", "schema.go"))
-	schemaSQL := mustReadAudit(t, filepath.Join(root, "schema", "schema.sql"))
+	schemaGoBytes, err := os.ReadFile(filepath.Join(rootDir, "internal", "store", "schema.go"))
+	if err != nil {
+		return fmt.Errorf("read schema.go: %w", err)
+	}
+	schemaSQLBytes, err := os.ReadFile(filepath.Join(rootDir, "schema", "schema.sql"))
+	if err != nil {
+		return fmt.Errorf("read schema.sql: %w", err)
+	}
+	schemaGo := string(schemaGoBytes)
+	schemaSQL := string(schemaSQLBytes)
 
-	tables := []string{"DaemonUpdateHistory", "DaemonStartLog"}
-	for _, table := range tables {
-		// schema.go: the table must appear in BOTH createSchema and
-		// runMigrations (heuristic: count `CREATE TABLE IF NOT EXISTS <table>`
-		// occurrences — should be 2).
+	for _, table := range updateHistoryRequiredTables {
 		needle := "CREATE TABLE IF NOT EXISTS " + table
 		count := strings.Count(schemaGo, needle)
 		if count < 2 {
-			t.Errorf("Pattern P_DaemonUpdateHistory: %s appears %d time(s) in schema.go, want 2 (createSchema + runMigrations)",
+			return fmt.Errorf("%s appears %d time(s) in schema.go, want 2 (createSchema + runMigrations)",
 				table, count)
 		}
-		// schema.sql: must appear at least once.
 		if !strings.Contains(schemaSQL, needle) {
-			t.Errorf("Pattern P_DaemonUpdateHistory: %s missing from schema/schema.sql", table)
+			return fmt.Errorf("%s missing from schema/schema.sql", table)
 		}
+	}
+	return nil
+}
+
+func TestPattern_P_DaemonUpdateHistory(t *testing.T) {
+	if err := checkDaemonUpdateHistory(moduleRoot(t)); err != nil {
+		t.Errorf("Pattern P_DaemonUpdateHistory: %v", err)
 	}
 }
 
@@ -114,4 +124,147 @@ func mustReadAudit(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// writeUpdateHistoryCompliantTree builds a fully compliant
+// daemon-update-history source tree under root.
+func writeUpdateHistoryCompliantTree(t *testing.T, root string) {
+	t.Helper()
+	mk := func(rel, body string) {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", full, err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
+	}
+	mk("cmd/force/daemon_cmds.go", "package force\n"+
+		"import _ \"force-orchestrator/internal/store\"\n"+
+		"func cmdDaemonUpdate() {\n"+
+		"\tdefer store.RecordDaemonUpdate(nil)\n"+
+		"}\n"+
+		"func cmdDaemonRollback() {\n"+
+		"\tdefer store.RecordDaemonUpdate(nil)\n"+
+		"}\n")
+	// schema.go: TWO occurrences each (createSchema + runMigrations).
+	mk("internal/store/schema.go", "package store\n"+
+		"const createSchemaSQL = \"\\nCREATE TABLE IF NOT EXISTS DaemonUpdateHistory (id INTEGER PRIMARY KEY);\\nCREATE TABLE IF NOT EXISTS DaemonStartLog (id INTEGER PRIMARY KEY);\\n\"\n"+
+		"const migrationsSQL = \"\\nCREATE TABLE IF NOT EXISTS DaemonUpdateHistory (id INTEGER PRIMARY KEY);\\nCREATE TABLE IF NOT EXISTS DaemonStartLog (id INTEGER PRIMARY KEY);\\n\"\n")
+	mk("schema/schema.sql", "CREATE TABLE IF NOT EXISTS DaemonUpdateHistory (id INTEGER PRIMARY KEY);\n"+
+		"CREATE TABLE IF NOT EXISTS DaemonStartLog (id INTEGER PRIMARY KEY);\n")
+}
+
+// TestPattern_P_DaemonUpdateHistory_DetectsInjectedDrift proves the
+// update-history checker would fire when each contract clause is
+// dropped.
+func TestPattern_P_DaemonUpdateHistory_DetectsInjectedDrift(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(t *testing.T, root string)
+		wantSub string
+	}{
+		{
+			name: "missing-RecordDaemonUpdate-in-update",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "cmd", "force", "daemon_cmds.go")
+				body := "package force\n" +
+					"import _ \"force-orchestrator/internal/store\"\n" +
+					"func cmdDaemonUpdate() {}\n" +
+					"func cmdDaemonRollback() {\n" +
+					"\tdefer store.RecordDaemonUpdate(nil)\n" +
+					"}\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "cmdDaemonUpdate does not call store.RecordDaemonUpdate",
+		},
+		{
+			name: "missing-RecordDaemonUpdate-in-rollback",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "cmd", "force", "daemon_cmds.go")
+				body := "package force\n" +
+					"import _ \"force-orchestrator/internal/store\"\n" +
+					"func cmdDaemonUpdate() {\n" +
+					"\tdefer store.RecordDaemonUpdate(nil)\n" +
+					"}\n" +
+					"func cmdDaemonRollback() {}\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "cmdDaemonRollback does not call store.RecordDaemonUpdate",
+		},
+		{
+			name: "schema-go-only-one-DaemonUpdateHistory",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "internal", "store", "schema.go")
+				body := "package store\n" +
+					"const createSchemaSQL = \"\\nCREATE TABLE IF NOT EXISTS DaemonUpdateHistory (id INTEGER PRIMARY KEY);\\nCREATE TABLE IF NOT EXISTS DaemonStartLog (id INTEGER PRIMARY KEY);\\n\"\n" +
+					"const migrationsSQL = \"\\nCREATE TABLE IF NOT EXISTS DaemonStartLog (id INTEGER PRIMARY KEY);\\n\"\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "DaemonUpdateHistory appears 1 time(s) in schema.go",
+		},
+		{
+			name: "schema-go-only-one-DaemonStartLog",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "internal", "store", "schema.go")
+				body := "package store\n" +
+					"const createSchemaSQL = \"\\nCREATE TABLE IF NOT EXISTS DaemonUpdateHistory (id INTEGER PRIMARY KEY);\\nCREATE TABLE IF NOT EXISTS DaemonStartLog (id INTEGER PRIMARY KEY);\\n\"\n" +
+					"const migrationsSQL = \"\\nCREATE TABLE IF NOT EXISTS DaemonUpdateHistory (id INTEGER PRIMARY KEY);\\n\"\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "DaemonStartLog appears 1 time(s) in schema.go",
+		},
+		{
+			name: "schema-sql-missing-DaemonUpdateHistory",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "schema", "schema.sql")
+				body := "CREATE TABLE IF NOT EXISTS DaemonStartLog (id INTEGER PRIMARY KEY);\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "DaemonUpdateHistory missing from schema/schema.sql",
+		},
+		{
+			name: "schema-sql-missing-DaemonStartLog",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "schema", "schema.sql")
+				body := "CREATE TABLE IF NOT EXISTS DaemonUpdateHistory (id INTEGER PRIMARY KEY);\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "DaemonStartLog missing from schema/schema.sql",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeUpdateHistoryCompliantTree(t, root)
+			tc.mutate(t, root)
+			err := checkDaemonUpdateHistory(root)
+			if err == nil {
+				t.Fatalf("checker accepted violating tree (case %q); want failure containing %q", tc.name, tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+
+	// Positive control.
+	root := t.TempDir()
+	writeUpdateHistoryCompliantTree(t, root)
+	if err := checkDaemonUpdateHistory(root); err != nil {
+		t.Fatalf("checker rejected compliant baseline: %v", err)
+	}
 }
