@@ -3725,7 +3725,10 @@ async function notifSetCategory(category, setting, tier) {
     const target = document.getElementById('notif-tier1-target');
     if (target) target.textContent = category + ' → ' + setting;
     const modal = document.getElementById('notif-tier1-confirm-modal');
-    if (modal) modal.hidden = false;
+    if (modal) {
+      modal.hidden = false;
+      modal.style.display = 'flex';
+    }
     return;
   }
   await _notifWriteCategory(category, setting, false);
@@ -3753,7 +3756,10 @@ async function _notifWriteCategory(category, setting, confirm) {
 function notifHideTier1Modal() {
   _notifPendingTier1 = null;
   const modal = document.getElementById('notif-tier1-confirm-modal');
-  if (modal) modal.hidden = true;
+  if (modal) {
+    modal.hidden = true;
+    modal.style.display = 'none';
+  }
 }
 window.notifHideTier1Modal = notifHideTier1Modal;
 
@@ -3798,12 +3804,16 @@ function notifShowDNDModal() {
   const errEl = document.getElementById('notif-dnd-error');
   if (errEl) errEl.textContent = '';
   modal.hidden = false;
+  modal.style.display = 'flex';
 }
 window.notifShowDNDModal = notifShowDNDModal;
 
 function notifHideDNDModal() {
   const modal = document.getElementById('notif-dnd-modal');
-  if (modal) modal.hidden = true;
+  if (modal) {
+    modal.hidden = true;
+    modal.style.display = 'none';
+  }
 }
 window.notifHideDNDModal = notifHideDNDModal;
 
@@ -3860,7 +3870,10 @@ window.notifClearDND = notifClearDND;
 
 function notifShowSavePresetModal() {
   const modal = document.getElementById('notif-save-preset-modal');
-  if (modal) modal.hidden = false;
+  if (modal) {
+    modal.hidden = false;
+    modal.style.display = 'flex';
+  }
   const r = document.getElementById('notif-save-preset-result');
   if (r) r.textContent = '';
 }
@@ -3868,7 +3881,10 @@ window.notifShowSavePresetModal = notifShowSavePresetModal;
 
 function notifHideSavePresetModal() {
   const modal = document.getElementById('notif-save-preset-modal');
-  if (modal) modal.hidden = true;
+  if (modal) {
+    modal.hidden = true;
+    modal.style.display = 'none';
+  }
 }
 window.notifHideSavePresetModal = notifHideSavePresetModal;
 
