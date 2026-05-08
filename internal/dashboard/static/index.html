@@ -713,7 +713,7 @@
     </div>
 
     <!-- DND modal. -->
-    <div id="notif-dnd-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+    <div id="notif-dnd-modal" class="modal-backdrop hidden">
       <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:480px">
         <h4 style="margin-top:0">Set Do Not Disturb</h4>
         <p class="reflection-help">DND silences every category except <code>spend_cap_e_stop</code> and <code>consumer_breakage</code>. Server-side cap: 14 days from now.</p>
@@ -737,7 +737,7 @@
     </div>
 
     <!-- Tier-1 confirm modal. -->
-    <div id="notif-tier1-confirm-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+    <div id="notif-tier1-confirm-modal" class="modal-backdrop hidden">
       <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:480px">
         <h4 style="margin-top:0">Tier-1 silencing — confirm</h4>
         <p>Tier-1 categories signal the fleet is blocked. Silencing them means a real escalation will be invisible until you actively check the dashboard.</p>
@@ -750,7 +750,7 @@
     </div>
 
     <!-- Save-as-preset modal. -->
-    <div id="notif-save-preset-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+    <div id="notif-save-preset-modal" class="modal-backdrop hidden">
       <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:520px">
         <h4 style="margin-top:0">Save current overrides as a preset</h4>
         <p class="reflection-help">Captures the current per-category overrides as a YAML preset block. The block is written to <code>/tmp/notifications-preset-&lt;name&gt;-&lt;ts&gt;.yaml.diff</code>; paste it into <code>config/notifications.yaml</code> via a normal PR.</p>
@@ -774,10 +774,11 @@
   <!-- D11 Phase 3 sub-task C — saved-filter modals (global, used by every
        tab that hosts a saved-filter-bar). The "save current filter" modal
        posts to /api/dashboard/saved-filter; the "export" modal calls
-       /api/dashboard/saved-filter/export. Markup is hidden by default; the
-       JS in app.js (openSaveFilterModal / openExportSavedFiltersModal)
-       toggles the `hidden` attribute. -->
-  <div id="saved-filter-save-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+       /api/dashboard/saved-filter/export. Both use the canonical
+       .modal-backdrop + .hidden class pattern (style.css:573); the JS in
+       app.js (openSaveFilterModal / openExportSavedFiltersModal) toggles
+       the `hidden` class. -->
+  <div id="saved-filter-save-modal" class="modal-backdrop hidden">
     <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:520px">
       <h4 style="margin-top:0">Save current filter</h4>
       <p class="reflection-help">Captures the current filter + sort as a named query you can recall in one click. Stored as <code>source=dashboard</code>; export to YAML and commit to <code>config/dashboard.yaml</code> to make it canonical.</p>
@@ -798,7 +799,7 @@
     </div>
   </div>
 
-  <div id="saved-filter-export-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+  <div id="saved-filter-export-modal" class="modal-backdrop hidden">
     <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:420px;max-width:640px">
       <h4 style="margin-top:0">Export saved filters to YAML</h4>
       <p class="reflection-help">This generates a diff containing your dashboard-saved filters. Apply it to <code>config/dashboard.yaml</code> and commit via the normal review path. Yaml-source filters are already in the YAML — they are NOT included.</p>

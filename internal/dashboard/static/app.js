@@ -3726,8 +3726,7 @@ async function notifSetCategory(category, setting, tier) {
     if (target) target.textContent = category + ' → ' + setting;
     const modal = document.getElementById('notif-tier1-confirm-modal');
     if (modal) {
-      modal.hidden = false;
-      modal.style.display = 'flex';
+      modal.classList.remove('hidden');
     }
     return;
   }
@@ -3757,8 +3756,7 @@ function notifHideTier1Modal() {
   _notifPendingTier1 = null;
   const modal = document.getElementById('notif-tier1-confirm-modal');
   if (modal) {
-    modal.hidden = true;
-    modal.style.display = 'none';
+    modal.classList.add('hidden');
   }
 }
 window.notifHideTier1Modal = notifHideTier1Modal;
@@ -3803,16 +3801,14 @@ function notifShowDNDModal() {
   }
   const errEl = document.getElementById('notif-dnd-error');
   if (errEl) errEl.textContent = '';
-  modal.hidden = false;
-  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
 }
 window.notifShowDNDModal = notifShowDNDModal;
 
 function notifHideDNDModal() {
   const modal = document.getElementById('notif-dnd-modal');
   if (modal) {
-    modal.hidden = true;
-    modal.style.display = 'none';
+    modal.classList.add('hidden');
   }
 }
 window.notifHideDNDModal = notifHideDNDModal;
@@ -3871,8 +3867,7 @@ window.notifClearDND = notifClearDND;
 function notifShowSavePresetModal() {
   const modal = document.getElementById('notif-save-preset-modal');
   if (modal) {
-    modal.hidden = false;
-    modal.style.display = 'flex';
+    modal.classList.remove('hidden');
   }
   const r = document.getElementById('notif-save-preset-result');
   if (r) r.textContent = '';
@@ -3882,8 +3877,7 @@ window.notifShowSavePresetModal = notifShowSavePresetModal;
 function notifHideSavePresetModal() {
   const modal = document.getElementById('notif-save-preset-modal');
   if (modal) {
-    modal.hidden = true;
-    modal.style.display = 'none';
+    modal.classList.add('hidden');
   }
 }
 window.notifHideSavePresetModal = notifHideSavePresetModal;
@@ -4058,15 +4052,13 @@ function openSaveFilterModal(tab) {
   if (nm) nm.value = '';
   if (ds) ds.value = '';
   if (rs) rs.textContent = '';
-  modal.hidden = false;
-  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
 }
 
 function closeSaveFilterModal() {
   const modal = document.getElementById('saved-filter-save-modal');
   if (!modal) return;
-  modal.hidden = true;
-  modal.style.display = 'none';
+  modal.classList.add('hidden');
 }
 
 async function submitSaveFilter() {
@@ -4122,15 +4114,13 @@ function openExportSavedFiltersModal() {
   if (!modal) return;
   const out = document.getElementById('saved-filter-export-result');
   if (out) out.textContent = '(click Generate to produce the YAML diff)';
-  modal.hidden = false;
-  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
 }
 
 function closeExportSavedFiltersModal() {
   const modal = document.getElementById('saved-filter-export-modal');
   if (!modal) return;
-  modal.hidden = true;
-  modal.style.display = 'none';
+  modal.classList.add('hidden');
 }
 
 async function submitExportSavedFilters() {
