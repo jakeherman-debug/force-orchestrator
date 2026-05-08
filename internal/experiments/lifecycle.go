@@ -114,9 +114,24 @@ type ManifestMetric struct {
 // ManifestPromotion is the optional rule-promotion block. When
 // present and the terminated experiment has a declared winner,
 // MaybePromoteRule mints a PromotionProposal with this content.
+//
+// json tags match the documented YAML wire keys so the SystemConfig
+// round-trip (AuthorFromManifest writes JSON via json.Marshal; the
+// unmarshal in MaybePromoteRule reads it back) preserves the
+// snake_case names the operator-facing manifest declares. Without
+// json tags the round-trip would emit PascalCase keys (`RuleKey`,
+// `ProposedContent`) — Go's case-insensitive matcher would still
+// resolve them on read because the same struct is on both sides, but
+// the on-disk shape would silently disagree with every other
+// snake_case wire (the `experiments/<stamp>/manifest.yaml` file, the
+// PromotionProposals SQL columns, the dashboard API payloads).
+//
+// This is the same antipattern as commit 154411a's CandidateRule fix:
+// multi-word PascalCase fields without json tags break wire-format
+// consistency. Pattern P_LLMParserJSONTags is the AST regression.
 type ManifestPromotion struct {
-	RuleKey         string `yaml:"rule_key"`
-	ProposedContent string `yaml:"proposed_content"`
+	RuleKey         string `yaml:"rule_key" json:"rule_key"`
+	ProposedContent string `yaml:"proposed_content" json:"proposed_content"`
 }
 
 func validateManifest(m Manifest) error {
