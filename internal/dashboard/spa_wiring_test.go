@@ -383,7 +383,7 @@ func TestSPA_ConvoyWatchChip_Wired(t *testing.T) {
 		`id="convoy-watch-modal"`,
 		`id="convoy-watch-id"`,
 		`id="convoy-watch-body"`,
-		`onclick="saveConvoyWatch()"`,
+		`data-action="saveConvoyWatch"`,
 	} {
 		if !strings.Contains(indexHTML, marker) {
 			t.Errorf("SPA wiring (D11 P2 watch): index.html missing %q — popover cannot mount", marker)

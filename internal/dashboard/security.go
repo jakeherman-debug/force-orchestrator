@@ -97,22 +97,23 @@ func isMutatingMethod(method string) bool {
 // Content-Security-Policy closes AUDIT-002 by preventing remote script
 // execution and tightening the XSS surface even if a sink is reintroduced.
 //
-// 'self' covers all bundled scripts under static/. 'unsafe-inline' is
-// required in BOTH script-src and style-src because:
-//   - script-src: the SPA uses 122+ inline onclick="..." event handlers
-//     across index.html. Browsers treat these as inline script and block
-//     them under strict 'self'-only script-src. Refactoring every handler
-//     to addEventListener (via data-action attributes + a single delegated
-//     click handler) is the proper long-term fix; the hotfix is to allow
-//     inline execution. The dashboard binds to 127.0.0.1 only and is
-//     operator-only, so the XSS surface is tightly bounded.
-//   - style-src: a few markup nodes (banners, modals) use inline style
-//     attributes. Same rationale.
+// 'self' covers all bundled scripts under static/.
+//   - script-src: 'self' alone — the SPA used to wire ~170 handlers via
+//     inline onclick="..." attributes (which the browser treats as inline
+//     script and blocks under strict CSP). Sweep B (post-d54cb2a hotfix)
+//     refactored every inline event handler in index.html and app.js's
+//     template strings to a single delegated dispatcher driven by
+//     data-action / data-arg attributes. Pattern P_DashboardNoInlineHandlers
+//     guards against drift — any future inline onclick= is a CI failure.
+//     'unsafe-inline' is therefore NO LONGER NEEDED for script-src.
+//   - style-src: 'self' 'unsafe-inline' — a few markup nodes (banners,
+//     modals, the convoy filter banner) still use inline style="..."
+//     attributes. Tightening style-src is a separate sweep.
 func setSecurityHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Security-Policy",
 		"default-src 'self'; "+
-			"script-src 'self' 'unsafe-inline'; "+
+			"script-src 'self'; "+
 			"style-src 'self' 'unsafe-inline'; "+
 			"img-src 'self' data:; "+
 			"connect-src 'self'; "+
