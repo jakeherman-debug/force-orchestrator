@@ -94,17 +94,25 @@ func isMutatingMethod(method string) bool {
 }
 
 // setSecurityHeaders applies the security headers to every response.
-// Content-Security-Policy closes AUDIT-002 by preventing inline/remote
-// script execution even if an XSS sink is reintroduced in future.
-// 'self' is enough because everything is bundled under static/.
-// 'unsafe-inline' is included ONLY in style-src because a few existing
-// markup nodes (e.g. the banner) use inline style attributes; if those
-// get cleaned up later, this can be tightened to style-src 'self'.
+// Content-Security-Policy closes AUDIT-002 by preventing remote script
+// execution and tightening the XSS surface even if a sink is reintroduced.
+//
+// 'self' covers all bundled scripts under static/. 'unsafe-inline' is
+// required in BOTH script-src and style-src because:
+//   - script-src: the SPA uses 122+ inline onclick="..." event handlers
+//     across index.html. Browsers treat these as inline script and block
+//     them under strict 'self'-only script-src. Refactoring every handler
+//     to addEventListener (via data-action attributes + a single delegated
+//     click handler) is the proper long-term fix; the hotfix is to allow
+//     inline execution. The dashboard binds to 127.0.0.1 only and is
+//     operator-only, so the XSS surface is tightly bounded.
+//   - style-src: a few markup nodes (banners, modals) use inline style
+//     attributes. Same rationale.
 func setSecurityHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Security-Policy",
 		"default-src 'self'; "+
-			"script-src 'self'; "+
+			"script-src 'self' 'unsafe-inline'; "+
 			"style-src 'self' 'unsafe-inline'; "+
 			"img-src 'self' data:; "+
 			"connect-src 'self'; "+
