@@ -226,13 +226,20 @@ type DigestCommit struct {
 // CandidateRule is one rule emitted by BootstrapSenatorRules. The
 // shape mirrors a FleetRules row but lives in-memory until Phase 3
 // promotes it through the standard candidate pipeline.
+// JSON tags MUST match the snake_case shape requested by
+// bootstrapSenatorRulesSystemPrompt. Without them, keys like
+// `rule_key` and `agent_scope` from the LLM response unmarshal to
+// empty strings (Go's case-insensitive matcher doesn't cross
+// underscores), and parseBootstrapSenatorRulesResponse rejects every
+// candidate as "missing rule_key or body" even on a well-formed
+// response.
 type CandidateRule struct {
-	RuleKey    string // proposed FleetRules.rule_key (e.g. "senate-<repo>-<slug>")
-	Category   string // 'senate' for D4-P0 outputs
-	AgentScope string // 'senate:<repo>'
-	Body       string // FleetRules.content (the rule body)
-	Rationale  string // human-readable WHY (becomes the audit comment)
-	Evidence   string // cited evidence — README path, commit shas, etc.
+	RuleKey    string `json:"rule_key"`    // proposed FleetRules.rule_key (e.g. "senate-<repo>-<slug>")
+	Category   string `json:"category"`    // 'senate' for D4-P0 outputs
+	AgentScope string `json:"agent_scope"` // 'senate:<repo>'
+	Body       string `json:"body"`        // FleetRules.content (the rule body)
+	Rationale  string `json:"rationale"`   // human-readable WHY (becomes the audit comment)
+	Evidence   string `json:"evidence"`    // cited evidence — README path, commit shas, etc.
 }
 
 // RepoDigest (D6) is the shared knowledge-synthesis output of

@@ -246,3 +246,56 @@ func mustRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v (output: %s)", args, err, string(out))
 	}
 }
+
+// TestParseBootstrapSenatorRulesResponse_SnakeCaseKeysUnmarshal pins
+// the JSON-tag contract on CandidateRule. The
+// bootstrapSenatorRulesSystemPrompt asks the LLM to emit snake_case
+// keys (rule_key, agent_scope); the parser unmarshals into
+// CandidateRule. Without explicit `json:"rule_key"` tags, Go's
+// case-insensitive matcher does NOT cross underscores, so the
+// snake_case keys would silently unmarshal to empty strings and the
+// parser would reject every candidate as "missing rule_key or body".
+//
+// This is a regression test for the live-Haiku SenatorOnboarding bug
+// observed against teamupstart/force-orchestrator on 2026-05-08.
+func TestParseBootstrapSenatorRulesResponse_SnakeCaseKeysUnmarshal(t *testing.T) {
+	// Mirrors exactly the shape requested by the system prompt.
+	raw := `{
+  "candidates": [
+    {
+      "rule_key":   "senate-myrepo-cap-profiles",
+      "category":   "senate",
+      "agent_scope": "senate:myrepo",
+      "body":       "Every agent that shells out to the Claude CLI MUST source its tool restrictions from a static YAML capability profile.",
+      "rationale":  "Capability profiles are the only audited path; ad-hoc flags drift.",
+      "evidence":   "agents/capabilities/REGISTRY.yaml"
+    }
+  ]
+}`
+	candidates, err := parseBootstrapSenatorRulesResponse(raw, "myrepo")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	c := candidates[0]
+	if c.RuleKey != "senate-myrepo-cap-profiles" {
+		t.Errorf("RuleKey: got %q, want %q (snake_case json tag missing on RuleKey?)", c.RuleKey, "senate-myrepo-cap-profiles")
+	}
+	if c.AgentScope != "senate:myrepo" {
+		t.Errorf("AgentScope: got %q, want %q (snake_case json tag missing on AgentScope?)", c.AgentScope, "senate:myrepo")
+	}
+	if c.Category != "senate" {
+		t.Errorf("Category: got %q, want senate", c.Category)
+	}
+	if !strings.HasPrefix(c.Body, "Every agent that shells out") {
+		t.Errorf("Body: did not unmarshal correctly; got %q", c.Body)
+	}
+	if !strings.HasPrefix(c.Rationale, "Capability profiles") {
+		t.Errorf("Rationale: did not unmarshal correctly; got %q", c.Rationale)
+	}
+	if c.Evidence != "agents/capabilities/REGISTRY.yaml" {
+		t.Errorf("Evidence: got %q, want %q", c.Evidence, "agents/capabilities/REGISTRY.yaml")
+	}
+}
