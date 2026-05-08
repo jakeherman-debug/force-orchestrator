@@ -5,8 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- AUDIT-002 / AUDIT-003 (Fix #2): CSP locks script/style execution to same-origin.
        The server also emits this as a response header via securityMiddleware; the
-       meta tag here is belt-and-suspenders for offline / file:// viewing. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+       meta tag here is belt-and-suspenders for offline / file:// viewing.
+       Sweep B: script-src is back to 'self' (no 'unsafe-inline') — the SPA
+       uses a delegated event dispatcher in app.js (data-action attributes),
+       so there are zero inline onclick handlers. Pattern
+       P_DashboardNoInlineHandlers guards against drift. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
   <title>Fleet Command Center</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -35,11 +39,11 @@
          autocomplete="off"
          spellcheck="false">
 
-  <button id="estop-btn"  class="hdr-btn estop-btn"  onclick="triggerEstop()">E-Stop</button>
-  <button id="resume-btn" class="hdr-btn resume-btn" onclick="triggerResume()" style="display:none">Resume</button>
-  <button class="hdr-btn primary" onclick="showAddModal()">+ Queue Task</button>
+  <button id="estop-btn"  class="hdr-btn estop-btn"  data-action="triggerEstop">E-Stop</button>
+  <button id="resume-btn" class="hdr-btn resume-btn" data-action="triggerResume" style="display:none">Resume</button>
+  <button class="hdr-btn primary" data-action="showAddModal">+ Queue Task</button>
   <!-- D3 P6A.3 — Help overlay button. Same as pressing `?`. -->
-  <button id="help-btn" class="hdr-btn" title="Keyboard shortcuts (?)" aria-label="Show keyboard shortcuts (?)" onclick="window.toggleHelpOverlay && window.toggleHelpOverlay()">?</button>
+  <button id="help-btn" class="hdr-btn" title="Keyboard shortcuts (?)" aria-label="Show keyboard shortcuts (?)" data-action="toggleHelpOverlay">?</button>
 </header>
 
 <!-- ── D3 P6A.1 — Pulse / Briefing / Reflection placeholder panes ───────────
@@ -77,56 +81,56 @@
     <h3>Drill — search across convoys / tasks / events</h3>
     <p class="reflection-help">Free-text search the fleet's transcript / git-op / task history. Tap a result to drill into the convoy or task timeline.</p>
     <input id="drill-search-input" type="search" placeholder="Search drill (e.g. convoy name, error message, AT-id)…" aria-label="Drill search">
-    <button onclick="window.runDrillSearch && window.runDrillSearch()">Search</button>
+    <button data-action="runDrillSearch">Search</button>
     <div id="drill-search-results" class="reflection-table"></div>
 
     <h3>Drill — by convoy</h3>
     <p class="reflection-help">Enter a convoy id to load its unified event stream (transitions, mail, git ops, LLM transcripts).</p>
     <input id="drill-convoy-id" type="number" placeholder="convoy id" min="1">
-    <button onclick="window.loadDrillConvoy && window.loadDrillConvoy()">Load convoy</button>
+    <button data-action="loadDrillConvoy">Load convoy</button>
     <div id="drill-convoy-events" class="reflection-table"></div>
 
     <h3>Drill — by task</h3>
     <p class="reflection-help">Enter a task id to load its event stream (single-task drill).</p>
     <input id="drill-task-id" type="number" placeholder="task id" min="1">
-    <button onclick="window.loadDrillTask && window.loadDrillTask()">Load task</button>
+    <button data-action="loadDrillTask">Load task</button>
     <div id="drill-task-events" class="reflection-table"></div>
 
     <h3>Drill — single event detail</h3>
     <p class="reflection-help">Inspect the full body of one event (transcript, git op, mail).</p>
     <input id="drill-event-kind" type="text" placeholder="kind (e.g. llm_call)">
     <input id="drill-event-id" type="number" placeholder="event id" min="1">
-    <button onclick="window.loadDrillEvent && window.loadDrillEvent()">Load event</button>
+    <button data-action="loadDrillEvent">Load event</button>
     <div id="drill-event-detail" class="reflection-table"></div>
 
     <h3>Replay — re-run a historical decision</h3>
     <p class="reflection-help">Re-run a past Captain / Council / Medic / Convoy-review decision under the current prompt version. Pure read on live state — only ReplayResults + replay's own LLMCallTranscripts row are written.</p>
     <input id="replay-event-kind" type="text" placeholder="kind (captain_ruling | council_ruling | …)">
     <input id="replay-event-id" type="number" placeholder="event id" min="1">
-    <button onclick="window.runReplay && window.runReplay()">Replay</button>
+    <button data-action="runReplay">Replay</button>
     <div id="replay-result" class="reflection-table"></div>
 
     <h3>Annotations — operator notes on events</h3>
     <p class="reflection-help">Browse annotations the operator has flagged on events. CRUD via `force annotate` CLI (write paths are CLI-only; this view is read-only).</p>
-    <button onclick="window.refreshAnnotations && window.refreshAnnotations()">Refresh</button>
+    <button data-action="refreshAnnotations">Refresh</button>
     <div id="annotations-list" class="reflection-table"></div>
   </div>
 
   <div id="reflection-pane-reflection-main" class="reflection-pane" hidden>
     <h3>Calibration scoreboard</h3>
     <p class="reflection-help">Confirmed-vs-overridden audit decisions per stakes bucket. Buckets surface drift early — accuracy_pct dropping in one bucket while staying steady in another is the signal.</p>
-    <button onclick="window.refreshCalibration && window.refreshCalibration()">Refresh</button>
+    <button data-action="refreshCalibration">Refresh</button>
     <div id="calibration-scoreboard" class="reflection-table"></div>
 
     <h3>Fleet learning panel</h3>
     <p class="reflection-help">Weekly auto-rendered summary of how the fleet itself is changing — promotions ratified, features filed, spec amendments, convoy-review activity.</p>
-    <button onclick="window.refreshLearning && window.refreshLearning()">Refresh now</button>
+    <button data-action="refreshLearning">Refresh now</button>
     <div id="learning-panel" class="reflection-table"></div>
 
     <h3>5-min retro generator</h3>
     <p class="reflection-help">Generate a markdown retro for the trailing 7 days — top win, top frustration, suggested experiment. Save to <code>docs/retros/&lt;date&gt;.md</code> (operator commits manually).</p>
-    <button onclick="window.generateRetro && window.generateRetro()">Generate retro</button>
-    <button onclick="window.saveRetro && window.saveRetro()">Save draft</button>
+    <button data-action="generateRetro">Generate retro</button>
+    <button data-action="saveRetro">Save draft</button>
     <pre id="retro-markdown" class="reflection-pre"></pre>
   </div>
 
@@ -134,7 +138,7 @@
     <h3>Ask Force a question</h3>
     <p class="reflection-help">Free-form question; the agent answers via read-only DB lookup. No write tools — Pattern P-AskNoWriteTools enforces this at the capability layer.</p>
     <input id="ask-question" type="text" placeholder="e.g. what's blocking convoy 47">
-    <button onclick="window.runAsk && window.runAsk()">Ask</button>
+    <button data-action="runAsk">Ask</button>
     <div id="ask-answer" class="reflection-table"></div>
   </div>
 </div>
@@ -192,7 +196,7 @@
      Visible when >=3 Open escalations exist, from any tab. The fleet is
      failing in ways that self-healing couldn't resolve — the operator is
      the bottleneck. Red, loud, unmistakable. -->
-<div id="high-esc-banner" class="high-esc-banner hidden" onclick="jumpToEscalations()" role="button" tabindex="0">
+<div id="high-esc-banner" class="high-esc-banner hidden" data-action="jumpToEscalations" role="button" tabindex="0">
   <span class="high-esc-banner-icon">&#9888;</span>
   <span class="high-esc-banner-msg"><span id="high-esc-banner-count">0</span> HIGH-severity escalation(s) open — fleet self-healing exhausted</span>
   <span class="high-esc-banner-cta">Go to Escalations &rarr;</span>
@@ -211,7 +215,7 @@
 <!-- Shows whenever one or more convoys are in DraftPROpen state. The fleet has
      done its job and is waiting on the operator to click Ship It — this is the
      only state where the operator is the bottleneck, so it needs to be loud. -->
-<div id="ship-banner" class="ship-banner hidden" onclick="jumpToShipReady()" role="button" tabindex="0">
+<div id="ship-banner" class="ship-banner hidden" data-action="jumpToShipReady" role="button" tabindex="0">
   <span class="ship-banner-icon">&#128674;</span>
   <span class="ship-banner-msg"><span id="ship-banner-count">0</span> convoy(s) ready to ship &mdash; click to review</span>
   <span class="ship-banner-cta">Go to Convoys &rarr;</span>
@@ -225,29 +229,29 @@
 
 <!-- ── Tab bar ──────────────────────────────────────────────────────────────── -->
 <nav id="tab-bar">
-  <button class="tab-btn active" data-tab="tasks"       onclick="switchTab('tasks')">Tasks <span class="tab-badge" id="tbadge-tasks"></span></button>
-  <button class="tab-btn"        data-tab="escalations" onclick="switchTab('escalations')">Escalations <span class="tab-badge" id="tbadge-escalations"></span></button>
-  <button class="tab-btn"        data-tab="convoys"     onclick="switchTab('convoys')">Convoys <span class="tab-badge" id="tbadge-convoys"></span></button>
-  <button class="tab-btn"        data-tab="agents"      onclick="switchTab('agents')">Agents <span class="tab-badge" id="tbadge-agents"></span></button>
-  <button class="tab-btn"        data-tab="mail"        onclick="switchTab('mail')">Mail <span class="tab-badge" id="tbadge-mail"></span></button>
-  <button class="tab-btn"        data-tab="knowledge"   onclick="switchTab('knowledge')">Knowledge <span class="tab-badge" id="tbadge-knowledge"></span></button>
-  <button class="tab-btn"        data-tab="experiments" onclick="switchTab('experiments')">Experiments <span class="tab-badge" id="tbadge-experiments"></span></button>
-  <button class="tab-btn"        data-tab="ec"          onclick="switchTab('ec')">EC <span class="tab-badge" id="tbadge-ec"></span></button>
+  <button class="tab-btn active" data-tab="tasks"       data-action="switchTab" data-arg="tasks">Tasks <span class="tab-badge" id="tbadge-tasks"></span></button>
+  <button class="tab-btn"        data-tab="escalations" data-action="switchTab" data-arg="escalations">Escalations <span class="tab-badge" id="tbadge-escalations"></span></button>
+  <button class="tab-btn"        data-tab="convoys"     data-action="switchTab" data-arg="convoys">Convoys <span class="tab-badge" id="tbadge-convoys"></span></button>
+  <button class="tab-btn"        data-tab="agents"      data-action="switchTab" data-arg="agents">Agents <span class="tab-badge" id="tbadge-agents"></span></button>
+  <button class="tab-btn"        data-tab="mail"        data-action="switchTab" data-arg="mail">Mail <span class="tab-badge" id="tbadge-mail"></span></button>
+  <button class="tab-btn"        data-tab="knowledge"   data-action="switchTab" data-arg="knowledge">Knowledge <span class="tab-badge" id="tbadge-knowledge"></span></button>
+  <button class="tab-btn"        data-tab="experiments" data-action="switchTab" data-arg="experiments">Experiments <span class="tab-badge" id="tbadge-experiments"></span></button>
+  <button class="tab-btn"        data-tab="ec"          data-action="switchTab" data-arg="ec">EC <span class="tab-badge" id="tbadge-ec"></span></button>
   <!-- D4 fix-loop-1 α — D4 dashboard surface: BoS / ISB findings, per-rule
        precision, override audit, Senate review log. Four sub-tabs share
        one top-level "Security" tab so the existing IA stays compact. -->
-  <button class="tab-btn"        data-tab="security"    onclick="switchTab('security')">Security <span class="tab-badge" id="tbadge-security"></span></button>
+  <button class="tab-btn"        data-tab="security"    data-action="switchTab" data-arg="security">Security <span class="tab-badge" id="tbadge-security"></span></button>
   <!-- D9 ArchHealth — Architecture Health tab. Reads /api/arch-health/latest
        and renders the per-month aggregates view. The dog
        `architecture-health-report` is the only writer; this tab is read-only. -->
-  <button class="tab-btn"        data-tab="arch-health" onclick="switchTab('arch-health')">Arch Health <span class="tab-badge" id="tbadge-arch-health"></span></button>
-  <button class="tab-btn"        data-tab="senate"      onclick="switchTab('senate')">Senate <span class="tab-badge" id="tbadge-senate"></span></button>
+  <button class="tab-btn"        data-tab="arch-health" data-action="switchTab" data-arg="arch-health">Arch Health <span class="tab-badge" id="tbadge-arch-health"></span></button>
+  <button class="tab-btn"        data-tab="senate"      data-action="switchTab" data-arg="senate">Senate <span class="tab-badge" id="tbadge-senate"></span></button>
   <!-- D11 Phase 2 — Notifications tab. Reads /api/notifications/state +
        /api/notifications/catalog and writes preset / DND / per-category
        overrides. All state mutations route through SystemConfig via the
        internal/notify resolution chain. -->
-  <button class="tab-btn"        data-tab="notifications" onclick="switchTab('notifications')">Notifications <span class="tab-badge" id="tbadge-notifications"></span></button>
-  <button class="tab-btn"        data-tab="logs"        onclick="switchTab('logs')">Logs</button>
+  <button class="tab-btn"        data-tab="notifications" data-action="switchTab" data-arg="notifications">Notifications <span class="tab-badge" id="tbadge-notifications"></span></button>
+  <button class="tab-btn"        data-tab="logs"        data-action="switchTab" data-arg="logs">Logs</button>
   <div id="tab-spacer"></div>
   <span id="last-refresh" style="font-size:11px;color:var(--text2);align-self:center"></span>
 </nav>
@@ -259,7 +263,7 @@
   <div class="tab-pane active" id="tab-tasks">
     <div id="convoy-filter-banner" style="display:none;padding:6px 14px;background:var(--surface2);border-bottom:1px solid var(--border);font-size:12px;color:var(--text1);align-items:center;gap:8px">
       <span id="convoy-filter-label"></span>
-      <a style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="clearConvoyFilter()">Clear filter</a>
+      <a style="cursor:pointer;color:var(--accent);text-decoration:underline" data-action="clearConvoyFilter">Clear filter</a>
     </div>
     <!-- ── JIRA-from-UI: queue a Feature from a Jira ticket without
          dropping to the CLI. Posts to /api/feature/from-jira which
@@ -291,7 +295,7 @@
       <label style="display:inline-flex;align-items:center;gap:4px;color:var(--text2)" title="Stop after Commander emits a plan; operator approves before agents run.">
         <input id="jira-plan-only" type="checkbox" style="margin:0"> Plan only
       </label>
-      <button id="jira-submit-btn" onclick="submitJiraFeature()" class="hdr-btn primary" style="font-size:12px;padding:3px 10px">Queue from Jira</button>
+      <button id="jira-submit-btn" data-action="submitJiraFeature" class="hdr-btn primary" style="font-size:12px;padding:3px 10px">Queue from Jira</button>
       <span id="jira-result" style="color:var(--text2);font-size:11px;margin-left:auto;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
     </div>
     <div id="api-stats-bar">
@@ -301,15 +305,15 @@
       <span class="stat-pill pill-teal"><span class="pill-num" id="pill-convoys-count">0</span> Active Convoys</span>
     </div>
     <div class="filter-bar">
-      <button class="filter-btn active" data-filter="active"  onclick="setTaskFilter('active')">Active</button>
-      <button class="filter-btn"        data-filter="pending" onclick="setTaskFilter('pending')">Pending</button>
-      <button class="filter-btn"        data-filter="failed"    onclick="setTaskFilter('failed')">Failed</button>
-      <button class="filter-btn"        data-filter="cancelled" onclick="setTaskFilter('cancelled')">Cancelled</button>
-      <button class="filter-btn"        data-filter="done"      onclick="setTaskFilter('done')">Completed</button>
-      <button class="filter-btn"        data-filter="all"       onclick="setTaskFilter('all')">All</button>
+      <button class="filter-btn active" data-filter="active"  data-action="setTaskFilter" data-arg="active">Active</button>
+      <button class="filter-btn"        data-filter="pending" data-action="setTaskFilter" data-arg="pending">Pending</button>
+      <button class="filter-btn"        data-filter="failed"    data-action="setTaskFilter" data-arg="failed">Failed</button>
+      <button class="filter-btn"        data-filter="cancelled" data-action="setTaskFilter" data-arg="cancelled">Cancelled</button>
+      <button class="filter-btn"        data-filter="done"      data-action="setTaskFilter" data-arg="done">Completed</button>
+      <button class="filter-btn"        data-filter="all"       data-action="setTaskFilter" data-arg="all">All</button>
       <div class="filter-spacer"></div>
       <label id="infra-toggle-label" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);margin-right:10px;cursor:pointer" title="Show fleet plumbing (Pilot git ops, memory writes, etc.). Hidden by default — they're always shown when Failed/Escalated.">
-        <input type="checkbox" id="show-infra-toggle" onchange="toggleShowInfra(this.checked)" style="margin:0"> Show infrastructure
+        <input type="checkbox" id="show-infra-toggle" data-event="change" data-action="toggleShowInfra" data-pass-this="checked" style="margin:0"> Show infrastructure
       </label>
       <input class="search-input" id="task-search" type="text" placeholder="Search tasks..." aria-label="Search tasks by keyword">
     </div>
@@ -317,26 +321,26 @@
     <div class="saved-filter-bar" id="saved-filter-bar-tasks" data-tab="tasks" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 14px;border-bottom:1px solid var(--border);font-size:12px">
       <span style="color:var(--text2);margin-right:4px">Saved filters:</span>
       <span class="saved-filter-pills" id="saved-filter-pills-tasks"></span>
-      <button class="hdr-btn" onclick="openSaveFilterModal('tasks')" title="Save the current filter/sort as a named query">+ Save current filter…</button>
+      <button class="hdr-btn" data-action="openSaveFilterModal" data-arg="tasks" title="Save the current filter/sort as a named query">+ Save current filter…</button>
       <div style="flex:1"></div>
-      <button class="hdr-btn" onclick="openExportSavedFiltersModal()" title="Generate a YAML diff of dashboard-saved filters for paste-back into config/dashboard.yaml">Export to YAML…</button>
+      <button class="hdr-btn" data-action="openExportSavedFiltersModal" title="Generate a YAML diff of dashboard-saved filters for paste-back into config/dashboard.yaml">Export to YAML…</button>
     </div>
     <div style="display:flex;flex:1;overflow:hidden">
       <div class="table-wrap" id="tasks-table-wrap">
         <table id="tasks-table">
           <thead>
             <tr>
-              <th class="th-sortable" data-sort-col="id" style="width:50px" onclick="setSortBy('id')">ID<span class="sort-icon"> ⇅</span></th>
-              <th class="th-sortable" data-sort-col="status" style="width:90px" onclick="setSortBy('status')">Status<span class="sort-icon"> ⇅</span></th>
+              <th class="th-sortable" data-sort-col="id" style="width:50px" data-action="setSortBy" data-arg="id">ID<span class="sort-icon"> ⇅</span></th>
+              <th class="th-sortable" data-sort-col="status" style="width:90px" data-action="setSortBy" data-arg="status">Status<span class="sort-icon"> ⇅</span></th>
               <th style="width:90px">Owner</th>
-              <th class="th-sortable" data-sort-col="type" style="width:80px" onclick="setSortBy('type')">Type<span class="sort-icon"> ⇅</span></th>
+              <th class="th-sortable" data-sort-col="type" style="width:80px" data-action="setSortBy" data-arg="type">Type<span class="sort-icon"> ⇅</span></th>
               <th>Payload</th>
               <th style="width:90px">Repo</th>
-              <th class="th-sortable" data-sort-col="priority" style="width:55px" onclick="setSortBy('priority')">Priority<span class="sort-icon"> ⇅</span></th>
+              <th class="th-sortable" data-sort-col="priority" style="width:55px" data-action="setSortBy" data-arg="priority">Priority<span class="sort-icon"> ⇅</span></th>
               <th style="width:60px">Retry</th>
               <th style="width:130px">Runtime / Blocked</th>
-              <th class="th-sortable" data-sort-col="created_at" style="width:100px" onclick="setSortBy('created_at')">Created<span class="sort-icon"> ⇅</span></th>
-              <th class="th-sortable" data-sort-col="cost" style="width:70px" onclick="setSortBy('cost')">Cost<span class="sort-icon"> ⇅</span></th>
+              <th class="th-sortable" data-sort-col="created_at" style="width:100px" data-action="setSortBy" data-arg="created_at">Created<span class="sort-icon"> ⇅</span></th>
+              <th class="th-sortable" data-sort-col="cost" style="width:70px" data-action="setSortBy" data-arg="cost">Cost<span class="sort-icon"> ⇅</span></th>
             </tr>
           </thead>
           <tbody id="tasks-tbody"></tbody>
@@ -355,7 +359,7 @@
             </div>
             <div id="panel-title"></div>
           </div>
-          <button id="panel-close" onclick="closePanel()">&times;</button>
+          <button id="panel-close" data-action="closePanel">&times;</button>
         </div>
         <div id="panel-actions"></div>
         <div id="panel-body"></div>
@@ -367,9 +371,9 @@
   <!-- Escalations tab -->
   <div class="tab-pane" id="tab-escalations">
     <div class="filter-bar">
-      <button class="filter-btn active" data-filter="Open"   onclick="setEscFilter('Open')">Open</button>
-      <button class="filter-btn"        data-filter="Closed" onclick="setEscFilter('Closed')">Closed</button>
-      <button class="filter-btn"        data-filter=""       onclick="setEscFilter('')">All</button>
+      <button class="filter-btn active" data-filter="Open"   data-action="setEscFilter" data-arg="Open">Open</button>
+      <button class="filter-btn"        data-filter="Closed" data-action="setEscFilter" data-arg="Closed">Closed</button>
+      <button class="filter-btn"        data-filter=""       data-action="setEscFilter" data-arg="">All</button>
     </div>
     <div class="esc-list" id="esc-list"></div>
   </div>
@@ -377,11 +381,11 @@
   <!-- Convoys tab -->
   <div class="tab-pane" id="tab-convoys">
     <div class="filter-bar">
-      <button class="filter-btn active" data-cstatus="all"       onclick="setConvoyStatusFilter('all')">All</button>
-      <button class="filter-btn"        data-cstatus="active"    onclick="setConvoyStatusFilter('active')">Active</button>
-      <button class="filter-btn"        data-cstatus="completed" onclick="setConvoyStatusFilter('completed')">Completed</button>
+      <button class="filter-btn active" data-cstatus="all"       data-action="setConvoyStatusFilter" data-arg="all">All</button>
+      <button class="filter-btn"        data-cstatus="active"    data-action="setConvoyStatusFilter" data-arg="active">Active</button>
+      <button class="filter-btn"        data-cstatus="completed" data-action="setConvoyStatusFilter" data-arg="completed">Completed</button>
       <div style="width:12px"></div>
-      <select class="field-select" id="convoy-time-filter" style="width:150px;padding:3px 8px;font-size:12px" onchange="setConvoyTimeFilter(this.value)">
+      <select class="field-select" id="convoy-time-filter" style="width:150px;padding:3px 8px;font-size:12px" data-event="change" data-action="setConvoyTimeFilter" data-pass-this="value">
         <option value="all">All time</option>
         <option value="1h">Last hour</option>
         <option value="8h">Last 8 hours</option>
@@ -392,9 +396,9 @@
     <div class="saved-filter-bar" id="saved-filter-bar-convoys" data-tab="convoys" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 14px;border-bottom:1px solid var(--border);font-size:12px">
       <span style="color:var(--text2);margin-right:4px">Saved filters:</span>
       <span class="saved-filter-pills" id="saved-filter-pills-convoys"></span>
-      <button class="hdr-btn" onclick="openSaveFilterModal('convoys')" title="Save the current filter/sort as a named query">+ Save current filter…</button>
+      <button class="hdr-btn" data-action="openSaveFilterModal" data-arg="convoys" title="Save the current filter/sort as a named query">+ Save current filter…</button>
       <div style="flex:1"></div>
-      <button class="hdr-btn" onclick="openExportSavedFiltersModal()" title="Generate a YAML diff of dashboard-saved filters for paste-back into config/dashboard.yaml">Export to YAML…</button>
+      <button class="hdr-btn" data-action="openExportSavedFiltersModal" title="Generate a YAML diff of dashboard-saved filters for paste-back into config/dashboard.yaml">Export to YAML…</button>
     </div>
     <div class="convoy-list" id="convoy-list"></div>
   </div>
@@ -420,7 +424,7 @@
   <!-- Mail tab -->
   <div class="tab-pane" id="tab-mail">
     <div class="tab-toolbar">
-      <button class="btn-sm" onclick="markAllMailRead()">Mark all as read</button>
+      <button class="btn-sm" data-action="markAllMailRead">Mark all as read</button>
     </div>
     <div class="table-wrap">
       <table id="mail-table">
@@ -442,15 +446,15 @@
   <!-- Knowledge tab -->
   <div class="tab-pane" id="tab-knowledge">
     <div class="filter-bar">
-      <button class="filter-btn active" data-kout=""         onclick="setMemFilter('outcome','')">All</button>
-      <button class="filter-btn"        data-kout="success"  onclick="setMemFilter('outcome','success')">Successes</button>
-      <button class="filter-btn"        data-kout="failure"  onclick="setMemFilter('outcome','failure')">Failures</button>
+      <button class="filter-btn active" data-kout=""         data-action="setMemFilter" data-args='["outcome",""]'>All</button>
+      <button class="filter-btn"        data-kout="success"  data-action="setMemFilter" data-args='["outcome","success"]'>Successes</button>
+      <button class="filter-btn"        data-kout="failure"  data-action="setMemFilter" data-args='["outcome","failure"]'>Failures</button>
       <div style="width:12px"></div>
-      <select class="field-select" id="mem-repo-filter" style="width:160px;padding:3px 8px;font-size:12px" onchange="loadMemories()">
+      <select class="field-select" id="mem-repo-filter" style="width:160px;padding:3px 8px;font-size:12px" data-event="change" data-action="loadMemories">
         <option value="">All repos</option>
       </select>
       <div class="filter-spacer"></div>
-      <input class="search-input" id="mem-search" type="text" placeholder="Search memories…" oninput="loadMemories()">
+      <input class="search-input" id="mem-search" type="text" placeholder="Search memories…" data-event="input" data-action="loadMemories">
     </div>
     <div class="table-wrap" id="mem-table-wrap">
       <table id="mem-table">
@@ -476,12 +480,12 @@
        view that lets operators see authored experiments through the lifecycle. -->
   <div class="tab-pane" id="tab-experiments">
     <div class="filter-bar">
-      <button class="filter-btn active" data-experiment-status="all"        onclick="setExperimentFilter('all')">All</button>
-      <button class="filter-btn"        data-experiment-status="authored"   onclick="setExperimentFilter('authored')">Authored</button>
-      <button class="filter-btn"        data-experiment-status="running"    onclick="setExperimentFilter('running')">Running</button>
-      <button class="filter-btn"        data-experiment-status="terminated" onclick="setExperimentFilter('terminated')">Terminated</button>
+      <button class="filter-btn active" data-experiment-status="all"        data-action="setExperimentFilter" data-arg="all">All</button>
+      <button class="filter-btn"        data-experiment-status="authored"   data-action="setExperimentFilter" data-arg="authored">Authored</button>
+      <button class="filter-btn"        data-experiment-status="running"    data-action="setExperimentFilter" data-arg="running">Running</button>
+      <button class="filter-btn"        data-experiment-status="terminated" data-action="setExperimentFilter" data-arg="terminated">Terminated</button>
       <div class="filter-spacer"></div>
-      <button class="hdr-btn" onclick="loadExperiments()">Refresh</button>
+      <button class="hdr-btn" data-action="loadExperiments">Refresh</button>
     </div>
     <div id="experiment-fleet-progress" style="padding:10px 14px;font-size:12px;color:var(--text1);border-bottom:1px solid var(--border)"></div>
     <div id="experiment-list-wrap" style="padding:10px 14px"></div>
@@ -494,18 +498,18 @@
        the Librarian → EC handoff is operator-visible. -->
   <div class="tab-pane" id="tab-ec">
     <div class="filter-bar">
-      <button class="filter-btn active" data-ec-status="pending"  onclick="setECFilter('pending')">Pending</button>
-      <button class="filter-btn"        data-ec-status="ratified" onclick="setECFilter('ratified')">Ratified</button>
-      <button class="filter-btn"        data-ec-status="rejected" onclick="setECFilter('rejected')">Rejected</button>
-      <button class="filter-btn"        data-ec-status="all"      onclick="setECFilter('all')">All</button>
+      <button class="filter-btn active" data-ec-status="pending"  data-action="setECFilter" data-arg="pending">Pending</button>
+      <button class="filter-btn"        data-ec-status="ratified" data-action="setECFilter" data-arg="ratified">Ratified</button>
+      <button class="filter-btn"        data-ec-status="rejected" data-action="setECFilter" data-arg="rejected">Rejected</button>
+      <button class="filter-btn"        data-ec-status="all"      data-action="setECFilter" data-arg="all">All</button>
       <div style="width:12px"></div>
-      <select class="field-select" id="ec-kind-filter" style="width:160px;padding:3px 8px;font-size:12px" onchange="setECKindFilter(this.value)">
+      <select class="field-select" id="ec-kind-filter" style="width:160px;padding:3px 8px;font-size:12px" data-event="change" data-action="setECKindFilter" data-pass-this="value">
         <option value="">All kinds</option>
         <option value="candidate">Librarian candidates</option>
         <option value="promote">EC promotes</option>
       </select>
       <div class="filter-spacer"></div>
-      <button class="hdr-btn" onclick="loadECProposals()">Refresh</button>
+      <button class="hdr-btn" data-action="loadECProposals">Refresh</button>
     </div>
     <div id="ec-list-wrap" style="padding:10px 14px"></div>
     <div id="ec-detail-wrap" style="padding:10px 14px;border-top:1px solid var(--border);display:none"></div>
@@ -550,7 +554,7 @@
         <label>Rule
           <input id="sf-rule-id" class="field-input" type="text" placeholder="e.g. BOS-001" style="width:120px">
         </label>
-        <button class="hdr-btn" onclick="window.loadSecurityFindings && window.loadSecurityFindings()">Refresh</button>
+        <button class="hdr-btn" data-action="loadSecurityFindings">Refresh</button>
         <span id="sf-summary" style="margin-left:auto;font-size:11px;color:var(--text2)"></span>
       </div>
       <div id="security-findings-table" class="reflection-table"></div>
@@ -567,7 +571,7 @@
             <option value="ISB">ISB</option>
           </select>
         </label>
-        <button class="hdr-btn" onclick="window.loadRuleMetrics && window.loadRuleMetrics()">Refresh</button>
+        <button class="hdr-btn" data-action="loadRuleMetrics">Refresh</button>
       </div>
       <div id="rule-metrics-table" class="reflection-table"></div>
     </div>
@@ -589,7 +593,7 @@
         <label>Audit ID
           <input id="oa-audit-id" class="field-input" type="text" placeholder="AUDIT-NNN" style="width:140px">
         </label>
-        <button class="hdr-btn" onclick="window.loadOverrideAudit && window.loadOverrideAudit()">Refresh</button>
+        <button class="hdr-btn" data-action="loadOverrideAudit">Refresh</button>
         <span id="oa-summary" style="margin-left:auto;font-size:11px;color:var(--text2)"></span>
       </div>
       <div id="override-audit-table" class="reflection-table"></div>
@@ -611,9 +615,9 @@
       <p class="reflection-help">Monthly longitudinal architectural-debt report — every BoS finding aggregated by (rule, repo, author_type). Generated by the <code>architecture-health-report</code> dog (1st of each month, 00:00 UTC). The ⚠️ flag means astromech violation_count exceeds human violation_count for that rule.</p>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <label>Month
-          <select id="ah-month" class="field-select" onchange="window.loadArchHealth && window.loadArchHealth()"></select>
+          <select id="ah-month" class="field-select" data-event="change" data-action="loadArchHealth"></select>
         </label>
-        <button class="hdr-btn" onclick="window.loadArchHealth && window.loadArchHealth()">Refresh</button>
+        <button class="hdr-btn" data-action="loadArchHealth">Refresh</button>
         <span id="ah-summary" style="margin-left:auto;font-size:11px;color:var(--text2)"></span>
       </div>
       <div id="arch-health-per-author" class="reflection-table" style="margin-bottom:14px"></div>
@@ -646,7 +650,7 @@
             <option value="retired">retired</option>
           </select>
         </label>
-        <button class="hdr-btn" onclick="window.loadSenateChambers && window.loadSenateChambers()">Refresh</button>
+        <button class="hdr-btn" data-action="loadSenateChambers">Refresh</button>
       </div>
       <div id="senate-chambers-table" class="reflection-table"></div>
     </div>
@@ -669,7 +673,7 @@
             <option value="dissent">dissent</option>
           </select>
         </label>
-        <button class="hdr-btn" onclick="window.loadSenateReviews && window.loadSenateReviews()">Refresh</button>
+        <button class="hdr-btn" data-action="loadSenateReviews">Refresh</button>
       </div>
       <div id="senate-reviews-table" class="reflection-table"></div>
       <div id="senate-review-detail" class="reflection-table" style="margin-top:14px"></div>
@@ -694,18 +698,18 @@
       <!-- DND active band — only visible when DND is set. -->
       <div id="notif-dnd-band" hidden style="margin-bottom:10px;padding:10px;border:1px solid var(--border);background:rgba(255,200,0,0.08)">
         <span id="notif-dnd-band-text" style="font-weight:600"></span>
-        <button class="hdr-btn" id="notif-dnd-end-now-btn" style="margin-left:10px" onclick="window.notifClearDND && window.notifClearDND()">End now</button>
+        <button class="hdr-btn" id="notif-dnd-end-now-btn" style="margin-left:10px" data-action="notifClearDND">End now</button>
       </div>
 
       <!-- Mode selector row. -->
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
         <span style="font-size:11px;color:var(--text2)">Mode:</span>
-        <button class="hdr-btn notif-preset-btn" data-preset="default" onclick="window.notifSetPreset && window.notifSetPreset('default')">Default</button>
-        <button class="hdr-btn notif-preset-btn" data-preset="focus"   onclick="window.notifSetPreset && window.notifSetPreset('focus')">Focus</button>
-        <button class="hdr-btn notif-preset-btn" data-preset="verbose" onclick="window.notifSetPreset && window.notifSetPreset('verbose')">Verbose</button>
-        <button class="hdr-btn" onclick="window.notifShowDNDModal && window.notifShowDNDModal()">DND…</button>
-        <button class="hdr-btn" style="margin-left:auto" onclick="window.loadNotificationsTab && window.loadNotificationsTab()">Refresh</button>
-        <button class="hdr-btn" onclick="window.notifShowSavePresetModal && window.notifShowSavePresetModal()">Save current as preset…</button>
+        <button class="hdr-btn notif-preset-btn" data-preset="default" data-action="notifSetPreset" data-arg="default">Default</button>
+        <button class="hdr-btn notif-preset-btn" data-preset="focus"   data-action="notifSetPreset" data-arg="focus">Focus</button>
+        <button class="hdr-btn notif-preset-btn" data-preset="verbose" data-action="notifSetPreset" data-arg="verbose">Verbose</button>
+        <button class="hdr-btn" data-action="notifShowDNDModal">DND…</button>
+        <button class="hdr-btn" style="margin-left:auto" data-action="loadNotificationsTab">Refresh</button>
+        <button class="hdr-btn" data-action="notifShowSavePresetModal">Save current as preset…</button>
       </div>
 
       <!-- Per-category grid. -->
@@ -729,8 +733,8 @@
           </label>
           <div id="notif-dnd-error" style="color:#e88;font-size:11px"></div>
           <div style="display:flex;gap:8px;justify-content:flex-end">
-            <button class="hdr-btn" onclick="window.notifHideDNDModal && window.notifHideDNDModal()">Cancel</button>
-            <button class="hdr-btn" onclick="window.notifSubmitDND && window.notifSubmitDND()">Set</button>
+            <button class="hdr-btn" data-action="notifHideDNDModal">Cancel</button>
+            <button class="hdr-btn" data-action="notifSubmitDND">Set</button>
           </div>
         </div>
       </div>
@@ -743,8 +747,8 @@
         <p>Tier-1 categories signal the fleet is blocked. Silencing them means a real escalation will be invisible until you actively check the dashboard.</p>
         <p id="notif-tier1-target" style="font-family:monospace;font-size:12px"></p>
         <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button class="hdr-btn" onclick="window.notifHideTier1Modal && window.notifHideTier1Modal()">Cancel</button>
-          <button class="hdr-btn" onclick="window.notifConfirmTier1 && window.notifConfirmTier1()">I understand — silence anyway</button>
+          <button class="hdr-btn" data-action="notifHideTier1Modal">Cancel</button>
+          <button class="hdr-btn" data-action="notifConfirmTier1">I understand — silence anyway</button>
         </div>
       </div>
     </div>
@@ -763,8 +767,8 @@
           </label>
           <div id="notif-save-preset-result" style="font-family:monospace;font-size:11px;white-space:pre-wrap;color:var(--text2)"></div>
           <div style="display:flex;gap:8px;justify-content:flex-end">
-            <button class="hdr-btn" onclick="window.notifHideSavePresetModal && window.notifHideSavePresetModal()">Close</button>
-            <button class="hdr-btn" onclick="window.notifSubmitSavePreset && window.notifSubmitSavePreset()">Save</button>
+            <button class="hdr-btn" data-action="notifHideSavePresetModal">Close</button>
+            <button class="hdr-btn" data-action="notifSubmitSavePreset">Save</button>
           </div>
         </div>
       </div>
@@ -791,8 +795,8 @@
         <div id="saved-filter-tab-display" style="font-size:11px;color:var(--text2)">Tab: <span id="saved-filter-tab-label"></span></div>
         <div id="saved-filter-save-result" style="font-family:monospace;font-size:11px;white-space:pre-wrap;color:var(--text2)"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button class="hdr-btn" onclick="closeSaveFilterModal()">Cancel</button>
-          <button class="hdr-btn" onclick="submitSaveFilter()">Save</button>
+          <button class="hdr-btn" data-action="closeSaveFilterModal">Cancel</button>
+          <button class="hdr-btn" data-action="submitSaveFilter">Save</button>
         </div>
       </div>
     </div>
@@ -804,8 +808,8 @@
       <p class="reflection-help">This generates a diff containing your dashboard-saved filters. Apply it to <code>config/dashboard.yaml</code> and commit via the normal review path. Yaml-source filters are already in the YAML — they are NOT included.</p>
       <div id="saved-filter-export-result" style="font-family:monospace;font-size:11px;white-space:pre-wrap;color:var(--text2);max-height:240px;overflow:auto;border:1px solid var(--border);padding:6px;background:var(--surface2)"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
-        <button class="hdr-btn" onclick="closeExportSavedFiltersModal()">Close</button>
-        <button class="hdr-btn" onclick="submitExportSavedFilters()">Generate</button>
+        <button class="hdr-btn" data-action="closeExportSavedFiltersModal">Close</button>
+        <button class="hdr-btn" data-action="submitExportSavedFilters">Generate</button>
       </div>
     </div>
   </div>
@@ -813,10 +817,10 @@
   <!-- Logs tab -->
   <div class="tab-pane" id="tab-logs">
     <div class="filter-bar">
-      <button class="filter-btn active" data-log="fleet" onclick="switchLog('fleet')">fleet.log</button>
-      <button class="filter-btn"        data-log="holonet" onclick="switchLog('holonet')">holonet events</button>
+      <button class="filter-btn active" data-log="fleet" data-action="switchLog" data-arg="fleet">fleet.log</button>
+      <button class="filter-btn"        data-log="holonet" data-action="switchLog" data-arg="holonet">holonet events</button>
       <div class="filter-spacer"></div>
-      <button class="hdr-btn" onclick="clearLog()">Clear</button>
+      <button class="hdr-btn" data-action="clearLog">Clear</button>
     </div>
     <div id="log-wrap"></div>
   </div>
@@ -830,12 +834,12 @@
   <div class="modal-box">
     <div class="modal-header">
       <h2>Queue New Task</h2>
-      <button class="modal-close" onclick="closeModal('add-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="add-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div>
         <label class="field-label" for="add-type">Type</label>
-        <select class="field-select" id="add-type" onchange="onAddTypeChange()">
+        <select class="field-select" id="add-type" data-event="change" data-action="onAddTypeChange">
           <option value="">Auto (recommended)</option>
           <option value="Feature">Feature — Commander plans tasks, Chancellor reviews for conflicts</option>
           <option value="Investigate">Investigate — research question, delivers a report</option>
@@ -858,8 +862,8 @@
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('add-modal')">Cancel</button>
-      <button class="btn btn-primary" onclick="submitAddTask()">Queue Task</button>
+      <button class="btn" data-action="closeModal" data-arg="add-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="submitAddTask">Queue Task</button>
     </div>
   </div>
 </div>
@@ -869,7 +873,7 @@
   <div class="modal-box">
     <div class="modal-header">
       <h2>Cancel Task <span id="cancel-task-id"></span></h2>
-      <button class="modal-close" onclick="closeModal('cancel-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="cancel-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div>
@@ -884,8 +888,8 @@
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('cancel-modal')">Back</button>
-      <button class="btn btn-danger" onclick="confirmCancel()">Cancel Task</button>
+      <button class="btn" data-action="closeModal" data-arg="cancel-modal">Back</button>
+      <button class="btn btn-danger" data-action="confirmCancel">Cancel Task</button>
     </div>
   </div>
 </div>
@@ -895,14 +899,14 @@
   <div class="modal-box">
     <div class="modal-header">
       <h2>Cancel Convoy <span id="convoy-cancel-id"></span></h2>
-      <button class="modal-close" onclick="closeModal('convoy-cancel-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="convoy-cancel-modal">&times;</button>
     </div>
     <div class="modal-body">
       <p>This will cancel all pending and planned tasks in this convoy. Tasks currently being worked on by agents will run to completion but no new work will start.</p>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('convoy-cancel-modal')">Back</button>
-      <button class="btn btn-danger" onclick="confirmCancelConvoy()">Cancel Convoy</button>
+      <button class="btn" data-action="closeModal" data-arg="convoy-cancel-modal">Back</button>
+      <button class="btn btn-danger" data-action="confirmCancelConvoy">Cancel Convoy</button>
     </div>
   </div>
 </div>
@@ -912,7 +916,7 @@
   <div class="modal-box">
     <div class="modal-header">
       <h2>Reject Task <span id="reject-task-id"></span></h2>
-      <button class="modal-close" onclick="closeModal('reject-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="reject-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div>
@@ -921,8 +925,8 @@
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('reject-modal')">Cancel</button>
-      <button class="btn btn-danger" onclick="confirmReject()">Reject</button>
+      <button class="btn" data-action="closeModal" data-arg="reject-modal">Cancel</button>
+      <button class="btn btn-danger" data-action="confirmReject">Reject</button>
     </div>
   </div>
 </div>
@@ -932,7 +936,7 @@
   <div class="modal-box" style="width:560px">
     <div class="modal-header">
       <h2 id="mail-modal-subject"></h2>
-      <button class="modal-close" onclick="closeModal('mail-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="mail-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div class="meta-grid" id="mail-modal-meta" style="margin-bottom:10px"></div>
@@ -946,15 +950,15 @@
   <div class="modal-box" style="width:600px">
     <div class="modal-header">
       <h2 id="mem-modal-title">Memory</h2>
-      <button class="modal-close" onclick="closeModal('mem-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="mem-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div class="meta-grid" id="mem-modal-meta" style="margin-bottom:10px"></div>
       <div class="directive-box" id="mem-modal-summary" style="max-height:300px"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-danger" id="mem-modal-delete" onclick="deleteMemFromModal()">Delete Memory</button>
-      <button class="btn" onclick="closeModal('mem-modal')">Close</button>
+      <button class="btn btn-danger" id="mem-modal-delete" data-action="deleteMemFromModal">Delete Memory</button>
+      <button class="btn" data-action="closeModal" data-arg="mem-modal">Close</button>
     </div>
   </div>
 </div>
@@ -968,13 +972,13 @@
   <div class="modal-box" style="width:840px;max-height:80vh;overflow:auto">
     <div class="modal-header">
       <h2>Stages — Convoy <span id="stages-modal-convoy"></span></h2>
-      <button class="modal-close" onclick="closeModal('stages-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="stages-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div id="stages-modal-content"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('stages-modal')">Close</button>
+      <button class="btn" data-action="closeModal" data-arg="stages-modal">Close</button>
     </div>
   </div>
 </div>
@@ -984,7 +988,7 @@
   <div class="modal-box">
     <div class="modal-header">
       <h2 id="stage-action-modal-title">Advance Stage</h2>
-      <button class="modal-close" onclick="closeModal('stage-action-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="stage-action-modal">&times;</button>
     </div>
     <div class="modal-body">
       <p id="stage-action-modal-summary"></p>
@@ -998,8 +1002,8 @@
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('stage-action-modal')">Cancel</button>
-      <button class="btn btn-primary" id="stage-action-confirm" onclick="confirmStageAction()">Confirm</button>
+      <button class="btn" data-action="closeModal" data-arg="stage-action-modal">Cancel</button>
+      <button class="btn btn-primary" id="stage-action-confirm" data-action="confirmStageAction">Confirm</button>
     </div>
   </div>
 </div>
@@ -1014,14 +1018,14 @@
   <div class="modal-box" style="width:680px;max-height:80vh;overflow:auto">
     <div class="modal-header">
       <h2>Watch — Convoy <span id="convoy-watch-id"></span></h2>
-      <button class="modal-close" onclick="closeModal('convoy-watch-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="convoy-watch-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div id="convoy-watch-body"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('convoy-watch-modal')">Cancel</button>
-      <button class="btn btn-primary" onclick="saveConvoyWatch()">Save</button>
+      <button class="btn" data-action="closeModal" data-arg="convoy-watch-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="saveConvoyWatch">Save</button>
     </div>
   </div>
 </div>
@@ -1031,15 +1035,15 @@
   <div class="modal-box" style="width:640px">
     <div class="modal-header">
       <h2>Ship Convoy <span id="ship-modal-convoy"></span></h2>
-      <button class="modal-close" onclick="closeModal('ship-modal')">&times;</button>
+      <button class="modal-close" data-action="closeModal" data-arg="ship-modal">&times;</button>
     </div>
     <div class="modal-body">
       <div class="ship-branch-list" id="ship-branch-list"></div>
       <div class="ship-summary-line" id="ship-summary-line"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('ship-modal')">Cancel</button>
-      <button class="btn btn-primary" onclick="confirmShip()">Confirm Ship</button>
+      <button class="btn" data-action="closeModal" data-arg="ship-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="confirmShip">Confirm Ship</button>
     </div>
   </div>
 </div>
