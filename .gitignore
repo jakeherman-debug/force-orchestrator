@@ -1,3 +1,101 @@
+### Upstart organizational defaults ###
+# Carried forward from teamupstart/force-orchestrator boilerplate so the new
+# repo's existing patterns (multi-language toolchain artifacts, IDE state,
+# infra bootstrap) keep working. force-orchestrator-specific entries follow
+# below.
+
+### Gradle / Kotlin ###
+.dccache
+HELP.md
+.gradle
+build/
+/gradlew.bat
+*.log
+logs/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### Env and Config ###
+application-user-overrides*.yml
+user-overrides*.json
+.env
+.env_ule
+.env.test.overrides
+!infra/.env
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+/.idea/*
+!/.idea/runConfigurations
+!/.idea/scopes
+!/.idea/watcherTasks.xml
+*.iws
+*.iml
+*.ipr
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### MacOS ###
+.DS_store
+
+### CDK ###
+!./infra/bin/
+node_modules/
+cdk.out/
+/infra/**/*.d.ts
+/infra/**/*.js
+/infra/cdk.context.json
+
+*.snap.debug
+
+### Ruby ###
+/.bundle
+/db/*.sqlite3
+/db/*.sqlite3-*
+/log/*
+/tmp/*
+!/log/.keep
+!/tmp/.keep
+/tmp/pids/*
+!/tmp/pids/
+!/tmp/pids/.keep
+/storage/*
+!/storage/.keep
+/tmp/storage/*
+!/tmp/storage/
+!/tmp/storage/.keep
+/config/master.key
+app/gen
+build
+.git
+.idea
+
+### Sublime ###
+*.sublime-project
+*.sublime-workspace
+
+### force-orchestrator (Go daemon + Holocron substrate) ###
+
 # Build output
 /force
 /force-orchestrator
@@ -36,6 +134,8 @@ coverage.out
 # its own `deliverable/<n>/<track>` branch; the directory is disposable
 # and never lands on main as tracked content.
 .build-worktrees/
+.d7-worktrees/
+.force-worktrees/
 
 # D6 — `force onboard` produces ONBOARDING.md at the repo root on demand.
 # The CLI is operator-triggered, NOT a dog; the rendered file is local-
