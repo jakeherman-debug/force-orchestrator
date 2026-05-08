@@ -60,7 +60,48 @@ func readDaemonPID() (int, bool) {
 	return pid, proc.Signal(syscall.Signal(0)) == nil
 }
 
-func cmdDaemon(db *sql.DB) {
+func cmdDaemon(db *sql.DB, args []string) {
+	// Hidden test-only flags. NOT for operator use — these exist solely
+	// so the daemon-singleton subprocess concurrency test
+	// (TestE2E_TwoConcurrentDaemons_SingletonRejectsSecond in
+	// daemon_singleton_e2e_test.go) can spawn two real `force daemon
+	// foreground` processes against the same PID file without dragging
+	// in the entire Holocron + agent fleet bootstrap.
+	//
+	//   --exit-after-acquire-singleton   After singleton.Acquire succeeds,
+	//                                     optionally hold for the duration
+	//                                     specified by --hold-singleton-for,
+	//                                     then exit 0 cleanly. Skips agent
+	//                                     spawn, dashboard, PR-flow startup,
+	//                                     and every other side effect.
+	//   --hold-singleton-for=<dur>       How long to hold the lock before
+	//                                     exiting (default 0 = exit
+	//                                     immediately). Only honored when
+	//                                     --exit-after-acquire-singleton is
+	//                                     set. Must parse as time.Duration.
+	//
+	// These flags must be parsed BEFORE singleton.Acquire so the help
+	// surface stays unaffected, and parsed via flag.ContinueOnError so a
+	// bad invocation prints a usage hint and exits cleanly without
+	// poisoning the bare-daemon code path.
+	var (
+		smokeExitAfterLock bool
+		holdLockFor        time.Duration
+	)
+	{
+		fs := flag.NewFlagSet("daemon-foreground", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		fs.BoolVar(&smokeExitAfterLock, "exit-after-acquire-singleton", false,
+			"TEST-ONLY: exit 0 immediately after acquiring the singleton lock; skips agent fleet bootstrap")
+		fs.DurationVar(&holdLockFor, "hold-singleton-for", 0,
+			"TEST-ONLY: hold the singleton lock for this duration before exiting (only with --exit-after-acquire-singleton)")
+		if perr := fs.Parse(args); perr != nil {
+			// Bad flag — usage already printed by the flagset. Exit 2 to
+			// distinguish from "another daemon already running" (exit 1).
+			os.Exit(2)
+		}
+	}
+
 	// D12 P1 — single-instance enforcement via flock + PID file.
 	// `singleton.Acquire` opens ~/.force/force.pid, takes a non-blocking
 	// exclusive flock, and writes our PID. If another live daemon holds
@@ -84,6 +125,20 @@ func cmdDaemon(db *sql.DB) {
 	defer release()
 	if stale.Stale {
 		fmt.Printf("stale PID file from PID %d — taking over.\n", stale.PriorPID)
+	}
+
+	// TEST-ONLY: hermetic singleton smoke path. We hold the lock for
+	// holdLockFor, then return — no fleet bootstrap, no Holocron writes.
+	// Used by the subprocess concurrency test to prove that two real
+	// `force daemon foreground` processes cannot both hold the lock.
+	if smokeExitAfterLock {
+		fmt.Printf("force daemon: smoke singleton acquired (PID %d, holding %s)\n",
+			os.Getpid(), holdLockFor)
+		if holdLockFor > 0 {
+			time.Sleep(holdLockFor)
+		}
+		fmt.Println("force daemon: smoke singleton released, exiting cleanly")
+		return
 	}
 
 	// Legacy fleet.pid (kept for back-compat with cmdScale's
