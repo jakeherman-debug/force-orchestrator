@@ -777,7 +777,7 @@
        /api/dashboard/saved-filter/export. Markup is hidden by default; the
        JS in app.js (openSaveFilterModal / openExportSavedFiltersModal)
        toggles the `hidden` attribute. -->
-  <div id="saved-filter-save-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
+  <div id="saved-filter-save-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
     <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:340px;max-width:520px">
       <h4 style="margin-top:0">Save current filter</h4>
       <p class="reflection-help">Captures the current filter + sort as a named query you can recall in one click. Stored as <code>source=dashboard</code>; export to YAML and commit to <code>config/dashboard.yaml</code> to make it canonical.</p>
@@ -798,7 +798,7 @@
     </div>
   </div>
 
-  <div id="saved-filter-export-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center">
+  <div id="saved-filter-export-modal" hidden style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
     <div style="background:var(--bg);border:1px solid var(--border);padding:16px;min-width:420px;max-width:640px">
       <h4 style="margin-top:0">Export saved filters to YAML</h4>
       <p class="reflection-help">This generates a diff containing your dashboard-saved filters. Apply it to <code>config/dashboard.yaml</code> and commit via the normal review path. Yaml-source filters are already in the YAML — they are NOT included.</p>

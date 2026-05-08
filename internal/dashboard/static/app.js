@@ -4043,11 +4043,14 @@ function openSaveFilterModal(tab) {
   if (ds) ds.value = '';
   if (rs) rs.textContent = '';
   modal.hidden = false;
+  modal.style.display = 'flex';
 }
 
 function closeSaveFilterModal() {
   const modal = document.getElementById('saved-filter-save-modal');
-  if (modal) modal.hidden = true;
+  if (!modal) return;
+  modal.hidden = true;
+  modal.style.display = 'none';
 }
 
 async function submitSaveFilter() {
@@ -4104,11 +4107,14 @@ function openExportSavedFiltersModal() {
   const out = document.getElementById('saved-filter-export-result');
   if (out) out.textContent = '(click Generate to produce the YAML diff)';
   modal.hidden = false;
+  modal.style.display = 'flex';
 }
 
 function closeExportSavedFiltersModal() {
   const modal = document.getElementById('saved-filter-export-modal');
-  if (modal) modal.hidden = true;
+  if (!modal) return;
+  modal.hidden = true;
+  modal.style.display = 'none';
 }
 
 async function submitExportSavedFilters() {
