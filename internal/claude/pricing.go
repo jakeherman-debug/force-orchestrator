@@ -109,7 +109,15 @@ func CostUSD(model string, tokensIn, tokensOut int) float64 {
 	p, ok := priceTable[key]
 	priceTableMu.RUnlock()
 	if !ok {
-		logUnknownModel(model)
+		// Suppress the warning when model is empty AND there are zero
+		// tokens — that's the shape on error paths where the CLI run
+		// failed before producing JSON output. Nothing was charged, no
+		// cost data to lose, no operator action required. Real
+		// cost-miscoded cases (empty model with non-zero tokens, OR a
+		// non-empty unknown model string) still warn.
+		if !(model == "" && tokensIn == 0 && tokensOut == 0) {
+			logUnknownModel(model)
+		}
 		return 0
 	}
 	return float64(tokensIn)*p.InputPerMillion/1_000_000 +
