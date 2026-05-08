@@ -56,7 +56,7 @@ func dispatchDaemon(db *sql.DB, args []string) {
 			fmt.Fprintln(os.Stderr,
 				"`force daemon` (no subcommand) starts a foreground daemon. Use `force daemon foreground` going forward; `force daemon install` for managed lifecycle.")
 		}
-		cmdDaemon(db)
+		cmdDaemon(db, nil)
 		return
 	}
 
@@ -64,7 +64,7 @@ func dispatchDaemon(db *sql.DB, args []string) {
 	rest := args[1:]
 	switch sub {
 	case "foreground", "fg":
-		cmdDaemon(db)
+		cmdDaemon(db, rest)
 	case "install":
 		os.Exit(cmdDaemonInstall(rest))
 	case "uninstall":
