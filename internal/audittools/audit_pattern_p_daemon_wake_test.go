@@ -20,6 +20,7 @@
 package audittools
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -29,15 +30,29 @@ import (
 	"testing"
 )
 
-func TestPattern_P_DaemonWakeReconcile(t *testing.T) {
-	root := moduleRoot(t)
+// wakeRequiredFiles maps each required platform file under
+// internal/daemon/wake/ to the build-tag substring that file must
+// declare.
+var wakeRequiredFiles = map[string]string{
+	"wake_darwin.go":       "darwin",
+	"wake_darwin_nocgo.go": "darwin",
+	"wake_linux.go":        "linux",
+	"wake_other.go":        "!darwin && !linux",
+}
 
+// checkDaemonWakeReconcile asserts the wake-reconcile contract holds
+// for the source tree rooted at rootDir. Returns nil on success,
+// otherwise the first violation as an error.
+//
+// Extracted from the production check so the sentinel can drive it
+// with a synthetic TempDir.
+func checkDaemonWakeReconcile(rootDir string) error {
 	// (1) fleet_cmds.go: import + wake.Subscribe call inside cmdDaemon.
-	fleetPath := filepath.Join(root, "cmd", "force", "fleet_cmds.go")
+	fleetPath := filepath.Join(rootDir, "cmd", "force", "fleet_cmds.go")
 	fset := token.NewFileSet()
 	fleetFile, err := parser.ParseFile(fset, fleetPath, nil, parser.ParseComments)
 	if err != nil {
-		t.Fatalf("parse %s: %v", fleetPath, err)
+		return fmt.Errorf("parse %s: %w", fleetPath, err)
 	}
 	wantImport := `"force-orchestrator/internal/daemon/wake"`
 	hasImport := false
@@ -48,15 +63,17 @@ func TestPattern_P_DaemonWakeReconcile(t *testing.T) {
 		}
 	}
 	if !hasImport {
-		t.Fatalf("Pattern P_DaemonWakeReconcile: %s does not import %s — daemon would skip sleep/wake hooks", fleetPath, wantImport)
+		return fmt.Errorf("%s does not import %s — daemon would skip sleep/wake hooks", fleetPath, wantImport)
 	}
 
 	subscribeFound := false
+	cmdDaemonFound := false
 	ast.Inspect(fleetFile, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Name == nil || fn.Name.Name != "cmdDaemon" {
 			return true
 		}
+		cmdDaemonFound = true
 		ast.Inspect(fn, func(inner ast.Node) bool {
 			call, ok := inner.(*ast.CallExpr)
 			if !ok {
@@ -77,54 +94,205 @@ func TestPattern_P_DaemonWakeReconcile(t *testing.T) {
 		})
 		return false
 	})
+	if !cmdDaemonFound {
+		return fmt.Errorf("%s missing cmdDaemon function — sanity check failed", fleetPath)
+	}
 	if !subscribeFound {
-		t.Fatalf("Pattern P_DaemonWakeReconcile: cmdDaemon does not call wake.Subscribe — daemon won't receive sleep/wake events")
+		return fmt.Errorf("cmdDaemon does not call wake.Subscribe — daemon won't receive sleep/wake events")
 	}
 
 	// (2) daemon_wake.go must reference both event constants AND
-	// reconcilePostWake. Source-level grep is sufficient — the file
-	// is a thin glue layer and we don't need full AST walks.
-	daemonWakePath := filepath.Join(root, "cmd", "force", "daemon_wake.go")
+	// reconcilePostWake.
+	daemonWakePath := filepath.Join(rootDir, "cmd", "force", "daemon_wake.go")
 	srcBytes, err := os.ReadFile(daemonWakePath)
 	if err != nil {
-		t.Fatalf("read %s: %v", daemonWakePath, err)
+		return fmt.Errorf("read %s: %w", daemonWakePath, err)
 	}
 	src := string(srcBytes)
 	for _, want := range []string{"wake.GoingToSleep", "wake.Woke", "reconcilePostWake"} {
 		if !strings.Contains(src, want) {
-			t.Errorf("Pattern P_DaemonWakeReconcile: %s does not reference %s — wake event routing or reconcile wiring is missing", daemonWakePath, want)
+			return fmt.Errorf("%s does not reference %s — wake event routing or reconcile wiring is missing", daemonWakePath, want)
 		}
 	}
 
-	// (3) internal/daemon/wake/ has all four required build-tagged
-	// files. Each must exist AND contain a //go:build line that
-	// matches the expected platform constraint.
-	wakeDir := filepath.Join(root, "internal", "daemon", "wake")
-	requiredFiles := map[string]string{
-		"wake_darwin.go":       "darwin",
-		"wake_darwin_nocgo.go": "darwin",
-		"wake_linux.go":        "linux",
-		"wake_other.go":        "!darwin && !linux",
-	}
-	for fname, wantTag := range requiredFiles {
+	// (3) internal/daemon/wake/ has all four required build-tagged files.
+	wakeDir := filepath.Join(rootDir, "internal", "daemon", "wake")
+	for fname, wantTag := range wakeRequiredFiles {
 		path := filepath.Join(wakeDir, fname)
 		body, err := os.ReadFile(path)
 		if err != nil {
-			t.Errorf("Pattern P_DaemonWakeReconcile: missing platform file %s — multi-platform coverage is incomplete: %v", path, err)
-			continue
+			return fmt.Errorf("missing platform file %s — multi-platform coverage is incomplete: %w", path, err)
 		}
-		// First non-blank line should be a //go:build directive
-		// containing the expected tag.
 		head := string(body)
 		if i := strings.Index(head, "\n\n"); i > 0 {
 			head = head[:i]
 		}
 		if !strings.Contains(head, "//go:build") {
-			t.Errorf("Pattern P_DaemonWakeReconcile: %s does not contain a //go:build directive", path)
-			continue
+			return fmt.Errorf("%s does not contain a //go:build directive", path)
 		}
 		if !strings.Contains(head, wantTag) {
-			t.Errorf("Pattern P_DaemonWakeReconcile: %s build tag does not contain %q (head: %q)", path, wantTag, head)
+			return fmt.Errorf("%s build tag does not contain %q (head: %q)", path, wantTag, head)
 		}
+	}
+	return nil
+}
+
+func TestPattern_P_DaemonWakeReconcile(t *testing.T) {
+	if err := checkDaemonWakeReconcile(moduleRoot(t)); err != nil {
+		t.Errorf("Pattern P_DaemonWakeReconcile: %v", err)
+	}
+}
+
+// writeWakeCompliantTree builds a fully compliant wake/reconcile
+// source tree under root. The sentinel uses this as the baseline and
+// then mutates one file at a time.
+func writeWakeCompliantTree(t *testing.T, root string) {
+	t.Helper()
+	mk := func(rel, body string) {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", full, err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
+	}
+	mk("cmd/force/fleet_cmds.go", "package force\n"+
+		"import \"force-orchestrator/internal/daemon/wake\"\n"+
+		"func cmdDaemon() {\n"+
+		"\twake.Subscribe(ctx)\n"+
+		"}\n")
+	mk("cmd/force/daemon_wake.go", "package force\n"+
+		"// references wake.GoingToSleep and wake.Woke; calls reconcilePostWake\n"+
+		"func handleEvents() {\n"+
+		"\tswitch ev {\n"+
+		"\tcase wake.GoingToSleep:\n"+
+		"\t\t_ = ev\n"+
+		"\tcase wake.Woke:\n"+
+		"\t\treconcilePostWake()\n"+
+		"\t}\n"+
+		"}\n")
+	mk("internal/daemon/wake/wake_darwin.go", "//go:build darwin && cgo\n\npackage wake\n")
+	mk("internal/daemon/wake/wake_darwin_nocgo.go", "//go:build darwin && !cgo\n\npackage wake\n")
+	mk("internal/daemon/wake/wake_linux.go", "//go:build linux\n\npackage wake\n")
+	mk("internal/daemon/wake/wake_other.go", "//go:build !darwin && !linux\n\npackage wake\n")
+}
+
+// TestPattern_P_DaemonWakeReconcile_DetectsInjectedDrift proves the
+// wake-reconcile checker would fire when each contract clause is
+// dropped. We build a compliant TempDir baseline and mutate one
+// clause at a time.
+func TestPattern_P_DaemonWakeReconcile_DetectsInjectedDrift(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(t *testing.T, root string)
+		wantSub string
+	}{
+		{
+			name: "missing-wake-import",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "cmd", "force", "fleet_cmds.go")
+				body := "package force\nfunc cmdDaemon() {}\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "does not import",
+		},
+		{
+			name: "missing-wake-Subscribe-call",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "cmd", "force", "fleet_cmds.go")
+				body := "package force\nimport _ \"force-orchestrator/internal/daemon/wake\"\nfunc cmdDaemon() {}\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "does not call wake.Subscribe",
+		},
+		{
+			name: "missing-cmdDaemon",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "cmd", "force", "fleet_cmds.go")
+				body := "package force\nimport _ \"force-orchestrator/internal/daemon/wake\"\nfunc somethingElse() {}\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "missing cmdDaemon function",
+		},
+		{
+			name: "missing-GoingToSleep",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "cmd", "force", "daemon_wake.go")
+				body := "package force\n// references wake.Woke; calls reconcilePostWake\nfunc handleEvents() {\n\tif ev == wake.Woke {\n\t\treconcilePostWake()\n\t}\n}\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "wake.GoingToSleep",
+		},
+		{
+			name: "missing-reconcilePostWake",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "cmd", "force", "daemon_wake.go")
+				body := "package force\n// references wake.GoingToSleep, wake.Woke\nfunc handleEvents() {\n\tswitch ev {\n\tcase wake.GoingToSleep:\n\tcase wake.Woke:\n\t}\n}\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "reconcilePostWake",
+		},
+		{
+			name: "missing-platform-file-linux",
+			mutate: func(t *testing.T, root string) {
+				if err := os.Remove(filepath.Join(root, "internal", "daemon", "wake", "wake_linux.go")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "missing platform file",
+		},
+		{
+			name: "build-tag-missing-on-other",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "internal", "daemon", "wake", "wake_other.go")
+				body := "package wake\n" // no //go:build line
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "//go:build directive",
+		},
+		{
+			name: "wrong-build-tag-on-darwin",
+			mutate: func(t *testing.T, root string) {
+				p := filepath.Join(root, "internal", "daemon", "wake", "wake_darwin.go")
+				body := "//go:build linux\n\npackage wake\n"
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSub: "build tag does not contain",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeWakeCompliantTree(t, root)
+			tc.mutate(t, root)
+			err := checkDaemonWakeReconcile(root)
+			if err == nil {
+				t.Fatalf("checker accepted violating tree (case %q); want failure containing %q", tc.name, tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+	// Positive control.
+	root := t.TempDir()
+	writeWakeCompliantTree(t, root)
+	if err := checkDaemonWakeReconcile(root); err != nil {
+		t.Fatalf("checker rejected compliant baseline: %v", err)
 	}
 }

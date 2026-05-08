@@ -20,6 +20,7 @@
 package audittools
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -29,16 +30,22 @@ import (
 	"testing"
 )
 
-func TestPattern_P_DaemonProvenance(t *testing.T) {
-	root := moduleRoot(t)
-
-	// ── Check 1: main.go vars ─────────────────────────────────────────
-	mainPath := filepath.Join(root, "cmd", "force", "main.go")
+// checkProvenanceMainGo parses src as Go source representing
+// cmd/force/main.go and returns nil iff (a) all three package-level
+// vars (GitSHA, BuildTime, GitBranch) are declared AND (b) init()
+// calls provenance.Set(...). If src == "" the file at srcName is
+// read from disk.
+func checkProvenanceMainGo(srcName, src string) error {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, mainPath, nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse %s: %v", mainPath, err)
+	var parseSrc interface{}
+	if src != "" {
+		parseSrc = src
 	}
+	file, err := parser.ParseFile(fset, srcName, parseSrc, parser.ParseComments)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", srcName, err)
+	}
+
 	wantVars := map[string]bool{
 		"GitSHA":    false,
 		"BuildTime": false,
@@ -61,34 +68,16 @@ func TestPattern_P_DaemonProvenance(t *testing.T) {
 			}
 		}
 	}
+	var missingVars []string
 	for name, found := range wantVars {
 		if !found {
-			t.Errorf("Pattern P_DaemonProvenance: cmd/force/main.go missing package-level var %s — `force version` won't surface build provenance", name)
+			missingVars = append(missingVars, name)
 		}
 	}
-
-	// ── Check 2: Makefile -ldflags ────────────────────────────────────
-	mkPath := filepath.Join(root, "Makefile")
-	mkBytes, err := os.ReadFile(mkPath)
-	if err != nil {
-		t.Fatalf("read Makefile: %v", err)
-	}
-	mk := string(mkBytes)
-	for _, want := range []string{
-		"-X main.GitSHA",
-		"-X main.BuildTime",
-		"-X main.GitBranch",
-	} {
-		if !strings.Contains(mk, want) {
-			t.Errorf("Pattern P_DaemonProvenance: Makefile missing %q in -ldflags — `make build` will produce a binary with default 'unknown' provenance", want)
-		}
-	}
-	// The build target must reference $(LDFLAGS).
-	if !strings.Contains(mk, "$(LDFLAGS)") {
-		t.Errorf("Pattern P_DaemonProvenance: Makefile defines LDFLAGS but the build target doesn't reference $(LDFLAGS)")
+	if len(missingVars) > 0 {
+		return fmt.Errorf("%s missing package-level var(s) %v — `force version` won't surface build provenance", srcName, missingVars)
 	}
 
-	// ── Check 3: provenance.Set wired via init() ──────────────────────
 	hasInitWithProvenanceSet := false
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -115,6 +104,128 @@ func TestPattern_P_DaemonProvenance(t *testing.T) {
 		})
 	}
 	if !hasInitWithProvenanceSet {
-		t.Errorf("Pattern P_DaemonProvenance: cmd/force/main.go does not call provenance.Set(...) from init() — non-main packages can't read GitSHA/BuildTime/GitBranch")
+		return fmt.Errorf("%s does not call provenance.Set(...) from init() — non-main packages can't read GitSHA/BuildTime/GitBranch", srcName)
 	}
+	return nil
+}
+
+// checkProvenanceMakefile asserts the Makefile body contains the
+// three -X main.* ldflag entries and references $(LDFLAGS) somewhere.
+// Returns nil on success.
+func checkProvenanceMakefile(mk string) error {
+	for _, want := range []string{
+		"-X main.GitSHA",
+		"-X main.BuildTime",
+		"-X main.GitBranch",
+	} {
+		if !strings.Contains(mk, want) {
+			return fmt.Errorf("Makefile missing %q in -ldflags — `make build` will produce a binary with default 'unknown' provenance", want)
+		}
+	}
+	if !strings.Contains(mk, "$(LDFLAGS)") {
+		return fmt.Errorf("Makefile defines LDFLAGS but the build target doesn't reference $(LDFLAGS)")
+	}
+	return nil
+}
+
+func TestPattern_P_DaemonProvenance(t *testing.T) {
+	root := moduleRoot(t)
+
+	mainPath := filepath.Join(root, "cmd", "force", "main.go")
+	if err := checkProvenanceMainGo(mainPath, ""); err != nil {
+		t.Errorf("Pattern P_DaemonProvenance: %v", err)
+	}
+
+	mkPath := filepath.Join(root, "Makefile")
+	mkBytes, err := os.ReadFile(mkPath)
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if err := checkProvenanceMakefile(string(mkBytes)); err != nil {
+		t.Errorf("Pattern P_DaemonProvenance: %v", err)
+	}
+}
+
+// TestPattern_P_DaemonProvenance_DetectsInjectedDrift proves both
+// the main.go AST check and the Makefile literal check would actually
+// fire if a future refactor regressed either side. We feed each
+// sub-checker synthetic input that violates a single contract clause
+// and assert it returns the expected error.
+func TestPattern_P_DaemonProvenance_DetectsInjectedDrift(t *testing.T) {
+	t.Run("main-missing-var", func(t *testing.T) {
+		// Drop GitBranch.
+		src := `package main
+import _ "force-orchestrator/internal/provenance"
+var (
+	GitSHA    = "unknown"
+	BuildTime = "unknown"
+)
+func init() { provenance.Set(GitSHA, BuildTime, "") }
+func main() {}
+`
+		err := checkProvenanceMainGo("synthetic-main.go", src)
+		if err == nil || !strings.Contains(err.Error(), "GitBranch") {
+			t.Fatalf("checker accepted main.go missing GitBranch; err=%v", err)
+		}
+	})
+
+	t.Run("main-missing-provenance-set", func(t *testing.T) {
+		src := `package main
+var (
+	GitSHA    = "unknown"
+	BuildTime = "unknown"
+	GitBranch = "unknown"
+)
+func main() {}
+`
+		err := checkProvenanceMainGo("synthetic-main.go", src)
+		if err == nil || !strings.Contains(err.Error(), "provenance.Set") {
+			t.Fatalf("checker accepted main.go without init() provenance.Set; err=%v", err)
+		}
+	})
+
+	t.Run("makefile-missing-ldflag", func(t *testing.T) {
+		// Missing -X main.GitBranch.
+		mk := `LDFLAGS = -X main.GitSHA=$(SHA) -X main.BuildTime=$(NOW)
+build:
+	go build $(LDFLAGS) -o force .
+`
+		err := checkProvenanceMakefile(mk)
+		if err == nil || !strings.Contains(err.Error(), "main.GitBranch") {
+			t.Fatalf("checker accepted Makefile missing -X main.GitBranch; err=%v", err)
+		}
+	})
+
+	t.Run("makefile-missing-ldflags-ref", func(t *testing.T) {
+		mk := `LDFLAGS = -X main.GitSHA=x -X main.BuildTime=y -X main.GitBranch=z
+build:
+	go build -o force .
+`
+		err := checkProvenanceMakefile(mk)
+		if err == nil || !strings.Contains(err.Error(), "$(LDFLAGS)") {
+			t.Fatalf("checker accepted Makefile not referencing $(LDFLAGS); err=%v", err)
+		}
+	})
+
+	t.Run("positive-control", func(t *testing.T) {
+		goodMain := `package main
+var (
+	GitSHA    = "unknown"
+	BuildTime = "unknown"
+	GitBranch = "unknown"
+)
+func init() { provenance.Set(GitSHA, BuildTime, GitBranch) }
+func main() {}
+`
+		if err := checkProvenanceMainGo("synthetic-main.go", goodMain); err != nil {
+			t.Fatalf("checker rejected compliant main.go: %v", err)
+		}
+		goodMk := `LDFLAGS = -X main.GitSHA=x -X main.BuildTime=y -X main.GitBranch=z
+build:
+	go build $(LDFLAGS) -o force .
+`
+		if err := checkProvenanceMakefile(goodMk); err != nil {
+			t.Fatalf("checker rejected compliant Makefile: %v", err)
+		}
+	})
 }
