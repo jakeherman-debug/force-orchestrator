@@ -39,7 +39,8 @@ Agents shell out to `claude -p` (never the Anthropic HTTP API directly), so each
 ```bash
 git clone <this repo> && cd force-orchestrator
 make build                                # produces ./force (provenance ldflags injected)
-./force add-repo myapp /path/to/myapp "Backend API"
+./force add-repo /path/to/myapp           # name + description auto-derived (or --name / --description)
+./force add-repos ~/code                  # bulk-register every git repo under a parent dir
 ./force daemon foreground                 # start fleet + bundled dashboard on :41977
 # or: ./force daemon install               # launchd (macOS) / systemd user-unit (linux)
 ```
