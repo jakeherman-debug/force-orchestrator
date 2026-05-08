@@ -680,7 +680,12 @@ Task management:
   scan [--priority N] [--repo <name>] <scope/question>
                                         Scan codebase for issues — findings become Planned
                                         tasks; approve with: force convoy approve <id>
-  add-repo <name> <path> <desc>         Register a repository
+  add-repo <path> [--name N] [--description D]
+                                        Register a repository (name + description auto-derive
+                                        from git remote / README; legacy 3-positional form
+                                        'add-repo <name> <path> <desc>' still works)
+  add-repos <directory> [-y]            Bulk-register every git repo under <directory>;
+                                        skips already-registered repos. -y skips the prompt.
   repos                                 List registered repositories
   repos remove <name>                   Remove a registered repository
   repo sync                             Populate remote_url/default_branch and queue FindPRTemplate

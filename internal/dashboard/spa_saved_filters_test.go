@@ -94,9 +94,13 @@ func TestSPA_SaveFilterModal_Wired(t *testing.T) {
 		`id="saved-filter-save-modal"`,
 		`id="saved-filter-name"`,
 		`id="saved-filter-desc"`,
-		`onclick="submitSaveFilter()"`,
-		`openSaveFilterModal('convoys')`,
-		`openSaveFilterModal('tasks')`,
+		`data-action="submitSaveFilter"`,
+		// Sweep B (CSP refactor) replaced inline onclick="..." with
+		// data-action / data-arg attributes. The save-current-filter
+		// buttons in tasks + convoys tabs are now wired via the dispatcher;
+		// the per-tab arg lives in data-arg.
+		`data-action="openSaveFilterModal" data-arg="convoys"`,
+		`data-action="openSaveFilterModal" data-arg="tasks"`,
 	} {
 		if !strings.Contains(indexHTML, marker) {
 			t.Errorf("SPA wiring (D11 P3-C): index.html missing save-modal marker %q", marker)
@@ -147,8 +151,10 @@ func TestSPA_ExportSavedFilters_Wired(t *testing.T) {
 
 	for _, marker := range []string{
 		`id="saved-filter-export-modal"`,
-		`onclick="openExportSavedFiltersModal()"`,
-		`onclick="submitExportSavedFilters()"`,
+		// Sweep B (CSP refactor) replaced the inline onclick="..." with
+		// data-action="..." driven by the delegated dispatcher in app.js.
+		`data-action="openExportSavedFiltersModal"`,
+		`data-action="submitExportSavedFilters"`,
 	} {
 		if !strings.Contains(indexHTML, marker) {
 			t.Errorf("SPA wiring (D11 P3-C): index.html missing export marker %q", marker)

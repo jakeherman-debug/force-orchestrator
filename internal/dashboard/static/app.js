@@ -1,5 +1,120 @@
 'use strict';
 
+// ── Delegated event dispatcher (CSP — script-src 'self', no 'unsafe-inline') ─
+// The SPA used to wire ~170 handlers via inline `onclick="..."` attributes.
+// Inline handlers are blocked under a strict CSP (`script-src 'self'`) — the
+// browser parses them as inline script, even though they live in HTML
+// attributes. Sweep B refactors every inline handler in index.html and
+// app.js's template strings to a single delegated handler driven by
+// `data-action` (function name) plus optional `data-arg` / `data-args`
+// attributes. Function definitions are unchanged; only the wiring shifts.
+//
+// Anti-cheat / drift protection: Pattern P_DashboardNoInlineHandlers
+// (internal/audittools/audit_pattern_p_dashboard_no_inline_handlers_test.go)
+// asserts the SPA contains zero inline event handlers — both in static
+// HTML and inside JS template literals — so a future copy-paste cannot
+// accidentally re-introduce them and silently re-break the CSP.
+//
+// `data-action="foo"`        → invokes window.foo() (or top-level foo()
+//                              hoisted onto the global) on the bubbling event.
+// `data-arg="123"`           → single arg; numeric strings autoparsed to int.
+// `data-args='[1,"x"]'`      → JSON-encoded multi-arg list (preferred for
+//                              anything other than a single id/name).
+// `data-pass-this="value"`   → pass `this.value` as the first arg (for
+//                              <input type=text> / <select>). Used to be
+//                              the inline `fn(this.value)` shape.
+// `data-pass-this="checked"` → pass `this.checked` as the first arg (for
+//                              <input type=checkbox>).
+// `data-pass-event`          → pass the Event object as the first arg
+//                              (used by handlers that need .preventDefault /
+//                              .stopPropagation themselves, e.g. the
+//                              context-menu handler).
+// `data-event="input"`       → restrict the binding to non-click events
+//                              (input/change/submit/contextmenu). Default is click.
+// `data-stop-propagation`    → calls ev.stopPropagation() before invoking
+//                              the handler (replaces inline `event.stopPropagation()`).
+// `data-prevent-default`     → opt-in to ev.preventDefault() (rarely needed —
+//                              the inline handlers we replaced never returned
+//                              false, so default browser action was already
+//                              the status quo).
+function dispatchAction(eventType, ev) {
+  let cursor = ev.target;
+  if (!cursor || !cursor.closest) return;
+  // Walk up the DOM looking for the FIRST [data-action] whose declared
+  // data-event matches the current event type. This lets a single element
+  // tree wire two events (e.g. a button that handles click on its inner
+  // <button> and contextmenu on its outer wrapper) without ambiguity.
+  let target = null;
+  while (cursor && cursor !== document) {
+    if (cursor.nodeType === 1 && cursor.hasAttribute && cursor.hasAttribute('data-action')) {
+      const declared = cursor.getAttribute('data-event') || 'click';
+      if (declared === eventType) { target = cursor; break; }
+    }
+    cursor = cursor.parentNode;
+  }
+  if (!target) return;
+  const action = target.getAttribute('data-action');
+  if (!action) return;
+  const fn = window[action];
+  if (typeof fn !== 'function') {
+    // eslint-disable-next-line no-console
+    console.warn('dispatchAction: no global handler for action', action, target);
+    return;
+  }
+  let args = [];
+  if (target.hasAttribute('data-args')) {
+    try {
+      const parsed = JSON.parse(target.getAttribute('data-args'));
+      args = Array.isArray(parsed) ? parsed : [parsed];
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('dispatchAction: bad data-args on', target, e);
+      return;
+    }
+  } else if (target.hasAttribute('data-arg')) {
+    const raw = target.getAttribute('data-arg');
+    args = [/^-?\d+$/.test(raw) ? parseInt(raw, 10) : raw];
+  }
+  if (target.hasAttribute('data-pass-this')) {
+    const prop = target.getAttribute('data-pass-this');
+    // Prepend the live element-state value as the first positional arg —
+    // mimics inline fn(this.value) / fn(this.checked).
+    args = [target[prop], ...args];
+  }
+  if (target.hasAttribute('data-pass-event')) {
+    // Mimics the inline `fn(event, ...)` shape — useful when the handler
+    // wants to call preventDefault/stopPropagation on its own (e.g. the
+    // context-menu handler).
+    args = [ev, ...args];
+  }
+  if (target.hasAttribute('data-stop-propagation') && ev.stopPropagation) {
+    ev.stopPropagation();
+  }
+  // We deliberately do NOT call ev.preventDefault() by default for click —
+  // the inline handlers we replaced never returned false, so default
+  // behavior was already in effect (largely harmless on <button> / <a>-
+  // without-href / <tr>). Specific buttons can opt-in via data-prevent-default.
+  // EXCEPTION: contextmenu always suppresses the native browser menu when
+  // a handler matches — the original inline form was `fn(event); return false`
+  // which both suppressed the menu and stopped propagation.
+  if (eventType === 'contextmenu' && ev.preventDefault) {
+    ev.preventDefault();
+  } else if (target.hasAttribute('data-prevent-default') && ev.preventDefault) {
+    ev.preventDefault();
+  }
+  try {
+    return fn.apply(target, args);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('dispatchAction: handler', action, 'threw', err);
+  }
+}
+document.addEventListener('click',  ev => dispatchAction('click',  ev));
+document.addEventListener('input',  ev => dispatchAction('input',  ev));
+document.addEventListener('change', ev => dispatchAction('change', ev));
+document.addEventListener('submit', ev => dispatchAction('submit', ev));
+document.addEventListener('contextmenu', ev => dispatchAction('contextmenu', ev));
+
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
   status:             null,
@@ -324,7 +439,7 @@ async function loadExperiments() {
       '</tr></thead><tbody>'];
     for (const e of rows) {
       const safeName = (e.name || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-      html.push('<tr style="cursor:pointer" onclick="loadExperimentDetail(' + e.id + ')">');
+      html.push('<tr style="cursor:pointer" data-action="loadExperimentDetail" data-arg="' + e.id + '">');
       html.push('<td>' + e.id + '</td>');
       html.push('<td>' + safeName + '</td>');
       html.push('<td><span class="badge">' + e.status + '</span></td>');
@@ -463,7 +578,7 @@ async function loadECProposals() {
       let status = 'pending';
       if (p.ratified_at) status = 'ratified by ' + ecEscape(p.ratified_by || '?');
       else if (p.rejected_at) status = 'rejected (' + ecEscape(p.rejection_action || '') + ')';
-      html.push('<tr style="cursor:pointer" onclick="loadECDetail(' + p.id + ')">');
+      html.push('<tr style="cursor:pointer" data-action="loadECDetail" data-arg="' + p.id + '">');
       html.push('<td>' + p.id + '</td>');
       html.push('<td>' + ecEscape(p.kind) + '</td>');
       html.push('<td>' + ecEscape(p.rule_key) + '</td>');
@@ -507,8 +622,8 @@ async function loadECDetail(id) {
     ];
     if (!p.ratified_at && !p.rejected_at) {
       html.push('<div style="margin-top:14px;display:flex;gap:8px">');
-      html.push('<button class="btn btn-primary" onclick="ecRatify(' + p.id + ')">Ratify</button>');
-      html.push('<button class="btn" onclick="ecRejectPrompt(' + p.id + ')">Reject…</button>');
+      html.push('<button class="btn btn-primary" data-action="ecRatify" data-arg="' + p.id + '">Ratify</button>');
+      html.push('<button class="btn" data-action="ecRejectPrompt" data-arg="' + p.id + '">Reject…</button>');
       html.push('</div>');
     }
     wrap.innerHTML = html.join('');
@@ -687,7 +802,7 @@ function renderTasks() {
                 : t.priority   < 0 ? `<span style="color:var(--text2)">${t.priority}</span>` : '0';
     const runtimeStr = t.status === 'Locked' ? fmtRuntime(t.runtime_seconds) : '';
     const blockedBy = (t.blocked_by && t.blocked_by.length > 0)
-      ? 'blocked by ' + t.blocked_by.map(id => `<a onclick="openPanel(${id});event.stopPropagation()" style="cursor:pointer">#${id}</a>`).join(', ')
+      ? 'blocked by ' + t.blocked_by.map(id => `<a data-action="openPanel" data-arg="${id}" data-stop-propagation style="cursor:pointer">#${id}</a>`).join(', ')
       : '';
     const infoCell = [
       runtimeStr ? `<span class="runtime-badge">${runtimeStr}</span>` : '',
@@ -697,7 +812,7 @@ function renderTasks() {
     const typeCell = isInfra
       ? `<span class="dim" style="font-size:11px" title="Fleet infrastructure">${t.type || ''} <span style="opacity:.6">⚙︎</span></span>`
       : (t.type || '');
-    return `<tr class="task-row${sel}${isInfra ? ' task-row-infra' : ''}" onclick="openPanel(${t.id})" data-id="${t.id}">
+    return `<tr class="task-row${sel}${isInfra ? ' task-row-infra' : ''}" data-action="openPanel" data-arg="${t.id}" data-id="${t.id}">
       <td class="mono dim">${t.id}</td>
       <td>${statusPill(t.status)}</td>
       <td class="dim" style="font-size:11px">${escHtml(t.owner || '')}</td>
@@ -728,6 +843,20 @@ function escHtml(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// dataArgs(...args) — encode an arg list for the data-args attribute consumed
+// by dispatchAction. Used inside template strings to wire delegated handlers
+// that take more than one positional arg. The result is suitable for use
+// inside a SINGLE-quoted HTML attribute (e.g. data-args='[...]').
+//
+// Implementation: JSON.stringify, then escape any single quote (no
+// multi-byte / unicode concerns since JSON output is 7-bit when arg
+// contents are reasonable, but we're defensive about apostrophes that can
+// appear in convoy names). Double quotes inside JSON are fine — the
+// surrounding attribute uses single quotes.
+function dataArgs(...args) {
+  return JSON.stringify(args).replace(/'/g, '&#39;');
 }
 
 // renderMemoryRows formats a DashboardMemory[] as HTML rows — used both for
@@ -807,24 +936,24 @@ function renderPanel(d) {
   // Actions
   const btns = [];
   if (REVIEWABLE.includes(d.status)) {
-    btns.push(`<button class="action-btn approve-btn" onclick="approveTask(${d.id})">Approve &amp; Merge</button>`);
-    btns.push(`<button class="action-btn reject-btn"  onclick="showRejectModal(${d.id})">Reject</button>`);
+    btns.push(`<button class="action-btn approve-btn" data-action="approveTask" data-arg="${d.id}">Approve &amp; Merge</button>`);
+    btns.push(`<button class="action-btn reject-btn"  data-action="showRejectModal" data-arg="${d.id}">Reject</button>`);
   }
   if (RETRYABLE.includes(d.status)) {
-    btns.push(`<button class="action-btn" onclick="retryTask(${d.id})">Retry</button>`);
+    btns.push(`<button class="action-btn" data-action="retryTask" data-arg="${d.id}">Retry</button>`);
   }
   if (!['Completed','Cancelled'].includes(d.status)) {
-    btns.push(`<button class="action-btn" onclick="resetTask(${d.id})">Reset to Pending</button>`);
+    btns.push(`<button class="action-btn" data-action="resetTask" data-arg="${d.id}">Reset to Pending</button>`);
   }
   if (CANCELLABLE.includes(d.status)) {
-    btns.push(`<button class="action-btn cancel-btn" onclick="cancelTask(${d.id})">Cancel</button>`);
+    btns.push(`<button class="action-btn cancel-btn" data-action="cancelTask" data-arg="${d.id}">Cancel</button>`);
   }
   // Ship It shortcut: only when the parent convoy has genuinely finished
   // (ConvoyReadyToShip = DraftPROpen + no active tasks + no pending review).
   // Offering the button while fix tasks or rebase conflicts are still in
   // flight would let an operator ship a half-finished convoy.
   if (d.convoy_id > 0 && d.convoy_ready_to_ship) {
-    btns.push(`<button class="action-btn ship-btn" onclick="showShip(${d.convoy_id})">🚢 Ship Convoy #${d.convoy_id}</button>`);
+    btns.push(`<button class="action-btn ship-btn" data-action="showShip" data-arg="${d.convoy_id}">🚢 Ship Convoy #${d.convoy_id}</button>`);
   }
   $('panel-actions').innerHTML = btns.join('');
 
@@ -834,7 +963,7 @@ function renderPanel(d) {
   // Meta
   const lockedAt = d.locked_at ? fmtTS(d.locked_at) : '—';
   const blockedByLinks = (d.blocked_by && d.blocked_by.length > 0)
-    ? d.blocked_by.map(id => `<a onclick="openPanel(${id})" style="cursor:pointer">#${id}</a>`).join(', ')
+    ? d.blocked_by.map(id => `<a data-action="openPanel" data-arg="${id}" style="cursor:pointer">#${id}</a>`).join(', ')
     : '';
 
   // Branch cell: if the server returned a web URL (resolved from the repo's
@@ -908,7 +1037,7 @@ function renderPanel(d) {
       const tok = `${(h.tokens_in||0).toLocaleString()} in / ${(h.tokens_out||0).toLocaleString()} out`;
       const injected = h.injected_memories || [];
       const memBadge = injected.length
-        ? `<a class="attempt-mem-toggle" onclick="toggleAttemptMemories(${h.attempt});event.stopPropagation()" title="Click to view the ${injected.length} memory entries injected into this attempt">📚 ${injected.length} memor${injected.length === 1 ? 'y' : 'ies'} injected</a>`
+        ? `<a class="attempt-mem-toggle" data-action="toggleAttemptMemories" data-arg="${h.attempt}" data-stop-propagation title="Click to view the ${injected.length} memory entries injected into this attempt">📚 ${injected.length} memor${injected.length === 1 ? 'y' : 'ies'} injected</a>`
         : '';
       const memBlock = injected.length
         ? `<div class="attempt-memories" id="attempt-memories-${h.attempt}" style="display:none">${renderMemoryRows(injected)}</div>`
@@ -1101,9 +1230,9 @@ function renderEscalations(escs) {
     const ackd = e.acknowledged_at ? `<span class="meta-key">Acked:</span> ${fmtTS(e.acknowledged_at)}` : '';
     const actions = [];
     if (e.status === 'Open') {
-      actions.push(`<button class="action-btn" onclick="ackEscalation(${e.id})">Acknowledge</button>`);
-      actions.push(`<button class="action-btn" onclick="closeEscalation(${e.id})">Close</button>`);
-      actions.push(`<button class="action-btn approve-btn" onclick="requeueEscalation(${e.id})">Close &amp; Requeue</button>`);
+      actions.push(`<button class="action-btn" data-action="ackEscalation" data-arg="${e.id}">Acknowledge</button>`);
+      actions.push(`<button class="action-btn" data-action="closeEscalation" data-arg="${e.id}">Close</button>`);
+      actions.push(`<button class="action-btn approve-btn" data-action="requeueEscalation" data-arg="${e.id}">Close &amp; Requeue</button>`);
     }
     return `
       <div class="esc-card sev-${e.severity}">
@@ -1111,7 +1240,7 @@ function renderEscalations(escs) {
           <span class="esc-id">#${e.id}</span>
           <span class="sev-${e.severity}" style="font-size:10px;font-weight:700">${e.severity}</span>
           ${statusPill(e.status)}
-          ${e.task_id ? `<span class="esc-task" onclick="jumpToTask(${e.task_id})">task #${e.task_id}</span>` : ''}
+          ${e.task_id ? `<span class="esc-task" data-action="jumpToTask" data-arg="${e.task_id}">task #${e.task_id}</span>` : ''}
           <span class="esc-ts">${fmtTS(e.created_at)}</span>
         </div>
         <div class="esc-msg">${escHtml(e.message)}</div>
@@ -1191,9 +1320,9 @@ function renderPagination() {
   const prevDis   = offset === 0 ? ' disabled' : '';
   const nextDis   = offset + limit >= total ? ' disabled' : '';
   el.innerHTML = `
-    <button class="page-btn"${prevDis} onclick="prevTaskPage()">&#8592; Prev</button>
+    <button class="page-btn"${prevDis} data-action="prevTaskPage">&#8592; Prev</button>
     <span class="page-info">Page ${page} of ${totalPages} &nbsp;·&nbsp; ${from}–${to} of ${total}</span>
-    <button class="page-btn"${nextDis} onclick="nextTaskPage()">Next &#8594;</button>
+    <button class="page-btn"${nextDis} data-action="nextTaskPage">Next &#8594;</button>
   `;
 }
 
@@ -1273,25 +1402,25 @@ function renderConvoys(convoys) {
   el.innerHTML = list.map(c => {
     const pct = c.total > 0 ? Math.round(100 * c.completed / c.total) : 0;
     const approveBtn = c.has_planned
-      ? `<button class="action-btn approve-btn" onclick="approveConvoy(${c.id})">Activate Planned Tasks</button>`
+      ? `<button class="action-btn approve-btn" data-action="approveConvoy" data-arg="${c.id}">Activate Planned Tasks</button>`
       : '';
     const cancelBtn = c.status === 'Active'
-      ? `<button class="action-btn cancel-btn" onclick="cancelConvoy(${c.id})">Cancel Convoy</button>`
+      ? `<button class="action-btn cancel-btn" data-action="cancelConvoy" data-arg="${c.id}">Cancel Convoy</button>`
       : '';
     // Ship It: only when the fleet has truly quiesced (no pending tasks, no
     // in-flight ConvoyReview). Relying on status='DraftPROpen' alone was a bug —
     // the draft PR exists well before fix tasks, rebase conflicts, and review
     // comments are resolved.
     const shipBtn = c.ready_to_ship
-      ? `<button class="action-btn ship-btn" onclick="showShip(${c.id})">Ship It</button>`
+      ? `<button class="action-btn ship-btn" data-action="showShip" data-arg="${c.id}">Ship It</button>`
       : '';
     const reviewBadge = renderPRReviewBadge(c);
     const watchChip = renderConvoyWatchChip(c);
     return `
       <div class="convoy-card">
         <div class="convoy-header">
-          <span class="convoy-name" style="cursor:pointer;text-decoration:underline" onclick="showConvoyTasks(${c.id}, ${escHtml(JSON.stringify(c.name || 'Convoy'))})">${escHtml(c.name || 'Convoy')}</span>
-          <span class="convoy-id" style="cursor:pointer" onclick="showConvoyTasks(${c.id}, ${escHtml(JSON.stringify(c.name || 'Convoy'))})">#${c.id}</span>
+          <span class="convoy-name" style="cursor:pointer;text-decoration:underline" data-action="showConvoyTasks" data-args='${dataArgs(c.id, c.name || 'Convoy')}'>${escHtml(c.name || 'Convoy')}</span>
+          <span class="convoy-id" style="cursor:pointer" data-action="showConvoyTasks" data-args='${dataArgs(c.id, c.name || 'Convoy')}'>#${c.id}</span>
           ${statusPill(c.status)}
           <span class="convoy-ts">${fmtTS(c.created_at)}</span>
           ${watchChip}
@@ -1303,7 +1432,7 @@ function renderConvoys(convoys) {
           <span class="convoy-counts">${c.completed} / ${c.total} tasks complete (${pct}%)</span>
           ${reviewBadge}
           <div style="flex:1"></div>
-          <button class="action-btn" onclick="showConvoyStages(${c.id}, ${escHtml(JSON.stringify(c.name || 'Convoy'))})">Stages</button>
+          <button class="action-btn" data-action="showConvoyStages" data-args='${dataArgs(c.id, c.name || 'Convoy')}'>Stages</button>
           ${approveBtn}
           ${cancelBtn}
           ${shipBtn}
@@ -1334,7 +1463,7 @@ function renderPRReviewBadge(c) {
   if (r.bot_conflicted_loop)parts.push(`<span title="Bot loop escalated" style="color:var(--red)">⚠️ ${r.bot_conflicted_loop}</span>`);
   if (r.human_awaiting)     parts.push(`<span title="Human comments awaiting operator" style="color:var(--accent)">👤 ${r.human_awaiting}</span>`);
   if (!parts.length) return '';
-  return `<button class="pr-review-badge" onclick="togglePRReviewPanel(${c.id})" title="Click to view PR review comments">
+  return `<button class="pr-review-badge" data-action="togglePRReviewPanel" data-arg="${c.id}" title="Click to view PR review comments">
     ${parts.join(' ')}
   </button>`;
 }
@@ -1360,7 +1489,7 @@ function renderConvoyWatchChip(c) {
     else if (ov.mode === 'quiet')       { label = 'Quiet';   cls = 'watch-chip-quiet'; }
     else if (ov.mode === 'custom_json') { label = 'Custom';  cls = 'watch-chip-custom'; }
   }
-  return `<button class="watch-chip ${cls}" onclick="loadConvoyWatchPopover(${c.id})" title="Notification override for this convoy">
+  return `<button class="watch-chip ${cls}" data-action="loadConvoyWatchPopover" data-arg="${c.id}" title="Notification override for this convoy">
     👁 Watch: ${label}
   </button>`;
 }
@@ -1397,7 +1526,7 @@ function renderConvoyWatchPopover(data) {
   const radio = (id, val, label) => {
     const checked = (cur === val) ? 'checked' : '';
     return `<label class="watch-radio">
-      <input type="radio" name="watch-mode" id="watch-mode-${id}" value="${val}" ${checked} onclick="onWatchModeChange()">
+      <input type="radio" name="watch-mode" id="watch-mode-${id}" value="${val}" ${checked} data-action="onWatchModeChange">
       ${label}
     </label>`;
   };
@@ -1559,7 +1688,7 @@ function renderPRReviewPanel(el, convoyID, comments) {
   el.innerHTML = `
     <div class="pr-review-header">
       <strong>PR review comments</strong>
-      <button class="action-btn" onclick="retriggerPRReview(${convoyID})" style="margin-left:auto">Re-run triage</button>
+      <button class="action-btn" data-action="retriggerPRReview" data-arg="${convoyID}" style="margin-left:auto">Re-run triage</button>
     </div>
     <table class="pr-review-table">
       <thead><tr>
@@ -1582,9 +1711,9 @@ function renderPRReviewRow(c) {
     reply = `
       <textarea class="pr-review-draft" id="pr-draft-${c.id}">${escHtml(c.reply_body || '')}</textarea>
       <div class="pr-review-actions">
-        <button class="action-btn" onclick="postHumanReply(${c.id})">Post reply</button>
-        <button class="action-btn" onclick="queueFollowup(${c.id})">Queue follow-up</button>
-        <button class="action-btn cancel-btn" onclick="dismissComment(${c.id})">Dismiss</button>
+        <button class="action-btn" data-action="postHumanReply" data-arg="${c.id}">Post reply</button>
+        <button class="action-btn" data-action="queueFollowup" data-arg="${c.id}">Queue follow-up</button>
+        <button class="action-btn cancel-btn" data-action="dismissComment" data-arg="${c.id}">Dismiss</button>
       </div>`;
   } else if (c.replied_at) {
     reply = `<div class="pr-review-reply">${escHtml(truncate(c.reply_body || '', 200))}</div>
@@ -1594,10 +1723,10 @@ function renderPRReviewRow(c) {
     const resolvedNote = c.thread_resolved_at
       ? `<div class="dim" style="font-size:10px">✓ resolved ${fmtShortDate(c.thread_resolved_at)}</div>`
       : '';
-    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ task #${c.spawned_task_id}</a> ${taskPill}${resolvedNote}`;
+    reply = `<a data-action="openPanel" data-arg="${c.spawned_task_id}" style="cursor:pointer">→ task #${c.spawned_task_id}</a> ${taskPill}${resolvedNote}`;
   } else if (c.classification === 'out_of_scope' && c.spawned_task_id) {
     const taskPill = c.spawned_task_status ? statusPill(c.spawned_task_status) : '';
-    reply = `<a onclick="openPanel(${c.spawned_task_id})" style="cursor:pointer">→ feature #${c.spawned_task_id}</a> ${taskPill}`;
+    reply = `<a data-action="openPanel" data-arg="${c.spawned_task_id}" style="cursor:pointer">→ feature #${c.spawned_task_id}</a> ${taskPill}`;
   } else if (c.classification === 'conflicted_loop') {
     reply = `<span style="color:var(--red)">loop escalated — operator required</span>`;
   } else {
@@ -1819,10 +1948,10 @@ function renderStagesPanel(convoyID, stages) {
     if (s.completed_at) ts.push(`completed ${escHtml(s.completed_at)}`);
     const isTerminal = s.status === 'Verified' || s.status === 'Failed';
     const advanceBtn = (!isTerminal && s.gate_type === 'operator_confirm')
-      ? `<button class="action-btn approve-btn" onclick="openStageActionModal('advance', ${convoyID}, ${s.stage_num})">Advance</button>`
+      ? `<button class="action-btn approve-btn" data-action="openStageActionModal" data-args='${dataArgs('advance', convoyID, s.stage_num)}'>Advance</button>`
       : '';
     const abortBtn = !isTerminal
-      ? `<button class="action-btn cancel-btn" onclick="openStageActionModal('abort', ${convoyID}, ${s.stage_num})">Abort</button>`
+      ? `<button class="action-btn cancel-btn" data-action="openStageActionModal" data-args='${dataArgs('abort', convoyID, s.stage_num)}'>Abort</button>`
       : '';
     const evalStatusColor = {
       passed: 'var(--green)',
@@ -1844,7 +1973,7 @@ function renderStagesPanel(convoyID, stages) {
           <div><strong>Intent:</strong> ${escHtml(s.intent_text || '(no intent)')}</div>
           <div><strong>Gate:</strong> ${escHtml(gateType)}${gateSummary ? ' — ' + escHtml(gateSummary) : ''}</div>
           ${ts.length ? `<div style="color:var(--text2);font-size:12px">${ts.join(' · ')}</div>` : ''}
-          <div style="margin-top:4px"><a style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="toggleStageHistory(${convoyID}, ${s.stage_num})">View history</a></div>
+          <div style="margin-top:4px"><a style="cursor:pointer;color:var(--accent);text-decoration:underline" data-action="toggleStageHistory" data-args='${dataArgs(convoyID, s.stage_num)}'>View history</a></div>
           <div id="stage-history-${convoyID}-${s.stage_num}" style="display:none;margin-top:6px"></div>
         </div>
       </div>`;
@@ -1958,7 +2087,7 @@ function renderAgents(agents) {
     const busy   = !!a.current_task_id;
     const cls    = busy ? 'agent-busy' : 'agent-idle';
     const taskLink = busy
-      ? `<a class="esc-task" onclick="jumpToTask(${a.current_task_id})">#${a.current_task_id}</a>`
+      ? `<a class="esc-task" data-action="jumpToTask" data-arg="${a.current_task_id}">#${a.current_task_id}</a>`
       : '<span class="dim">—</span>';
     return `<tr>
       <td class="${cls} mono" style="font-size:12px">${escHtml(a.agent_name)}</td>
@@ -1998,7 +2127,7 @@ function renderMail(mail) {
   }
   tbody.innerHTML = mail.map(m => {
     const unread = !m.read_at ? ' unread' : ' read';
-    return `<tr class="mail-row${unread}" onclick="openMail(${m.id})" data-mail='${JSON.stringify(m).replace(/'/g,"&#39;")}'>
+    return `<tr class="mail-row${unread}" data-action="openMail" data-arg="${m.id}" data-mail='${JSON.stringify(m).replace(/'/g,"&#39;")}'>
       <td class="mono dim">${m.id}</td>
       <td class="mono">${escHtml(m.from_agent || '')}</td>
       <td class="mono dim">${escHtml(m.to_agent || '')}</td>
@@ -2045,7 +2174,7 @@ function openMail(id) {
   if (!m.read_at) {
     api(`/api/mail/${id}/read`, { method: 'POST' }).catch(() => {});
     // update DOM
-    const rowEl = document.querySelector(`#mail-tbody tr[onclick="openMail(${id})"]`);
+    const rowEl = document.querySelector(`#mail-tbody tr[data-action="openMail"][data-arg="${id}"]`);
     if (rowEl) rowEl.className = 'mail-row read';
     pollStatus();
   }
@@ -2307,17 +2436,17 @@ function renderMemories(data) {
       ? `<span class="status s-Completed">success</span>`
       : `<span class="status s-Failed">failure</span>`;
     const taskLink = m.task_id
-      ? `<span class="esc-task" onclick="jumpToTask(${m.task_id})">#${m.task_id}</span>`
+      ? `<span class="esc-task" data-action="jumpToTask" data-arg="${m.task_id}">#${m.task_id}</span>`
       : '—';
     return `<tr>
       <td class="mono dim">${m.id}</td>
       <td class="mono dim" style="font-size:11px">${escHtml(m.repo || '')}</td>
       <td>${taskLink}</td>
       <td>${oc}</td>
-      <td class="mem-summary-cell" onclick="openMemory(${m.id})" title="${escHtml(m.summary)}">${escHtml(truncate(m.summary, 120))}</td>
+      <td class="mem-summary-cell" data-action="openMemory" data-arg="${m.id}" title="${escHtml(m.summary)}">${escHtml(truncate(m.summary, 120))}</td>
       <td class="mem-files-cell" title="${escHtml(m.files_changed)}">${escHtml(m.files_changed || '')}</td>
       <td class="mono dim" style="font-size:11px">${fmtTS(m.created_at)}</td>
-      <td><button class="del-btn" onclick="deleteMem(${m.id})" title="Delete memory">✕</button></td>
+      <td><button class="del-btn" data-action="deleteMem" data-arg="${m.id}" title="Delete memory">✕</button></td>
     </tr>`;
   }).join('');
 }
@@ -3688,11 +3817,11 @@ function _notifRenderCatalog(state, cat) {
       const isCurrent = (overridden === opt);
       html.push('<button class="hdr-btn" style="margin-right:2px;' +
         (isCurrent ? 'background:var(--accent);color:var(--bg);' : '') +
-        '" onclick="window.notifSetCategory && window.notifSetCategory(' +
-        JSON.stringify(r.category) + ',' + JSON.stringify(opt) + ',' + r.tier + ')">' +
+        '" data-action="notifSetCategory" data-args=\'' +
+        dataArgs(r.category, opt, r.tier) + '\'>' +
         opt + '</button>');
     }
-    html.push(' <button class="hdr-btn" onclick="window.notifClearCategory && window.notifClearCategory(' + JSON.stringify(r.category) + ')">↺</button>');
+    html.push(' <button class="hdr-btn" data-action="notifClearCategory" data-arg="' + _notifEsc(r.category) + '">↺</button>');
     html.push('</td>');
     html.push('</tr>');
   }
@@ -3726,8 +3855,7 @@ async function notifSetCategory(category, setting, tier) {
     if (target) target.textContent = category + ' → ' + setting;
     const modal = document.getElementById('notif-tier1-confirm-modal');
     if (modal) {
-      modal.hidden = false;
-      modal.style.display = 'flex';
+      modal.classList.remove('hidden');
     }
     return;
   }
@@ -3757,8 +3885,7 @@ function notifHideTier1Modal() {
   _notifPendingTier1 = null;
   const modal = document.getElementById('notif-tier1-confirm-modal');
   if (modal) {
-    modal.hidden = true;
-    modal.style.display = 'none';
+    modal.classList.add('hidden');
   }
 }
 window.notifHideTier1Modal = notifHideTier1Modal;
@@ -3803,16 +3930,14 @@ function notifShowDNDModal() {
   }
   const errEl = document.getElementById('notif-dnd-error');
   if (errEl) errEl.textContent = '';
-  modal.hidden = false;
-  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
 }
 window.notifShowDNDModal = notifShowDNDModal;
 
 function notifHideDNDModal() {
   const modal = document.getElementById('notif-dnd-modal');
   if (modal) {
-    modal.hidden = true;
-    modal.style.display = 'none';
+    modal.classList.add('hidden');
   }
 }
 window.notifHideDNDModal = notifHideDNDModal;
@@ -3871,8 +3996,7 @@ window.notifClearDND = notifClearDND;
 function notifShowSavePresetModal() {
   const modal = document.getElementById('notif-save-preset-modal');
   if (modal) {
-    modal.hidden = false;
-    modal.style.display = 'flex';
+    modal.classList.remove('hidden');
   }
   const r = document.getElementById('notif-save-preset-result');
   if (r) r.textContent = '';
@@ -3882,8 +4006,7 @@ window.notifShowSavePresetModal = notifShowSavePresetModal;
 function notifHideSavePresetModal() {
   const modal = document.getElementById('notif-save-preset-modal');
   if (modal) {
-    modal.hidden = true;
-    modal.style.display = 'none';
+    modal.classList.add('hidden');
   }
 }
 window.notifHideSavePresetModal = notifHideSavePresetModal;
@@ -3974,7 +4097,17 @@ function renderSavedFilterPills(tab) {
     const icon  = f.source === 'yaml' ? '📌' : '💾';
     const title = (f.description || '') + (f.source === 'yaml' ? '\n(yaml-source — committed)' : '\n(dashboard-source — right-click to delete)');
     const safe  = escHtml(f.name);
-    return `<button class="filter-btn saved-filter-pill" data-filter-id="${f.id}" data-source="${f.source}" title="${escHtml(title)}" onclick="applySavedFilter('${tab}', ${f.id})" oncontextmenu="onSavedFilterContextMenu(event, '${tab}', ${f.id});return false">${icon} ${safe}</button>`;
+    // The pill responds to two events:
+    //   click       → applySavedFilter(tab, id)        (default delegated event)
+    //   contextmenu → onSavedFilterContextMenu(ev, tab, id)
+    // The dispatcher's data-event filter only matches one event per element,
+    // so we render two stacked elements: the visible button (click) and a
+    // sibling stub that owns the contextmenu handler. Cleanest alternative
+    // would be to wrap with two listeners, but data-* attributes can't
+    // express "this element has TWO actions" without code duplication.
+    // Instead: wrap the button in a span that holds the contextmenu, since
+    // contextmenu bubbles from the inner button up to the wrapper.
+    return `<span data-action="onSavedFilterContextMenu" data-event="contextmenu" data-pass-event data-args='${dataArgs(tab, f.id)}'><button class="filter-btn saved-filter-pill" data-filter-id="${f.id}" data-source="${f.source}" title="${escHtml(title)}" data-action="applySavedFilter" data-args='${dataArgs(tab, f.id)}'>${icon} ${safe}</button></span>`;
   }).join(' ');
 }
 
@@ -4058,15 +4191,13 @@ function openSaveFilterModal(tab) {
   if (nm) nm.value = '';
   if (ds) ds.value = '';
   if (rs) rs.textContent = '';
-  modal.hidden = false;
-  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
 }
 
 function closeSaveFilterModal() {
   const modal = document.getElementById('saved-filter-save-modal');
   if (!modal) return;
-  modal.hidden = true;
-  modal.style.display = 'none';
+  modal.classList.add('hidden');
 }
 
 async function submitSaveFilter() {
@@ -4122,15 +4253,13 @@ function openExportSavedFiltersModal() {
   if (!modal) return;
   const out = document.getElementById('saved-filter-export-result');
   if (out) out.textContent = '(click Generate to produce the YAML diff)';
-  modal.hidden = false;
-  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
 }
 
 function closeExportSavedFiltersModal() {
   const modal = document.getElementById('saved-filter-export-modal');
   if (!modal) return;
-  modal.hidden = true;
-  modal.style.display = 'none';
+  modal.classList.add('hidden');
 }
 
 async function submitExportSavedFilters() {

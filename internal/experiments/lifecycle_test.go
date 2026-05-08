@@ -3,11 +3,63 @@ package experiments
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"force-orchestrator/internal/store"
 )
+
+// TestManifestPromotion_JSONTagsRoundTripSnakeCase asserts that
+// ManifestPromotion's JSON wire format uses snake_case keys
+// (`rule_key`, `proposed_content`) and that an explicit snake_case
+// payload round-trips into the struct fields without falling back to
+// Go's case-insensitive matcher.
+//
+// Anchor: commit 154411a (CandidateRule). Without explicit json tags,
+// `RuleKey` would marshal to PascalCase and a snake_case payload like
+// `{"rule_key":"X"}` would unmarshal as an empty string because Go's
+// case-insensitive matcher does not cross underscores. The fix that
+// landed alongside this test adds `json:"rule_key" json:"proposed_content"`
+// tags so the SystemConfig round-trip preserves the documented YAML
+// wire keys.
+func TestManifestPromotion_JSONTagsRoundTripSnakeCase(t *testing.T) {
+	t.Run("Marshal_emits_snake_case", func(t *testing.T) {
+		p := ManifestPromotion{
+			RuleKey:         "captain-test",
+			ProposedContent: "body",
+		}
+		body, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		got := string(body)
+		if !strings.Contains(got, `"rule_key":"captain-test"`) {
+			t.Errorf("expected snake_case rule_key, got %s", got)
+		}
+		if !strings.Contains(got, `"proposed_content":"body"`) {
+			t.Errorf("expected snake_case proposed_content, got %s", got)
+		}
+		if strings.Contains(got, `"RuleKey"`) || strings.Contains(got, `"ProposedContent"`) {
+			t.Errorf("PascalCase keys leaked into wire: %s", got)
+		}
+	})
+
+	t.Run("Unmarshal_snake_case_payload", func(t *testing.T) {
+		raw := []byte(`{"rule_key":"captain-test","proposed_content":"body"}`)
+		var p ManifestPromotion
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if p.RuleKey != "captain-test" {
+			t.Errorf("RuleKey: got %q, want captain-test", p.RuleKey)
+		}
+		if p.ProposedContent != "body" {
+			t.Errorf("ProposedContent: got %q, want body", p.ProposedContent)
+		}
+	})
+}
 
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
