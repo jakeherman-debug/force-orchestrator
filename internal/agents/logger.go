@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"sync"
+
+	"force-orchestrator/internal/forcepath"
 )
 
 // lockedWriter is a synchronized wrapper around a shared log file, opened once
@@ -27,9 +29,15 @@ var (
 	sharedLogOnce sync.Once
 )
 
+// NewLogger returns a process-shared logger that writes through a
+// single FD pointed at the canonical fleet log
+// (~/.force/fleet.log; resolved via forcepath.FleetLog). Sweep-F:
+// pre-canonical builds wrote "./fleet.log" from CWD, which forced
+// operators to run `force logs-fleet` from the daemon's working
+// directory to see anything.
 func NewLogger(name string) *log.Logger {
 	sharedLogOnce.Do(func() {
-		f, err := os.OpenFile("fleet.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(forcepath.FleetLog(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
 			sharedLog.w = f
 		}

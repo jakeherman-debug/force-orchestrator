@@ -88,7 +88,7 @@ This spawns all agents as goroutines under one process. Defaults (configurable; 
 
 - 2 Astromechs, 1 Council, 3 Commanders, 1 Captain, 1 Chancellor (always single-instance), 1 Librarian, 1 Medic, 1 Investigator, 1 Auditor, 1 Pilot, 1 Diplomat, 1 BoS, 1 ISB, 1 Senate, 1 Inquisitor.
 
-The daemon writes `fleet.pid` to the working directory, logs to `fleet.log`, and emits structured telemetry to `holonet.jsonl`. It handles `SIGINT`/`SIGTERM` with a 30 s graceful drain (cancels claim loops, then sweeps in-flight rows via `ReleaseInFlightTasks`).
+The daemon writes its PID file (`force.pid`), the human-readable `fleet.log`, the structured `holonet.jsonl`, and the SQLite `holocron.db` to `~/.force/` (override with `FORCE_DIR` for tests, or `FORCE_HOLOCRON_DSN` for an in-memory or custom DSN). The resolver lives at [`internal/forcepath/`](../internal/forcepath/forcepath.go); see [`docs/subsystems/state-files.md`](subsystems/state-files.md) for the full canonical-path contract. SIGINT/SIGTERM is handled with a 30 s graceful drain (cancels claim loops, then sweeps in-flight rows via `ReleaseInFlightTasks`).
 
 > **Note on D12.** When D12 lands, the foreground/supervisor split lets you run `force daemon foreground` and the background path becomes the supervised default. Today, `./force daemon` is the only mode.
 
@@ -165,7 +165,7 @@ CLI equivalents:
 `holocron.db` is just SQLite — every coordination event is a row. When the dashboard isn't enough, read the source of truth directly:
 
 ```bash
-sqlite3 holocron.db
+sqlite3 ~/.force/holocron.db
 sqlite> SELECT id, status, type, owner, repo FROM BountyBoard ORDER BY id DESC LIMIT 20;
 sqlite> SELECT * FROM Escalations WHERE status = 'Open';
 sqlite> SELECT key, value FROM SystemConfig ORDER BY key;
@@ -173,7 +173,7 @@ sqlite> SELECT key, value FROM SystemConfig ORDER BY key;
 
 The schema lives at [`schema/schema.sql`](../schema/schema.sql) (kept in parity with `createSchema` + `runMigrations` by `TestSchemaParity`).
 
-The DB is in the working directory the daemon was launched from (`./holocron.db` plus its `-wal` and `-shm` sidecars). Don't move it; use `make protect-db` to apply a macOS ACL that blocks `unlink`, and `make install-snapshots` to install hourly `sqlite3 .backup` snapshots into `~/.force/backups/`.
+The DB resolves through [`internal/forcepath`](../internal/forcepath/forcepath.go): `~/.force/holocron.db` by default, overridable via `FORCE_DIR` (custom state directory) or `FORCE_HOLOCRON_DSN` (verbatim DSN — `:memory:`, custom path, etc.). The WAL/SHM sidecars live alongside. Don't move it; use `make protect-db` to apply a macOS ACL that blocks `unlink`, and `make install-snapshots` to install hourly `sqlite3 .backup` snapshots into `~/.force/backups/`. `make protect-db` / `unprotect-db` / `db-status` honor `FORCE_DIR` so they work from any cwd.
 
 ## Smoke flows
 

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
 )
@@ -51,10 +52,16 @@ var (
 )
 
 func InitTelemetry() {
-	f, err := os.OpenFile("holonet.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// Sweep-F: holonet.jsonl resolves through forcepath
+	// (~/.force/holonet.jsonl by default; overridable via FORCE_DIR).
+	// Pre-canonical builds wrote to "./holonet.jsonl" in CWD, which
+	// invisibly bifurcated event streams when daemon/CLI ran from
+	// different directories.
+	path := forcepath.HolonetEventStream()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		telemetryLog = log.New(os.Stderr, "[telemetry] ", log.LstdFlags)
-		telemetryLog.Printf("WARNING: could not open holonet.jsonl: %v", err)
+		telemetryLog.Printf("WARNING: could not open %s: %v", path, err)
 	} else {
 		telemetryFile = f
 	}

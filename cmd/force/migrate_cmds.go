@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/gh"
 	"force-orchestrator/internal/store"
 )
@@ -89,11 +90,12 @@ func cmdMigratePRFlow(ctx context.Context, db *sql.DB, args []string) {
 
 	if rollback {
 		if !confirm {
-			// Rollback is destructive — overwrites holocron.db, losing any
-			// state changes since the snapshot (escalations, in-flight work,
-			// fleet memory, etc.). Refuse without explicit --confirm.
+			// Rollback is destructive — overwrites the canonical DB,
+			// losing any state changes since the snapshot (escalations,
+			// in-flight work, fleet memory, etc.). Refuse without
+			// explicit --confirm.
 			fmt.Fprintln(os.Stderr, "Error: --rollback is destructive and requires --confirm.")
-			fmt.Fprintln(os.Stderr, "It will overwrite holocron.db with the latest pre-migration snapshot,")
+			fmt.Fprintln(os.Stderr, "It will overwrite the canonical holocron.db with the latest pre-migration snapshot,")
 			fmt.Fprintln(os.Stderr, "discarding any state changes since that snapshot was taken.")
 			fmt.Fprintln(os.Stderr, "Re-run with `force migrate pr-flow --rollback --confirm` to proceed.")
 			os.Exit(1)
@@ -201,12 +203,19 @@ func runPRFlowDryRun(ctx context.Context, db *sql.DB) {
 	fmt.Printf("\nActive convoys missing ask_branch: %d (Layer C backfill)\n", len(needsBackfill))
 
 	fmt.Println("\nAvailable snapshots:")
-	snapshots, _ := listPRFlowSnapshots(".")
-	if len(snapshots) == 0 {
-		fmt.Println("  (none — the first real migrate run will create one)")
+	// Sweep-F: snapshots live alongside the canonical holocron.db
+	// (~/.force/ by default). In-memory DSN returns "" — skip listing.
+	snapDir := canonicalSnapshotDir()
+	if snapDir == "" {
+		fmt.Println("  (in-memory DSN — snapshots not applicable)")
 	} else {
-		for _, s := range snapshots {
-			fmt.Printf("  - %s\n", s)
+		snapshots, _ := listPRFlowSnapshots(snapDir)
+		if len(snapshots) == 0 {
+			fmt.Println("  (none — the first real migrate run will create one)")
+		} else {
+			for _, s := range snapshots {
+				fmt.Printf("  - %s\n", s)
+			}
 		}
 	}
 }
@@ -214,7 +223,15 @@ func runPRFlowDryRun(ctx context.Context, db *sql.DB) {
 func runPRFlowMigrate(ctx context.Context, db *sql.DB) {
 	// Take a snapshot before any work. Failing to snapshot aborts — we never
 	// run the backfill without a rollback available.
-	snapshot, err := takePRFlowSnapshot(".")
+	// Sweep-F: snapshot lives next to the canonical DB; the source path
+	// is resolved through forcepath so an operator running this from any
+	// cwd snapshots the SAME file the daemon opens.
+	canonical := forcepath.HolocronFile()
+	if canonical == "" {
+		fmt.Fprintln(os.Stderr, "Snapshot unsupported under in-memory FORCE_HOLOCRON_DSN.")
+		os.Exit(1)
+	}
+	snapshot, err := takePRFlowSnapshot(canonical)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Snapshot failed: %v\nAborting migration.\n", err)
 		os.Exit(1)
@@ -255,7 +272,13 @@ func runPRFlowRollback(db *sql.DB) {
 		os.Exit(1)
 	}
 
-	snapshots, err := listPRFlowSnapshots(".")
+	// Sweep-F: snapshots + canonical DB resolve through forcepath.
+	canonical := forcepath.HolocronFile()
+	if canonical == "" {
+		fmt.Fprintln(os.Stderr, "Rollback unsupported under in-memory FORCE_HOLOCRON_DSN.")
+		os.Exit(1)
+	}
+	snapshots, err := listPRFlowSnapshots(filepath.Dir(canonical))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to list snapshots: %v\n", err)
 		os.Exit(1)
@@ -268,20 +291,37 @@ func runPRFlowRollback(db *sql.DB) {
 
 	// Must close the DB before overwriting the file on some platforms.
 	_ = db.Close()
-
-	if err := copyFile(latest, "holocron.db"); err != nil {
+	if err := copyFile(latest, canonical); err != nil {
 		fmt.Fprintf(os.Stderr, "Rollback failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Rolled back holocron.db from %s\n", latest)
+	fmt.Printf("Rolled back %s from %s\n", canonical, latest)
 }
 
-// takePRFlowSnapshot copies holocron.db to a timestamped snapshot in dir.
-func takePRFlowSnapshot(dir string) (string, error) {
-	src := filepath.Join(dir, "holocron.db")
-	if _, err := os.Stat(src); err != nil {
-		return "", fmt.Errorf("holocron.db not found at %s: %v", src, err)
+// canonicalSnapshotDir returns the directory PR-flow snapshots live in:
+// the same directory as the canonical holocron.db. Pre-Sweep-F this
+// was hardcoded to "." (CWD); now it follows the DB so snapshots stay
+// adjacent regardless of where `force migrate` is run. Returns "" when
+// running against an in-memory DSN (snapshots are not meaningful then).
+func canonicalSnapshotDir() string {
+	canonical := forcepath.HolocronFile()
+	if canonical == "" {
+		return ""
 	}
+	return filepath.Dir(canonical)
+}
+
+// takePRFlowSnapshot copies the canonical DB file at src to a
+// timestamped snapshot in src's directory. Pre-Sweep-F this took a
+// `dir` argument and joined the literal "holocron.db" — that broke
+// when the canonical path moved out of CWD. Now the full source path
+// flows in from forcepath, so the snapshot semantics follow the
+// canonical location automatically.
+func takePRFlowSnapshot(src string) (string, error) {
+	if _, err := os.Stat(src); err != nil {
+		return "", fmt.Errorf("source DB not found at %s: %v", src, err)
+	}
+	dir := filepath.Dir(src)
 	dst := filepath.Join(dir, fmt.Sprintf("%s%s", prFlowSnapshotPrefix, time.Now().Format("20060102-150405")))
 	if err := copyFile(src, dst); err != nil {
 		return "", err

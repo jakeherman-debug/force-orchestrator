@@ -6,10 +6,17 @@ import (
 	"log"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"force-orchestrator/internal/forcepath"
 )
 
+// InitHolocron opens the canonical holocron.db resolved through the
+// forcepath package (FORCE_HOLOCRON_DSN > FORCE_DIR > ~/.force/holocron.db).
+// Sweep-F: pre-canonical builds used a CWD-relative "./holocron.db",
+// which silently bifurcated state when the daemon and a CLI subcommand
+// ran from different working directories.
 func InitHolocron() *sql.DB {
-	return InitHolocronDSN("./holocron.db?_busy_timeout=5000&_journal_mode=WAL")
+	return InitHolocronDSN(forcepath.Holocron())
 }
 
 // InitHolocronDSN opens (or creates) a Holocron database at the given DSN.

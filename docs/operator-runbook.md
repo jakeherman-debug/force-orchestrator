@@ -158,12 +158,15 @@ The `quarantined-repo-watch` dog will keep alerting the operator until quarantin
 
 ### Where the logs live
 
-| File | Format | Content |
-|---|---|---|
-| `fleet.log` | Plain text, timestamped | Human-readable agent log lines (one process-wide writer) |
-| `holonet.jsonl` | NDJSON | Structured telemetry events; rotates at 50 MB via `holonet-rotate` dog |
-| `bash.log` (per worktree) | TSV | Every bash-guard invocation (allow + deny); rotates at `bash_guard_log_max_bytes` (default 10 MiB) |
-| `fleet.pid` | One line | PID of the running daemon |
+All daemon-wide files live under `~/.force/` (overridable via `FORCE_DIR`). See [`docs/subsystems/state-files.md`](subsystems/state-files.md) for the resolver contract.
+
+| File | Path | Format | Content |
+|---|---|---|---|
+| `fleet.log` | `~/.force/fleet.log` | Plain text, timestamped | Human-readable agent log lines (one process-wide writer) |
+| `holonet.jsonl` | `~/.force/holonet.jsonl` | NDJSON | Structured telemetry events; rotates at 50 MB via `holonet-rotate` dog |
+| `bash.log` (per worktree) | inside each worktree | TSV | Every bash-guard invocation (allow + deny); rotates at `bash_guard_log_max_bytes` (default 10 MiB) |
+| `force.pid` | `~/.force/force.pid` | One line | PID of the running daemon (D12 singleton) |
+| `holocron.db` (+`-wal`/`-shm`) | `~/.force/holocron.db` | SQLite | The Gas Town source of truth |
 
 Tail with:
 
@@ -181,7 +184,7 @@ The dashboard's Logs tab does the same via Server-Sent Events with a 1000-line c
 
 ### Reading the holocron
 
-`holocron.db` is just SQLite. Keep a `sqlite3 holocron.db` shell open while debugging:
+`holocron.db` is just SQLite. Keep a `sqlite3 ~/.force/holocron.db` shell open while debugging (or `sqlite3 "$FORCE_DIR/holocron.db"` if you override the state dir):
 
 ```sql
 -- Anything in flight?
@@ -320,8 +323,8 @@ Zero is still the goal — every skip is a known-broken regression awaiting a fi
 ```bash
 ./force estop              # pause fleet
 ls -lt ~/.force/backups/   # find a recent snapshot
-make unprotect-db          # remove the macOS ACL guard
-cp ~/.force/backups/holocron.db.<timestamp> ./holocron.db
+make unprotect-db          # remove the macOS ACL guard (resolves $FORCE_DIR or ~/.force)
+cp ~/.force/backups/holocron.db.<timestamp> ~/.force/holocron.db
 make protect-db            # reapply the ACL
 ./force resume
 ```

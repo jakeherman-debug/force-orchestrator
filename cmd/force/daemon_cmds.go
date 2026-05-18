@@ -43,6 +43,7 @@ import (
 	"force-orchestrator/internal/daemon/provenance"
 	"force-orchestrator/internal/daemon/singleton"
 	"force-orchestrator/internal/daemon/trust"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/store"
 )
 
@@ -317,7 +318,8 @@ func cmdDaemonLogs(args []string) int {
 	}
 	follow := *followPtr
 	tailLines := *tailLinesPtr
-	path := "fleet.log"
+	// Sweep-F: canonical fleet log path (~/.force/fleet.log).
+	path := forcepath.FleetLog()
 	f, err := os.Open(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logs: open %s: %v\n", path, err)

@@ -2,6 +2,13 @@ BINARY  := force
 TAGS    := sqlite_fts5
 GOFLAGS := -tags $(TAGS)
 
+# Sweep F: canonical state-file location. Honors FORCE_DIR env override
+# (matches internal/forcepath/forcepath.go default-resolution chain).
+# Used by the protect-db / unprotect-db / db-status targets so operators
+# can run them from any cwd without first cd-ing to the daemon's dir.
+FORCE_STATE_DIR ?= $(if $(FORCE_DIR),$(FORCE_DIR),$(HOME)/.force)
+DB_PATH := $(FORCE_STATE_DIR)/holocron.db
+
 # D12 P1 — provenance ldflags. The Makefile is the authoritative build
 # path; binaries built without these vars carry "unknown" markers so
 # `force version` and the trust-file gate can refuse / warn. Captured
@@ -112,13 +119,16 @@ clean:
 	rm -rf bin/
 
 # make protect-db — apply a macOS ACL (deny delete,delete_child) to
-# holocron.db and its WAL/SHM sidecars. SQLite read/write operations
-# remain unaffected; only unlink() is blocked. Idempotent: re-running
-# detects the existing ACL and short-circuits per file. Files that
-# don't exist yet are skipped with a log line — run again after the
-# daemon first creates them.
+# the canonical holocron.db and its WAL/SHM sidecars. SQLite read/write
+# operations remain unaffected; only unlink() is blocked. Idempotent:
+# re-running detects the existing ACL and short-circuits per file.
+# Files that don't exist yet are skipped with a log line — run again
+# after the daemon first creates them. Sweep F: the target paths
+# resolve from $(DB_PATH) (defaults to ~/.force/holocron.db, override
+# with FORCE_DIR) so this target works from any cwd.
 protect-db:
-	@for f in holocron.db holocron.db-wal holocron.db-shm; do \
+	@echo "Target state dir: $(FORCE_STATE_DIR)"
+	@for f in $(DB_PATH) $(DB_PATH)-wal $(DB_PATH)-shm; do \
 		if [ -f "$$f" ]; then \
 			if ls -le "$$f" 2>/dev/null | grep -q "deny delete"; then \
 				echo "Already protected: $$f"; \
@@ -131,13 +141,15 @@ protect-db:
 	done
 	@echo ""
 	@echo "Current ACLs on protected files:"
-	@ls -le holocron.db* 2>/dev/null | grep -B 1 "deny delete" || echo "(none found — expected if all files are missing)"
+	@ls -le $(DB_PATH) $(DB_PATH)-wal $(DB_PATH)-shm 2>/dev/null | grep -B 1 "deny delete" || echo "(none found — expected if all files are missing)"
 
 # make unprotect-db — reverse of protect-db. Run before legitimate
 # maintenance that requires removing holocron.db (e.g. a destructive
 # migration rollback that the operator has consciously chosen).
+# Resolves $(DB_PATH) via the same FORCE_DIR-aware default as protect-db.
 unprotect-db:
-	@for f in holocron.db holocron.db-wal holocron.db-shm; do \
+	@echo "Target state dir: $(FORCE_STATE_DIR)"
+	@for f in $(DB_PATH) $(DB_PATH)-wal $(DB_PATH)-shm; do \
 		if [ -f "$$f" ]; then \
 			chmod -a "everyone deny delete,delete_child" "$$f" 2>/dev/null && echo "Unprotected: $$f" || echo "$$f: no ACL to remove"; \
 		fi; \
@@ -155,11 +167,15 @@ install-snapshots:
 uninstall-snapshots:
 	@scripts/uninstall-snapshots.sh
 
-# make db-status — show holocron.db file ACLs, snapshot crontab entries,
-# and the most recent snapshots. Read-only diagnostic.
+# make db-status — show canonical holocron.db file ACLs, snapshot
+# crontab entries, and the most recent snapshots. Read-only diagnostic.
+# Sweep F: resolves $(DB_PATH) so the report covers the SAME file the
+# daemon opens, regardless of cwd.
 db-status:
+	@echo "Target state dir: $(FORCE_STATE_DIR)"
+	@echo ""
 	@echo "holocron.db files:"
-	@ls -le holocron.db* 2>/dev/null || echo "  (none present)"
+	@ls -le $(DB_PATH) $(DB_PATH)-wal $(DB_PATH)-shm 2>/dev/null || echo "  (none present at $(DB_PATH))"
 	@echo ""
 	@echo "Crontab snapshot entries:"
 	@crontab -l 2>/dev/null | grep -A 1 "force-orchestrator" || echo "  (none — run \`make install-snapshots\`)"
@@ -178,9 +194,14 @@ help:
 	@echo "make hooks-install      — install the .forceignore pre-commit hook (opt-in)"
 	@echo "make render-rules       — regenerate CLAUDE.md / FIX-LOG.md / docs/* from FleetRules"
 	@echo "make render-rules-check — drift detector (exit 1 if rendered files disagree with disk)"
-	@echo "make protect-db         — macOS ACL: deny delete on holocron.db (+ -wal/-shm)"
+	@echo "make protect-db         — macOS ACL: deny delete on \$$(DB_PATH) (+ -wal/-shm)"
 	@echo "make unprotect-db       — remove the deny-delete ACL"
 	@echo "make install-snapshots  — install hourly snapshot cron + daily cleanup"
 	@echo "make uninstall-snapshots — remove the snapshot crontab entries"
 	@echo "make db-status          — show ACLs, crontab, and recent snapshots"
 	@echo "make clean              — remove build artifacts"
+	@echo ""
+	@echo "Sweep F: protect-db / unprotect-db / db-status resolve the DB"
+	@echo "path from FORCE_DIR (default ~/.force/holocron.db) — they work"
+	@echo "from any cwd. Override with FORCE_DIR=/path/to/dir or"
+	@echo "FORCE_STATE_DIR=/path/to/dir."

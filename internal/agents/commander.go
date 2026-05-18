@@ -16,6 +16,7 @@ import (
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/agents/commander"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/repo"
 	"force-orchestrator/internal/stagegate"
 	"force-orchestrator/internal/store"
@@ -497,7 +498,9 @@ STAGED EXAMPLE (only when phased rollout is genuinely required):
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
 	cmdTimeout := claude.CommanderTimeoutForAttempt(bounty.InfraFailures)
 	logger.Printf("[%s] Task %d: timeout %v (infra_failures=%d)", sessionID, bounty.ID, cmdTimeout, bounty.InfraFailures)
-	taskLogPath := fmt.Sprintf("fleet-task-%d.log", bounty.ID)
+	// Sweep-F: per-task streaming log resolves through forcepath so the
+	// daemon + `force tail <id>` see the same file regardless of CWD.
+	taskLogPath := forcepath.ScratchTaskFile(int(bounty.ID))
 	taskLogFile, _ := os.Create(taskLogPath)
 	var taskWriter io.Writer = io.Discard
 	if taskLogFile != nil {

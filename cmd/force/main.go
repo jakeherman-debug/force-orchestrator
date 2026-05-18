@@ -12,6 +12,7 @@ import (
 	"force-orchestrator/internal/agents"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/daemon/provenance"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 )
@@ -56,6 +57,16 @@ func main() {
 	// precedence; this is the catch-all for one-shot CLI commands.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Sweep-F: migrate any legacy CWD-resident holocron.db to the
+	// canonical ~/.force/holocron.db BEFORE store.InitHolocron opens
+	// the DB. Returns silently when there's nothing to do; refuses
+	// with an actionable error when both legacy AND canonical have
+	// data so the operator must intervene.
+	if mErr := forcepath.MigrateLegacyHolocronDB(ctx, os.Stderr); mErr != nil {
+		fmt.Fprintf(os.Stderr, "force: holocron.db migration aborted: %v\n", mErr)
+		os.Exit(1)
+	}
 
 	db := store.InitHolocron()
 	defer db.Close()

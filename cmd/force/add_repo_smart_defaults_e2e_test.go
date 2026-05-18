@@ -80,7 +80,13 @@ func runForceCmd(t *testing.T, bin, cwd string, stdin string, args ...string) (s
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "LIVE_HAIKU_DISABLED=1")
+	// Sweep F: point the canonical-path resolver (internal/forcepath) at
+	// `cwd` so the subprocess writes its holocron.db inside the test's
+	// TempDir — matches the parent test's open path at filepath.Join(cwd,
+	// "holocron.db"). Without this the subprocess lands at the real
+	// ~/.force/holocron.db (operator state) and the test sees an empty
+	// table on its CWD-relative probe.
+	cmd.Env = append(os.Environ(), "LIVE_HAIKU_DISABLED=1", "FORCE_DIR="+cwd)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}

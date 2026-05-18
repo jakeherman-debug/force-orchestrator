@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
@@ -91,7 +92,12 @@ func handleStatus(db *sql.DB) http.HandlerFunc {
 		// D2 T1-4 — quarantined repo count drives the dashboard's persistent banner.
 		_ = db.QueryRow(`SELECT COUNT(*) FROM Repositories WHERE mode = 'quarantined'`).Scan(&s.QuarantinedRepos)
 
-		if pidBytes, err := os.ReadFile("fleet.pid"); err == nil {
+		// Sweep-F: read the canonical singleton PID file
+		// (~/.force/force.pid) — the daemon's flock target. Pre-Sweep-F
+		// this read a CWD-relative legacy "fleet.pid" that drifted
+		// whenever the dashboard process and the daemon had different
+		// working directories.
+		if pidBytes, err := os.ReadFile(forcepath.PIDFile()); err == nil {
 			var pid int
 			fmt.Sscanf(strings.TrimSpace(string(pidBytes)), "%d", &pid)
 			if pid > 0 {
