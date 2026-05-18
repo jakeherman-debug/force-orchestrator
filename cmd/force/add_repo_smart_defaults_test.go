@@ -6,11 +6,15 @@ package main
 // fails loud without dragging in the full add-repo write pipeline.
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"force-orchestrator/internal/clients/librarian"
 )
 
 // initRepoWithRemote creates a fresh git repo at dir with the given
@@ -287,6 +291,111 @@ func TestReorderFlagsFirst(t *testing.T) {
 		if strings.Join(got, "|") != strings.Join(c.want, "|") {
 			t.Errorf("%s: in=%v\n  got=%v\n want=%v", c.name, c.in, got, c.want)
 		}
+	}
+}
+
+// ── Sweep-E (D12) wrapper tests ────────────────────────────────────
+// Cover deriveRepoDescriptionWithLibrarian. The librarian.MockClient
+// stubs the Claude call so these tests run hermetically without
+// requiring LIVE_HAIKU_DISABLED env juggling.
+
+// TestDeriveRepoDescriptionWithLibrarian_HappyPath stubs the
+// librarian to return a known description and asserts it's passed
+// through verbatim.
+func TestDeriveRepoDescriptionWithLibrarian_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# x\n\nfallback\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mock := librarian.NewMock()
+	mock.GenerateRepoDescriptionFn = func(_ context.Context, p string) (string, error) {
+		if p != dir {
+			t.Errorf("librarian got %q, want %q", p, dir)
+		}
+		return "LLM description.", nil
+	}
+	got := deriveRepoDescriptionWithLibrarian(dir, mock)
+	if got != "LLM description." {
+		t.Errorf("got %q, want %q", got, "LLM description.")
+	}
+	if len(mock.GenerateRepoDescriptionCalls) != 1 {
+		t.Errorf("expected 1 librarian call, got %d", len(mock.GenerateRepoDescriptionCalls))
+	}
+}
+
+// TestDeriveRepoDescriptionWithLibrarian_NilLibFallsBack confirms a
+// nil librarian routes through the regex scraper.
+func TestDeriveRepoDescriptionWithLibrarian_NilLibFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# x\n\nregex-scraped result.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := deriveRepoDescriptionWithLibrarian(dir, nil)
+	if got != "regex-scraped result." {
+		t.Errorf("got %q, want regex fallback", got)
+	}
+}
+
+// TestDeriveRepoDescriptionWithLibrarian_LibErrorFallsBack stubs the
+// librarian to return an error and asserts the regex scraper is
+// used instead.
+func TestDeriveRepoDescriptionWithLibrarian_LibErrorFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# x\n\nregex result.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mock := librarian.NewMock()
+	mock.GenerateRepoDescriptionFn = func(_ context.Context, _ string) (string, error) {
+		return "", errors.New("simulated failure")
+	}
+	got := deriveRepoDescriptionWithLibrarian(dir, mock)
+	if got != "regex result." {
+		t.Errorf("got %q, want regex fallback after lib error", got)
+	}
+}
+
+// TestDeriveRepoDescriptionWithLibrarian_LibEmptyFallsBack covers
+// the case where the librarian returns "" (no description, no error)
+// — the wrapper should retry via regex.
+func TestDeriveRepoDescriptionWithLibrarian_LibEmptyFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# x\n\nregex result.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mock := librarian.NewMock()
+	mock.GenerateRepoDescriptionFn = func(_ context.Context, _ string) (string, error) {
+		return "", nil
+	}
+	got := deriveRepoDescriptionWithLibrarian(dir, mock)
+	if got != "regex result." {
+		t.Errorf("got %q, want regex fallback after empty lib result", got)
+	}
+}
+
+// TestDeriveRepoDescriptionWithLibrarian_EmptyPath returns "".
+func TestDeriveRepoDescriptionWithLibrarian_EmptyPath(t *testing.T) {
+	mock := librarian.NewMock()
+	got := deriveRepoDescriptionWithLibrarian("", mock)
+	if got != "" {
+		t.Errorf("empty path must return empty, got %q", got)
+	}
+	if len(mock.GenerateRepoDescriptionCalls) != 0 {
+		t.Errorf("librarian should not be called on empty path; got %d calls", len(mock.GenerateRepoDescriptionCalls))
+	}
+}
+
+// TestScrapeReadmeFirstParagraph_StillWorks proves the renamed
+// helper is the same behaviour as the pre-Sweep-E deriveRepoDescription.
+func TestScrapeReadmeFirstParagraph_StillWorks(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"),
+		[]byte("# title\n\nThe first paragraph stands alone.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := scrapeReadmeFirstParagraph(dir)
+	want := "The first paragraph stands alone."
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
