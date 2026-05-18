@@ -69,7 +69,7 @@ func TestDaemonInstall_HelpFlag_DoesNotInstall(t *testing.T) {
 	artifact := installArtifactPathForHome(home)
 
 	cmd := exec.Command(bin, "daemon", "install", "--help")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "FORCE_DIR="+home)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -94,7 +94,7 @@ func TestDaemonInstall_UnknownFlag_ExitsNonZero(t *testing.T) {
 	artifact := installArtifactPathForHome(home)
 
 	cmd := exec.Command(bin, "daemon", "install", "--bogus-flag")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "FORCE_DIR="+home)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -120,7 +120,7 @@ func TestDaemonInstall_DryRunFlag_StillWorks(t *testing.T) {
 	artifact := installArtifactPathForHome(home)
 
 	cmd := exec.Command(bin, "daemon", "install", "--dry-run")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "FORCE_DIR="+home)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -153,7 +153,7 @@ func TestDaemonUninstall_HelpFlag_DoesNotUninstall(t *testing.T) {
 	}
 
 	cmd := exec.Command(bin, "daemon", "uninstall", "--help")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "FORCE_DIR="+home)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -184,7 +184,7 @@ func TestDaemonUpdate_HelpFlag_DoesNotMutate(t *testing.T) {
 	db.Close()
 
 	cmd := exec.Command(bin, "daemon", "update", "--help")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "FORCE_DIR="+home)
 	cmd.Dir = home
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -232,7 +232,7 @@ func TestDaemonClearCrashBudget_HelpFlag_DoesNotClear(t *testing.T) {
 	db.Close()
 
 	cmd := exec.Command(bin, "daemon", "clear-crash-budget", "--help")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "FORCE_DIR="+home)
 	cmd.Dir = home
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

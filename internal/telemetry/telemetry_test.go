@@ -10,9 +10,25 @@ import (
 	"testing"
 	"time"
 
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/util"
 )
+
+// pinHolonetToTempDir routes forcepath.HolonetEventStream() at a fresh
+// temp dir for the duration of the test. Returns that temp dir.
+// Sweep F: pre-canonical builds wrote ./holonet.jsonl to CWD, so the
+// tests chdir'd into a TempDir. Now the path resolves through
+// forcepath, so we set FORCE_DIR + reset the resolver's memoised Dir.
+func pinHolonetToTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("FORCE_DIR", dir)
+	t.Setenv("FORCE_HOLOCRON_DSN", "")
+	forcepath.ResetDirCacheForTests()
+	t.Cleanup(forcepath.ResetDirCacheForTests)
+	return dir
+}
 
 // ── NewSessionID ──────────────────────────────────────────────────────────────
 
@@ -38,11 +54,8 @@ func TestEmitEvent_NoFile(t *testing.T) {
 }
 
 func TestEmitEvent_WithFile(t *testing.T) {
-	dir := t.TempDir()
-	orig, _ := os.Getwd()
-	os.Chdir(dir)
+	dir := pinHolonetToTempDir(t)
 	defer func() {
-		os.Chdir(orig)
 		telemetryMu.Lock()
 		if telemetryFile != nil {
 			telemetryFile.Close()
@@ -60,10 +73,12 @@ func TestEmitEvent_WithFile(t *testing.T) {
 		Payload:   map[string]any{"key": "value"},
 	})
 
-	// holonet.jsonl should contain the event
-	data, err := os.ReadFile("holonet.jsonl")
+	// holonet.jsonl should contain the event — at the canonical path
+	// under the resolved FORCE_DIR.
+	path := filepath.Join(dir, "holonet.jsonl")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("could not read holonet.jsonl: %v", err)
+		t.Fatalf("could not read %s: %v", path, err)
 	}
 	if !strings.Contains(string(data), "test_with_file") {
 		t.Errorf("expected event in holonet.jsonl, got: %s", data)
@@ -234,11 +249,8 @@ func TestEventStallDetected(t *testing.T) {
 // ── InitTelemetry ─────────────────────────────────────────────────────────────
 
 func TestInitTelemetry_CreatesFile(t *testing.T) {
-	dir := t.TempDir()
-	orig, _ := os.Getwd()
-	os.Chdir(dir)
+	dir := pinHolonetToTempDir(t)
 	defer func() {
-		os.Chdir(orig)
 		// Reset global telemetry state
 		telemetryMu.Lock()
 		if telemetryFile != nil {
@@ -250,9 +262,10 @@ func TestInitTelemetry_CreatesFile(t *testing.T) {
 
 	InitTelemetry()
 
-	// holonet.jsonl should be created
-	if _, statErr := os.Stat("holonet.jsonl"); statErr != nil {
-		t.Error("expected holonet.jsonl to be created by InitTelemetry")
+	// holonet.jsonl should be created at the canonical path.
+	path := filepath.Join(dir, "holonet.jsonl")
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("expected holonet.jsonl to be created by InitTelemetry at %s: %v", path, statErr)
 	}
 
 	// Should be able to emit an event after init

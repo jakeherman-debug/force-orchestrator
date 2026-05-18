@@ -22,7 +22,10 @@ func TestTakePRFlowSnapshot_CreatesTimestampedCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path, err := takePRFlowSnapshot(dir)
+	// Sweep F: takePRFlowSnapshot takes the SRC FILE path (not the dir);
+	// the snapshot lands next to it. Production callers resolve src via
+	// forcepath.Holocron(). Test passes the explicit file path.
+	path, err := takePRFlowSnapshot(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +43,8 @@ func TestTakePRFlowSnapshot_CreatesTimestampedCopy(t *testing.T) {
 
 func TestTakePRFlowSnapshot_MissingSource(t *testing.T) {
 	dir := t.TempDir()
-	_, err := takePRFlowSnapshot(dir)
+	// Sweep F: pass an explicit (nonexistent) FILE path.
+	_, err := takePRFlowSnapshot(filepath.Join(dir, "holocron.db"))
 	if err == nil {
 		t.Errorf("expected error when holocron.db missing")
 	}

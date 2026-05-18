@@ -21,6 +21,7 @@ import (
 	"force-orchestrator/internal/agents"
 	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/store"
 )
 
@@ -194,15 +195,18 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 			}
 		}
 	}
+	// Sweep-F: resolve the canonical fleet log path
+	// (~/.force/fleet.log) once and use it for every grep/tail.
+	fleetLogPath := forcepath.FleetLog()
 	if filterPattern != "" {
 		if noFollow {
 			// Fix #9 (AUDIT-098): `--` before the pattern so an operator
 			// filter like `-r` or `--include=...` can't be re-interpreted
 			// by grep as a flag.
-			grepCmd := exec.Command("grep", "-i", "--", filterPattern, "fleet.log")
+			grepCmd := exec.Command("grep", "-i", "--", filterPattern, fleetLogPath)
 			grepOut, grepErr := grepCmd.Output()
 			if grepErr != nil {
-				fmt.Println("fleet.log not found — start the daemon first.")
+				fmt.Printf("%s not found — start the daemon first.\n", fleetLogPath)
 			} else {
 				lines := strings.Split(strings.TrimRight(string(grepOut), "\n"), "\n")
 				if len(lines) > 100 {
@@ -211,10 +215,10 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 				fmt.Println(strings.Join(lines, "\n"))
 			}
 		} else {
-			tailCmd := exec.Command("tail", "-f", "--", "fleet.log")
+			tailCmd := exec.Command("tail", "-f", "--", fleetLogPath)
 			tailOut, pipeErr := tailCmd.StdoutPipe()
 			if pipeErr != nil {
-				fmt.Println("fleet.log not found — start the daemon first.")
+				fmt.Printf("%s not found — start the daemon first.\n", fleetLogPath)
 			} else {
 				// Fix #9 (AUDIT-098): `--` separator applied here too.
 				grepCmd := exec.Command("grep", "--line-buffered", "-i", "--", filterPattern)
@@ -226,15 +230,15 @@ func cmdLogsFleet(db *sql.DB, args []string) {
 			}
 		}
 	} else {
-		tailArgs := []string{"-f", "fleet.log"}
+		tailArgs := []string{"-f", fleetLogPath}
 		if noFollow {
-			tailArgs = []string{"-n", "100", "fleet.log"}
+			tailArgs = []string{"-n", "100", fleetLogPath}
 		}
 		tailCmd := exec.Command("tail", tailArgs...)
 		tailCmd.Stdout = os.Stdout
 		tailCmd.Stderr = os.Stderr
 		if err := tailCmd.Run(); err != nil {
-			fmt.Println("fleet.log not found — start the daemon first.")
+			fmt.Printf("%s not found — start the daemon first.\n", fleetLogPath)
 		}
 	}
 }
@@ -265,6 +269,8 @@ func cmdHolonet(db *sql.DB, args []string) {
 	if *taskFlag != 0 {
 		filterTask = strconv.Itoa(*taskFlag)
 	}
+	// Sweep-F: canonical holonet path (~/.force/holonet.jsonl).
+	holonetPath := forcepath.HolonetEventStream()
 	// Build filter pattern for grep (applied before tail/follow)
 	if filterType != "" || filterTask != "" {
 		typePattern := ""
@@ -276,9 +282,9 @@ func cmdHolonet(db *sql.DB, args []string) {
 			taskPattern = fmt.Sprintf("\"task_id\":%s", filterTask)
 		}
 		if noFollow {
-			data, readErr := os.ReadFile("holonet.jsonl")
+			data, readErr := os.ReadFile(holonetPath)
 			if readErr != nil {
-				fmt.Println("holonet.jsonl not found — start the daemon first.")
+				fmt.Printf("%s not found — start the daemon first.\n", holonetPath)
 			} else {
 				var matched []string
 				for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
@@ -299,10 +305,10 @@ func cmdHolonet(db *sql.DB, args []string) {
 				fmt.Println(strings.Join(matched, "\n"))
 			}
 		} else {
-			tailCmd := exec.Command("tail", "-f", "holonet.jsonl")
+			tailCmd := exec.Command("tail", "-f", holonetPath)
 			tailOut, pipeErr := tailCmd.StdoutPipe()
 			if pipeErr != nil {
-				fmt.Println("holonet.jsonl not found — start the daemon first.")
+				fmt.Printf("%s not found — start the daemon first.\n", holonetPath)
 			} else if typePattern != "" && taskPattern != "" {
 				grep1 := exec.Command("grep", "--line-buffered", typePattern)
 				grep2 := exec.Command("grep", "--line-buffered", taskPattern)
@@ -328,15 +334,15 @@ func cmdHolonet(db *sql.DB, args []string) {
 			}
 		}
 	} else {
-		tailArgs := []string{"-f", "holonet.jsonl"}
+		tailArgs := []string{"-f", holonetPath}
 		if noFollow {
-			tailArgs = []string{"-n", "50", "holonet.jsonl"}
+			tailArgs = []string{"-n", "50", holonetPath}
 		}
 		tailCmd := exec.Command("tail", tailArgs...)
 		tailCmd.Stdout = os.Stdout
 		tailCmd.Stderr = os.Stderr
 		if err := tailCmd.Run(); err != nil {
-			fmt.Println("holonet.jsonl not found — start the daemon first.")
+			fmt.Printf("%s not found — start the daemon first.\n", holonetPath)
 		}
 	}
 }
@@ -753,7 +759,8 @@ func cmdTailTask(db *sql.DB, args []string) {
 		os.Exit(1)
 	}
 
-	taskLogPath := fmt.Sprintf("fleet-task-%d.log", taskID)
+	// Sweep-F: canonical scratch path (~/.force/scratch/fleet-task-<id>.log).
+	taskLogPath := forcepath.ScratchTaskFile(taskID)
 
 	// Poll until the file appears — Claude may still be starting up (worktree
 	// setup, branch creation, prompt assembly all happen before RunCLIStreaming).

@@ -31,6 +31,7 @@ import (
 	"force-orchestrator/internal/daemon/trust"
 	"force-orchestrator/internal/daemon/wake"
 	"force-orchestrator/internal/dashboard"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/gh"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/holdout"
@@ -43,10 +44,17 @@ import (
 	"force-orchestrator/internal/treatments"
 )
 
-// readDaemonPID checks if the PID in fleet.pid refers to a running process.
-// Returns (pid, true) if alive, (pid, false) if stale/missing.
+// readDaemonPID checks if the PID in the canonical force.pid refers
+// to a running process. Returns (pid, true) if alive, (pid, false) if
+// stale/missing.
+//
+// Sweep-F: resolves through forcepath.PIDFile() (~/.force/force.pid by
+// default), the same path the singleton package's Acquire writes to.
+// Pre-Sweep-F this read a CWD-relative legacy "fleet.pid"; an operator
+// invoking the CLI from a different directory than the daemon would
+// see "no daemon" and silently start a second copy.
 func readDaemonPID() (int, bool) {
-	data, err := os.ReadFile("fleet.pid")
+	data, err := os.ReadFile(forcepath.PIDFile())
 	if err != nil {
 		return 0, false
 	}
@@ -109,9 +117,10 @@ func cmdDaemon(db *sql.DB, args []string) {
 	// the lock, we exit 1 with an operator-friendly message; if a stale
 	// PID file exists (prior daemon crashed), we take over and log it.
 	//
-	// Legacy fleet.pid is kept for backwards-compat (cmdScale +
-	// readDaemonPID still read it), but the SOURCE OF TRUTH for "is a
-	// daemon running" is the flock on ~/.force/force.pid.
+	// Sweep-F: cmdScale's readDaemonPID + the dashboard's daemon-running
+	// check now also resolve through forcepath.PIDFile(), which points
+	// at the same canonical path the singleton package writes — the
+	// legacy CWD-relative "fleet.pid" is gone.
 	pidPath := singleton.DefaultPIDPath()
 	release, stale, lockErr := singleton.Acquire(pidPath)
 	if lockErr != nil {
@@ -142,11 +151,12 @@ func cmdDaemon(db *sql.DB, args []string) {
 		return
 	}
 
-	// Legacy fleet.pid (kept for back-compat with cmdScale's
-	// readDaemonPID + any operator scripts that read fleet.pid).
-	pidFile := "fleet.pid"
-	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
-	defer os.Remove(pidFile)
+	// Sweep-F: the singleton package already wrote the canonical
+	// ~/.force/force.pid (via Acquire above); cmdScale's readDaemonPID
+	// and the dashboard's "daemon running" handler both resolve through
+	// forcepath.PIDFile() now, so no legacy CWD-relative duplicate is
+	// needed. Pre-Sweep-F we wrote a "./fleet.pid" alongside the
+	// singleton file purely to bridge those readers.
 
 	numAgents := 2
 	if n := store.GetConfig(db, "num_astromechs", ""); n != "" {

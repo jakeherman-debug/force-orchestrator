@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/forcepath"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
@@ -231,8 +232,11 @@ func runDoctor(db *sql.DB, clean bool) {
 		}
 	}
 
-	// Check daemon PID file
-	if pidData, pidErr := os.ReadFile("fleet.pid"); pidErr == nil {
+	// Check daemon PID file. Sweep-F: canonical path
+	// (~/.force/force.pid) — same flock target the singleton package
+	// writes during daemon start.
+	pidPath := forcepath.PIDFile()
+	if pidData, pidErr := os.ReadFile(pidPath); pidErr == nil {
 		pid, _ := strconv.Atoi(strings.TrimSpace(string(pidData)))
 		if pid > 0 {
 			proc, procErr := os.FindProcess(pid)
@@ -240,16 +244,16 @@ func runDoctor(db *sql.DB, clean bool) {
 				check("daemon running", fmt.Sprintf("PID %d", pid), true)
 			} else {
 				if clean {
-					os.Remove("fleet.pid")
-					advisory("stale fleet.pid", "")
-					fix("stale fleet.pid", fmt.Sprintf("removed stale PID file (PID %d)", pid))
+					os.Remove(pidPath)
+					advisory("stale "+pidPath, "")
+					fix("stale "+pidPath, fmt.Sprintf("removed stale PID file (PID %d)", pid))
 				} else {
-					advisory("stale fleet.pid", fmt.Sprintf("PID %d not running — delete fleet.pid or run with --clean", pid))
+					advisory("stale "+pidPath, fmt.Sprintf("PID %d not running — delete %s or run with --clean", pid, pidPath))
 				}
 			}
 		}
 	} else {
-		fmt.Println("  [INFO] No fleet.pid — daemon is not running")
+		fmt.Printf("  [INFO] No %s — daemon is not running\n", pidPath)
 	}
 
 	fmt.Println()
@@ -593,13 +597,16 @@ func pruneFleet(db *sql.DB, keepDays int, dryRun bool) {
 // Dogs cooldown table. Safe to call while the daemon is stopped.
 // Fix #8e: ctx threads from main's signal-cancellation ctx.
 func purgeFilesystem(ctx context.Context, db *sql.DB) {
-	// Log and telemetry files
-	for _, name := range []string{"fleet.log", "holonet.jsonl", "fleet.pid"} {
+	// Log and telemetry files. Sweep-F: resolve canonical paths via
+	// forcepath. Pre-Sweep-F these were CWD-relative literals; an
+	// operator who launched `force purge` from a different directory
+	// than the daemon never cleaned the real files.
+	for _, name := range []string{forcepath.FleetLog(), forcepath.HolonetEventStream(), forcepath.PIDFile()} {
 		if err := os.Remove(name); err == nil {
 			fmt.Printf("  Deleted %s\n", name)
 		}
 	}
-	rotated, _ := filepath.Glob("holonet-*.jsonl")
+	rotated, _ := filepath.Glob(forcepath.HolonetRotatedPattern())
 	for _, f := range rotated {
 		if err := os.Remove(f); err == nil {
 			fmt.Printf("  Deleted %s\n", f)
@@ -704,7 +711,7 @@ func cmdPurge(ctx context.Context, db *sql.DB, args []string) {
 	confirmed := *confirmFlag
 	// Always print the warning regardless of --confirm (defense-in-depth).
 	fmt.Fprintln(os.Stderr, "WARNING: This will permanently delete:")
-	fmt.Fprintln(os.Stderr, "  - fleet.log and holonet.jsonl log files")
+	fmt.Fprintln(os.Stderr, "  - ~/.force/fleet.log and ~/.force/holonet.jsonl log files")
 	fmt.Fprintln(os.Stderr, "  - All agent worktrees (from disk)")
 	fmt.Fprintln(os.Stderr, "  - All agent branches in registered repositories")
 	fmt.Fprintln(os.Stderr, "  - Dog cooldown timers")
@@ -758,7 +765,7 @@ func cmdHardReset(ctx context.Context, db *sql.DB, args []string) {
 	fmt.Fprintln(os.Stderr, "  - Fleet memories, mail, and escalations")
 	fmt.Fprintln(os.Stderr, "  - Audit log")
 	fmt.Fprintln(os.Stderr, "  - All agent worktrees and branches")
-	fmt.Fprintln(os.Stderr, "  - Log files (fleet.log, holonet.jsonl)")
+	fmt.Fprintln(os.Stderr, "  - Log files (~/.force/fleet.log, ~/.force/holonet.jsonl)")
 	if purgeRepos {
 		fmt.Fprintln(os.Stderr, "  - Repositories and system config (--purge-repos)")
 	} else {

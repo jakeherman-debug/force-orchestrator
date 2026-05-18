@@ -14,9 +14,10 @@ import (
 	"sync"
 	"time"
 
-	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/agents/capabilities"
 	"force-orchestrator/internal/claude"
+	"force-orchestrator/internal/forcepath"
+	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 	"force-orchestrator/internal/telemetry"
 	"force-orchestrator/internal/util"
@@ -672,12 +673,15 @@ Do not re-do work that is already correctly committed.`
 	// closed, returns, and only then does cancelClaude fire.
 	defer close(heartbeatDone)
 
-	// Per-task streaming log — written to fleet-task-<id>.log while Claude runs.
-	// The file is removed on completion so it only exists for in-progress tasks.
-	// `force tail <id>` tails this file to show live output.
+	// Per-task streaming log — written to ~/.force/scratch/fleet-task-<id>.log
+	// while Claude runs. The file is removed on completion so it only
+	// exists for in-progress tasks. `force tail <id>` tails this file
+	// to show live output.
 	// AUDIT-126 (Fix #8d): defer Close + Remove immediately so an early
 	// return / panic cannot leak the FD or the stale log file.
-	taskLogPath := fmt.Sprintf("fleet-task-%d.log", bounty.ID)
+	// Sweep-F: resolves through forcepath.ScratchTaskFile so the daemon
+	// + `force tail <id>` see the same file regardless of CWD.
+	taskLogPath := forcepath.ScratchTaskFile(int(bounty.ID))
 	taskLogFile, _ := os.Create(taskLogPath)
 	var taskWriter io.Writer = io.Discard
 	if taskLogFile != nil {

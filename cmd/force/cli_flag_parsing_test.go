@@ -43,7 +43,10 @@ func buildForceForCLITest(t *testing.T) string {
 func runForceCLI(t *testing.T, bin, tmpHome string, args ...string) (string, string, error) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
+	// Sweep F: subprocess must resolve its DB at `tmpHome/holocron.db`, not
+	// at the canonical ~/.force/holocron.db. FORCE_DIR overrides the
+	// resolver to `tmpHome` so the seed/probe path the test uses lines up.
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome, "FORCE_DIR="+tmpHome)
 	cmd.Dir = tmpHome
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -39,6 +39,7 @@ D13 P2 Wave B authored the per-subsystem pages below. Pages tagged "(planned)" a
 Each stub carries the canonical metadata block plus a `## Status: Stub` H2 + a forward-pointer to the closure report or pattern doc that already covers the design. The stub-vs-allowlist call (D13 P3) lands a stub instead of suppressing the link so the navigation contract holds and the orphan-checker stays clean.
 
 - [`daemon-lifecycle.md`](daemon-lifecycle.md) — D12 daemon lifecycle, drain, supervisor, foreground mode
+- [`state-files.md`](state-files.md) — Sweep F canonical-path resolver (`~/.force/<name>`), `FORCE_DIR` override, Pattern P_CanonicalPaths
 - [`arch-health.md`](arch-health.md) — D9 architecture health report (`docs/arch-health-weights.yaml`)
 - [`onboarding-cli.md`](onboarding-cli.md) — D6 synthetic onboarding CLI
 - [`handoff-docs.md`](handoff-docs.md) — D10 synthetic handoff documentation

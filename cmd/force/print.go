@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"force-orchestrator/internal/agents"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/store"
 )
 
@@ -415,7 +416,8 @@ func printStatus(db *sql.DB) {
 	}
 
 	daemonStatus := "not running"
-	if pidBytes, pidErr := os.ReadFile("fleet.pid"); pidErr == nil {
+	// Sweep-F: canonical PID file (~/.force/force.pid).
+	if pidBytes, pidErr := os.ReadFile(forcepath.PIDFile()); pidErr == nil {
 		pid, _ := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 		if pid > 0 {
 			proc, procErr := os.FindProcess(pid)
@@ -665,7 +667,7 @@ Agent control:
                                          num_commanders, num_investigators, num_auditors,
                                          num_bos, num_isb, num_senate (D4),
                                          max_concurrent, spawn_delay_ms, batch_size, max_turns
-Logs written to fleet.log | Telemetry written to holonet.jsonl
+Logs written to ~/.force/fleet.log | Telemetry written to ~/.force/holonet.jsonl
 
 Task management:
   add [--priority N] [--plan-only] [--type Feature|Investigate|Audit] <description>

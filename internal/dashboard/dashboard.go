@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"force-orchestrator/internal/forcepath"
 )
 
 //go:embed static
@@ -75,8 +77,11 @@ func RunDashboardCtx(ctx context.Context, db *sql.DB, port int) {
 	// stamps resolved_at + resolution_note via store.ResolveConflictTicket.
 	mux.HandleFunc("/api/conflicts/tickets", handleConflictsTickets(db))
 	mux.HandleFunc("/api/conflicts/tickets/", handleConflictsTickets(db))
-	mux.HandleFunc("/api/events", handleHolonetStream("holonet.jsonl"))
-	mux.HandleFunc("/api/fleet-log", handleFleetLogStream("fleet.log"))
+	// Sweep-F: streams resolve through forcepath so the bundled
+	// dashboard reads the canonical event stream / fleet log regardless
+	// of which directory the daemon was launched from.
+	mux.HandleFunc("/api/events", handleHolonetStream(forcepath.HolonetEventStream()))
+	mux.HandleFunc("/api/fleet-log", handleFleetLogStream(forcepath.FleetLog()))
 	mux.HandleFunc("/api/dogs", handleDogsList(db))
 	mux.HandleFunc("/api/dogs/", handleDogsRun(db))
 	mux.HandleFunc("/api/pr-comments/", handlePRCommentsSubroutes(db))

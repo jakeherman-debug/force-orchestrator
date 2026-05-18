@@ -14,6 +14,7 @@ import (
 
 	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
+	"force-orchestrator/internal/forcepath"
 	igit "force-orchestrator/internal/git"
 	"force-orchestrator/internal/store"
 )
@@ -816,7 +817,12 @@ func dogDBVacuum(db *sql.DB, logger interface{ Printf(string, ...any) }) error {
 const holonetMaxBytes = 50 * 1024 * 1024 // 50 MB
 
 func dogHolonetRotate(logger interface{ Printf(string, ...any) }) error {
-	const path = "holonet.jsonl"
+	// Sweep-F: rotate the canonical event stream (~/.force/holonet.jsonl)
+	// in place — archives land next to the source so `force purge`'s
+	// `holonet-*.jsonl` glob still finds them. Pre-canonical builds
+	// rotated CWD-relative files; an operator whose daemon CWD changed
+	// would orphan the archives.
+	path := forcepath.HolonetEventStream()
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil
@@ -826,7 +832,7 @@ func dogHolonetRotate(logger interface{ Printf(string, ...any) }) error {
 	}
 	// Use millisecond precision to prevent same-second filename collisions.
 	stamp := time.Now().UTC().Format("20060102-150405.000")
-	archivePath := filepath.Join("holonet-" + stamp + ".jsonl")
+	archivePath := filepath.Join(filepath.Dir(path), "holonet-"+stamp+".jsonl")
 	if renErr := os.Rename(path, archivePath); renErr != nil {
 		return renErr
 	}

@@ -3,17 +3,23 @@ package store
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"force-orchestrator/internal/forcepath"
 )
 
 // ── InitHolocron ─────────────────────────────────────────────────────────────
 
 func TestInitHolocron_CreatesDatabase(t *testing.T) {
+	// Sweep F: the DB now lives at forcepath.HolocronFile() rather than
+	// in CWD. Point FORCE_DIR at a temp dir so the test stays hermetic.
 	dir := t.TempDir()
-	orig, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(orig)
+	t.Setenv("FORCE_DIR", dir)
+	t.Setenv("FORCE_HOLOCRON_DSN", "")
+	forcepath.ResetDirCacheForTests()
+	t.Cleanup(forcepath.ResetDirCacheForTests)
 
 	db := InitHolocron()
 	if db == nil {
@@ -21,8 +27,8 @@ func TestInitHolocron_CreatesDatabase(t *testing.T) {
 	}
 	db.Close()
 
-	if _, statErr := os.Stat("holocron.db"); statErr != nil {
-		t.Error("expected holocron.db to be created")
+	if _, statErr := os.Stat(filepath.Join(dir, "holocron.db")); statErr != nil {
+		t.Errorf("expected holocron.db to be created at %s: %v", filepath.Join(dir, "holocron.db"), statErr)
 	}
 }
 
