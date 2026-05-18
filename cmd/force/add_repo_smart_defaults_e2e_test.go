@@ -68,10 +68,19 @@ func makeStubGitRepo(t *testing.T, path, desc string) {
 
 // runForceCmd runs the binary with workdir `cwd` (so holocron.db lands
 // there) and returns stdout/stderr/err.
+//
+// Sweep-E (D12): the subprocess inherits LIVE_HAIKU_DISABLED=1 so the
+// add-repo description-derivation path uses the regex scrape (not a
+// real Claude call). Pre-Sweep-E the regex was the only path and the
+// env var didn't matter; post-Sweep-E without this set, the E2E tests
+// would attempt a real Claude call from inside the test binary and
+// either hang (no network) or charge an LLM token. Tests that want
+// to exercise the LLM path stub the runner in-process.
 func runForceCmd(t *testing.T, bin, cwd string, stdin string, args ...string) (string, string, error) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "LIVE_HAIKU_DISABLED=1")
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}

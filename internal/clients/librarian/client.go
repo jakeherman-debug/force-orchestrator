@@ -197,6 +197,24 @@ type Client interface {
 	// pattern). Returns the rendered Markdown body; callers (the dog
 	// + the future operator-CLI) write it to disk.
 	BuildArchitectureDoc(ctx context.Context, repoSpec string) (ArchitectureDoc, error)
+
+	// GenerateRepoDescription reads README + a small commit digest
+	// from the given repo and produces a single-paragraph description
+	// (≤ ReadmeDescriptionMaxLen characters after trim) suitable for
+	// the Repositories table. LIVE_HAIKU-gated; falls back to a
+	// deterministic stub (regex-based first-paragraph scrape via
+	// ScrapeReadmeFirstParagraph) when disabled or on LLM failure.
+	//
+	// The repoPath argument is an absolute filesystem path (the
+	// `force add-repo` smart-default codepath passes the validated
+	// path from filepath.Abs — there is no registered-repo lookup
+	// here because add-repo is the registration step).
+	//
+	// Returns ("", nil) when the repo has no usable README AND the
+	// LLM produced no description; empty is acceptable per the
+	// existing add-repo semantics (the Repositories.description
+	// column allows blank).
+	GenerateRepoDescription(ctx context.Context, repoPath string) (string, error)
 }
 
 // CommitsDigest is the per-repo recent-commits view returned by

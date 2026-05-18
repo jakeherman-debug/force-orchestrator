@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 
+	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/store"
 )
 
@@ -52,7 +53,7 @@ func cmdAddRepos(db *sql.DB, args []string) {
 	assumeYes := fs.Bool("assume-yes", false, "Skip the confirmation prompt (unattended)")
 	assumeYesShort := fs.Bool("y", false, "Alias for --assume-yes")
 	helped, perr := parseSubcommandFlags(fs, args, "add-repos",
-		"Bulk-register every git repo found in the immediate subdirectories of <directory>. Each repo is added with smart-default name (git remote tail or basename) and description (README first paragraph); already-registered repos are skipped.",
+		"Bulk-register every git repo found in the immediate subdirectories of <directory>. Each repo is added with smart-default name (git remote tail or basename) and description (Librarian LLM-generated from README, falling back to a regex scrape when LIVE_HAIKU is disabled); already-registered repos are skipped.",
 		[]flagDoc{
 			{Name: "--assume-yes, -y", Desc: "skip the preview confirmation prompt"},
 			{Name: "--help, -h", Desc: "show this help and exit"},
@@ -94,6 +95,12 @@ func cmdAddRepos(db *sql.DB, args []string) {
 		os.Exit(1)
 	}
 
+	// Sweep-E (D12): construct the librarian Client once for the whole
+	// batch. Each candidate's description derivation reuses the same
+	// in-process client (no per-repo allocation overhead, and the
+	// transcript rows for each LLM call are uniformly attributed).
+	lib := librarian.NewInProcess(db)
+
 	// Collect candidate repos: every immediate subdir that contains a
 	// `.git/` entry (file or directory — git submodules use a `.git`
 	// FILE pointing back to the parent).
@@ -113,7 +120,12 @@ func cmdAddRepos(db *sql.DB, args []string) {
 		}
 		entry := repoBatchEntry{Path: repoPath}
 		entry.Name = deriveRepoName(repoPath)
-		entry.Description = deriveRepoDescription(repoPath)
+		// Sweep-E (D12): route batch descriptions through the
+		// librarian's GenerateRepoDescription so the LLM-backed
+		// path handles them too. The librarian falls back to the
+		// regex scrape when LIVE_HAIKU is disabled, matching the
+		// pre-Sweep-E behaviour for the offline operator.
+		entry.Description = deriveRepoDescriptionWithLibrarian(repoPath, lib)
 		if entry.Name == "" {
 			entry.Skip = true
 			entry.SkipReason = "could not derive name"
@@ -182,6 +194,7 @@ func cmdAddRepos(db *sql.DB, args []string) {
 			Path:        c.Path,
 			Description: c.Description,
 			Out:         os.Stdout,
+			Librarian:   lib,
 		})
 		if err != nil {
 			fmt.Printf("  ERROR: %v\n", err)

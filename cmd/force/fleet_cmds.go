@@ -1181,10 +1181,10 @@ func cmdAddRepo(db *sql.DB, args []string) {
 
 	fs := flag.NewFlagSet("add-repo", flag.ContinueOnError)
 	nameFlag := fs.String("name", "", "Override the auto-derived name (defaults to git remote tail or basename)")
-	descFlag := fs.String("description", "", "Override the auto-derived description (defaults to README.md first paragraph)")
+	descFlag := fs.String("description", "", "Override the auto-derived description (LLM-generated from README via the Librarian; set LIVE_HAIKU_DISABLED=1 to use the regex fallback)")
 	pathFlag := fs.String("path", "", "Repo path (alternative to passing the path positionally)")
 	helped, perr := parseSubcommandFlags(fs, args, "add-repo",
-		"Register a git repository with the orchestrator. Name and description auto-derive from the repo when omitted (git remote tail / README first paragraph). Validates the path is a git repo, populates remote_url + default_branch, and queues FindPRTemplate.",
+		"Register a git repository with the orchestrator. Name and description auto-derive from the repo when omitted (git remote tail / Librarian LLM-generated description, with regex fallback when LIVE_HAIKU is disabled). Validates the path is a git repo, populates remote_url + default_branch, and queues FindPRTemplate.",
 		[]flagDoc{
 			{Name: "--name <name>", Desc: "override auto-derived name"},
 			{Name: "--description <desc>", Desc: "override auto-derived description"},
@@ -1244,6 +1244,12 @@ func cmdAddRepo(db *sql.DB, args []string) {
 		Path:        repoRegPath,
 		Description: desc,
 		Out:         os.Stdout,
+		// Sweep-E (D12): wire the librarian so the description
+		// derivation runs through Claude when LIVE_HAIKU is enabled.
+		// The in-process backing is the only Client implementation
+		// available from the CLI surface; daemon-side callers route
+		// through the same factory.
+		Librarian: librarian.NewInProcess(db),
 	}); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -1259,6 +1265,11 @@ type repoRegistration struct {
 	Path        string    // required
 	Description string    // optional; auto-derived from README if empty
 	Out         io.Writer // os.Stdout in normal use; tests can capture
+	// Librarian is the Sweep-E (D12) LLM-backed description seam.
+	// When non-nil + Description is empty + LIVE_HAIKU is enabled, the
+	// description derives from the librarian's Claude call instead of
+	// the regex scrape. Nil falls back to the deterministic scrape.
+	Librarian librarian.Client
 }
 
 // registerRepo runs the full add-repo write pipeline for one repo. Returns
@@ -1315,7 +1326,13 @@ func registerRepo(db *sql.DB, r *repoRegistration) error {
 	}
 	desc := r.Description
 	if desc == "" {
-		desc = deriveRepoDescription(absPath)
+		// Sweep-E (D12): the librarian's GenerateRepoDescription runs
+		// the LLM-backed path (LIVE_HAIKU-gated) and falls back to the
+		// deterministic regex scrape on LIVE_HAIKU_DISABLED / LLM
+		// failure. r.Librarian is the operator-injected seam — when
+		// nil (tests, early-boot CLI paths), the helper falls back to
+		// the pre-Sweep-E regex-only behaviour.
+		desc = deriveRepoDescriptionWithLibrarian(absPath, r.Librarian)
 	}
 
 	store.AddRepo(db, name, absPath, desc)

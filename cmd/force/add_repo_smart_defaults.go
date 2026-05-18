@@ -24,14 +24,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"force-orchestrator/internal/clients/librarian"
 	igit "force-orchestrator/internal/git"
 )
 
 // repoDescriptionMaxLen caps derived descriptions. Long enough to be useful
 // in dashboard tables and `force repos` output, short enough that the
 // operator can still read the row. The trailing "…" indicates truncation.
-const repoDescriptionMaxLen = 200
+//
+// Sweep-E (D12): the canonical constant lives in the librarian package
+// (librarian.ReadmeDescriptionMaxLen). This local alias is kept so the
+// existing add_repo_smart_defaults_test.go assertions keep compiling
+// without a wholesale rewrite — both names now refer to the same
+// truncation cap.
+const repoDescriptionMaxLen = librarian.ReadmeDescriptionMaxLen
+
+// generateRepoDescriptionTimeout caps the librarian's LLM-backed
+// derivation call from the add-repo flow. Operators waiting on
+// `force add-repo` should never spin for longer than this before the
+// regex fallback fires.
+const generateRepoDescriptionTimeout = 60 * time.Second
 
 // addRepoBoolFlags lists the boolean flags accepted by the add-repo /
 // add-repos handlers — needed so reorderFlagsFirst doesn't grab the
@@ -151,225 +165,61 @@ func repoNameFromRemoteURL(url string) string {
 	return url
 }
 
-// deriveRepoDescription extracts a one-paragraph description from the
-// repo's README. Searches for README.md / README / readme.md (case-
-// insensitive) at the repo root. Skips frontmatter (`---\n...\n---`),
-// HTML comments, badge lines (lines starting with `[![` or `![`),
-// blank lines, and Markdown headings. Returns the first remaining
-// non-blank paragraph, truncated to 200 chars (with "…" if truncated).
-// Returns empty string if no README found or no usable paragraph.
+// deriveRepoDescription is the legacy no-librarian shim retained for
+// callers / tests that don't have a `librarian.Client` in scope. It
+// delegates to scrapeReadmeFirstParagraph — the deterministic regex
+// scrape that lived here pre-Sweep-E. Production callers MUST use
+// deriveRepoDescriptionWithLibrarian so the LLM-backed path runs.
 func deriveRepoDescription(absPath string) string {
+	return scrapeReadmeFirstParagraph(absPath)
+}
+
+// deriveRepoDescriptionWithLibrarian is the Sweep-E (D12) entry-point.
+// It routes through the librarian's GenerateRepoDescription
+// (LLM-backed; LIVE_HAIKU-gated) and falls back to the deterministic
+// regex scrape when:
+//
+//   - lib is nil (test paths that don't wire a client),
+//   - the LLM returns an error (logged inside the librarian),
+//   - the LLM returns an empty string (no description), OR
+//   - the LLM returns the "(no description)" sentinel (which the
+//     sanitiser maps to "").
+//
+// The 60-second timeout matches generateRepoDescriptionTimeout so the
+// operator-facing `force add-repo` flow never hangs.
+func deriveRepoDescriptionWithLibrarian(absPath string, lib librarian.Client) string {
 	if absPath == "" {
 		return ""
 	}
-	readmePath := findReadme(absPath)
-	if readmePath == "" {
-		return ""
+	if lib == nil {
+		return scrapeReadmeFirstParagraph(absPath)
 	}
-	data, err := os.ReadFile(readmePath)
-	if err != nil {
-		return ""
+	ctx, cancel := context.WithTimeout(context.Background(), generateRepoDescriptionTimeout)
+	defer cancel()
+	desc, err := lib.GenerateRepoDescription(ctx, absPath)
+	if err != nil || strings.TrimSpace(desc) == "" {
+		return scrapeReadmeFirstParagraph(absPath)
 	}
-	return extractFirstParagraph(string(data))
+	return desc
 }
 
-// findReadme walks the immediate children of dir and returns the first one
-// whose name matches a README variant (case-insensitive). README.md is
-// preferred over README, but if both exist we take whichever ReadDir lists
-// first — operationally good enough; the helper doesn't claim a strict
-// priority since the README content is what matters.
-func findReadme(dir string) string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-	// Two-pass so "README.md" wins over "README" / "readme" if both exist.
-	var fallback string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		lower := strings.ToLower(name)
-		if lower == "readme.md" || lower == "readme.markdown" {
-			return filepath.Join(dir, name)
-		}
-		if lower == "readme" || lower == "readme.txt" || lower == "readme.rst" {
-			if fallback == "" {
-				fallback = filepath.Join(dir, name)
-			}
-		}
-	}
-	return fallback
+// scrapeReadmeFirstParagraph is the regex-based deterministic
+// description scraper preserved as the LIVE_HAIKU-disabled /
+// LLM-failure fallback. Thin re-export of
+// librarian.ScrapeReadmeFirstParagraph so the cmd/force test suite
+// (TestDeriveRepoDescription_*, TestExtractFirstParagraph_*) keeps
+// asserting on the same byte-for-byte shape it did pre-Sweep-E.
+func scrapeReadmeFirstParagraph(absPath string) string {
+	return librarian.ScrapeReadmeFirstParagraph(absPath)
 }
 
-// extractFirstParagraph parses README markdown text and returns the first
-// non-blank paragraph after skipping:
-//   - YAML frontmatter (leading `---\n...\n---`)
-//   - HTML comments (`<!-- ... -->`, possibly multi-line)
-//   - badge / image lines (`[![...]` or `![...`)
-//   - blank lines
-//   - Markdown headings (`#`, `##`, etc.)
-//   - Horizontal rules (`---`, `***`, `___`)
-//
-// The returned paragraph has its internal newlines folded to single spaces
-// and is truncated to repoDescriptionMaxLen (with a trailing `…` if
-// truncation happened). Returns "" when no usable paragraph exists.
-func extractFirstParagraph(content string) string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-
-	// Strip YAML frontmatter.
-	if strings.HasPrefix(content, "---\n") {
-		// Find the closing `---` on its own line.
-		rest := content[4:]
-		if i := strings.Index(rest, "\n---\n"); i != -1 {
-			content = rest[i+5:]
-		} else if strings.HasSuffix(rest, "\n---") {
-			content = ""
-		}
-	}
-
-	// Strip HTML comments (greedy across lines).
-	for {
-		start := strings.Index(content, "<!--")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(content[start:], "-->")
-		if end == -1 {
-			content = content[:start]
-			break
-		}
-		content = content[:start] + content[start+end+3:]
-	}
-
-	lines := strings.Split(content, "\n")
-
-	// Walk lines, accumulating the first usable paragraph. A "paragraph"
-	// is a run of consecutive non-skipped non-blank lines; the run ends at
-	// a blank line or end of file.
-	var (
-		para  []string
-		seen  bool
-	)
-	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if line == "" {
-			if seen {
-				break
-			}
-			continue
-		}
-		if isSkippableReadmeLine(line) {
-			// A skippable line still ends the paragraph if we'd already
-			// collected text — treat it like a paragraph separator.
-			if seen {
-				break
-			}
-			continue
-		}
-		seen = true
-		para = append(para, line)
-	}
-	if len(para) == 0 {
-		return ""
-	}
-	joined := strings.Join(para, " ")
-	// Collapse interior whitespace runs to a single space.
-	joined = collapseWhitespace(joined)
-	joined = strings.TrimSpace(joined)
-	if joined == "" {
-		return ""
-	}
-
-	// Truncate. Use rune-aware slicing so multi-byte chars don't get cut
-	// in the middle.
-	runes := []rune(joined)
-	if len(runes) > repoDescriptionMaxLen {
-		runes = runes[:repoDescriptionMaxLen]
-		// Trim trailing whitespace before adding the ellipsis so we don't
-		// produce "foo …".
-		for len(runes) > 0 && (runes[len(runes)-1] == ' ' || runes[len(runes)-1] == '\t') {
-			runes = runes[:len(runes)-1]
-		}
-		return string(runes) + "…"
-	}
-	return string(runes)
-}
-
-// isSkippableReadmeLine returns true for headings, horizontal rules, badge
-// lines, and lone image lines. The caller has already stripped the line's
-// outer whitespace.
-func isSkippableReadmeLine(line string) bool {
-	if line == "" {
-		return true
-	}
-	// Headings: `#`, `##`, … (Setext-style "===" / "---" underlines are
-	// rare in modern READMEs and would be eaten by the HR check below
-	// anyway).
-	if strings.HasPrefix(line, "#") {
-		return true
-	}
-	// Horizontal rules: `---`, `***`, `___` (3+ of the same char, possibly
-	// with spaces between). Cheap check: if every non-space char is the
-	// same and length >= 3.
-	if isHorizontalRule(line) {
-		return true
-	}
-	// Badge lines: `[![...]...]` or `![...]...` — both forms are images
-	// or linked images, conventionally CI/coverage badges at the top of a
-	// README. We skip the WHOLE line even if there's trailing text after
-	// the badge (the typical "[![Build][x]][y] [![Cov][a]][b]" pattern).
-	if strings.HasPrefix(line, "[![") || strings.HasPrefix(line, "![") {
-		return true
-	}
-	return false
-}
-
-// isHorizontalRule reports whether the trimmed line is a Markdown
-// horizontal rule (`---`, `***`, `___`, with at least 3 identical chars
-// and only spaces between them).
-func isHorizontalRule(line string) bool {
-	if len(line) < 3 {
-		return false
-	}
-	var pivot byte
-	count := 0
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if c == ' ' || c == '\t' {
-			continue
-		}
-		if c != '-' && c != '*' && c != '_' {
-			return false
-		}
-		if pivot == 0 {
-			pivot = c
-		} else if c != pivot {
-			return false
-		}
-		count++
-	}
-	return count >= 3
-}
-
-// collapseWhitespace replaces every run of whitespace (space, tab,
-// newline) with a single ASCII space. Used after joining paragraph lines
-// so the result reads like a single-line description.
-func collapseWhitespace(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	prevSpace := false
-	for _, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			if !prevSpace {
-				b.WriteByte(' ')
-				prevSpace = true
-			}
-			continue
-		}
-		b.WriteRune(r)
-		prevSpace = false
-	}
-	return b.String()
-}
+// findReadme / extractFirstParagraph / isSkippableReadmeLine /
+// isHorizontalRule / collapseWhitespace are re-exports of the shared
+// librarian helpers. Kept here under their old names so the existing
+// cmd/force unit tests compile unchanged; the canonical
+// implementations live in internal/clients/librarian/readme.go.
+func findReadme(dir string) string                { return librarian.FindReadme(dir) }
+func extractFirstParagraph(content string) string { return librarian.ExtractFirstParagraph(content) }
+func isSkippableReadmeLine(line string) bool      { return librarian.IsSkippableReadmeLine(line) }
+func isHorizontalRule(line string) bool           { return librarian.IsHorizontalRule(line) }
+func collapseWhitespace(s string) string          { return librarian.CollapseWhitespace(s) }

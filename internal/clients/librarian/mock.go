@@ -43,6 +43,7 @@ type MockClient struct {
 	RefreshSenatorMemoryFn      func(ctx context.Context, repo string) (SenatorDigest, error)
 	BuildRepoDigestFn           func(ctx context.Context, repoSpec string) (RepoDigest, error)
 	BuildArchitectureDocFn      func(ctx context.Context, repoSpec string) (ArchitectureDoc, error)
+	GenerateRepoDescriptionFn   func(ctx context.Context, repoPath string) (string, error)
 
 	// D3 Phase 3 — Librarian → EC handoff state. Candidates added via
 	// EmitCandidate live here; ListPendingCandidates returns the slice.
@@ -68,6 +69,8 @@ type MockClient struct {
 	BuildDigestCalls   []string
 	// D10 — BuildArchitectureDoc call recording.
 	BuildArchitectureCalls []string
+	// Sweep-E (D12) — GenerateRepoDescription call recording.
+	GenerateRepoDescriptionCalls []string
 }
 
 // MockGetWeightedCall records one GetWeightedMemories invocation.
@@ -381,6 +384,19 @@ func (m *MockClient) BuildArchitectureDoc(ctx context.Context, repoSpec string) 
 	}, nil
 }
 
+// GenerateRepoDescription records the call and (default) returns "".
+// Tests override via GenerateRepoDescriptionFn to fixture the
+// LLM-backed path deterministically.
+func (m *MockClient) GenerateRepoDescription(ctx context.Context, repoPath string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.GenerateRepoDescriptionCalls = append(m.GenerateRepoDescriptionCalls, repoPath)
+	if m.GenerateRepoDescriptionFn != nil {
+		return m.GenerateRepoDescriptionFn(ctx, repoPath)
+	}
+	return "", nil
+}
+
 // Reset clears all recorded calls and fixture state, restoring NextWriteID
 // to 1. Useful between sub-tests inside the same test function.
 func (m *MockClient) Reset() {
@@ -405,6 +421,7 @@ func (m *MockClient) Reset() {
 	m.RefreshDigestCalls = nil
 	m.BuildDigestCalls = nil
 	m.BuildArchitectureCalls = nil
+	m.GenerateRepoDescriptionCalls = nil
 }
 
 // Compile-time assertion: *MockClient satisfies the Client interface.
