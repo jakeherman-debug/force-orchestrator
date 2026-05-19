@@ -7,15 +7,15 @@ package apiextract
 import "force-orchestrator/internal/store"
 
 // ProviderExtractor is implemented by each language/framework extractor.
-// A single extractor handles one framework (e.g. Spring annotations, Ktor DSL)
-// and is responsible for understanding its own file extensions.
+// A single extractor handles one framework (e.g. Spring annotations, Ktor DSL,
+// Express routes, NestJS decorators) and is registered by the scanner.
 type ProviderExtractor interface {
 	// Kind returns the api_kind value written to CrossRepoAPIs rows
 	// (e.g. "http_route").
 	Kind() string
 
 	// ExtractorName returns the extractor label written to CrossRepoAPIs rows
-	// (e.g. "spring-annotation", "ktor-routing").
+	// (e.g. "spring-annotation", "ktor-routing", "express-app").
 	ExtractorName() string
 
 	// Extract parses content (a single source file) and returns all API

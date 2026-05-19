@@ -1,0 +1,8 @@
+[
+  {"APIIdentifier": "GET /api/v1/users",      "SourceLine": 7,  "Extractor": "nestjs-decorator"},
+  {"APIIdentifier": "GET /api/v1/users/:id",  "SourceLine": 12, "Extractor": "nestjs-decorator"},
+  {"APIIdentifier": "POST /api/v1/users",     "SourceLine": 17, "Extractor": "nestjs-decorator"},
+  {"APIIdentifier": "PUT /api/v1/users/:id",  "SourceLine": 22, "Extractor": "nestjs-decorator"},
+  {"APIIdentifier": "DELETE /api/v1/users/:id","SourceLine": 27, "Extractor": "nestjs-decorator"},
+  {"APIIdentifier": "GET /health",            "SourceLine": 35, "Extractor": "nestjs-decorator"}
+]
