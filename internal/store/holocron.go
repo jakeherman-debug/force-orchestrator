@@ -314,6 +314,25 @@ func DogMarkHeartbeat(db *sql.DB, name string) {
 	db.Exec(`UPDATE Dogs SET heartbeat_at = datetime('now') WHERE name = ?`, name)
 }
 
+// DogResetCooldown sets last_run_at to the epoch (effectively zero) for the
+// named dog so that the next inquisitor tick treats it as overdue and runs it
+// immediately, regardless of when it last ran.
+//
+// Used as a lightweight "merge-event trigger": the caller (e.g. a post-merge
+// hook in pr_flow.go) calls DogResetCooldown("architecture-doc-render") after
+// a convoy draft PR merges, so the renderer fires on the very next dog cycle
+// rather than waiting up to an hour.
+//
+// If no Dogs row exists yet (the dog hasn't run before), the INSERT creates a
+// sentinel row with last_run_at='1970-01-01 00:00:00' which the cooldown
+// check treats as infinitely overdue. Idempotent: calling twice leaves the
+// same sentinel.
+func DogResetCooldown(db *sql.DB, name string) {
+	db.Exec(`INSERT INTO Dogs (name, last_run_at, run_count)
+		VALUES (?, '1970-01-01 00:00:00', 0)
+		ON CONFLICT(name) DO UPDATE SET last_run_at = '1970-01-01 00:00:00'`, name)
+}
+
 // DogHeartbeat returns the most recent heartbeat_at for a dog (empty if
 // never recorded / pre-migration DB).
 func DogHeartbeat(db *sql.DB, name string) string {

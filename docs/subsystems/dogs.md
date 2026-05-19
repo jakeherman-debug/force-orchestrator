@@ -115,9 +115,13 @@ The 43 dogs grouped by purpose, with cooldowns. Order within each group reflects
 
 - `holdout-snapshot` (24 h) — computes a deterministic SHA-256 fleet-state hash (task distribution by status, active agent counts by type, distinct model tiers from `TreatmentSpecs`) and writes it into `GlobalHoldouts.fleet_state_hash` for every active holdout row. Pure DB reads + one UPDATE per active holdout; no LLM calls or external I/O.
 
+**T+30 verdict (D17 P2B):**
+
+- `t30-verdict` (24 h) — scans `ExperimentRuns` for rows whose `completed_at` is 30–31 days ago and `t30_verdict_sent_at` is empty. Emits one operator mail per eligible row asking "keep or deprecate?" for the handoff-synthesis experiment. Stamps `t30_verdict_sent_at` after sending so subsequent dog ticks are no-ops. Only `holdout` and `paired_real` modes receive verdict mails; shadow runs are excluded.
+
 ## Invariants
 
-1. **Inventory count is asserted.** `TestListDogs` (`internal/agents/dogs_test.go`) requires exactly 43 dogs and names the load-bearing subset; adding a dog requires updating the test in the same commit.
+1. **Inventory count is asserted.** `TestListDogs` (`internal/agents/dogs_test.go`) requires exactly 44 dogs and names the load-bearing subset; adding a dog requires updating the test in the same commit.
 2. **`spend-burn-watch` runs first; `task-spend-watch` runs second.** Both cost defenses must land before any subsequent dog or any subsequent claim cycle continues spending tokens.
 3. **E-stop short-circuits all dogs.** AUDIT-106 / Fix #1: no dogs run during emergency halt. The whole point of e-stop is to stop activity that costs money.
 4. **Per-tick context is cancellable from the daemon.** `SpawnInquisitor` derives `tickCtx` from the daemon `ctx`; per-dog ctx derives from `tickCtx`. Daemon SIGINT/SIGTERM cancels in-flight dog work.

@@ -272,23 +272,35 @@ func postHandoffSynthesisForBranch(ctx context.Context, db *sql.DB, convoy *stor
 	// system prompt forbids the model from doing this itself.
 	body = appendHandoffSynthesisFooter(body, convoy.Name, experimentArm)
 
-	// Post via gh.
+	// Post via gh REST API (D17 P2B): switch from `gh pr comment` to
+	// `gh api POST repos/{repo}/issues/{pr}/comments` so the returned
+	// comment ID is captured and stored in PRHandoffSyntheses.comment_id.
+	// ghRepo must be non-empty for the API path to be valid; fall back to
+	// PostIssueComment (no ID) when we can't derive the owner/name.
 	ghc := newGHClient()
 	ghRepo := deriveGHRepoFromRemoteURL(repo.RemoteURL)
-	if err := ghc.PostIssueComment(repo.LocalPath, ghRepo, ab.DraftPRNumber, body); err != nil {
-		return fmt.Errorf("gh pr comment: %w", err)
+	var capturedCommentID int64
+	if ghRepo != "" {
+		id, postErr := ghc.PostIssueCommentGetID(repo.LocalPath, ghRepo, ab.DraftPRNumber, body)
+		if postErr != nil {
+			return fmt.Errorf("gh api post comment: %w", postErr)
+		}
+		capturedCommentID = id
+	} else {
+		// No owner/name available (e.g. file:// remote in tests) — fall
+		// back to the legacy subcommand which doesn't surface the ID.
+		if err := ghc.PostIssueComment(repo.LocalPath, ghRepo, ab.DraftPRNumber, body); err != nil {
+			return fmt.Errorf("gh pr comment: %w", err)
+		}
 	}
 
-	// Record the audit row. CommentID is left at 0 — gh's
-	// PostIssueComment doesn't surface the new comment's REST ID via
-	// the `gh pr comment` subcommand. A future iteration that needs
-	// the ID can switch to `gh api repos/.../issues/.../comments`
-	// directly; the column already exists.
+	// Record the audit row with the captured REST comment ID.
 	if _, err := store.InsertPRHandoffSynthesis(db, store.PRHandoffSynthesis{
 		ConvoyID:      convoy.ID,
 		PRURL:         ab.DraftPRURL,
 		PostedAt:      store.NowSQLite(),
 		ExperimentArm: experimentArm,
+		CommentID:     capturedCommentID,
 	}); err != nil {
 		// Posted comment + missing audit row is preferable to the
 		// reverse — log and continue. The dashboard will not show
@@ -296,8 +308,8 @@ func postHandoffSynthesisForBranch(ctx context.Context, db *sql.DB, convoy *stor
 		logger.Printf("PRHandoffSynthesis: InsertPRHandoffSynthesis(%d, %s) failed (%v) — comment is posted but audit row missing",
 			convoy.ID, ab.DraftPRURL, err)
 	}
-	logger.Printf("PRHandoffSynthesis: posted reviewer narrative on %s/%s PR #%d",
-		ab.Repo, ab.AskBranch, ab.DraftPRNumber)
+	logger.Printf("PRHandoffSynthesis: posted reviewer narrative on %s/%s PR #%d (comment_id=%d)",
+		ab.Repo, ab.AskBranch, ab.DraftPRNumber, capturedCommentID)
 	return nil
 }
 

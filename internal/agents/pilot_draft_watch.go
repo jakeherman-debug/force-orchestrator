@@ -164,6 +164,30 @@ func transitionConvoyToShipped(ctx context.Context, db *sql.DB, convoyID int, co
 		fmt.Sprintf("Convoy '%s' draft PR(s) merged to main. Ask-branch cleanup has been queued.", convoyName),
 		0, store.MailTypeInfo)
 	logger.Printf("draft-pr-watch: convoy %d → Shipped, cleanup queued", convoyID)
+
+	// D17 P2B — merge-event trigger for dogArchitectureDocRender.
+	// Check whether any of the convoy's repos have handoff_synthesis_enabled=1.
+	// If so, reset the dog's cooldown so it fires on the very next inquisitor
+	// tick rather than waiting up to an hour. The dog itself re-reads the flag
+	// at run time, so this is just a nudge — a false positive is harmless (one
+	// extra dog run that does nothing for non-enabled repos).
+	nudgeArchitectureDocRenderIfEnabled(db, convoyID, logger)
+}
+
+// nudgeArchitectureDocRenderIfEnabled resets the architecture-doc-render dog's
+// cooldown when at least one of the convoy's repos has handoff_synthesis_enabled=1.
+// Called post-merge so the ARCHITECTURE.md renderer fires promptly on the next
+// dog cycle, satisfying the D10 roadmap "triggered on PR merge" requirement.
+// Non-fatal: a failure to nudge is logged but does not roll back the merge.
+func nudgeArchitectureDocRenderIfEnabled(db *sql.DB, convoyID int, logger interface{ Printf(string, ...any) }) {
+	branches := store.ListConvoyAskBranches(db, convoyID)
+	for _, ab := range branches {
+		if store.HandoffSynthesisEnabled(db, ab.Repo) {
+			store.DogResetCooldown(db, "architecture-doc-render")
+			logger.Printf("draft-pr-watch: convoy %d has repo %q with handoff_synthesis_enabled — architecture-doc-render cooldown reset", convoyID, ab.Repo)
+			return
+		}
+	}
 }
 
 func transitionConvoyToAbandoned(ctx context.Context, db *sql.DB, convoyID int, convoyName string, lib librarian.Client, logger interface{ Printf(string, ...any) }) {

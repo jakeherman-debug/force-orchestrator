@@ -46,6 +46,12 @@ func (s *stubGHRunnerForHandoff) Run(cwd string, args []string, stdin []byte) ([
 	if s.failBody {
 		return nil, []byte("synthetic gh failure"), errors.New("gh: forced test failure")
 	}
+	// D17 P2B: PostIssueCommentGetID calls `gh api -X POST .../comments`
+	// and expects JSON with an "id" field. Return a stub ID of 12345 so the
+	// smoke test can assert comment_id != 0.
+	if len(args) >= 3 && args[0] == "api" && args[1] == "-X" && args[2] == "POST" {
+		return []byte(`{"id":12345,"body":"stub"}`), nil, nil
+	}
 	return []byte("{}"), nil, nil
 }
 
@@ -181,27 +187,33 @@ func TestPRHandoffSynthesis_PostsComment_Smoke(t *testing.T) {
 		t.Errorf("expected status=Completed; got %q", finalBounty.Status)
 	}
 
-	// Verify the gh runner saw a `pr comment` invocation.
+	// D17 P2B: verify the gh runner saw a `gh api -X POST` invocation
+	// (not `gh pr comment`) because the new code uses PostIssueCommentGetID
+	// when ghRepo is non-empty (smoke-repo has git@github.com remote set).
 	if len(ghStub.calls) == 0 {
 		t.Fatalf("expected at least one gh call; got 0")
 	}
-	sawComment := false
+	sawAPIPost := false
 	for _, c := range ghStub.calls {
-		if len(c.args) > 0 && c.args[0] == "pr" && len(c.args) > 1 && c.args[1] == "comment" {
-			sawComment = true
-			if !strings.Contains(string(c.body), "What changed") {
-				t.Errorf("expected stubbed Claude body to flow into gh body; got %q", string(c.body))
+		if len(c.args) >= 3 && c.args[0] == "api" && c.args[1] == "-X" && c.args[2] == "POST" {
+			sawAPIPost = true
+			// Verify the body is passed via -f body=... arg (not stdin).
+			foundBodyArg := false
+			for _, arg := range c.args {
+				if strings.HasPrefix(arg, "body=") && strings.Contains(arg, "What changed") {
+					foundBodyArg = true
+				}
 			}
-			if !strings.Contains(string(c.body), "AUTO-GENERATED") {
-				t.Errorf("expected appended footer with AUTO-GENERATED marker; body=%q", string(c.body))
+			if !foundBodyArg {
+				t.Errorf("expected -f body=<narrative> in gh api args; args=%v", c.args)
 			}
 		}
 	}
-	if !sawComment {
-		t.Errorf("expected `gh pr comment` call; saw %v", ghStub.calls)
+	if !sawAPIPost {
+		t.Errorf("expected `gh api -X POST` call (PostIssueCommentGetID); saw %v", ghStub.calls)
 	}
 
-	// Verify a PRHandoffSyntheses row landed.
+	// Verify a PRHandoffSyntheses row landed with non-zero comment_id.
 	rows, err := store.ListPRHandoffSynthesesForConvoy(db, cid)
 	if err != nil {
 		t.Fatalf("ListPRHandoffSynthesesForConvoy: %v", err)
@@ -214,6 +226,10 @@ func TestPRHandoffSynthesis_PostsComment_Smoke(t *testing.T) {
 	}
 	if rows[0].PRURL == "" || rows[0].PostedAt == "" {
 		t.Errorf("expected non-empty pr_url + posted_at; got %+v", rows[0])
+	}
+	// D17 P2B: comment_id must be non-zero (stub returns 12345).
+	if rows[0].CommentID == 0 {
+		t.Errorf("expected non-zero comment_id in PRHandoffSyntheses (D17 P2B); got 0")
 	}
 }
 

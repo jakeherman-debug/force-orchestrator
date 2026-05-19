@@ -407,3 +407,114 @@ func TestTransitionConvoyToShipped_NoOverrideRowSilentNoOp(t *testing.T) {
 		t.Errorf("expected Shipped, got %q", conv.Status)
 	}
 }
+
+// ── D17 P2B: merge-event trigger for dogArchitectureDocRender ───────────────
+
+// TestNudgeArchitectureDocRender_EnabledRepoResetsCooldown asserts that when a
+// convoy is Shipped and the convoy's repo has handoff_synthesis_enabled=1, the
+// architecture-doc-render dog's cooldown is reset to the epoch so it fires on
+// the next inquisitor tick.
+func TestNudgeArchitectureDocRender_EnabledRepoResetsCooldown(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	store.AddRepo(db, "arch-enabled-repo", t.TempDir(), "test")
+	if err := store.SetHandoffSynthesisEnabled(db, "arch-enabled-repo", true); err != nil {
+		t.Fatalf("SetHandoffSynthesisEnabled: %v", err)
+	}
+
+	cid, _ := store.CreateConvoy(db, "[1] arch-test")
+	_ = store.UpsertConvoyAskBranch(db, cid, "arch-enabled-repo", "force/ask-1-arch", "sha")
+
+	// Seed a recent last_run_at for architecture-doc-render so we can confirm
+	// the cooldown is reset (from "now" to epoch).
+	store.DogMarkRun(db, "architecture-doc-render")
+	beforeNudge := store.DogLastRun(db, "architecture-doc-render")
+	if beforeNudge == "" {
+		t.Fatalf("expected DogMarkRun to set last_run_at")
+	}
+
+	nudgeArchitectureDocRenderIfEnabled(db, cid, testLogger{})
+
+	afterNudge := store.DogLastRun(db, "architecture-doc-render")
+	// After the reset, last_run_at should be the epoch sentinel (not "now").
+	if afterNudge == beforeNudge {
+		t.Errorf("expected last_run_at to be reset from %q, but it was unchanged", beforeNudge)
+	}
+	if afterNudge != "1970-01-01 00:00:00" {
+		t.Errorf("expected last_run_at to be epoch sentinel '1970-01-01 00:00:00', got %q", afterNudge)
+	}
+}
+
+// TestNudgeArchitectureDocRender_DisabledRepoNoReset asserts that when a
+// convoy's repo has handoff_synthesis_enabled=0, the dog cooldown is NOT reset.
+func TestNudgeArchitectureDocRender_DisabledRepoNoReset(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	store.AddRepo(db, "arch-disabled-repo", t.TempDir(), "test")
+	// handoff_synthesis_enabled defaults to 0 — no call to SetHandoffSynthesisEnabled.
+
+	cid, _ := store.CreateConvoy(db, "[1] no-arch")
+	_ = store.UpsertConvoyAskBranch(db, cid, "arch-disabled-repo", "force/ask-1-noarch", "sha")
+
+	// Seed a recent last_run_at.
+	store.DogMarkRun(db, "architecture-doc-render")
+	before := store.DogLastRun(db, "architecture-doc-render")
+
+	nudgeArchitectureDocRenderIfEnabled(db, cid, testLogger{})
+
+	after := store.DogLastRun(db, "architecture-doc-render")
+	if after != before {
+		t.Errorf("expected last_run_at to remain unchanged when no repo is enabled; before=%q after=%q", before, after)
+	}
+}
+
+// TestTransitionConvoyToShipped_NudgesArchDocRenderWhenEnabled covers the
+// end-to-end path: a full DraftPROpen→Shipped transition (via
+// dogDraftPRWatch) resets the architecture-doc-render cooldown when the
+// convoy's repo is enabled.
+func TestTransitionConvoyToShipped_NudgesArchDocRenderWhenEnabled(t *testing.T) {
+	db := store.InitHolocronDSN(":memory:")
+	defer db.Close()
+
+	repoDir := t.TempDir()
+	store.AddRepo(db, "nudge-repo", repoDir, "test")
+	if err := store.SetHandoffSynthesisEnabled(db, "nudge-repo", true); err != nil {
+		t.Fatalf("SetHandoffSynthesisEnabled: %v", err)
+	}
+	cid, _ := store.CreateConvoy(db, "[1] nudge-test")
+	_ = store.SetConvoyStatus(db, cid, "DraftPROpen")
+	_ = store.UpsertConvoyAskBranch(db, cid, "nudge-repo", "force/ask-1-nudge", "sha")
+	_ = store.SetConvoyAskBranchDraftPR(db, cid, "nudge-repo", "https://github.com/acme/nudge-repo/pull/1", 1, "Open")
+
+	// Seed a recent cooldown so we can detect the reset.
+	store.DogMarkRun(db, "architecture-doc-render")
+	before := store.DogLastRun(db, "architecture-doc-render")
+	if before == "" {
+		t.Fatalf("expected DogMarkRun to set last_run_at")
+	}
+
+	installDraftPRViewStub(t, map[int]struct {
+		State  string
+		Merged bool
+		Err    error
+	}{1: {State: "MERGED", Merged: true}})
+
+	if err := dogDraftPRWatch(context.Background(), db, librarian.NewInProcess(db), testLogger{}); err != nil {
+		t.Fatalf("dogDraftPRWatch: %v", err)
+	}
+
+	conv := store.GetConvoy(db, cid)
+	if conv.Status != "Shipped" {
+		t.Fatalf("expected Shipped, got %q", conv.Status)
+	}
+
+	after := store.DogLastRun(db, "architecture-doc-render")
+	if after == before {
+		t.Errorf("architecture-doc-render cooldown should be reset after merge; before=%q after=%q", before, after)
+	}
+	if after != "1970-01-01 00:00:00" {
+		t.Errorf("expected epoch sentinel after reset, got %q", after)
+	}
+}

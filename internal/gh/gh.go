@@ -625,6 +625,44 @@ func (c *Client) PostIssueComment(cwd, repo string, number int, body string) err
 	return nil
 }
 
+// PostIssueCommentGetID posts a top-level comment on a PR via the GitHub REST
+// API and returns the newly created comment's REST ID. Unlike PostIssueComment
+// (which uses `gh pr comment` and discards the response), this method switches
+// to `gh api -X POST repos/{repo}/issues/{number}/comments` so the returned
+// JSON `id` field can be captured and stored in PRHandoffSyntheses.comment_id.
+//
+// D17 P2B: replaces the PostIssueComment call site in runPRHandoffSynthesis so
+// the audit row carries the real comment ID instead of 0.
+//
+// repo must be in "owner/name" format (e.g. "acme/api"); the call fails if
+// repo is empty because gh api paths must include owner/name.
+func (c *Client) PostIssueCommentGetID(cwd, repo string, number int, body string) (int64, error) {
+	if strings.TrimSpace(repo) == "" {
+		return 0, fmt.Errorf("PostIssueCommentGetID: repo required (gh api paths must include owner/name)")
+	}
+	if strings.TrimSpace(body) == "" {
+		return 0, fmt.Errorf("PostIssueCommentGetID: body required")
+	}
+	path := fmt.Sprintf("repos/%s/issues/%d/comments", strings.TrimSpace(repo), number)
+	// Use -f (string field) so special characters in body are not re-interpreted
+	// as JSON. This mirrors the PostReviewThreadReply convention.
+	args := []string{"api", "-X", "POST", path, "-f", "body=" + body}
+	stdout, stderr, err := c.runner.Run(cwd, args, nil)
+	if err != nil {
+		return 0, redactGHError("gh api post issue comment", err, stderr)
+	}
+	var resp struct {
+		ID int64 `json:"id"`
+	}
+	if parseErr := json.Unmarshal(stdout, &resp); parseErr != nil {
+		return 0, fmt.Errorf("gh api post issue comment: parse json: %v", parseErr)
+	}
+	if resp.ID <= 0 {
+		return 0, fmt.Errorf("gh api post issue comment: returned id=%d (unexpected)", resp.ID)
+	}
+	return resp.ID, nil
+}
+
 // PostReviewThreadReply posts a reply inside an existing review-comment thread.
 // inReplyToCommentID is the REST ID of the comment being replied to (GitHub
 // places the new comment in the same thread automatically).

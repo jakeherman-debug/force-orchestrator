@@ -627,7 +627,8 @@ CREATE TABLE IF NOT EXISTS ExperimentRuns (
     metric_version           TEXT    DEFAULT '',
     model_substituted_from   TEXT    DEFAULT '',                 -- holdout model substitutions
     model_substituted_to     TEXT    DEFAULT '',
-    is_provisional           INTEGER DEFAULT 0                   -- true for llm_judge pending downstream
+    is_provisional           INTEGER DEFAULT 0,                  -- true for llm_judge pending downstream
+    t30_verdict_sent_at      TEXT    DEFAULT ''                  -- D17 P2B: stamped when T+30 verdict mail is sent
 );
 CREATE INDEX IF NOT EXISTS idx_exp_runs_exp_treat ON ExperimentRuns (experiment_id, treatment_id);
 CREATE INDEX IF NOT EXISTS idx_exp_runs_unit      ON ExperimentRuns (natural_unit_kind, natural_unit_id);

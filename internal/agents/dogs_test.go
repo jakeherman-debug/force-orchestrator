@@ -408,8 +408,10 @@ func TestListDogs(t *testing.T) {
 	// D16 Phase 1B added golden-set-evaluator (weekly — evaluates
 	// every agent's golden-set fixtures and records accuracy into
 	// GoldenSetEvaluations for trend dashboards).
-	if len(dogs) != 43 {
-		t.Errorf("expected 43 built-in dogs (D17-P1B added holdout-snapshot), got %d", len(dogs))
+	// D17 P2B added t30-verdict (daily — emits keep-or-deprecate operator
+	// mail 30 days after a handoff-synthesis experiment run completes).
+	if len(dogs) != 44 {
+		t.Errorf("expected 44 built-in dogs (D17-P2B added t30-verdict), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -443,7 +445,9 @@ func TestListDogs(t *testing.T) {
 		// D16 Phase 1B — golden-set-evaluator.
 		"golden-set-evaluator",
 		// D17 Phase 1B — holdout-snapshot.
-		"holdout-snapshot"} {
+		"holdout-snapshot",
+		// D17 P2B — t30-verdict.
+		"t30-verdict"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

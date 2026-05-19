@@ -227,6 +227,12 @@ var dogCooldowns = map[string]time.Duration{
 	// experiment configuration changes) and once-per-day sampling is
 	// sufficient for the analyst's longitudinal comparison use case.
 	"holdout-snapshot": 24 * time.Hour,
+	// D17 P2B — t30-verdict. Fires ~30 days after a handoff-synthesis
+	// experiment run completes. Emits an operator mail asking keep-or-
+	// deprecate for each eligible ExperimentRuns row. Daily cadence —
+	// the 30–31-day query window means each run appears in at most one
+	// dog tick; daily is sufficient to deliver within the window.
+	"t30-verdict": 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -330,6 +336,10 @@ var dogOrder = []string{
 	// so it sees the post-evaluation fleet state. Pure DB reads + a single
 	// UPDATE; no LLM calls, no external I/O.
 	"holdout-snapshot",
+	// D17 P2B — t30-verdict. Ordered last because it emits operator mail
+	// and should run after all structural dogs have completed the cycle.
+	// Pure DB reads + SendMail; no LLM calls, no external I/O.
+	"t30-verdict",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -545,6 +555,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogGoldenSetEvaluator(ctx, db, evaluators, versions, logger)
 	case "holdout-snapshot":
 		return dogHoldoutSnapshot(ctx, db, logger)
+	case "t30-verdict":
+		return dogT30Verdict(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}

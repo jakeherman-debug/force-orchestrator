@@ -635,7 +635,8 @@ func createSchema(db *sql.DB) {
 		metric_version           TEXT    DEFAULT '',
 		model_substituted_from   TEXT    DEFAULT '',
 		model_substituted_to     TEXT    DEFAULT '',
-		is_provisional           INTEGER DEFAULT 0
+		is_provisional           INTEGER DEFAULT 0,
+		t30_verdict_sent_at      TEXT    DEFAULT ''
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_exp_treat ON ExperimentRuns (experiment_id, treatment_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_unit      ON ExperimentRuns (natural_unit_kind, natural_unit_id);`)
@@ -2241,10 +2242,15 @@ func runMigrations(db *sql.DB) {
 		metric_version           TEXT    DEFAULT '',
 		model_substituted_from   TEXT    DEFAULT '',
 		model_substituted_to     TEXT    DEFAULT '',
-		is_provisional           INTEGER DEFAULT 0
+		is_provisional           INTEGER DEFAULT 0,
+		t30_verdict_sent_at      TEXT    DEFAULT ''
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_exp_treat ON ExperimentRuns (experiment_id, treatment_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_exp_runs_unit      ON ExperimentRuns (natural_unit_kind, natural_unit_id)`)
+	// D17 P2B — add t30_verdict_sent_at to existing ExperimentRuns rows.
+	// ALTER TABLE ADD COLUMN silently no-ops if the column already exists
+	// (per schema convention: idempotent migrations).
+	db.Exec(`ALTER TABLE ExperimentRuns ADD COLUMN t30_verdict_sent_at TEXT DEFAULT ''`)
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS ExperimentOutcomes (
 		id                          INTEGER PRIMARY KEY AUTOINCREMENT,

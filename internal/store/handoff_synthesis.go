@@ -1,5 +1,5 @@
 // Package store — D10 PRHandoffSyntheses + Repositories.handoff_synthesis_enabled
-// helpers.
+// helpers, plus D17 P2B T+30 verdict helpers for ExperimentRuns.
 //
 // One row per Diplomat-emitted reviewer narrative comment posted on a draft
 // PR. The row is the audit trail: the LLM call landed, the gh post landed,
@@ -11,6 +11,73 @@ import (
 	"database/sql"
 	"fmt"
 )
+
+// ── D17 P2B — T+30 verdict helpers ────────────────────────────────────────────
+
+// T30VerdictRun is a minimal view of an ExperimentRun row used by the T+30
+// verdict dog. Only the fields needed for verdict-mail composition are included.
+type T30VerdictRun struct {
+	ID           int
+	ExperimentID int
+	CompletedAt  string // SQLite UTC shape
+	AgentName    string
+	ScoreSource  string
+	Score        float64
+}
+
+// ListT30VerdictPending returns ExperimentRuns rows whose completed_at is
+// between 30 and 31 days ago (the 24-hour window the daily dog checks) AND
+// whose t30_verdict_sent_at is empty (verdict not yet sent). Mode is
+// constrained to 'holdout' or 'paired_real' because shadow runs have no
+// meaningful keep-or-deprecate verdict. Only rows with a non-empty
+// completed_at are returned (runs still in flight are skipped).
+func ListT30VerdictPending(db *sql.DB) ([]T30VerdictRun, error) {
+	rows, err := db.Query(`
+		SELECT id, experiment_id, completed_at,
+		       IFNULL(agent_name, ''), IFNULL(score_source, ''), IFNULL(score, 0.0)
+		  FROM ExperimentRuns
+		 WHERE IFNULL(completed_at, '') != ''
+		   AND t30_verdict_sent_at = ''
+		   AND mode IN ('holdout', 'paired_real')
+		   AND completed_at <= datetime('now', '-30 days')
+		   AND completed_at >  datetime('now', '-31 days')
+		 ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("ListT30VerdictPending: %w", err)
+	}
+	defer rows.Close()
+	var out []T30VerdictRun
+	for rows.Next() {
+		var r T30VerdictRun
+		if scanErr := rows.Scan(&r.ID, &r.ExperimentID, &r.CompletedAt,
+			&r.AgentName, &r.ScoreSource, &r.Score); scanErr != nil {
+			return nil, fmt.Errorf("ListT30VerdictPending: scan: %w", scanErr)
+		}
+		out = append(out, r)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, fmt.Errorf("ListT30VerdictPending: rows iter: %w", rerr)
+	}
+	return out, nil
+}
+
+// MarkT30VerdictSent stamps t30_verdict_sent_at = datetime('now') for the
+// given ExperimentRun row, preventing duplicate verdict mails on subsequent
+// dog ticks. Returns an error if the row was not found or the update fails.
+func MarkT30VerdictSent(db *sql.DB, runID int) error {
+	res, err := db.Exec(
+		`UPDATE ExperimentRuns SET t30_verdict_sent_at = datetime('now') WHERE id = ?`,
+		runID,
+	)
+	if err != nil {
+		return fmt.Errorf("MarkT30VerdictSent(%d): %w", runID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("MarkT30VerdictSent(%d): row not found", runID)
+	}
+	return nil
+}
 
 // PRHandoffSynthesis is one row of PRHandoffSyntheses.
 type PRHandoffSynthesis struct {
