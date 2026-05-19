@@ -48,6 +48,8 @@ func cmdEC(ctx context.Context, db *sql.DB, args []string) {
 		ecReject(ctx, db, rest)
 	case "status":
 		ecStatus(ctx, db, rest)
+	case "promote":
+		ecPromote(ctx, db, rest)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown ec subcommand: %s\n", sub)
 		ecUsage()
@@ -71,6 +73,14 @@ Subcommands:
                  (default: leave_as_is).
         --rationale ≥ 20 chars when --action != leave_as_is (concern #7).
         --reason free-form summary stored on the row; defaults to rationale or action.
+
+  promote <id> --scope <global|tag:<tagname>|repo:<reponame>>
+        Promote an EC experiment to a FleetRule with explicit scope. Ratifies
+        the PromotionProposal and sets FleetRules.agent_scope.
+        --scope global      → agent_scope = 'senate:*'
+        --scope tag:X       → agent_scope = 'senate:tag:X'
+        --scope repo:X      → agent_scope = 'senate:X'
+        Omitting --scope defaults to repo scope (uses the proposal's rule_key).
 
   status <id>
         Print one proposal's current state (pending / ratified / rejected).`)
@@ -361,6 +371,147 @@ func ecStatus(ctx context.Context, db *sql.DB, args []string) {
 	if content != "" {
 		fmt.Printf("  content       %s\n", content)
 	}
+}
+
+// ecPromote handles `force ec promote <id> --scope <global|tag:<t>|repo:<r>>`.
+//
+// It ratifies the PromotionProposal and, when the proposal's rule_key maps to
+// an active FleetRules row, updates agent_scope on that row.
+//
+// Scope mapping:
+//
+//	--scope global    → agent_scope = "senate:*"
+//	--scope tag:X     → agent_scope = "senate:tag:X"
+//	--scope repo:X    → agent_scope = "senate:X"
+//	(omitted)         → falls back to ecRatify behaviour (repo scope, rule_key as key)
+func ecPromote(ctx context.Context, db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("ec promote", flag.ContinueOnError)
+	operator := fs.String("operator", "", "operator email — recorded in AuditLog")
+	scopeFlag := fs.String("scope", "", "global|tag:<tagname>|repo:<reponame> (omit = repo scope)")
+	helped, perr := parseSubcommandFlags(fs, args, "ec promote",
+		"Promote an EC experiment to a FleetRule with explicit scope.",
+		[]flagDoc{
+			{Name: "--scope S", Desc: "global|tag:<t>|repo:<r> (default: repo scope from rule_key)"},
+			{Name: "--operator E", Desc: "operator email (default: $USER@upstart.com)"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force ec promote 17 --scope global",
+			"force ec promote 17 --scope tag:payments",
+			"force ec promote 17 --scope repo:myrepo",
+		})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: force ec promote <id> [--scope <global|tag:<t>|repo:<r>>]")
+		os.Exit(1)
+	}
+	id := mustParseID(fs.Arg(0))
+	op := defaultOperatorEmail(*operator)
+	if op == "" {
+		fmt.Fprintln(os.Stderr, "ec promote: --operator is required (operator-routed gate)")
+		os.Exit(1)
+	}
+
+	// Load the proposal to get rule_key.
+	var ruleKey string
+	err := db.QueryRowContext(ctx,
+		`SELECT IFNULL(rule_key,'') FROM PromotionProposals WHERE id = ?`, id,
+	).Scan(&ruleKey)
+	if err == sql.ErrNoRows {
+		fmt.Fprintf(os.Stderr, "ec promote: proposal %d not found\n", id)
+		os.Exit(1)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ec promote: load proposal: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Resolve the target agent_scope.
+	var agentScope string
+	switch {
+	case *scopeFlag == "" || *scopeFlag == "repo" || strings.HasPrefix(*scopeFlag, "repo:"):
+		// Default: repo scope. Use the rule_key as the repo identifier if no
+		// explicit repo name is given.
+		if strings.HasPrefix(*scopeFlag, "repo:") {
+			repoName := strings.TrimPrefix(*scopeFlag, "repo:")
+			agentScope = "senate:" + repoName
+		} else if ruleKey != "" {
+			// Fallback: derive repo from rule_key (convention: rule_key starts with
+			// the repo name or is the repo name itself for simple senate rules).
+			agentScope = "senate:" + ruleKey
+		} else {
+			fmt.Fprintln(os.Stderr, "ec promote: cannot derive repo scope — provide --scope repo:<name> explicitly")
+			os.Exit(1)
+		}
+	case *scopeFlag == "global":
+		agentScope = "senate:*"
+	case strings.HasPrefix(*scopeFlag, "tag:"):
+		tagName := strings.TrimPrefix(*scopeFlag, "tag:")
+		if strings.TrimSpace(tagName) == "" {
+			fmt.Fprintln(os.Stderr, "ec promote: --scope tag: requires a non-empty tag name")
+			os.Exit(1)
+		}
+		agentScope = "senate:tag:" + tagName
+	default:
+		// Accept the full "senate:..." form directly.
+		if err2 := validateRuleScope(*scopeFlag); err2 != nil {
+			fmt.Fprintf(os.Stderr, "ec promote: invalid --scope: %v\n", err2)
+			os.Exit(1)
+		}
+		agentScope = *scopeFlag
+	}
+
+	// Ratify the proposal (same CAS shape as ecRatify).
+	res, err := db.ExecContext(ctx, `
+		UPDATE PromotionProposals
+		   SET ratified_at = datetime('now'),
+		       ratified_by = ?
+		 WHERE id = ?
+		   AND IFNULL(ratified_at,'') = ''
+		   AND IFNULL(rejected_at,'') = ''
+	`, op, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ec promote: ratify: %v\n", err)
+		os.Exit(1)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ec promote: rows: %v\n", err)
+		os.Exit(1)
+	}
+	if n == 0 {
+		var exists int
+		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM PromotionProposals WHERE id = ?`, id).Scan(&exists)
+		if exists == 0 {
+			fmt.Fprintf(os.Stderr, "ec promote: proposal %d not found\n", id)
+		} else {
+			fmt.Fprintf(os.Stderr, "ec promote: proposal %d is not pending — refusing to flip\n", id)
+		}
+		os.Exit(1)
+	}
+
+	// Update FleetRules.agent_scope when the rule_key maps to an active row.
+	if ruleKey != "" {
+		upRes, upErr := db.ExecContext(ctx,
+			`UPDATE FleetRules SET agent_scope = ? WHERE rule_key = ? AND active_until = ''`,
+			agentScope, ruleKey,
+		)
+		if upErr != nil {
+			fmt.Fprintf(os.Stderr, "ec promote: update FleetRules scope: %v\n", upErr)
+			// Non-fatal — proposal was already ratified; log and continue.
+		} else if upN, _ := upRes.RowsAffected(); upN > 0 {
+			fmt.Printf("FleetRules %q agent_scope → %q (%d row(s) updated).\n", ruleKey, agentScope, upN)
+		}
+	}
+
+	store.LogAudit(db, op, "ec.promote", id,
+		fmt.Sprintf("Promoted PromotionProposal %d scope=%s via CLI", id, agentScope))
+	fmt.Printf("Proposal %d promoted by %s (scope=%s).\n", id, op, agentScope)
 }
 
 // defaultOperatorEmail mirrors experiment.go's behaviour: if --operator

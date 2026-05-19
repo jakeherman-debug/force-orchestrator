@@ -1098,6 +1098,7 @@ func cmdScale(db *sql.DB, args []string) {
 
 func cmdRepos(db *sql.DB, args []string) {
 	// `force repos` (no subcommand) lists; `force repos remove <name>` removes.
+	// D14 P3: `force repos tag`, `force repos untag`, `force repos tags` added.
 	// We intercept --help / unknown flags BEFORE dispatching to the subcommand
 	// branch so a stray --bogus-flag at the top level rejects.
 	subCmd := ""
@@ -1105,6 +1106,15 @@ func cmdRepos(db *sql.DB, args []string) {
 		subCmd = args[0]
 	}
 	switch subCmd {
+	case "tag":
+		cmdReposTag(db, args[1:])
+		return
+	case "untag":
+		cmdReposUntag(db, args[1:])
+		return
+	case "tags":
+		cmdReposTags(db, args[1:])
+		return
 	case "remove":
 		fs := flag.NewFlagSet("repos remove", flag.ContinueOnError)
 		helped, perr := parseSubcommandFlags(fs, args[1:], "repos remove",

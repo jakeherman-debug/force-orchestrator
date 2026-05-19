@@ -339,6 +339,15 @@ func main() {
 	case "onboard":
 		cmdOnboard(ctx, db, os.Args[2:])
 
+	case "tags":
+		os.Exit(cmdTags(db, os.Args[2:]))
+
+	case "tag-suggestions":
+		os.Exit(cmdTagSuggestions(db, os.Args[2:]))
+
+	case "rules":
+		os.Exit(cmdRules(db, os.Args[2:]))
+
 	case "experiment":
 		cmdExperiment(ctx, db, os.Args[2:])
 
