@@ -44,7 +44,7 @@ func cmdConvoy(db *sql.DB, args []string) {
 	}
 	switch subCmd {
 	case "--help", "-h", "help":
-		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|review <id>|pr <id>|ship <id>]")
+		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|cancel <id>|pr <id>|ship <id>]")
 		return
 	case "list", "":
 		printConvoys(db)
@@ -78,6 +78,8 @@ func cmdConvoy(db *sql.DB, args []string) {
 			os.Exit(1)
 		}
 		cmdConvoyPR(db, mustParseID(args[1]))
+	case "cancel":
+		cmdConvoyCancel(db, args[1:])
 	case "ship":
 		cmdConvoyShipCLI(db, args[1:])
 	case "pr-review":
@@ -89,7 +91,7 @@ func cmdConvoy(db *sql.DB, args []string) {
 		cmdConvoyPRReview(db, mustParseID(args[1]))
 	default:
 		fmt.Printf("Unknown convoy subcommand: %s\n", subCmd)
-		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|pr <id>|ship <id>|pr-review <id>]")
+		fmt.Println("Usage: force convoy [list|create <name>|show <name>|approve <id>|reset <id>|reject <id> <feedback>|cancel <id>|pr <id>|ship <id>|pr-review <id>]")
 		os.Exit(1)
 	}
 }
@@ -306,6 +308,56 @@ func cmdConvoyReject(db *sql.DB, args []string) {
 	fmt.Printf("Convoy %d rejected: %d task(s) cancelled, Feature #%d re-queued for Commander.\n",
 		rejectConvoyID, cancelled, rejectParentID)
 	fmt.Printf("Feedback sent to Commander: %s\n", rejectFeedback)
+}
+
+// cmdConvoyCancel — `force convoy cancel <id>`. DESTRUCTIVE: cancels all
+// Planned/Pending tasks in a convoy and marks the convoy itself as
+// Cancelled. Mirrors the dashboard's convoy cancel action. Idempotent:
+// cancelling an already-cancelled convoy is a no-op.
+func cmdConvoyCancel(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("convoy cancel", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "convoy cancel",
+		"Cancel a convoy: stop all Planned/Pending tasks and mark the convoy Cancelled.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force convoy cancel 17"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: force convoy cancel <id>")
+		os.Exit(1)
+	}
+	convoyID := mustParseID(rest[0])
+
+	// Verify the convoy exists.
+	var convoyStatus string
+	err := db.QueryRow(`SELECT status FROM Convoys WHERE id = ?`, convoyID).Scan(&convoyStatus)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Convoy %d not found.\n", convoyID)
+		os.Exit(1)
+	}
+
+	// Idempotent: already cancelled is fine.
+	if convoyStatus == "Cancelled" {
+		fmt.Printf("Convoy %d is already cancelled.\n", convoyID)
+		return
+	}
+
+	n := store.CancelConvoyPendingTasks(db, convoyID)
+	db.Exec(`UPDATE Convoys SET status = 'Cancelled' WHERE id = ?`, convoyID)
+	// Best-effort: stamp ConvoyNotificationOverrides closure so cleanup
+	// dogs can purge after 7d (same as the dashboard path). Failure is
+	// non-fatal — the convoy is already cancelled.
+	if err := store.MarkConvoyOverrideClosed(db, convoyID, ""); err != nil {
+		log.Printf("convoy cancel: MarkConvoyOverrideClosed convoy=%d: %v", convoyID, err)
+	}
+	store.LogAudit(db, "operator", "convoy-cancel", convoyID,
+		fmt.Sprintf("cancelled convoy #%d (%d pending task(s) stopped) via CLI", convoyID, n))
+	fmt.Printf("Convoy %d cancelled: %d pending/planned task(s) stopped.\n", convoyID, n)
 }
 
 // cmdConvoyShipCLI — `force convoy ship <id> [--merge squash|merge|rebase]`.

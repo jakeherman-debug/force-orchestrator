@@ -1063,6 +1063,10 @@ func cmdScale(db *sql.DB, args []string) {
 	scaleInvestigators := fs.Int("investigators", -1, "number of investigators")
 	scaleAuditors := fs.Int("auditors", -1, "number of auditors")
 	scaleLibrarians := fs.Int("librarians", -1, "number of librarians")
+	// D17 P2A: --medics and --pilots added for CLI parity with the daemon's
+	// dynamic scale loop (which already handles num_medics / num_pilots).
+	scaleMedics := fs.Int("medics", -1, "number of medics")
+	scalePilots := fs.Int("pilots", -1, "number of pilots")
 	helped, perr := parseSubcommandFlags(fs, args, "scale",
 		"Dynamically scale agent counts. Each flag sets a SystemConfig row + signals daemon.",
 		[]flagDoc{
@@ -1073,9 +1077,11 @@ func cmdScale(db *sql.DB, args []string) {
 			{Name: "--investigators N", Desc: "number of investigators"},
 			{Name: "--auditors N", Desc: "number of auditors"},
 			{Name: "--librarians N", Desc: "number of librarians"},
+			{Name: "--medics N", Desc: "number of medics"},
+			{Name: "--pilots N", Desc: "number of pilots"},
 			{Name: "--help, -h", Desc: "show this help and exit"},
 		},
-		[]string{"force scale --astromechs 4 --council 1"})
+		[]string{"force scale --astromechs 4 --council 1", "force scale --medics 2 --pilots 3"})
 	if helped {
 		return
 	}
@@ -1095,6 +1101,8 @@ func cmdScale(db *sql.DB, args []string) {
 		{"num_investigators", "investigators", *scaleInvestigators},
 		{"num_auditors", "auditors", *scaleAuditors},
 		{"num_librarians", "librarians", *scaleLibrarians},
+		{"num_medics", "medics", *scaleMedics},
+		{"num_pilots", "pilots", *scalePilots},
 	}
 
 	var updated []string
@@ -1106,7 +1114,7 @@ func cmdScale(db *sql.DB, args []string) {
 	}
 
 	if len(updated) == 0 {
-		fmt.Println("Usage: force scale [--astromechs N] [--council N] [--captain N] [--investigators N] [--auditors N]")
+		fmt.Println("Usage: force scale [--astromechs N] [--council N] [--captain N] [--investigators N] [--auditors N] [--medics N] [--pilots N]")
 		os.Exit(1)
 	}
 

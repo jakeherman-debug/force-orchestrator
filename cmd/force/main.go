@@ -315,6 +315,14 @@ func main() {
 	case "bounty":
 		cmdBounty(db, os.Args[2:])
 
+	case "briefing":
+		// D17 P2A — CLI parity for GET /api/briefing/queue.
+		cmdBriefing(db, os.Args[2:])
+
+	case "senate":
+		// D17 P2A — CLI parity for senate roster + refresh.
+		cmdSenate(db, os.Args[2:])
+
 	case "convoy":
 		cmdConvoy(db, os.Args[2:])
 

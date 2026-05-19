@@ -784,6 +784,7 @@ Paired Runs / Engineering Corps (D3):
                                  (D6 — reuses the Senator bootstrap pipeline's digest assembly)
 
 Operator decision surfaces (Phase 6 — Pulse / Briefing / Reflection / Ask):
+  briefing                       List queued decisions awaiting review (D17 P2A)
   decide <decision-id> approve|reject
                                  CLI parity for dashboard Briefing approve/reject (P25)
   briefing-reject <decision-id>  High-tier rejection with mandatory counter-proposal

@@ -91,7 +91,10 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 		"cmdCooldown":         "dispatcher — routes to pause/resume/cancel (leaves call helper)",
 		"cmdRepo":             "wrapper — routes to sync/set-pr-flow/help (cli_inline_handlers.go)",
 		"cmdBounty":           "wrapper — routes to stats (cli_inline_handlers.go)",
-		"cmdTask":             "wrapper — routes to note (cli_inline_handlers.go)",
+		"cmdTask":             "wrapper — routes to note/show/status (cli_inline_handlers.go)",
+		// D17 P2A — senate dispatcher routes to list (default) and refresh
+		// sub-commands. The leaf functions call parseSubcommandFlags.
+		"cmdSenate":           "dispatcher — routes to list (default) and refresh (leaf calls helper)",
 		"cmdRunForeground":    "wrapper — calls helper internally; signature takes a closure",
 		// `cmdReject` (briefing-reject) and `cmdDecide` actually
 		// DO call the helper after migration; they're listed here
@@ -149,6 +152,9 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 		"cmdConvoyReset":   true,
 		"cmdConvoyReject":  true,
 		"cmdConvoyShipCLI": true,
+		// D17 P2A additions.
+		"cmdConvoyCancel":  true,
+		"cmdSenateRefresh": true,
 		"cmdMailSend":      true,
 		"cmdConfigSet":     true,
 		"cmdMemoriesDelete": true,
@@ -204,7 +210,10 @@ func TestPattern_P_CLIFlagParsing(t *testing.T) {
 		"SetRepoRemoteInfo":          true,
 		"QueueFindPRTemplate":        true,
 		"QueueSenatorOnboarding":     true,
+		"QueueSenatorRefresh":        true,
 		"QueueFeatureFromJira":       true,
+		"CancelConvoyPendingTasks":   true,
+		"MarkConvoyOverrideClosed":   true,
 		"runPRFlowMigrate":           true,
 		"runPRFlowRollback":          true,
 	}
@@ -358,6 +367,7 @@ var dispatcherDestructiveVerbs = map[string]map[string]string{
 		"reset":   "cmdConvoyReset",
 		"reject":  "cmdConvoyReject",
 		"ship":    "cmdConvoyShipCLI",
+		"cancel":  "cmdConvoyCancel",  // D17 P2A
 	},
 	"cmdConfig": {
 		"set": "cmdConfigSet",

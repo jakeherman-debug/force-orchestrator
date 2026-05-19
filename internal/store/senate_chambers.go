@@ -134,6 +134,34 @@ func SetSenateChamberStatus(db *sql.DB, senatorName, status string) error {
 	return nil
 }
 
+// ListAllSenateChambers returns all chambers regardless of status, ordered by
+// senator_name. Used by `force senate` to display the full roster.
+func ListAllSenateChambers(db *sql.DB) ([]SenateChamber, error) {
+	rows, err := db.Query(`
+		SELECT senator_name, scope, IFNULL(senate_md_path,''), status,
+		       IFNULL(onboarded_at,''), IFNULL(last_refreshed_at,''),
+		       IFNULL(retired_at,''), IFNULL(created_at,'')
+		  FROM SenateChambers
+		 ORDER BY senator_name ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("ListAllSenateChambers: %w", err)
+	}
+	defer rows.Close()
+	var out []SenateChamber
+	for rows.Next() {
+		var c SenateChamber
+		if scanErr := rows.Scan(&c.SenatorName, &c.Scope, &c.SenateMDPath, &c.Status,
+			&c.OnboardedAt, &c.LastRefreshedAt, &c.RetiredAt, &c.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("ListAllSenateChambers: scan: %w", scanErr)
+		}
+		out = append(out, c)
+	}
+	if rErr := rows.Err(); rErr != nil {
+		return nil, fmt.Errorf("ListAllSenateChambers: rows.Err: %w", rErr)
+	}
+	return out, nil
+}
+
 // MarkSenateChamberRefreshed bumps last_refreshed_at to now. Called by
 // the senate-refresh dog after each successful per-Senator memory
 // digest pass.

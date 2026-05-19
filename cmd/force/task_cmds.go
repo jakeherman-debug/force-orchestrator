@@ -614,6 +614,65 @@ func cmdRetryAllFailed(db *sql.DB, args []string) {
 	fmt.Printf("Reset %d failed task(s) to Pending.\n", n)
 }
 
+// cmdTaskShow implements both `force task show <id>` and `force task status <id>`.
+// Both aliases query the BountyBoard by ID and render the task state in
+// a human-readable format matching what `force list` rows contain, plus
+// extended fields (branch, convoy, owner, retry count, priority).
+func cmdTaskShow(db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("task show", flag.ContinueOnError)
+	helped, perr := parseSubcommandFlags(fs, args, "task show",
+		"Display full details for a task. `force task status <id>` is an alias.",
+		[]flagDoc{{Name: "--help, -h", Desc: "show this help and exit"}},
+		[]string{"force task show 42", "force task status 42"})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: force task show <id>")
+		os.Exit(1)
+	}
+	id := mustParseID(rest[0])
+	b, err := store.GetBounty(db, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Task %d not found.\n", id)
+		os.Exit(1)
+	}
+
+	// Fetch created_at separately — GetBounty doesn't surface it.
+	var createdAt string
+	db.QueryRow(`SELECT IFNULL(created_at,'') FROM BountyBoard WHERE id = ?`, id).Scan(&createdAt)
+
+	fmt.Printf("Task #%d\n", b.ID)
+	fmt.Printf("  Type:        %s\n", b.Type)
+	fmt.Printf("  Status:      %s\n", b.Status)
+	fmt.Printf("  Repo:        %s\n", b.TargetRepo)
+	fmt.Printf("  Priority:    %d\n", b.Priority)
+	fmt.Printf("  Created:     %s\n", createdAt)
+	if b.Owner != "" {
+		fmt.Printf("  Owner:       %s\n", b.Owner)
+	}
+	if b.ConvoyID > 0 {
+		fmt.Printf("  Convoy:      #%d\n", b.ConvoyID)
+	}
+	if b.ParentID > 0 {
+		fmt.Printf("  Parent:      #%d\n", b.ParentID)
+	}
+	if b.BranchName != "" {
+		fmt.Printf("  Branch:      %s\n", b.BranchName)
+	}
+	if b.RetryCount > 0 {
+		fmt.Printf("  Retries:     %d\n", b.RetryCount)
+	}
+	fmt.Printf("  Payload:\n")
+	for _, line := range strings.Split(b.Payload, "\n") {
+		fmt.Printf("    %s\n", line)
+	}
+}
+
 func cmdTaskNote(db *sql.DB, args []string) {
 	fs := flag.NewFlagSet("task note", flag.ContinueOnError)
 	helped, perr := parseSubcommandFlags(fs, args, "task note",

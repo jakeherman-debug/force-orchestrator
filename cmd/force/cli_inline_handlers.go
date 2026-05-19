@@ -167,19 +167,23 @@ func cmdBounty(db *sql.DB, args []string) {
 // cmdTask — `force task <subcommand>`.
 func cmdTask(db *sql.DB, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: force task <subcommand>\n  note <id> <text>  — append an operator note to a task\n")
+		fmt.Fprintf(os.Stderr, "Usage: force task <subcommand>\n  note <id> <text>  — append an operator note to a task\n  show <id>         — display full task details\n  status <id>       — display task status\n")
 		os.Exit(1)
 	}
 	switch args[0] {
 	case "note":
 		cmdTaskNote(db, args[1:])
+	case "show", "status":
+		cmdTaskShow(db, args[1:])
 	case "--help", "-h", "help":
 		fmt.Fprintln(os.Stdout, "Usage: force task <subcommand>")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, "Subcommands:")
 		fmt.Fprintln(os.Stdout, "  note <id> <text>  — append an operator note to a task")
+		fmt.Fprintln(os.Stdout, "  show <id>         — display full task details")
+		fmt.Fprintln(os.Stdout, "  status <id>       — display task status (alias for show)")
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown task subcommand: %s\nUsage: force task note <id> <text>\n", args[0])
+		fmt.Fprintf(os.Stderr, "Unknown task subcommand: %s\nUsage: force task note <id> <text>\n       force task show <id>\n       force task status <id>\n", args[0])
 		os.Exit(1)
 	}
 }
