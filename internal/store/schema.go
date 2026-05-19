@@ -1589,6 +1589,50 @@ func createSchema(db *sql.DB) {
 		resolved_by   TEXT NOT NULL DEFAULT ''
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_tag_suggestions_status ON TagSuggestions(status, suggested_at);`)
+
+	// ── D15 Phase 1 — API-Surface Dependency Graph ───────────────────────────────
+	// CrossRepoAPIs: one row per API endpoint/operation exported by a repo.
+	// api_kind ∈ {'http_route', 'grpc_rpc', 'openapi_op', 'graphql_op', 'proto_event'}
+	// api_identifier for http_route: 'GET /api/v1/users/:id' (path-normalized)
+	// api_identifier for grpc_rpc:   'service.UserService/GetUser'
+	// api_identifier for proto_event: 'events.UserCreated'
+	// extractor ∈ {'rails-routes', 'spring-annotation', 'express-app',
+	//              'nestjs-decorator', 'ktor-routing', 'proto-service',
+	//              'openapi-yaml', 'graphql-schema'}
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoAPIs (
+		id               INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_name        TEXT NOT NULL,
+		api_kind         TEXT NOT NULL,
+		api_identifier   TEXT NOT NULL,
+		source_file      TEXT NOT NULL DEFAULT '',
+		source_line      INTEGER NOT NULL DEFAULT 0,
+		extractor        TEXT NOT NULL DEFAULT '',
+		signature_hash   TEXT NOT NULL DEFAULT '',
+		last_scanned_at  TEXT NOT NULL DEFAULT (datetime('now')),
+		UNIQUE(repo_name, api_kind, api_identifier)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_apis_repo ON CrossRepoAPIs(repo_name);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_apis_ident ON CrossRepoAPIs(api_kind, api_identifier);`)
+
+	// CrossRepoAPIDependencies: one row per (consumer, provider API) edge.
+	// call_kind ∈ {'fetch', 'axios', 'rest-template', 'okhttp', 'retrofit',
+	//              'httparty', 'faraday', 'grpc-client', 'graphql-client'}
+	// deleted_at='' means active; non-empty means soft-deleted.
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoAPIDependencies (
+		id               INTEGER PRIMARY KEY AUTOINCREMENT,
+		consumer_repo    TEXT NOT NULL,
+		consumer_file    TEXT NOT NULL DEFAULT '',
+		consumer_line    INTEGER NOT NULL DEFAULT 0,
+		provider_api_id  INTEGER NOT NULL,
+		call_kind        TEXT NOT NULL DEFAULT '',
+		match_confidence REAL NOT NULL DEFAULT 1.0,
+		discovered_at    TEXT NOT NULL DEFAULT (datetime('now')),
+		deleted_at       TEXT NOT NULL DEFAULT '',
+		UNIQUE(consumer_repo, consumer_file, consumer_line, provider_api_id),
+		FOREIGN KEY (provider_api_id) REFERENCES CrossRepoAPIs(id)
+	);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_api_deps_provider ON CrossRepoAPIDependencies(provider_api_id);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_api_deps_consumer ON CrossRepoAPIDependencies(consumer_repo);`)
 }
 
 // runMigrations applies schema changes for existing databases.
@@ -3085,4 +3129,39 @@ func runMigrations(db *sql.DB) {
 		WHERE key = 'treatments_apply_mode' AND value IN ('log_only', 'log-only')`)
 	db.Exec(`INSERT OR IGNORE INTO SystemConfig (key, value)
 		VALUES ('treatments_apply_mode', 'live')`)
+
+	// ── D15 Phase 1 — API-Surface Dependency Graph (upgrade path) ───────────────
+	// Mirrors the createSchema declarations above. CREATE TABLE IF NOT EXISTS
+	// keeps each statement idempotent — fresh DBs already have the tables from
+	// createSchema; upgraded DBs land them here on the next runMigrations sweep.
+	// TestSchemaParity enforces createSchema ↔ schema/schema.sql parity.
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoAPIs (
+		id               INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_name        TEXT NOT NULL,
+		api_kind         TEXT NOT NULL,
+		api_identifier   TEXT NOT NULL,
+		source_file      TEXT NOT NULL DEFAULT '',
+		source_line      INTEGER NOT NULL DEFAULT 0,
+		extractor        TEXT NOT NULL DEFAULT '',
+		signature_hash   TEXT NOT NULL DEFAULT '',
+		last_scanned_at  TEXT NOT NULL DEFAULT (datetime('now')),
+		UNIQUE(repo_name, api_kind, api_identifier)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_apis_repo ON CrossRepoAPIs(repo_name)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_apis_ident ON CrossRepoAPIs(api_kind, api_identifier)`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS CrossRepoAPIDependencies (
+		id               INTEGER PRIMARY KEY AUTOINCREMENT,
+		consumer_repo    TEXT NOT NULL,
+		consumer_file    TEXT NOT NULL DEFAULT '',
+		consumer_line    INTEGER NOT NULL DEFAULT 0,
+		provider_api_id  INTEGER NOT NULL,
+		call_kind        TEXT NOT NULL DEFAULT '',
+		match_confidence REAL NOT NULL DEFAULT 1.0,
+		discovered_at    TEXT NOT NULL DEFAULT (datetime('now')),
+		deleted_at       TEXT NOT NULL DEFAULT '',
+		UNIQUE(consumer_repo, consumer_file, consumer_line, provider_api_id),
+		FOREIGN KEY (provider_api_id) REFERENCES CrossRepoAPIs(id)
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_api_deps_provider ON CrossRepoAPIDependencies(provider_api_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_api_deps_consumer ON CrossRepoAPIDependencies(consumer_repo)`)
 }
