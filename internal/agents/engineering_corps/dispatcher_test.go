@@ -37,7 +37,7 @@ func TestEngineeringCorpsDispatcher_UnknownTypeFailsCleanly(t *testing.T) {
 		Name:      "EC-test",
 		DB:        db,
 		Librarian: librarian.NewInProcess(db),
-		Metrics:   metrics.NewInProcess(),
+		Metrics:   metrics.NewInProcess(db),
 	}, nil, "EC-test", "ECPhantomTaskTypeForTest", bounty, logger.std())
 
 	fresh, err := store.GetBounty(db, id)
@@ -61,8 +61,8 @@ func TestEngineeringCorpsConfig_FailsClosedOnMissingDeps(t *testing.T) {
 		name string
 		cfg  EngineeringCorpsConfig
 	}{
-		{"nil_db", EngineeringCorpsConfig{Librarian: librarian.NewInProcess(nil), Metrics: metrics.NewInProcess()}},
-		{"nil_librarian", EngineeringCorpsConfig{DB: store.InitHolocronDSN(":memory:"), Metrics: metrics.NewInProcess()}},
+		{"nil_db", EngineeringCorpsConfig{Librarian: librarian.NewInProcess(nil), Metrics: metrics.NewInProcess(nil)}},
+		{"nil_librarian", EngineeringCorpsConfig{DB: store.InitHolocronDSN(":memory:"), Metrics: metrics.NewInProcess(nil)}},
 		{"nil_metrics", EngineeringCorpsConfig{DB: store.InitHolocronDSN(":memory:"), Librarian: librarian.NewInProcess(nil)}},
 	}
 	for _, tc := range cases {

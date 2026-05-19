@@ -43,7 +43,7 @@ func TestDispatcher_AllSixTypes_HandlersWired(t *testing.T) {
 		Name:      "EC-int-test",
 		DB:        db,
 		Librarian: librarian.NewInProcess(db),
-		Metrics:   metrics.NewInProcess(),
+		Metrics:   metrics.NewInProcess(db),
 	}
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

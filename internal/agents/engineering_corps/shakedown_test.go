@@ -181,7 +181,7 @@ func TestShakedown_LibrarianToFleetRulesRoundTrip(t *testing.T) {
 		Name:      "EC-shakedown",
 		DB:        db,
 		Librarian: libClient,
-		Metrics:   metrics.NewInProcess(),
+		Metrics:   metrics.NewInProcess(db),
 	}
 	profile, err := capabilities.LoadProfile("engineering-corps")
 	if err != nil {

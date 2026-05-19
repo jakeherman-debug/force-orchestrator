@@ -36,11 +36,12 @@ import (
 // CallDescriptor describes the operation about to be performed —
 // "claude -p with this prompt" or "git push origin <branch>". The
 // descriptor is opaque enough that an experiment can rewrite it
-// (e.g. swap the prompt template or the model). Mirrors the shape
-// in internal/clients/experiments/client.go's CallDescriptor; the
-// duplicate is intentional — internal/treatments is the runtime
-// implementation, internal/clients/experiments is the cross-agent
-// service interface (D0 stub layer).
+// (e.g. swap the prompt template or the model). The runtime
+// implementation lives here in internal/treatments; an earlier D0
+// stub at internal/clients/experiments mirrored this shape as a
+// cross-agent service interface but was retired in Ship I because
+// the in-tree call sites consume internal/treatments directly and
+// the stub had no production callers.
 type CallDescriptor struct {
 	AgentName       string
 	NaturalUnitKind string // 'feature' | 'convoy' | 'task'
