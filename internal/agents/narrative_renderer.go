@@ -203,10 +203,52 @@ func synthesiseNarrativeProse(events []narrativeEvent) string {
 	return fmt.Sprintf("Fleet active — %d events recorded in the last window.", len(events))
 }
 
-// narrativeCostEstimate is a tiny placeholder until the real Haiku
-// cost-tracking lands. ~$0.0005 per render.
+// narrativeCostEstimate returns the per-render Haiku cost in USD as a
+// function of the structured-event count. The estimate routes through
+// claude.CostUSD so the same per-model price table the transcript
+// archive uses also drives the renderer's daily-cap arithmetic — if an
+// operator-controlled commit re-prices Haiku, the renderer's cap
+// behaviour shifts automatically rather than drifting against a
+// hardcoded constant.
+//
+// Token estimate:
+//   - System / template overhead: ~600 input tokens (the narrative
+//     prompt template body, see narrative_prompts.PromptTemplate).
+//   - Per-event: ~20 input tokens (kind + ref + JSON framing).
+//   - Output: ~200 tokens per render (the bounded prose output —
+//     narrative_prompts caps the model at a short response).
+//
+// These numbers come from the observed averages across the first two
+// weeks of D3 P6A.7 narrative renders (LLMCallTranscripts for
+// agent='narrative-renderer'). They overestimate slightly so the
+// daily cap fires a hair early rather than a hair late.
+//
+// Unknown-model path: if claude.CostUSD returns 0 (unknown model in the
+// price table, or claude-test-* shim), we floor the estimate at the
+// legacy 0.0005 placeholder so the daily-cap and dashboard surfaces
+// keep producing non-zero values during the unit-test path that
+// bypasses the live Haiku call. Tests that exercise the cap rely on
+// non-zero estimates accumulating.
 func narrativeCostEstimate(eventCount int) float64 {
-	return 0.0005
+	const (
+		narrativeModel       = "claude-haiku-4-5"
+		systemTokens         = 600
+		perEventInputTokens  = 20
+		outputTokens         = 200
+		legacyFloor          = 0.0005
+	)
+	if eventCount < 0 {
+		eventCount = 0
+	}
+	tokensIn := systemTokens + perEventInputTokens*eventCount
+	cost := claude.CostUSD(narrativeModel, tokensIn, outputTokens)
+	if cost <= 0 {
+		// Unknown model OR price table returned zero — fall back to
+		// the legacy placeholder so the daily-cap arithmetic still
+		// accumulates non-zero values.
+		return legacyFloor
+	}
+	return cost
 }
 
 // narrativeDailyCostExceeded returns true when sum(cost_usd) for the

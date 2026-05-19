@@ -69,6 +69,13 @@ func SpawnArchaeologist(ctx context.Context, db *sql.DB, lib librarian.Client, n
 	logger := NewLogger(name)
 	logger.Printf("Archaeologist %s coming online", name)
 	gc := graph.NewInProcess(db)
+	// Wire the ARCH-002 (unused-exports) pattern to the cross-repo
+	// graph. The Pattern interface deliberately does not carry a DB
+	// handle; ARCH-002 reads it via the package-level injection point
+	// mirroring claude.SetTranscriptDB. Skipping this call leaves
+	// ARCH-002 in its "graph unavailable, return nil + log once" mode
+	// (P9: never emit findings against missing data).
+	patterns.SetCrossRepoGraphDB(db)
 	for {
 		if ctx.Err() != nil {
 			logger.Printf("Archaeologist %s exiting: %v", name, ctx.Err())

@@ -32,12 +32,12 @@ import (
 )
 
 // reconcilePostWakeLoop consumes wake.Event values until ctx is
-// cancelled or the channel closes. On GoingToSleep we just log (with
-// a TODO marker for a future pre-sleep snapshot — store.SnapshotHolocron
-// doesn't exist yet; D12 P3's DaemonUpdateHistory may absorb that
-// story). On Woke we call reconcilePostWake; if the reconciler
-// returns one of the fatal sentinels (DB dead, foreign singleton),
-// we log.Fatalf so a supervisor can restart us with fresh state.
+// cancelled or the channel closes. On GoingToSleep we take a pre-sleep
+// holocron snapshot (best-effort; failures log but don't block the
+// sleep transition — the OS doesn't wait on us). On Woke we call
+// reconcilePostWake; if the reconciler returns one of the fatal
+// sentinels (DB dead, foreign singleton), we log.Fatalf so a
+// supervisor can restart us with fresh state.
 func reconcilePostWakeLoop(ctx context.Context, db *sql.DB, events <-chan wake.Event) {
 	for {
 		select {
@@ -50,11 +50,18 @@ func reconcilePostWakeLoop(ctx context.Context, db *sql.DB, events <-chan wake.E
 			switch ev {
 			case wake.GoingToSleep:
 				log.Printf("daemon: system going to sleep")
-				// TODO(D12 P3): pre-sleep holocron snapshot.
-				// store.SnapshotHolocron does not exist today; P3 may
-				// add a DaemonUpdateHistory snapshot here. For now we
-				// just log — the post-wake reconciler is what
-				// actually keeps the fleet consistent.
+				// Pre-sleep snapshot. Best-effort: a failure here
+				// (read-only FS, permission, in-memory test DB) is
+				// logged and we continue — the OS isn't waiting on
+				// us and the post-wake reconciler is what actually
+				// keeps the fleet consistent. Tests pass an in-memory
+				// DB; SnapshotHolocron returns an error in that case
+				// which we log + swallow.
+				if path, err := store.SnapshotHolocron(db, "pre-sleep"); err != nil {
+					log.Printf("daemon: pre-sleep snapshot failed (continuing): %v", err)
+				} else {
+					log.Printf("daemon: pre-sleep snapshot written to %s", path)
+				}
 			case wake.Woke:
 				log.Printf("daemon: system woke — running post-wake reconciliation")
 				if err := reconcilePostWake(ctx, db); err != nil {
@@ -104,8 +111,12 @@ var ErrPostWakeForeignSingleton = errors.New("post-wake: singleton lock held by 
 //   - "AgentAttention table" — no such table exists in this codebase
 //     (OperatorAttentionTags is operator-pinned, not agent-state
 //     metadata). Skipped with TODO.
-//   - "store.SnapshotHolocron" — function doesn't exist. Skipped per
-//     spec note.
+//   - "store.SnapshotHolocron" — now exists; the pre-sleep snapshot
+//     is taken in reconcilePostWakeLoop's GoingToSleep branch (above),
+//     not here. The post-wake reconciler does not re-snapshot because
+//     the wake transition already crossed the fleet-consistency
+//     boundary; rolling back to the pre-sleep snapshot is a manual
+//     operator action, not an automatic one.
 //
 // Idempotence: running this twice in a row is indistinguishable from
 // running it once. ReleaseInFlightTasks finds nothing to release on

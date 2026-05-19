@@ -175,10 +175,105 @@ func synthesiseBriefingText(kind string, id int64, prior []PriorSimilarDecision)
 	return sb.String()
 }
 
-// findPriorSimilar — minimal placeholder. Returns up to `limit` prior
-// BriefingRenders rows of the same kind. The full similarity model
-// arrives in 6A.12.
+// findPriorSimilar returns up to `limit` prior decisions of the same
+// kind, ranked by payload similarity to the current decision (via the
+// fts_bounty FTS5 index when available) and falling back to
+// recency-only when FTS5 is unavailable or the current decision's
+// payload is empty.
+//
+// Similarity heuristic:
+//   1. Fetch the current BountyBoard.payload for `id` (Pattern P29
+//      requires the model only references IDs we hand it, and those
+//      IDs all come from this query — so the join is the trust
+//      boundary).
+//   2. Tokenise the payload into a small bag of "interesting" words
+//      (length >= 4, alpha-only) and build an FTS5 MATCH expression
+//      ORed across them.
+//   3. Query fts_bounty for prior rows of the same kind ranked by
+//      bm25, then JOIN to BriefingRenders to recover operator decision
+//      + rendered_at. Limit to `limit` rows.
+//   4. If FTS5 isn't compiled in OR the payload yields no tokens, fall
+//      back to the recency-only query (the original behaviour).
+//
+// The returned shape preserves the SubsequentOutcome="pending"
+// placeholder for the not-yet-implemented "did the post-decision
+// outcome ship clean?" lookup (D3 P6A.12 owns that fill-in). That
+// piece is a separate question from "which prior decisions look like
+// this one"; conflating them across the deliverable boundary would
+// have made the briefing-render pattern P29 audit fight itself.
 func findPriorSimilar(ctx context.Context, db *sql.DB, kind string, id int64, limit int) ([]PriorSimilarDecision, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	// (1) Look up the current decision's payload. Missing payload OR
+	// missing row is tolerated — we degrade to the recency-only path.
+	var currentPayload string
+	_ = db.QueryRowContext(ctx, `SELECT IFNULL(payload, '') FROM BountyBoard WHERE id = ?`, id).Scan(&currentPayload)
+
+	// (2) Build an FTS5 MATCH expression from the payload tokens. If
+	// the payload yields no usable tokens, skip the FTS path.
+	matchExpr := buildPriorSimilarMatch(currentPayload)
+	if matchExpr != "" {
+		if results, err := queryPriorSimilarFTS5(ctx, db, kind, id, matchExpr, limit); err == nil && len(results) > 0 {
+			return results, nil
+		}
+		// FTS5 path errored OR returned no matches — fall through to
+		// the recency-only path so the caller always gets the best
+		// available signal rather than an empty list when the same-
+		// kind set is non-empty.
+	}
+
+	// Recency-only fallback. Matches the original shape.
+	return queryPriorSimilarRecency(ctx, db, kind, id, limit)
+}
+
+// queryPriorSimilarFTS5 runs the FTS5-backed similarity query. Returns
+// (nil, err) if fts_bounty doesn't exist (FTS5 not compiled in OR
+// EnsureDrillFTS5 hasn't been called) so the caller can fall back.
+func queryPriorSimilarFTS5(ctx context.Context, db *sql.DB, kind string, id int64, matchExpr string, limit int) ([]PriorSimilarDecision, error) {
+	// Join fts_bounty (the FTS5 ranker) against BountyBoard (for kind
+	// filtering) and LEFT JOIN BriefingRenders (so a same-kind bounty
+	// row without a prior briefing still appears, and a row WITH a
+	// briefing carries its operator_decision).
+	rows, err := db.QueryContext(ctx, `
+		SELECT bb.id,
+		       COALESCE(MAX(br.rendered_at), bb.created_at) AS decided_at,
+		       COALESCE(MAX(br.operator_decision), '') AS outcome
+		FROM fts_bounty
+		JOIN BountyBoard bb ON bb.id = fts_bounty.rowid
+		LEFT JOIN BriefingRenders br
+		       ON br.decision_id = bb.id AND br.decision_kind = ?
+		WHERE fts_bounty MATCH ?
+		  AND bb.id != ?
+		  AND IFNULL(bb.type, '') != ''
+		GROUP BY bb.id
+		ORDER BY bm25(fts_bounty) ASC, decided_at DESC
+		LIMIT ?`, kind, matchExpr, id, limit)
+	if err != nil {
+		return nil, fmt.Errorf("fts5 prior similar: %w", err)
+	}
+	defer rows.Close()
+	var out []PriorSimilarDecision
+	for rows.Next() {
+		var p PriorSimilarDecision
+		if scanErr := rows.Scan(&p.DecisionID, &p.DecidedAt, &p.Outcome); scanErr != nil {
+			return nil, fmt.Errorf("scan fts5 prior similar: %w", scanErr)
+		}
+		if p.Outcome == "" {
+			p.Outcome = "pending"
+		}
+		p.SubsequentOutcome = "pending" // D3 P6A.12 fills in real value
+		out = append(out, p)
+	}
+	if iterErr := rows.Err(); iterErr != nil {
+		return nil, fmt.Errorf("iter fts5 prior similar: %w", iterErr)
+	}
+	return out, nil
+}
+
+// queryPriorSimilarRecency is the FTS-free fallback. Returns prior
+// BriefingRenders rows of the same kind, ordered by recency.
+func queryPriorSimilarRecency(ctx context.Context, db *sql.DB, kind string, id int64, limit int) ([]PriorSimilarDecision, error) {
 	rows, err := db.QueryContext(ctx, `SELECT decision_id, IFNULL(rendered_at, ''), IFNULL(operator_decision, '')
 		FROM BriefingRenders WHERE decision_kind = ? AND decision_id != ?
 		ORDER BY rendered_at DESC LIMIT ?`, kind, id, limit)
@@ -189,19 +284,92 @@ func findPriorSimilar(ctx context.Context, db *sql.DB, kind string, id int64, li
 	var out []PriorSimilarDecision
 	for rows.Next() {
 		var p PriorSimilarDecision
-		if err := rows.Scan(&p.DecisionID, &p.DecidedAt, &p.Outcome); err != nil {
-			return nil, fmt.Errorf("scan prior similar: %w", err)
+		if scanErr := rows.Scan(&p.DecisionID, &p.DecidedAt, &p.Outcome); scanErr != nil {
+			return nil, fmt.Errorf("scan prior similar: %w", scanErr)
 		}
 		if p.Outcome == "" {
 			p.Outcome = "pending"
 		}
-		p.SubsequentOutcome = "pending" // 6A.12 fills in real value
+		p.SubsequentOutcome = "pending" // D3 P6A.12 fills in real value
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iter prior similar: %w", err)
 	}
 	return out, nil
+}
+
+// buildPriorSimilarMatch tokenises a payload into a small FTS5 MATCH
+// expression. Strategy:
+//   - Lowercase the input, split on non-alphanumerics.
+//   - Keep tokens of length >= 4 (drop noise: "the", "and", JSON
+//     keys like "id", "ok").
+//   - Drop the top-N most common stop-tokens to reduce false matches.
+//   - Cap at 8 tokens so the FTS5 query plan stays cheap.
+//   - Join with OR; wrap each token in double-quotes so a stray
+//     punctuation byte doesn't get interpreted as a FTS5 operator.
+//
+// Returns "" when the payload has fewer than 1 usable token — the
+// caller falls back to the recency-only path in that case.
+func buildPriorSimilarMatch(payload string) string {
+	if payload == "" {
+		return ""
+	}
+	// Stop-word set: tiny, just enough to avoid the obvious JSON keys
+	// every BountyBoard.payload carries.
+	stop := map[string]struct{}{
+		"true": {}, "false": {}, "null": {},
+		"type": {}, "kind": {}, "owner": {}, "status": {},
+		"task": {}, "task_id": {}, "convoy_id": {},
+		"payload": {}, "created_at": {}, "updated_at": {},
+	}
+	const maxTokens = 8
+	const minLen = 4
+
+	// Lower-case + alphanumeric tokenise.
+	tokens := make([]string, 0, 16)
+	seen := map[string]struct{}{}
+	cur := make([]byte, 0, 32)
+	flush := func() {
+		if len(cur) < minLen {
+			cur = cur[:0]
+			return
+		}
+		s := string(cur)
+		cur = cur[:0]
+		if _, dup := seen[s]; dup {
+			return
+		}
+		if _, isStop := stop[s]; isStop {
+			return
+		}
+		seen[s] = struct{}{}
+		tokens = append(tokens, s)
+	}
+	for i := 0; i < len(payload) && len(tokens) < maxTokens; i++ {
+		c := payload[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			cur = append(cur, c)
+		case c >= 'A' && c <= 'Z':
+			cur = append(cur, c+32) // tolower
+		default:
+			flush()
+		}
+	}
+	flush()
+
+	if len(tokens) == 0 {
+		return ""
+	}
+	// Wrap each token in double-quotes so FTS5's MATCH parser doesn't
+	// reinterpret them as column filters or operators. The OR shape
+	// keeps the query broad — bm25 ranks the best matches first.
+	parts := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		parts = append(parts, fmt.Sprintf(`"%s"`, t))
+	}
+	return strings.Join(parts, " OR ")
 }
 
 // BriefingQueueRow is one entry in the briefing list view.

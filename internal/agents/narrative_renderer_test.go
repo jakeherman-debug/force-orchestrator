@@ -7,8 +7,55 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents/narrative_prompts"
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/store"
 )
+
+// TestNarrativeCostEstimate_ScalesWithEvents is the contract test for
+// the post-placeholder estimator: more events → higher cost (because
+// the per-event input-token term grows). Both estimates must be
+// strictly positive — the unknown-model floor protects against a 0
+// return that would short-circuit the daily-cap accumulator.
+func TestNarrativeCostEstimate_ScalesWithEvents(t *testing.T) {
+	lo := narrativeCostEstimate(1)
+	hi := narrativeCostEstimate(50)
+	if lo <= 0 {
+		t.Errorf("estimate(1) = %v, want > 0", lo)
+	}
+	if hi <= 0 {
+		t.Errorf("estimate(50) = %v, want > 0", hi)
+	}
+	if !(hi > lo) {
+		t.Errorf("estimate(50)=%v should exceed estimate(1)=%v — token-scaling broken", hi, lo)
+	}
+}
+
+// TestNarrativeCostEstimate_UsesPriceTable confirms the estimate
+// matches what claude.CostUSD would return for the haiku-4-5 model
+// directly. Operator price-table edits should flow through to the
+// renderer's cap.
+func TestNarrativeCostEstimate_UsesPriceTable(t *testing.T) {
+	// Empty-event path: 600 input tokens + 200 output tokens.
+	want := claude.CostUSD("claude-haiku-4-5", 600, 200)
+	if want <= 0 {
+		t.Fatalf("claude.CostUSD baseline returned 0 — price table missing claude-haiku-4-5")
+	}
+	got := narrativeCostEstimate(0)
+	if got != want {
+		t.Errorf("narrativeCostEstimate(0) = %v, want %v (must mirror claude.CostUSD)", got, want)
+	}
+}
+
+// TestNarrativeCostEstimate_NegativeEventCount asserts the defensive
+// clamp: a negative count is treated as zero, never as a price-table
+// underflow.
+func TestNarrativeCostEstimate_NegativeEventCount(t *testing.T) {
+	got := narrativeCostEstimate(-3)
+	want := narrativeCostEstimate(0)
+	if got != want {
+		t.Errorf("estimate(-3) = %v, want %v (negative clamps to 0)", got, want)
+	}
+}
 
 func TestNarrativeRenderer_Tick(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
