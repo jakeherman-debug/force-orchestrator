@@ -18,6 +18,9 @@ type CrossRepoAPI struct {
 }
 
 // CrossRepoAPIDependency mirrors a CrossRepoAPIDependencies table row.
+// APIIdentifier is a transient (non-persisted) field populated by consumer
+// extractors to carry the raw extracted path/identifier before P6 resolves
+// ProviderAPIID. It is ignored by UpsertCrossRepoAPIDependency.
 type CrossRepoAPIDependency struct {
 	ID            int
 	ConsumerRepo  string
@@ -28,6 +31,9 @@ type CrossRepoAPIDependency struct {
 	MatchConf     float64
 	DiscoveredAt  string
 	DeletedAt     string
+	// APIIdentifier holds the raw extracted path/identifier. Populated by
+	// consumer extractors; cleared once ProviderAPIID is resolved (P6).
+	APIIdentifier string
 }
 
 // UpsertCrossRepoAPI inserts or updates a CrossRepoAPIs row keyed on
