@@ -50,10 +50,53 @@
      These three surfaces fill in across 6A.7–6A.14. For now they display
      a "coming-online" placeholder so the operator sees the new IA without
      losing access to the existing widgets (folded under Legacy below). -->
+<!-- D3 P6A.7 / 6A.8 — Pulse SPA frontend (Ship G).
+     Consumes the already-shipped backend endpoints:
+       GET /api/pulse/snapshot   (store.PulseSnapshotFor)
+       GET /api/pulse/narrative  (agents.ListLatestNarrativeRenders)
+       GET /api/pulse/cinematic  (agents.BuildCinematic, sleep-detected only)
+     JS loaders (loadPulse / loadPulseNarrative / loadPulseCinematic) +
+     5s polling (startPulseRefresh / stopPulseRefresh) live in app.js.
+     Polling stops automatically when this pane is hidden (Sweep B uses the
+     same data-action delegated dispatcher pattern; no inline handlers). -->
 <div id="surface-pulse-pane" class="surface-pane" hidden>
-  <div class="surface-placeholder">
-    <h2>Pulse</h2>
-    <p>Ambient fleet view. Live narrative panel + fleet vital signs land in 6A.7 / 6A.8.</p>
+  <div class="pulse-toolbar">
+    <span class="pulse-title">Fleet Pulse</span>
+    <span id="pulse-last-refresh" class="pulse-last-refresh">—</span>
+    <button class="pulse-refresh-btn" data-action="refreshPulseAll" title="Refresh all pulse cards now">Refresh</button>
+  </div>
+  <div class="pulse-grid">
+    <!-- Vital signs: spend rate + queue snapshot -->
+    <div class="pulse-card pulse-card-vitals">
+      <h3>Fleet vital signs</h3>
+      <div id="pulse-vitals-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Currently running agents (Locked tasks) -->
+    <div class="pulse-card pulse-card-running">
+      <h3>Currently running</h3>
+      <div id="pulse-running-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Convoys in flight -->
+    <div class="pulse-card pulse-card-convoys">
+      <h3>Convoys in flight</h3>
+      <div id="pulse-convoys-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Narrative prose (haiku-rendered) -->
+    <div class="pulse-card pulse-card-narrative">
+      <h3>Fleet narrative</h3>
+      <div id="pulse-narrative-content" class="pulse-card-body">Loading…</div>
+      <button class="pulse-refresh-btn" data-action="refreshPulseNarrative">Refresh narrative</button>
+    </div>
+    <!-- Cinematic stream / sleep replay -->
+    <div class="pulse-card pulse-card-stream">
+      <h3>Recent activity</h3>
+      <div id="pulse-stream-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Trust dials (per-agent slider state) -->
+    <div class="pulse-card pulse-card-dials">
+      <h3>Trust dials</h3>
+      <div id="pulse-dials-content" class="pulse-card-body">Loading…</div>
+    </div>
   </div>
 </div>
 <div id="surface-briefing-pane" class="surface-pane" hidden>

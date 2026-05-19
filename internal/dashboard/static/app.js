@@ -4311,3 +4311,337 @@ window.switchTab = function(name) {
 if (SAVED_FILTER_TABS.includes(S.activeTab)) {
   loadSavedFiltersForTab(S.activeTab);
 }
+
+// ── D3 P6A.7 / 6A.8 — Pulse SPA frontend (Ship G) ────────────────────────
+// The Pulse surface consumes three backend endpoints that already exist:
+//
+//   GET /api/pulse/snapshot   — PulseSnapshot{spend, active_agents, convoys,
+//                               queue, trust_dials}
+//   GET /api/pulse/narrative  — {narratives: NarrativeRow[]} (prose +
+//                               rendered_at + cost)
+//   GET /api/pulse/cinematic  — CinematicPayload | {sleep_detected:false}
+//
+// We poll /api/pulse/snapshot every 5s while the Pulse surface is the
+// active one and stop polling on deactivation. The narrative and
+// cinematic endpoints are fetched once per activation (cheap; the
+// narrative renderer agent's tick is 30s so faster polling is wasted).
+const PULSE_REFRESH_MS = 5000;
+let pulseRefreshTimer = null;
+let pulseInflight = false;
+
+// ── Renderers (DOM-construction; no innerHTML for untrusted strings) ──
+function _pulseTextNode(s) { return document.createTextNode(s == null ? '' : String(s)); }
+function _pulseClear(el) {
+  if (!el) return;
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+function _pulseEmpty(el, msg) {
+  if (!el) return;
+  _pulseClear(el);
+  const span = document.createElement('span');
+  span.className = 'pulse-empty';
+  span.appendChild(_pulseTextNode(msg || '(no data)'));
+  el.appendChild(span);
+}
+
+function renderPulseVitals(snap) {
+  const el = document.getElementById('pulse-vitals-content');
+  if (!el) return;
+  const spend = (snap && snap.spend) || {};
+  const queue = (snap && snap.queue) || {};
+  _pulseClear(el);
+  const ul = document.createElement('ul');
+  ul.className = 'pulse-kv';
+  function row(label, value) {
+    const li = document.createElement('li');
+    const k = document.createElement('span'); k.className = 'pulse-k';
+    k.appendChild(_pulseTextNode(label));
+    const v = document.createElement('span'); v.className = 'pulse-v';
+    v.appendChild(_pulseTextNode(value));
+    li.appendChild(k); li.appendChild(v);
+    return li;
+  }
+  const fmtUSD = n => '$' + (Number(n) || 0).toFixed(2);
+  ul.appendChild(row('Spend (1h)',      fmtUSD(spend.hourly_usd)));
+  ul.appendChild(row('Projected today', fmtUSD(spend.projected_today_usd)));
+  ul.appendChild(row('7d avg / day',    fmtUSD(spend.last_7d_avg_usd)));
+  ul.appendChild(row('Queue total',     String(queue.total || 0)));
+  ul.appendChild(row('High-stakes',     String(queue.high_stakes || 0)));
+  ul.appendChild(row('Medium-stakes',   String(queue.medium_stakes || 0)));
+  if (spend.top_burner_task_id) {
+    ul.appendChild(row('Top-burner task', '#' + spend.top_burner_task_id));
+  }
+  el.appendChild(ul);
+}
+
+function renderPulseRunning(snap) {
+  const el = document.getElementById('pulse-running-content');
+  if (!el) return;
+  const agents = (snap && snap.active_agents) || [];
+  if (agents.length === 0) {
+    _pulseEmpty(el, 'No agents are currently locked on a task.');
+    return;
+  }
+  _pulseClear(el);
+  const table = document.createElement('table');
+  table.className = 'pulse-table';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  ['Agent', 'Task', 'Locked at'].forEach(h => {
+    const th = document.createElement('th');
+    th.appendChild(_pulseTextNode(h));
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  agents.forEach(a => {
+    const tr = document.createElement('tr');
+    const tdA = document.createElement('td');
+    tdA.appendChild(_pulseTextNode(a.agent || '(unowned)'));
+    const tdT = document.createElement('td');
+    tdT.appendChild(_pulseTextNode('#' + a.task_id));
+    const tdL = document.createElement('td');
+    tdL.className = 'pulse-mono';
+    tdL.appendChild(_pulseTextNode(a.locked_at || '—'));
+    tr.appendChild(tdA); tr.appendChild(tdT); tr.appendChild(tdL);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  el.appendChild(table);
+}
+
+function renderPulseConvoys(snap) {
+  const el = document.getElementById('pulse-convoys-content');
+  if (!el) return;
+  const convoys = (snap && snap.convoys) || [];
+  if (convoys.length === 0) {
+    _pulseEmpty(el, 'No convoys in flight.');
+    return;
+  }
+  _pulseClear(el);
+  const ul = document.createElement('ul');
+  ul.className = 'pulse-list';
+  convoys.forEach(c => {
+    const li = document.createElement('li');
+    const idSpan = document.createElement('span'); idSpan.className = 'pulse-convoy-id';
+    idSpan.appendChild(_pulseTextNode('#' + c.id));
+    const nameSpan = document.createElement('span'); nameSpan.className = 'pulse-convoy-name';
+    nameSpan.appendChild(_pulseTextNode(' ' + (c.name || '(unnamed)')));
+    const statusSpan = document.createElement('span'); statusSpan.className = 'pulse-pill';
+    statusSpan.appendChild(_pulseTextNode(c.status || 'Unknown'));
+    li.appendChild(idSpan);
+    li.appendChild(nameSpan);
+    li.appendChild(statusSpan);
+    ul.appendChild(li);
+  });
+  el.appendChild(ul);
+}
+
+function renderPulseDials(snap) {
+  const el = document.getElementById('pulse-dials-content');
+  if (!el) return;
+  const dials = (snap && snap.trust_dials) || [];
+  if (dials.length === 0) {
+    _pulseEmpty(el, 'No trust dials configured yet.');
+    return;
+  }
+  _pulseClear(el);
+  const wrap = document.createElement('div');
+  wrap.className = 'pulse-dials-grid';
+  dials.forEach(d => {
+    const cell = document.createElement('div');
+    cell.className = 'pulse-dial-cell';
+    const name = document.createElement('div');
+    name.className = 'pulse-dial-name';
+    name.appendChild(_pulseTextNode(d.agent || '(agent)'));
+    const meter = document.createElement('div');
+    meter.className = 'pulse-dial-meter';
+    const fill = document.createElement('div');
+    fill.className = 'pulse-dial-fill';
+    const pct = Math.max(0, Math.min(100, Number(d.dial_value) || 0));
+    fill.style.width = pct + '%';
+    meter.appendChild(fill);
+    const val = document.createElement('div');
+    val.className = 'pulse-dial-val';
+    val.appendChild(_pulseTextNode(String(pct)));
+    cell.appendChild(name);
+    cell.appendChild(meter);
+    cell.appendChild(val);
+    wrap.appendChild(cell);
+  });
+  el.appendChild(wrap);
+}
+
+function renderPulseNarrative(payload) {
+  const el = document.getElementById('pulse-narrative-content');
+  if (!el) return;
+  const rows = (payload && payload.narratives) || [];
+  if (rows.length === 0) {
+    _pulseEmpty(el, 'No narrative renders yet — the renderer ticks every 30s.');
+    return;
+  }
+  _pulseClear(el);
+  rows.slice(0, 5).forEach(n => {
+    const block = document.createElement('div');
+    block.className = 'pulse-narrative-block';
+    const ts = document.createElement('div');
+    ts.className = 'pulse-narrative-ts pulse-mono';
+    ts.appendChild(_pulseTextNode(n.rendered_at || ''));
+    const prose = document.createElement('div');
+    prose.className = 'pulse-narrative-prose';
+    prose.appendChild(_pulseTextNode(n.prose || '(empty)'));
+    block.appendChild(ts);
+    block.appendChild(prose);
+    el.appendChild(block);
+  });
+}
+
+function renderPulseStream(payload) {
+  const el = document.getElementById('pulse-stream-content');
+  if (!el) return;
+  if (payload && payload.sleep_detected === false) {
+    _pulseEmpty(el, 'No sleep window detected — fleet is live.');
+    return;
+  }
+  if (!payload || (!payload.event_count && !(payload.narrative_replay || []).length)) {
+    _pulseEmpty(el, 'Quiet window.');
+    return;
+  }
+  _pulseClear(el);
+  const meta = document.createElement('div');
+  meta.className = 'pulse-stream-meta pulse-mono';
+  const dur = Number(payload.sleep_duration_sec) || 0;
+  const mins = Math.round(dur / 60);
+  meta.appendChild(_pulseTextNode(
+    'Replay: ' + payload.event_count + ' events · ' + mins + ' min window'));
+  el.appendChild(meta);
+  const ul = document.createElement('ul');
+  ul.className = 'pulse-list';
+  (payload.narrative_replay || []).slice(0, 6).forEach(n => {
+    const li = document.createElement('li');
+    li.appendChild(_pulseTextNode(n.prose || ''));
+    ul.appendChild(li);
+  });
+  el.appendChild(ul);
+}
+
+function _pulseRenderError(targetId, err) {
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  _pulseClear(el);
+  const span = document.createElement('span');
+  span.className = 'pulse-error';
+  span.appendChild(_pulseTextNode('Error: ' + (err && err.message ? err.message : String(err))));
+  el.appendChild(span);
+}
+
+function _updatePulseRefreshStamp() {
+  const el = document.getElementById('pulse-last-refresh');
+  if (!el) return;
+  const now = new Date();
+  el.textContent = 'Updated ' + now.toLocaleTimeString();
+}
+
+// ── Loaders ──────────────────────────────────────────────────────────────
+async function loadPulse(forceRefresh) {
+  if (pulseInflight && !forceRefresh) return;
+  pulseInflight = true;
+  try {
+    const r = await fetch('/api/pulse/snapshot');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const snap = await r.json();
+    renderPulseVitals(snap);
+    renderPulseRunning(snap);
+    renderPulseConvoys(snap);
+    renderPulseDials(snap);
+    _updatePulseRefreshStamp();
+  } catch (e) {
+    _pulseRenderError('pulse-vitals-content', e);
+  } finally {
+    pulseInflight = false;
+  }
+}
+
+async function loadPulseNarrative() {
+  try {
+    const r = await fetch('/api/pulse/narrative?limit=5');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    renderPulseNarrative(data);
+  } catch (e) {
+    _pulseRenderError('pulse-narrative-content', e);
+  }
+}
+
+async function loadPulseCinematic() {
+  try {
+    const r = await fetch('/api/pulse/cinematic');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    renderPulseStream(data);
+  } catch (e) {
+    _pulseRenderError('pulse-stream-content', e);
+  }
+}
+
+// ── data-action handlers ────────────────────────────────────────────────
+function refreshPulseAll() {
+  loadPulse(true);
+  loadPulseNarrative();
+  loadPulseCinematic();
+}
+function refreshPulseNarrative() {
+  loadPulseNarrative();
+}
+
+// ── Polling lifecycle ────────────────────────────────────────────────────
+function startPulseRefresh() {
+  stopPulseRefresh();
+  // Kick an immediate load so the operator sees data without waiting for
+  // the first tick.
+  loadPulse(true);
+  loadPulseNarrative();
+  loadPulseCinematic();
+  pulseRefreshTimer = setInterval(() => {
+    // Only the snapshot is on the 5s cadence; narrative/cinematic stay
+    // on manual / activation triggers to respect the haiku cost cap.
+    loadPulse(false);
+  }, PULSE_REFRESH_MS);
+}
+
+function stopPulseRefresh() {
+  if (pulseRefreshTimer != null) {
+    clearInterval(pulseRefreshTimer);
+    pulseRefreshTimer = null;
+  }
+}
+
+// Wrap showSurface so Pulse polling lifecycle is bound to surface
+// activation/deactivation. The hashchange listener registered earlier
+// calls showSurface() under the hood; this wrapper sees every transition.
+const _origShowSurfacePulse = window.showSurface || showSurface;
+window.showSurface = function(name) {
+  _origShowSurfacePulse(name);
+  if (name === 'pulse') {
+    startPulseRefresh();
+  } else {
+    stopPulseRefresh();
+  }
+};
+
+// Boot: if Pulse is the initial surface (the default), kick polling now.
+if (currentSurfaceFromHash() === 'pulse') {
+  // Defer to the next tick so the DOM-ready state is consistent with how
+  // other surface loaders bootstrap themselves.
+  setTimeout(startPulseRefresh, 0);
+}
+
+// data-action exports — dispatchAction looks up handlers on window.
+window.loadPulse              = loadPulse;
+window.loadPulseNarrative     = loadPulseNarrative;
+window.loadPulseCinematic     = loadPulseCinematic;
+window.startPulseRefresh      = startPulseRefresh;
+window.stopPulseRefresh       = stopPulseRefresh;
+window.refreshPulseAll        = refreshPulseAll;
+window.refreshPulseNarrative  = refreshPulseNarrative;

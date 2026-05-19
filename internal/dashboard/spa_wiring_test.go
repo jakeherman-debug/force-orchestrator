@@ -414,6 +414,113 @@ func TestSPA_ConvoyWatchChip_Wired(t *testing.T) {
 	}
 }
 
+// TestSPA_PulseSurface_Wired — D3 P6A.7 / 6A.8 SPA wiring regression
+// (Ship G).
+//
+// The Pulse surface in the top-nav was a placeholder card prior to this
+// task; the backend (/api/pulse/snapshot, /api/pulse/narrative,
+// /api/pulse/cinematic + store.PulseSnapshotFor + narrative_renderer.go)
+// shipped earlier but no frontend consumed it. This test pins:
+//
+//   1. The placeholder text is gone.
+//   2. The six pulse-* content divs exist in index.html.
+//   3. The three pulse endpoints are referenced by app.js.
+//   4. The four core JS functions (loadPulse / loadPulseNarrative /
+//      startPulseRefresh / stopPulseRefresh) are defined and exported
+//      on window so dispatchAction can find the data-action handlers.
+//   5. No inline event handlers (onclick=, onchange=, etc.) sneaked into
+//      the new markup.
+func TestSPA_PulseSurface_Wired(t *testing.T) {
+	root := repoRootSPA(t)
+
+	indexHTMLBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/index.html"))
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	indexHTML := string(indexHTMLBytes)
+
+	appJSBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	appJS := string(appJSBytes)
+
+	// (1) Placeholder text must be gone.
+	if strings.Contains(indexHTML, "Live narrative panel + fleet vital signs land in 6A.7 / 6A.8") {
+		t.Errorf("SPA wiring (D3 P6A.7/8 Pulse): placeholder copy still present in index.html — surface was never wired")
+	}
+
+	// (2) Required Pulse content divs.
+	for _, marker := range []string{
+		`id="pulse-vitals-content"`,
+		`id="pulse-running-content"`,
+		`id="pulse-convoys-content"`,
+		`id="pulse-narrative-content"`,
+		`id="pulse-stream-content"`,
+		`id="pulse-dials-content"`,
+		`class="pulse-grid"`,
+	} {
+		if !strings.Contains(indexHTML, marker) {
+			t.Errorf("SPA wiring (D3 P6A.7/8 Pulse): index.html missing %q — card will not mount", marker)
+		}
+	}
+
+	// (3) Backend endpoints referenced.
+	for _, endpoint := range []string{
+		"/api/pulse/snapshot",
+		"/api/pulse/narrative",
+		"/api/pulse/cinematic",
+	} {
+		if !strings.Contains(appJS, endpoint) {
+			t.Errorf("SPA wiring (D3 P6A.7/8 Pulse): app.js does not reference %q — loader cannot reach backend", endpoint)
+		}
+	}
+
+	// (4) Core JS functions defined + exported.
+	for _, marker := range []string{
+		"function loadPulse(",
+		"function loadPulseNarrative(",
+		"function loadPulseCinematic(",
+		"function startPulseRefresh(",
+		"function stopPulseRefresh(",
+		"function refreshPulseNarrative(",
+		"window.loadPulse              = loadPulse",
+		"window.loadPulseNarrative     = loadPulseNarrative",
+		"window.startPulseRefresh      = startPulseRefresh",
+		"window.stopPulseRefresh       = stopPulseRefresh",
+		"window.refreshPulseNarrative  = refreshPulseNarrative",
+	} {
+		if !strings.Contains(appJS, marker) {
+			t.Errorf("SPA wiring (D3 P6A.7/8 Pulse): app.js missing %q", marker)
+		}
+	}
+
+	// (5) No inline event handlers in the Pulse pane block. We isolate the
+	// pulse-pane substring and grep for the common offenders. Pattern
+	// P_DashboardNoInlineHandlers also catches this at the whole-file
+	// level, but a targeted check here gives a clearer failure mode.
+	start := strings.Index(indexHTML, `id="surface-pulse-pane"`)
+	if start < 0 {
+		t.Fatalf("could not locate surface-pulse-pane block")
+	}
+	end := strings.Index(indexHTML[start:], `id="surface-briefing-pane"`)
+	if end < 0 {
+		t.Fatalf("could not locate end of surface-pulse-pane block")
+	}
+	pulseBlock := indexHTML[start : start+end]
+	for _, offender := range []string{
+		"onclick=",
+		"onchange=",
+		"oninput=",
+		"onsubmit=",
+		"onload=",
+	} {
+		if strings.Contains(pulseBlock, offender) {
+			t.Errorf("SPA wiring (D3 P6A.7/8 Pulse): inline handler %q present in pulse pane — violates Sweep B convention + CSP", offender)
+		}
+	}
+}
+
 func repoRootSPA(t *testing.T) string {
 	t.Helper()
 	wd, _ := os.Getwd()

@@ -1537,3 +1537,230 @@ body.density-comfortable th {
   padding: 6px 10px;
 }
 
+/* ── D3 P6A.7 / 6A.8 — Pulse SPA frontend (Ship G) ──────────────────────
+   Pulse surface grid: 6 cards in a 3-column responsive grid. Falls back
+   to 2-col then 1-col as viewport narrows. Visual style matches the
+   .reflection-pane / Help overlay shape (var(--bg2) panels w/ borders). */
+.pulse-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px 0 24px;
+}
+.pulse-title {
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text2, #aaa);
+  font-weight: 600;
+}
+.pulse-last-refresh {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text2, #888);
+}
+.pulse-refresh-btn {
+  background: var(--bg-elevated, var(--bg3, #2a2a2a));
+  border: 1px solid var(--border, #444);
+  color: var(--text, #ddd);
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  border-radius: 3px;
+}
+.pulse-refresh-btn:hover {
+  background: var(--bg-elevated-hover, #333);
+}
+.pulse-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px 24px 24px 24px;
+  overflow: auto;
+}
+@media (max-width: 1100px) {
+  .pulse-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .pulse-grid { grid-template-columns: 1fr; }
+}
+.pulse-card {
+  background: var(--bg2, #1a1a1a);
+  border: 1px solid var(--border, #444);
+  border-radius: var(--radius, 4px);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  min-height: 140px;
+}
+.pulse-card h3 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text2, #aaa);
+  font-weight: 600;
+}
+.pulse-card-body {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text, #ddd);
+  overflow: auto;
+}
+.pulse-card-narrative { grid-column: span 2; }
+.pulse-card-stream    { grid-column: span 2; }
+@media (max-width: 1100px) {
+  .pulse-card-narrative { grid-column: span 2; }
+  .pulse-card-stream    { grid-column: span 2; }
+}
+@media (max-width: 720px) {
+  .pulse-card-narrative,
+  .pulse-card-stream { grid-column: span 1; }
+}
+
+.pulse-kv {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.pulse-kv li {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-faint, #2a2a2a);
+  font-size: 12px;
+}
+.pulse-kv li:last-child { border-bottom: none; }
+.pulse-k { color: var(--text2, #aaa); }
+.pulse-v {
+  color: var(--text, #ddd);
+  font-family: var(--font-mono, monospace);
+}
+
+.pulse-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+}
+.pulse-table th {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border, #444);
+  color: var(--text2, #aaa);
+  font-weight: 600;
+}
+.pulse-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-faint, #2a2a2a);
+  color: var(--text, #ddd);
+  word-break: break-word;
+}
+
+.pulse-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.pulse-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-faint, #2a2a2a);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pulse-list li:last-child { border-bottom: none; }
+.pulse-convoy-id {
+  font-family: var(--font-mono, monospace);
+  color: var(--accent, #6cf);
+}
+.pulse-convoy-name {
+  flex: 1;
+  color: var(--text, #ddd);
+}
+.pulse-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border, #444);
+  border-radius: 999px;
+  background: var(--bg3, #222);
+  color: var(--text2, #aaa);
+  font-size: 11px;
+}
+
+.pulse-dials-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+.pulse-dial-cell {
+  display: grid;
+  grid-template-columns: 70px 1fr 28px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.pulse-dial-name {
+  color: var(--text2, #aaa);
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pulse-dial-meter {
+  background: var(--bg3, #222);
+  border: 1px solid var(--border, #444);
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+}
+.pulse-dial-fill {
+  background: var(--accent, #6cf);
+  height: 100%;
+}
+.pulse-dial-val {
+  font-family: var(--font-mono, monospace);
+  color: var(--text, #ddd);
+  text-align: right;
+}
+
+.pulse-narrative-block {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-faint, #2a2a2a);
+}
+.pulse-narrative-block:last-child { border-bottom: none; }
+.pulse-narrative-ts {
+  font-size: 11px;
+  color: var(--text2, #888);
+  margin-bottom: 4px;
+}
+.pulse-narrative-prose {
+  font-size: 13px;
+  color: var(--text, #ddd);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.pulse-stream-meta {
+  font-size: 11px;
+  color: var(--text2, #888);
+  margin-bottom: 6px;
+}
+
+.pulse-empty {
+  display: block;
+  color: var(--text2, #888);
+  font-style: italic;
+  font-size: 12px;
+  padding: 8px 0;
+}
+.pulse-error {
+  display: block;
+  color: var(--red, #e66);
+  font-size: 12px;
+  padding: 8px 0;
+}
+.pulse-mono { font-family: var(--font-mono, monospace); }
