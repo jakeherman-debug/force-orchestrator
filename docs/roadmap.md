@@ -2521,3 +2521,531 @@ Authoritative ordered sequence of every track-level merge to main across the ent
 **The gate rows are non-skippable.** An agent proposing to begin step N+1 when step N's gate row is not satisfied (closure report not filed, or some merge in the prior deliverable still pending) is rejected. The operator enforces this by refusing to approve the starting PR.
 
 **What changes if an experiment in D7 declares null/inconclusive.** The ship-PR for that experiment doesn't exist (there's nothing to ship). The step number stays in the sequence as a "no-op" — the closure report records the null outcome and moves on. Subsequent gates are unaffected. The operator should NOT hold D7 open waiting for a null experiment to "change its mind"; null is a valid terminal outcome.
+
+---
+
+> **Note on D11–D13.** Deliverables 11 (Notification Routing + Dashboard Personalization), 12 (Daemon Lifecycle Management), and 13 (Documentation Sharding) shipped without backfilling this roadmap document — their canonical specs live in their closure reports: `docs/closures/DELIVERABLE-11-CLOSURE.md`, `DELIVERABLE-12-CLOSURE.md`, `DELIVERABLE-13-CLOSURE.md`. D14 below is the first roadmap-resident entry post-D10.
+
+## Deliverable 14 — Senate as Knowledge-First Advisor (+ tag-driven rule scoping)
+
+### Why now
+
+Operator surfaced two architectural conflations in the D4 Senate design:
+
+1. **Knowledge** (facts the senator knows about a repo) and **rules** (operator-encoded standards the senator enforces) were collapsed into a single ratification-gated pipeline. Result: 78 pending ratifications across 17 onboarded senators, most of which are observations dressed as rules.
+2. **Rule scope** is hard-pinned to a single repo (`senate:<repo>`). No way to express "this applies to every frontend repo" or "this is universal." Result: ratifying the same rule N times per repo, or accepting it only applies to one.
+
+The senate state machine is stuck: every chamber says `onboarding` because no candidates have been ratified, blocking the `active` transition. The senator HAS the knowledge already (in `SenateMemory`) but can't operate.
+
+### Goals (operator-facing)
+
+1. **Senators become operational immediately** after onboarding (knowledge digest built). No operator ratification needed to use a senator as an advisor.
+2. **Rules are explicit, scarce, and well-scoped** — operator-promoted, three-tier (global / tag / repo).
+3. **Tags are first-class** with a registry, operator + librarian-managed, with explicit suggestion flow at intake AND on every dog refresh pass.
+4. **Existing 78 candidates** get migrated: most absorbed as knowledge, the genuine rules surfaced with scope-suggestion.
+
+### Schema additions (3-place parity)
+
+```sql
+-- Tag registry (namespace constraint prevents typos)
+CREATE TABLE Tags (
+  name        TEXT PRIMARY KEY,
+  description TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  created_by  TEXT NOT NULL DEFAULT 'operator'
+);
+
+-- Many-to-many: repos ↔ tags
+CREATE TABLE RepoTags (
+  repo_name TEXT NOT NULL,
+  tag       TEXT NOT NULL,
+  added_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  added_by  TEXT NOT NULL DEFAULT 'operator',
+  source    TEXT NOT NULL DEFAULT 'operator',
+  -- source ∈ {'operator', 'librarian-suggestion', 'dog-refresh'}
+  PRIMARY KEY (repo_name, tag),
+  FOREIGN KEY (tag) REFERENCES Tags(name)
+);
+CREATE INDEX idx_repotags_tag ON RepoTags(tag);
+
+-- Operator-review queue for librarian-suggested tags
+CREATE TABLE TagSuggestions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_name     TEXT NOT NULL,
+  tag           TEXT NOT NULL,
+  rationale     TEXT NOT NULL DEFAULT '',
+  suggested_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  suggested_by  TEXT NOT NULL,
+  -- suggested_by ∈ {'librarian:senate-onboarding', 'librarian:senate-refresh'}
+  status        TEXT NOT NULL DEFAULT 'pending',
+  -- status ∈ {'pending', 'accepted', 'dismissed'}
+  resolved_at   TEXT NOT NULL DEFAULT '',
+  resolved_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_tag_suggestions_status ON TagSuggestions(status, suggested_at);
+```
+
+**FleetRules.agent_scope syntax extension** (backwards-compatible — no new column):
+- `senate:<repo>` — single-repo (existing form, unchanged)
+- `senate:*` — global (NEW)
+- `senate:tag:<tag>` — tag-scoped (NEW)
+
+Validated by a new pattern test (`P_RuleScopeSyntaxValid`).
+
+**SenateChamber state-machine update**:
+- Current: `onboarding` → `active` requires ratified candidate
+- New: `onboarding` → `active` happens when knowledge digest completes successfully (auto). Operator action no longer blocks senator operationality.
+- One-time migration in `runMigrations` flips existing `onboarding` chambers to `active` if they have a non-empty SenateMemory.
+
+### Phases
+
+| Phase | Scope | Dependencies | Notes |
+|---|---|---|---|
+| **P1** | Schema (3 new tables) + `store.ResolveRulesForRepo` (unions `senate:*` + `senate:<repo>` + `senate:tag:<tag>`) + 11 store helpers + 4 pattern tests | none | Sequential, foundational |
+| **P2** | Senate-onboarding rewrite: 3 LLM outputs (knowledge_digest / rule_suggestions / tag_suggestions); `runSenatorOnboardingTask` rewritten to auto-set chamber active; `senate-refresh` dog regenerates all three on cadence | P1 | Parallel with P3+P4 |
+| **P3** | CLI surface: `force repos tag/untag/tags`, `force tags list/create/remove`, `force tag-suggestions accept/dismiss`, `force ec promote --scope`, `force rules list/upgrade` | P1 | Parallel with P2+P4 |
+| **P4** | Dashboard surfaces: new Rules sub-tab (per-repo + global + per-tag); per-rule scope-upgrade UI; tag registry view; tag-suggestion banner in Briefing (Ship H); Pulse vital-sign counter (Ship G) | P1 | Parallel with P2+P3 |
+| **P5** | One-shot migration of pending PromotionProposals: LLM classifier buckets as `knowledge_observation` or `enforceable_rule`; knowledge auto-absorbed to SenateMemory; rules enriched with `suggested_scope` for operator review | P1+P2+P3 | Sequential |
+| **P6** | Strict verifier (Static + Heavy + Closure) + `DELIVERABLE-14-CLOSURE.md` | P5 | Sequential, 3 sub-agents in parallel |
+
+### Pattern tests added
+
+| Pattern | What it asserts |
+|---|---|
+| `P_RuleScopeSyntaxValid` | Every FleetRules.agent_scope matches `senate:(\*\|tag:[a-z0-9_-]+\|<repo-name>)` |
+| `P_SenateNoRepoTagsWrites` | AST audit: Senate package never inserts into RepoTags directly (operator + librarian-suggestion only) |
+| `P_TagRegistryEnforced` | Schema-level: RepoTags inserts FK-fail when the tag is missing from Tags |
+| `P_ResolveRulesForRepoComplete` | Unit-level: resolver returns the full union for every fixture combination |
+
+### CLI surface added (Pattern P25 cli-parity)
+
+```
+force repos tag <repo> <tag>                   force tag-suggestions list [--repo X]
+force repos untag <repo> <tag>                 force tag-suggestions accept <id>
+force repos tags [--repo X] [--tag Y]          force tag-suggestions dismiss <id>
+force tags list                                force ec promote <id> --scope <global|tag:X|repo:Y>
+force tags create <name> [--description "..."] force rules list [--scope|--repo|--tag]
+force tags remove <name>                       force rules upgrade <rule-key> --to-scope <spec>
+```
+
+### Migration risk
+
+- Existing FleetRules rows are untouched (backwards-compat)
+- State-machine change is forward-only; one-time migration flips orphan `onboarding` chambers to `active` on next daemon start
+- 78 pending PromotionProposals stay in queue until P5 runs (operator triggers explicitly)
+- Pattern P34 (Senate-no-self-promote) preserved end-to-end
+
+### Out of scope (deferred to D15+)
+
+- Auto-tagging based on file detection (e.g. "has package.json → frontend"). Librarian's `tag_suggestions` covers this; auto-apply without operator confirmation is a future deliverable.
+- Conflict resolution between tag rules and repo rules. Both fire as separate review verdicts; operator decides. No precedence ordering in D14.
+- Tag-of-tags hierarchy. Tags are flat in D14.
+- Per-rule expiry / sunset dates. Existing `FleetRules.active_until` covers manual sunset.
+
+### Estimate
+
+Wall-clock: ~6–8 hours if waves run cleanly. Agent-time: ~16 hours total (heavy parallelism in P2/P3/P4). Operator attention: ~30 minutes at P5 (review migration report + scope upgrades).
+
+### Closure
+
+`docs/closures/DELIVERABLE-14-CLOSURE.md` (TBD).
+
+## Deliverable 15 — API-Surface Dependency Graph
+
+### Why now
+
+The D8 cross-repo dependency graph captures **language-symbol dependencies** — Go functions, exported types, exported constants. That's only one form of dependency. The fleet's actual operator-impacting dependencies at Upstart are mostly **API-surface**:
+
+- `upstart_web` (Rails) exposes HTTP routes that `upstart-web-frontend` (TypeScript/React) calls over the wire
+- Spring (Java + Kotlin) services expose gRPC RPCs that other microservices consume via generated stubs
+- Event producers emit protobuf events that downstream services subscribe to
+
+None of these connections appear in D8's symbol graph because they cross language/process boundaries. Result: `Chancellor.PostProcessBlastRadius` understates blast radius for the most common kind of breakage at scale.
+
+D15 ships a parallel graph that captures **API-surface** dependencies (HTTP routes, gRPC services, OpenAPI specs, protobuf events) connected via wire-format identity (URL paths + RPC names), not Go-import-path identity.
+
+### Ordering
+
+**Follows D14** (sequential). D14 is the unblocker for the stuck senate state; D15 is value-add on top. Tail of D14 closure can overlap with head of D15 schema phase if convenient, but no formal parallel run.
+
+### Compounding with D14
+
+Once D15 lands, D14's librarian-side tag suggestions get richer signals:
+- Repo has `.proto` files → suggest tag `grpc-server`
+- Repo has Rails `config/routes.rb` with operator-facing routes → suggest tag `has-rest-api`
+- Repo has only consumer-side HTTP clients (no exposed routes) → suggest tag `frontend-only`
+
+D14 ships fine without this enhancement (tag suggestions can come from README parsing alone in v1). The D15 → D14 hook is a small follow-up patch, not blocking either deliverable.
+
+### Goals (operator-facing)
+
+1. **Cross-language API graph** captures the actual wire-level dependencies at Upstart (Rails ↔ TypeScript, Spring ↔ Spring, gRPC services ↔ stubs).
+2. **Blast radius accuracy improves** for HTTP / gRPC changes — `Chancellor.PostProcessBlastRadius` returns real consumer lists, not just symbol-import consumers.
+3. **`Diplomat.ConsumerIntegrationCheck`** runs integration tests on the right set of consumers when an API surface changes.
+4. **Realistic per-stack coverage bars** — operator knows where false-negatives are likely (Express dynamic-URL HTTP clients are inherently hard to extract; Rails routes.rb and `.proto` files are nearly 100%).
+
+### Schema additions (3-place parity)
+
+```sql
+-- Distinct from CrossRepoSymbols (D8) — that captures language symbols;
+-- this captures wire-level API surfaces.
+CREATE TABLE CrossRepoAPIs (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_name        TEXT NOT NULL,
+  api_kind         TEXT NOT NULL,
+  -- api_kind ∈ {'http_route', 'grpc_rpc', 'openapi_op', 'graphql_op', 'proto_event'}
+  api_identifier   TEXT NOT NULL,
+  -- For http_route: 'GET /api/v1/users/:id' (path normalized)
+  -- For grpc_rpc:   'service.UserService/GetUser'
+  -- For proto_event: 'events.UserCreated'
+  source_file      TEXT NOT NULL,
+  source_line      INTEGER NOT NULL,
+  extractor        TEXT NOT NULL,
+  -- extractor ∈ {'rails-routes', 'spring-annotation', 'express-app',
+  --              'nestjs-decorator', 'ktor-routing', 'proto-service',
+  --              'openapi-yaml', 'graphql-schema'}
+  signature_hash   TEXT NOT NULL,
+  last_scanned_at  TEXT NOT NULL,
+  UNIQUE(repo_name, api_kind, api_identifier)
+);
+CREATE INDEX idx_cross_repo_apis_repo ON CrossRepoAPIs(repo_name);
+CREATE INDEX idx_cross_repo_apis_ident ON CrossRepoAPIs(api_kind, api_identifier);
+
+CREATE TABLE CrossRepoAPIDependencies (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  consumer_repo    TEXT NOT NULL,
+  consumer_file    TEXT NOT NULL,
+  consumer_line    INTEGER NOT NULL,
+  provider_api_id  INTEGER NOT NULL,
+  call_kind        TEXT NOT NULL,
+  -- call_kind ∈ {'fetch', 'axios', 'rest-template', 'okhttp', 'retrofit',
+  --              'httparty', 'faraday', 'grpc-client', 'graphql-client'}
+  match_confidence REAL NOT NULL DEFAULT 1.0,
+  -- 1.0 = exact static match; lower = pattern inferred (e.g. URL built from base+path)
+  discovered_at    TEXT NOT NULL,
+  deleted_at       TEXT NOT NULL DEFAULT '',
+  UNIQUE(consumer_repo, consumer_file, consumer_line, provider_api_id),
+  FOREIGN KEY (provider_api_id) REFERENCES CrossRepoAPIs(id)
+);
+CREATE INDEX idx_cross_repo_api_deps_provider ON CrossRepoAPIDependencies(provider_api_id);
+CREATE INDEX idx_cross_repo_api_deps_consumer ON CrossRepoAPIDependencies(consumer_repo);
+```
+
+### Phases
+
+| Phase | Scope | Dependencies | Notes |
+|---|---|---|---|
+| **P1** | Schema (2 new tables) + path-normalization helper (`/users/:id` ↔ `/users/{id}` ↔ `/users/${id}`) + `store.GetAPIBlastRadius(api_id)` + pattern test scaffold | none | Sequential, foundational |
+| **P2** | Provider extractors — **easy stacks**: Rails `config/routes.rb` (DSL parse), `.proto` services (protobuf grammar), OpenAPI/Swagger YAML | P1 | Parallel-eligible with P3+P4 |
+| **P3** | Provider extractors — **Spring (Java + Kotlin)**: `@RequestMapping` / `@GetMapping` / `@PostMapping` / `@RestController` annotations via JavaParser / kotlinx.ast; also Ktor `routing { ... }` DSL | P1 | Parallel-eligible with P2+P4 |
+| **P4** | Provider extractors — **Node**: Express `app.METHOD()` calls; NestJS `@Controller` + `@Get`/`@Post` decorators via TypeScript AST | P1 | Parallel-eligible with P2+P3 |
+| **P5** | Consumer extractors — HTTP clients (fetch, axios, RestTemplate, OkHttp, HTTParty, Faraday, Net::HTTP) + gRPC stub-import detection + GraphQL clients | P1 | Sequential after P2/P3/P4 (uses normalizer + path index) |
+| **P6** | Path-matcher: connect HTTP consumers to providers via normalized path. Integrate with `Chancellor.PostProcessBlastRadius` (now unions symbol + API blast radius) and `Diplomat.ConsumerIntegrationCheck` (selects target repos via API consumers too) | P2+P3+P4+P5 | Sequential |
+| **P7** | Strict verifier (Static + Heavy + Closure) + `DELIVERABLE-15-CLOSURE.md` | P6 | Sequential, 3 sub-agents in parallel |
+
+### Per-stack coverage bars (acknowledged false-negative envelope)
+
+The pattern test `P_APIExtractorCoverage` enforces minimum extraction accuracy per stack. Operator knows up-front where the gaps will be:
+
+| Stack | Expected accuracy | Where it's likely to miss |
+|---|---|---|
+| Rails `routes.rb` | ≥ 95% | Dynamic `match` with procs; mountable engines |
+| Spring annotations | ≥ 90% | Programmatic registration (`@Bean`-based routes); custom `HandlerMapping` |
+| Ktor DSL | ≥ 75% | Deeply nested routing scopes with computed paths |
+| Express `app.METHOD()` | ≥ 70% | Routes registered via runtime config; routes loaded from middleware |
+| NestJS decorators | ≥ 85% | Dynamic module factories that register routes at runtime |
+| `.proto` services | ≥ 99% | `import` paths that don't resolve in the local repo |
+| OpenAPI YAML | ≥ 95% | Multi-file specs with `$ref` to remote URLs |
+| **Consumer side** | | |
+| `fetch` / `axios` (string literals) | ≥ 80% | URLs built up from variables (`fetch(\`\${base}/users\`)`) |
+| Retrofit `@GET("...")` | ≥ 95% | Annotation-driven, easy |
+| RestTemplate `getForObject` | ≥ 60% | URL almost always built up from base + path |
+| HTTParty / Faraday | ≥ 55% | Dynamic URL composition, configured per-instance |
+| gRPC `<Stub>.<RPC>` | ≥ 90% | Dynamically-named RPC dispatch (rare) |
+
+Below the threshold = pattern test fails. Above = the operator accepts the false-negative envelope.
+
+### Pattern tests added
+
+| Pattern | What it asserts |
+|---|---|
+| `P_APIPathNormalized` | Every `CrossRepoAPIs.api_identifier` row passes through `normalizePath` (parameter forms `:id`/`{id}`/`${id}` all collapse to `:id`) |
+| `P_APIExtractorCoverage` | Per-stack accuracy bars above are met against the test fixture corpus |
+| `P_APIConsumerProviderResolverComplete` | Unit-level: every consumer-side hit either resolves to a CrossRepoAPIs row or is correctly classified as `unresolved` (with a tracked reason) |
+| `P_DiplomatAPIConsumerIntegration` | AST audit: `runConsumerIntegrationCheck` queries `CrossRepoAPIDependencies` in addition to `CrossRepoDependencies` when fanning out consumer test suites |
+
+### CLI surface added (Pattern P25 cli-parity)
+
+```
+force apis list [--repo X] [--kind http_route|grpc_rpc|proto_event|...]
+force apis consumers <api-id>     # who calls this API?
+force apis providers <api-path>   # which repo exposes this path?
+force apis resolve <consumer-call> # given a consumer-side call site, show the matched provider
+force apis coverage              # per-stack extraction stats for diagnostic
+```
+
+### Test fixture corpus
+
+P_APIExtractorCoverage runs against a checked-in fixture corpus under `internal/agents/dogs_repo_api_scan/testdata/`:
+- `rails-app/` with a realistic `config/routes.rb`
+- `spring-app/` (Java) with annotated controllers
+- `spring-app-kotlin/` with the same controllers in Kotlin
+- `express-app/` with route registrations
+- `nestjs-app/` with `@Controller` modules
+- `proto-app/` with multi-service `.proto` files
+- `openapi-app/` with a `openapi.yaml`
+- `frontend-app/` (TypeScript) with consumer calls
+
+Each fixture has a `expected.json` listing the API rows + consumer matches the extractor should produce. P_APIExtractorCoverage asserts ≥ threshold matches.
+
+### Migration / backfill
+
+Once P6 lands, the `dog_repo_api_scan` dog kicks off and populates the graph for all 15 registered repos on next daemon start. Expected: ~10-15 min for the initial scan (most time spent on Spring AST walks). Subsequent scans are 24h-cadence + incremental (file mtime check).
+
+No data migration is needed — D15 builds a NEW graph alongside D8's existing one. Both coexist permanently because they answer different questions.
+
+### Out of scope (deferred to D16+)
+
+- **GraphQL subscription / mutation tracking**. Only query-level captured in v1.
+- **Event-bus consumer tracking**. We capture proto_event provider-side; tracking who SUBSCRIBES to an event requires per-broker integration (Kafka consumer groups, RabbitMQ bindings, etc.) — too broker-specific for v1.
+- **WebSocket / SSE endpoints**. Long-lived connections don't fit the request/response API model cleanly.
+- **gRPC streaming RPC argument flow**. The graph captures the RPC method as a unit; the streaming-argument-flow analysis is a different kind of model.
+- **Auto-generated stub detection** (`buf generate`, `protoc-gen-*` outputs). Generated stubs that consume protos shouldn't double-count as both "this repo defines an RPC" and "this repo consumes an RPC" — needs a heuristic to filter, deferred.
+
+### Pattern P16 / P34 implications
+
+- **P16** (cross-agent service interfaces): the new `internal/clients/apigraph/` package gets added with the same client.go + inprocess.go shape; P16 auto-walks `internal/clients/*/` so no test update needed.
+- **P34** (Senate-no-self-promote): unaffected — D15 doesn't touch FleetRules.
+
+### Estimate
+
+Wall-clock: ~3 days if P2/P3/P4 parallelize cleanly. Agent-time: ~24 hours total. Operator attention: ~30 minutes at P6 to validate the matcher works on 2-3 real upstart cases (e.g. "what does upstart_web's `/api/v1/users` change actually break?").
+
+### Closure
+
+`docs/closures/DELIVERABLE-15-CLOSURE.md` (TBD).
+
+---
+
+## Deliverable 16 — Deferred Feature Loop Restoration: Tier 1 (Critical Activations)
+
+### Why now
+
+A 2026-05-19 audit of all deliverables D1–D14 identified a class of defect: complete, tested implementations sitting inert because the Phase N+1 calling path (registration, enrollment, live-flip) was deferred and never returned. Three items represent correctness failures rather than feature gaps:
+
+1. **EC experiments in log-only mode.** `treatments.Apply` was shipped in log-only mode as D3 Phase 1. Phase 2 was supposed to flip it live. It was never flipped. No experiment in the fleet is actually doing anything differently in production — treatment pass-through is silently swallowed.
+2. **RunWeeklyEvaluatorDog never registered.** The weekly golden-set accuracy regression dog is complete, tested, and production-ready — but was never added to the dogs dispatch table. Agent accuracy has never been evaluated in production.
+3. **8 InfrastructureTaskTypes entries missing.** Task types with active handlers (including `SenateReview`, `SenatorOnboarding`, and six EC types) are absent from the `InfrastructureTaskTypes` slice. The dashboard "infrastructure tasks" view silently omits them.
+
+### Classification
+
+Bug/correctness (Tier 1 — these represent running systems that silently do nothing).
+
+### Prerequisites
+
+D14 complete and merged. (D16 does not require D15.)
+
+### Phases
+
+| Phase | Scope | Dependencies | Parallel-eligible with |
+|---|---|---|---|
+| **P1A** | Add 8 missing entries to `InfrastructureTaskTypes` in `internal/store/tasks.go` + test asserting the count | none | P1B |
+| **P1B** | Register `RunWeeklyEvaluatorDog` in `internal/agents/dogs.go` dispatch table + `TestListDogs` count increment | none | P1A |
+| **P2** | Flip `treatments.Apply` from log-only to live in the EC paired-runs path; add integration test asserting a treatment arm actually receives different inputs | P1A + P1B merged | — |
+| **P3** | Deliverable verifier: Static (pattern tests) + Heavy (full suite) + Closure | P2 | — |
+
+**P1A and P1B are trivial (one-to-few lines each) and run in parallel.** P2 is the substantive phase — it requires understanding exactly where log-only mode is gated and what "live" means for the existing experiment infrastructure.
+
+### Work tracks — P1A
+
+- File: `internal/store/tasks.go`
+- Find `InfrastructureTaskTypes` slice. Add all task types that have registered handlers but are absent from the slice.
+- Confirmed missing (from audit): `SenateReview`, `SenatorOnboarding`, plus EC types — verify exact set by grepping handlers vs the slice.
+- Test: existing `TestInfrastructureTaskTypes` or equivalent — assert the count includes the new entries.
+
+### Work tracks — P1B
+
+- File: `internal/agents/dogs.go`
+- Find the dogs dispatch table / switch. Add `"golden-set-evaluator"` → `RunWeeklyEvaluatorDog` (the function lives in `internal/agents/golden_set/dog.go`).
+- Verify the `InquisitorConfig` + evaluator map wiring that the dog needs at startup is either already present or add the minimal plumbing.
+- Test: `TestListDogs` count increment.
+
+### Work tracks — P2
+
+- Find where `treatments.Apply` is currently gated to log-only mode. The gating is somewhere in the EC claim loop or the experiment harness (D3 Phase 1 shipped it; look for a `logOnly`, `dryRun`, or `simulate` flag).
+- Remove the gate / flip the flag to live. The paired-runs infrastructure (schema, holdout, experiment runner) is all present — this should be a small targeted change.
+- Add an integration test: create a fixture experiment, enroll a task in an active arm, call `treatments.Apply`, assert the treatment's effect is observable (not just logged).
+- Do NOT change experiment-lifecycle behavior, sampling logic, or Bayesian termination — only the apply-vs-log gate.
+
+### Exit criteria
+
+1. `InfrastructureTaskTypes` includes all task types with active handlers. `TestInfrastructureTaskTypes` (or equivalent) green with new count.
+2. `TestListDogs` green with `golden-set-evaluator` included. Dog fires in a stub daemon run without panic.
+3. `treatments.Apply` live: integration test asserts a treatment arm's effect is applied (not just logged) to a fixture task.
+4. `go test -tags sqlite_fts5 -race -count=5 ./...` green.
+5. `docs/closures/DELIVERABLE-16-CLOSURE.md` filed.
+
+### Anti-cheat directives
+
+- **No hardcoding the InfrastructureTaskTypes count.** The test must derive expected count from the set of registered handlers, not a magic number.
+- **No disabling golden-set evaluation behind a flag in the dog.** The dog registers and runs; LIVE_HAIKU_DISABLED gates LLM calls inside it (already handled by existing pattern).
+- **No flipping treatments.Apply live by removing safety checks.** The spend-cap and e-stop gates around experiment execution must remain intact. Only remove the log-only bypass.
+
+### Verification procedure
+
+```
+go test -tags sqlite_fts5 -race -count=5 ./internal/store/... ./internal/agents/...
+go test -tags sqlite_fts5 -run TestListDogs ./internal/agents/...
+go test -tags sqlite_fts5 -run TestTreatmentsApply_Live ./...
+```
+
+### Closure
+
+`docs/closures/DELIVERABLE-16-CLOSURE.md` with: InfrastructureTaskTypes before/after list, golden-set-evaluator registration evidence, treatments.Apply live-flip diff + integration test result.
+
+---
+
+## Deliverable 17 — Deferred Feature Loop Restoration: Tier 2 (Feature Completions)
+
+### Why now
+
+Same 2026-05-19 audit. These items are complete Phase N implementations whose Phase N+1 calling code was planned but never shipped. Unlike D16, these are feature gaps rather than correctness failures — the system isn't silently wrong, it's missing value that was intended to be there.
+
+### Classification
+
+Feature (Tier 2 — planned work that slipped roadmap phases).
+
+### Prerequisites
+
+D16 complete and `docs/closures/DELIVERABLE-16-CLOSURE.md` filed.
+
+### Phases
+
+| Phase | Scope | Dependencies | Parallel-eligible with |
+|---|---|---|---|
+| **P1A** | Senate material-amendment re-review loop: wire `HasMaterialAmendment()` into the Senate verdict aggregation path; when amendments are material, queue a re-review task | none | P1B |
+| **P1B** | Holdout fleet-state snapshot dog: implement the dog that computes and writes `GlobalHoldouts.fleet_state_hash` on a daily cadence | none | P1A |
+| **P2A** | CLI parity: `force briefing`, `force scale --medics/--pilots/etc.`, `force convoy cancel`, `force task show/status`, `force senate` | P1A + P1B merged | P2B |
+| **P2B** | D10 v2 follow-ups: (1) merge-event trigger for `dogArchitectureDocRender`; (2) `gh api` swap to capture real CommentID; (3) T+30 operator verdict scaffolding | P1A + P1B merged | P2A |
+| **P3** | Deliverable verifier: Static + Heavy + Closure | P2A + P2B | — |
+
+### Work tracks — P1A (Senate re-review)
+
+- `internal/senate/verdict.go` — `HasMaterialAmendment()` exists; implement the re-review loop that fires when this returns true.
+- The loop: when a Senate verdict has material amendments, queue a new `SenateReview` task (or re-queue the original task) after the Chancellor splices in amendments.
+- Must not create infinite re-review cycles — add a `review_pass_count` cap (max 3) per bounty.
+- Test: fixture where a verdict has material amendments → assert a re-review task is queued; fixture where amendments are non-material → assert no re-queue.
+
+### Work tracks — P1B (Holdout snapshot dog)
+
+- `internal/holdout/baseline.go` — `GlobalHoldouts.fleet_state_hash` column exists but is never populated.
+- Implement `dogHoldoutSnapshot` (daily cadence): computes a stable hash of current fleet state (active agent count, task distribution, model-tier breakdown) and writes it to `GlobalHoldouts.fleet_state_hash`.
+- Register in `internal/agents/dogs.go`.
+- Test: stub fleet state → run dog → assert `fleet_state_hash` non-empty and deterministic for same inputs.
+
+### Work tracks — P2A (CLI parity)
+
+Missing CLI surface for features that have complete backends:
+
+- `force briefing` — routes to `/api/briefing/queue`; renders output to terminal. (Full SPA + backend exists; endpoint is in `internal/dashboard/handlers_briefing.go`.)
+- `force scale --medics N --pilots N` — add only these two flags to the existing `cmdScale` (which already supports `--astromechs`, `--council`, `--captain`, `--commanders`, `--investigators`, `--auditors`, `--librarians`); do not build the command from scratch.
+- `force convoy cancel <id>` — calls the existing cancel endpoint. (Dashboard modal + API exist.)
+- `force task show <id>` / `force task status <id>` — queries BountyBoard by ID; renders task state. (Dashboard queries exist.)
+- `force senate` — lists active senators and their chamber status; sub-command `force senate refresh <name>` queues a SenatorRefresh task.
+
+Pattern P25 (cli-parity) must be updated for each new command.
+
+### Work tracks — P2B (D10 v2 follow-ups)
+
+- **Merge-event trigger**: `dogArchitectureDocRender` currently runs hourly with a fast-path no-op. Wire it to trigger on PR merge events by hooking into the existing Diplomat post-merge path in `internal/agents/pr_flow.go` (which already runs after merge confirmation). Do NOT create a new `RepoMergeEvent` table — a new schema table is explicitly out of scope.
+- **CommentID capture**: `gh pr comment` doesn't surface the REST comment ID. Swap to `gh api repos/{repo}/issues/{pr}/comments` to post the comment and capture the returned `id`. Store in `PRHandoffSyntheses.comment_id` (the `comment_id` column already exists with default 0 and just needs to be populated; `PRHandoffComments` does not exist).
+- **T+30 verdict**: Scaffold an operator-facing prompt at T+30 days post-D10-ship: "Handoff synthesis experiment outcome — keep or deprecate?" Emit an operator mail with the experiment metrics. (This is a dog + mail; no new UI needed.)
+
+### Exit criteria
+
+1. Senate re-review fires on material amendments; cap of 3 passes enforced. Tests green.
+2. `GlobalHoldouts.fleet_state_hash` populated by dog. `TestListDogs` count incremented. Tests green.
+3. All 5 CLI commands functional. `force briefing` renders output. `force scale --medics N` and `--pilots N` flags accepted (added to existing `cmdScale`). `force convoy cancel` idempotent. `force task show` renders BountyBoard row. `force senate` lists active chambers.
+4. D10 merge-event trigger confirmed firing in test. CommentID stored non-zero in fixture test. T+30 mail dog registered.
+5. Pattern P25 updated. `go test -tags sqlite_fts5 -race -count=5 ./...` green.
+6. `docs/closures/DELIVERABLE-17-CLOSURE.md` filed.
+
+### Anti-cheat directives
+
+- **No re-review loop without a cap.** Unbounded Senate re-review cycles would loop forever on stubborn amendments. Max 3 passes, then escalate.
+- **No fleet_state_hash that changes on every run.** The hash must be deterministic: same fleet state → same hash. Use sorted inputs.
+- **No CLI commands that shell out to curl.** Use the existing `gh` client wrapper pattern.
+
+### Closure
+
+`docs/closures/DELIVERABLE-17-CLOSURE.md` with per-phase evidence: re-review loop test trace, snapshot dog hash sample, CLI help-text for each new command, D10 v2 diff summary.
+
+---
+
+## Deliverable 18 — Design Debt + Verification Pass
+
+### Why now
+
+Lower-urgency items from the same 2026-05-19 audit, plus verification of items that may have been resolved by interim ships.
+
+### Classification
+
+Maintenance (Tier 3/4 — design debt and verification).
+
+### Prerequisites
+
+D17 complete and `docs/closures/DELIVERABLE-17-CLOSURE.md` filed.
+
+### Phases
+
+| Phase | Scope | Dependencies | Parallel-eligible with |
+|---|---|---|---|
+| **P1A** | Verify D12 SnapshotHolocron wiring: Ship J added `store.SnapshotHolocron`; confirm it is wired into the GoingToSleep handler in `cmd/force/daemon_wake.go`. If not, wire it. | none | P1B |
+| **P1B** | Shadow run enrollment path: implement the ExperimentRuns `mode='paired_shadow'` enrollment so `SetupShadowWorktreeAt` is actually called for Level-3 experiments | none | P1A |
+| **P2** | D14 auto-tagging from file detection: when Librarian scans a repo, auto-suggest tags based on detectable signals (`.proto` → `grpc-server`, `package.json` → `frontend`, `config/routes.rb` → `has-rest-api`, etc.) and emit TagSuggestions | P1A + P1B merged | — |
+| **P3** | D7 30-day monitoring audit: verify whether the post-ship monitoring window for each D7 promoted agent has elapsed; if elapsed, write the retention verdict to the closure report addendum | P1A + P1B merged | P2 |
+| **P4** | Deliverable verifier: Static + Heavy + Closure | P2 + P3 | — |
+
+### Work tracks — P1A (SnapshotHolocron verification)
+
+**Pre-confirmed no-op.** This wiring is already complete: `cmd/force/daemon_wake.go` calls `store.SnapshotHolocron(db, "pre-sleep")` in the `GoingToSleep` branch, and `TestReconcilePostWakeLoop_GoingToSleepSnapshots` asserts it. P1A is documentation-only — confirm the evidence in the closure report and file closure; no code change is needed.
+
+### Work tracks — P1B (Shadow run enrollment)
+
+- `internal/agents/shadow/` — `SetupShadowWorktreeAt` exists and is production-ready.
+- The public entry point `SetupShadowWorktree` returns `ErrShadowNotConfigured`.
+- Implement the enrollment path: when an `ExperimentRuns` row has `mode='paired_shadow'`, call `SetupShadowWorktreeAt` with the appropriate worktree path derived from the experiment ID.
+- This is the Phase N+1 that was planned but never built.
+- Test: create a fixture ExperimentRuns row with `mode='paired_shadow'`; assert shadow worktree is created at the expected path.
+
+### Work tracks — P2 (Auto-tagging signals)
+
+- Extend the Senate onboarding LLM prompt (or add a deterministic pre-pass) to auto-suggest tags from file-system signals:
+  - `.proto` files → suggest `grpc-server`
+  - `package.json` at root → suggest `frontend` or `nodejs`
+  - `config/routes.rb` → suggest `has-rest-api`
+  - `Gemfile` → suggest `rails`
+  - `go.mod` → suggest `golang`
+  - `pom.xml` / `build.gradle` → suggest `jvm`
+- These are suggestions → TagSuggestions table, not auto-applied.
+- Test: fixture repo with `.proto` + `package.json` → assert two suggestions emitted.
+
+### Work tracks — P3 (D7 monitoring audit)
+
+- For each D7 experiment that promoted a model downgrade: check if 30 days have elapsed since the ship-PR merged.
+- If elapsed: read the retention metric from the dashboard or DB; write a brief verdict to a D7 closure report addendum at `docs/closures/DELIVERABLE-7-CLOSURE-ADDENDUM.md`.
+- This is a read-only audit, not a code change. If the monitoring window has not elapsed for all experiments, note the expected completion dates.
+- **Architecture-doc-render merge trigger verification**: After D17 ships its merge-event trigger for `dogArchitectureDocRender`, verify the trigger actually fires on a PR merge (currently the dog runs hourly only, with the merge trigger as a planned stub). Confirm end-to-end: merge a PR in a tracked repo → assert `dogArchitectureDocRender` is invoked within the expected window. Document the result in the D18 closure report.
+
+### Exit criteria
+
+1. `GoingToSleep` handler calls `store.SnapshotHolocron`. Test green (or confirmed already wired).
+2. Shadow enrollment: fixture `paired_shadow` ExperimentRun → shadow worktree created. Test green.
+3. Auto-tagging: 3+ file-signal → tag-suggestion mappings in place. Test green.
+4. D7 addendum filed with per-experiment retention verdict or expected completion date.
+5. `go test -tags sqlite_fts5 -race -count=5 ./...` green.
+6. `docs/closures/DELIVERABLE-18-CLOSURE.md` filed.
+
+### Closure
+
+`docs/closures/DELIVERABLE-18-CLOSURE.md` with: SnapshotHolocron wiring evidence, shadow enrollment test trace, auto-tagging signal map, D7 retention verdicts.
