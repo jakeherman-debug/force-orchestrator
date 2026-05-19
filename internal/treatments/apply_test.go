@@ -402,8 +402,8 @@ func TestApply_OrthogonalOverlap_NoDoubleEnrollment(t *testing.T) {
 //   (c) idempotence — Apply twice for the same unit produces exactly one
 //       ExperimentRuns row (sticky assignment)
 //   (d) log-only rollback — explicit 'log_only' key skips enrollment
-//   (e) migration gate — INSERT OR IGNORE seeds the 'live' key without
-//       overwriting a deliberate 'log_only' row
+//   (e) migration gate — UPDATE upgrades stale Phase-1-era 'log_only' rows to
+//       'live'; INSERT OR IGNORE seeds the key when no row existed
 func TestTreatmentsApply_Live(t *testing.T) {
 	// (a) happy path: no holdout, one running experiment, one treatment arm
 	// that rewrites the prompt template. Verify the descriptor comes back
@@ -556,29 +556,54 @@ func TestTreatmentsApply_Live(t *testing.T) {
 		}
 	})
 
-	// (e) D16 P2 migration: INSERT OR IGNORE seeds 'live' without overwriting
-	// a deliberate 'log_only' row. Simulates the runMigrations behaviour.
-	t.Run("migration_seeds_live_without_clobbering_log_only", func(t *testing.T) {
+	// (e) D16 P2 migration: stale Phase-1-era 'log_only' rows are upgraded to
+	// 'live' by the migration (UPDATE fires first, then INSERT OR IGNORE for the
+	// no-row case). Simulates the runMigrations behaviour.
+	t.Run("migration_upgrades_phase1_log_only_row_to_live", func(t *testing.T) {
 		db := openDB(t)
+		ctx := context.Background()
 
-		// Case 1: no pre-existing row → migration seeds 'live'.
+		// Seed a Phase-1-era 'log_only' row, simulating an operator who ran
+		// `force config set treatments_apply_mode log_only` before D16.
+		store.SetConfig(db, SystemConfigApplyMode, ModeLogOnly)
+
+		// Run the D16 P2 migration SQL (UPDATE + INSERT OR IGNORE).
+		db.Exec(`UPDATE SystemConfig SET value = 'live'
+			WHERE key = 'treatments_apply_mode' AND value IN ('log_only', 'log-only')`)
 		db.Exec(`INSERT OR IGNORE INTO SystemConfig (key, value)
 			VALUES ('treatments_apply_mode', 'live')`)
-		var v1 string
-		db.QueryRow(`SELECT value FROM SystemConfig WHERE key = 'treatments_apply_mode'`).Scan(&v1)
-		if v1 != "live" {
-			t.Errorf("migration case 1: got %q, want 'live'", v1)
+
+		// The stale row must now be 'live'.
+		var v string
+		db.QueryRow(`SELECT value FROM SystemConfig WHERE key = 'treatments_apply_mode'`).Scan(&v)
+		if v != ModeLive {
+			t.Errorf("migration: got %q, want %q (stale log_only must be upgraded to live)", v, ModeLive)
 		}
 
-		// Case 2: pre-existing 'log_only' row → migration does NOT overwrite.
-		db2 := openDB(t)
-		store.SetConfig(db2, SystemConfigApplyMode, ModeLogOnly)
-		db2.Exec(`INSERT OR IGNORE INTO SystemConfig (key, value)
-			VALUES ('treatments_apply_mode', 'live')`)
-		var v2 string
-		db2.QueryRow(`SELECT value FROM SystemConfig WHERE key = 'treatments_apply_mode'`).Scan(&v2)
-		if v2 != ModeLogOnly {
-			t.Errorf("migration case 2: got %q, want %q (operator rollback must survive)", v2, ModeLogOnly)
+		// And activeApplyMode returns ModeLive after the migration.
+		expID := seedRunningExperiment(t, db, "captain", "task")
+		seedTreatment(t, db, expID, "treatment", "captain/live-upgrade@HEAD", 1.0)
+
+		in := CallDescriptor{
+			AgentName:       "captain",
+			NaturalUnitKind: "task",
+			NaturalUnitID:   5555,
+			PromptTemplate:  "captain/default@HEAD",
+		}
+		out, assignments, err := Apply(ctx, db, in)
+		if err != nil {
+			t.Fatalf("Apply after migration: %v", err)
+		}
+		if len(assignments) != 1 {
+			t.Errorf("expected 1 assignment (live mode after upgrade); got %d", len(assignments))
+		}
+		if out.PromptTemplate != "captain/live-upgrade@HEAD" {
+			t.Errorf("descriptor not rewritten after migration: PromptTemplate=%q, want captain/live-upgrade@HEAD", out.PromptTemplate)
+		}
+		var logMode string
+		db.QueryRow(`SELECT mode FROM TreatmentApplyLog ORDER BY id DESC LIMIT 1`).Scan(&logMode)
+		if logMode != ModeLive {
+			t.Errorf("TreatmentApplyLog.mode after migration: got %q, want %q", logMode, ModeLive)
 		}
 	})
 }
