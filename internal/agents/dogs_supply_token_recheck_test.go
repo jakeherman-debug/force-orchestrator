@@ -446,7 +446,7 @@ func TestSupplyTokenRecheck_DispatchViaRunDogByName(t *testing.T) {
 	// supply-token-recheck dog reads its codeartifact.Client from
 	// SupplyRecheckDeps (registered via RegisterSupplyRecheckDeps), not
 	// the RunDogByName ca arg.
-	if err := RunDogByName(context.Background(), db, "supply-token-recheck", librarian.NewMock(), nil, testLogger{}); err != nil {
+	if err := RunDogByName(context.Background(), db, "supply-token-recheck", librarian.NewMock(), nil, nil, nil, testLogger{}); err != nil {
 		t.Errorf("RunDogByName: %v", err)
 	}
 	if ca.calls() != 1 {

@@ -224,7 +224,7 @@ func TestModelAvailabilityDog_RegisteredInDogOrder(t *testing.T) {
 	db := store.InitHolocronDSN(":memory:")
 	defer db.Close()
 	logger := log.New(os.Stderr, "[test] ", 0)
-	if err := runDog(context.Background(), db, "model-availability-watch", nil, nil, logger); err != nil {
+	if err := runDog(context.Background(), db, "model-availability-watch", nil, nil, nil, nil, logger); err != nil {
 		t.Errorf("runDog model-availability-watch: %v", err)
 	}
 }

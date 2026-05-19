@@ -591,7 +591,7 @@ func cmdDogs(ctx context.Context, db *sql.DB, args []string) {
 			fmt.Fprintf(os.Stderr, "[CODEARTIFACT] construction failed (%v) — supply dogs will skip\n", caErr)
 			caClient = nil
 		}
-		if err := agents.RunDogByName(ctx, db, name, libClient, caClient, logger); err != nil {
+		if err := agents.RunDogByName(ctx, db, name, libClient, caClient, nil, nil, logger); err != nil {
 			fmt.Printf("Dog %s failed: %v\n", name, err)
 			os.Exit(1)
 		}

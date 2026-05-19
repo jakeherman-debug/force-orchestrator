@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"force-orchestrator/internal/agents/golden_set"
 	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/forcepath"
@@ -203,6 +204,13 @@ var dogCooldowns = map[string]time.Duration{
 	// preventing indefinite accumulation. Daily cadence is plenty —
 	// rows are tiny and the operator tolerates a few days of staleness.
 	"notification-override-cleanup": 24 * time.Hour,
+	// D16 Phase 1B — golden-set-evaluator. Runs RunWeeklyEvaluatorDog
+	// for every registered agent's fixture set, recording per-fixture
+	// pass/fail into GoldenSetEvaluations so accuracy-trend dashboards
+	// stay current. Weekly cadence matches the spec ("once a week");
+	// the dog itself is gated by IsEstopped + SpendCapExceeded so it
+	// never burns tokens during an emergency halt.
+	"golden-set-evaluator": 7 * 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -293,6 +301,11 @@ var dogOrder = []string{
 	// running after the rest of the cycle is finished is fine — the
 	// cleanup is silent and tolerant of a tick of staleness.
 	"notification-override-cleanup",
+	// D16 Phase 1B — golden-set-evaluator. Ordered last because it
+	// executes LLM calls (gated by LIVE_HAIKU_DISABLED in tests) and
+	// is the heaviest dog in the roster. Running after all structural
+	// dogs ensures a healthy fleet state before paying evaluation cost.
+	"golden-set-evaluator",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -323,7 +336,7 @@ var dogOrder = []string{
 // client is constructed once at daemon startup via codeartifact.NewInProcess
 // and passed via InquisitorConfig; tests pass a stub Client (or nil, which
 // the dog will detect and skip with a log line).
-func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, ca codeartifact.Client, logger interface{ Printf(string, ...any) }) {
+func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, ca codeartifact.Client, evaluators golden_set.EvaluatorByAgent, versions golden_set.PromptVersionByAgent, logger interface{ Printf(string, ...any) }) {
 	if IsEstopped(db) {
 		logger.Printf("RunDogs: e-stop active — skipping all dogs this cycle")
 		return
@@ -361,7 +374,7 @@ func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, ca codeartif
 		// subprocess invocation.
 		dogCtx, dogCancel := context.WithTimeout(ctx, 5*time.Minute)
 		errCh := make(chan error, 1)
-		go func(name string) { errCh <- runDog(dogCtx, db, name, lib, ca, logger) }(dogName)
+		go func(name string) { errCh <- runDog(dogCtx, db, name, lib, ca, evaluators, versions, logger) }(dogName)
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -406,10 +419,10 @@ func RunDogs(ctx context.Context, db *sql.DB, lib librarian.Client, ca codeartif
 // codeartifact.NewInProcess(ctx, db) at the entry point. ca may be nil
 // when the AWS SDK config can't load (e.g. in CI without AWS env); the
 // dog itself detects nil and logs a skip rather than panicking.
-func RunDogByName(ctx context.Context, db *sql.DB, name string, lib librarian.Client, ca codeartifact.Client, logger interface{ Printf(string, ...any) }) error {
+func RunDogByName(ctx context.Context, db *sql.DB, name string, lib librarian.Client, ca codeartifact.Client, evaluators golden_set.EvaluatorByAgent, versions golden_set.PromptVersionByAgent, logger interface{ Printf(string, ...any) }) error {
 	// Mark the run before executing so a crashed dog still shows up as attempted.
 	store.DogMarkRun(db, name)
-	return runDog(ctx, db, name, lib, ca, logger)
+	return runDog(ctx, db, name, lib, ca, evaluators, versions, logger)
 }
 
 // DogNames returns the canonical order of registered dogs. Used for CLI
@@ -420,7 +433,7 @@ func DogNames() []string {
 	return out
 }
 
-func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, ca codeartifact.Client, logger interface{ Printf(string, ...any) }) error {
+func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, ca codeartifact.Client, evaluators golden_set.EvaluatorByAgent, versions golden_set.PromptVersionByAgent, logger interface{ Printf(string, ...any) }) error {
 	switch name {
 	case "git-hygiene":
 		return dogGitHygiene(ctx, db, logger)
@@ -502,9 +515,38 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogArchitectureDocRender(ctx, db, lib, logger)
 	case "notification-override-cleanup":
 		return dogNotificationOverrideCleanup(db, logger)
+	case "golden-set-evaluator":
+		return dogGoldenSetEvaluator(ctx, db, evaluators, versions, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
+}
+
+// dbGate is the production implementation of golden_set.Gate that delegates
+// to the package-level IsEstopped and SpendCapExceeded functions.
+type dbGate struct{ db *sql.DB }
+
+func (g dbGate) IsEstopped() bool       { return IsEstopped(g.db) }
+func (g dbGate) SpendCapExceeded() bool { return SpendCapExceeded(g.db) }
+
+// dogGoldenSetEvaluator wraps golden_set.RunWeeklyEvaluatorDog for the dogs
+// dispatch table. Callers pass nil evaluators / versions when the production
+// wiring has not been set up yet (e.g. in tests that don't set LIVE_HAIKU);
+// the dog handles empty maps gracefully (no-op zero iterations).
+func dogGoldenSetEvaluator(ctx context.Context, db *sql.DB,
+	evaluators golden_set.EvaluatorByAgent, versions golden_set.PromptVersionByAgent,
+	logger interface{ Printf(string, ...any) },
+) error {
+	counts, err := golden_set.RunWeeklyEvaluatorDog(ctx, db, evaluators, versions, dbGate{db})
+	if err != nil {
+		return fmt.Errorf("golden-set-evaluator: %w", err)
+	}
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	logger.Printf("Dog golden-set-evaluator: evaluated %d fixture(s) across %d agent(s)", total, len(counts))
+	return nil
 }
 
 // dogArchaeologistSweep enqueues one ArchaeologistSweep task per

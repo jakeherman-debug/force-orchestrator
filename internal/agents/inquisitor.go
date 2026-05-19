@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents/capabilities"
+	"force-orchestrator/internal/agents/golden_set"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/librarian"
@@ -29,9 +30,16 @@ import (
 // passed through here. May be nil — the dogs guard against that and
 // log/skip rather than crash, so a fleet running without AWS access still
 // gets the rest of the dog roster.
+//
+// D16 Phase 1B: Evaluators and Versions are the per-agent evaluator map and
+// prompt-version map consumed by golden-set-evaluator. Both may be nil or
+// empty (e.g. when running without LLM access) — the dog handles empty maps
+// as a no-op so the rest of the roster is unaffected.
 type InquisitorConfig struct {
 	Librarian    librarian.Client
 	CodeArtifact codeartifact.Client
+	Evaluators   golden_set.EvaluatorByAgent
+	Versions     golden_set.PromptVersionByAgent
 }
 
 const staleLockTimeout = 45 * time.Minute // locked this long (regardless of commits) → hard reset
@@ -83,7 +91,7 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB, cfg InquisitorConfig) {
 		// When the tick runs long, the context fires and downstream calls
 		// that honour it (gh, future claude calls) abort rather than hang.
 		tickCtx, tickCancel := context.WithTimeout(ctx, 15*time.Minute)
-		runInquisitorTick(tickCtx, db, cfg.Librarian, cfg.CodeArtifact, bootProfile, inquisitorProfile, logger)
+		runInquisitorTick(tickCtx, db, cfg.Librarian, cfg.CodeArtifact, cfg.Evaluators, cfg.Versions, bootProfile, inquisitorProfile, logger)
 		tickCancel()
 		continue
 	}
@@ -93,7 +101,7 @@ func SpawnInquisitor(ctx context.Context, db *sql.DB, cfg InquisitorConfig) {
 // SpawnInquisitor so each tick runs under its own timeout-bounded
 // context (AUDIT-047) without the enclosing for-loop needing deferred
 // cancellation book-keeping.
-func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, ca codeartifact.Client, bootProfile, inquisitorProfile *capabilities.Profile, logger *log.Logger) {
+func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, ca codeartifact.Client, evaluators golden_set.EvaluatorByAgent, versions golden_set.PromptVersionByAgent, bootProfile, inquisitorProfile *capabilities.Profile, logger *log.Logger) {
 	// Fix #8e: ctx now threads into cleanOrphanedBranches (igit.RunCmd) and
 	// RunDogs (per-dog ctx); the prior _=ctx discard reflected the pre-Fix-#8e
 	// state where the only consumers were gh/claude calls that took ctx
@@ -174,7 +182,7 @@ func runInquisitorTick(ctx context.Context, db *sql.DB, lib librarian.Client, ca
 		// lives in astromech.go next to the map declaration.
 		pruneRateLimitRetries(db)
 
-		RunDogs(ctx, db, lib, ca, logger)
+		RunDogs(ctx, db, lib, ca, evaluators, versions, logger)
 
 		db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 }

@@ -112,7 +112,7 @@ func TestRunDog_Unknown(t *testing.T) {
 	defer db.Close()
 
 	logger := log.New(io.Discard, "", 0)
-	err := runDog(context.Background(), db, "unknown-dog", librarian.NewInProcess(db), nil, logger)
+	err := runDog(context.Background(), db, "unknown-dog", librarian.NewInProcess(db), nil, nil, nil, logger)
 	if err == nil {
 		t.Error("expected error for unknown dog")
 	}
@@ -126,7 +126,7 @@ func TestRunDog_MailCleanup(t *testing.T) {
 	defer db.Close()
 
 	logger := log.New(io.Discard, "", 0)
-	if err := runDog(context.Background(), db, "mail-cleanup", librarian.NewInProcess(db), nil, logger); err != nil {
+	if err := runDog(context.Background(), db, "mail-cleanup", librarian.NewInProcess(db), nil, nil, nil, logger); err != nil {
 		t.Fatalf("mail-cleanup dog failed: %v", err)
 	}
 }
@@ -136,7 +136,7 @@ func TestRunDog_DBVacuum(t *testing.T) {
 	defer db.Close()
 
 	logger := log.New(io.Discard, "", 0)
-	if err := runDog(context.Background(), db, "db-vacuum", librarian.NewInProcess(db), nil, logger); err != nil {
+	if err := runDog(context.Background(), db, "db-vacuum", librarian.NewInProcess(db), nil, nil, nil, logger); err != nil {
 		t.Fatalf("db-vacuum dog failed: %v", err)
 	}
 }
@@ -147,7 +147,7 @@ func TestRunDog_GitHygiene_NoRepos(t *testing.T) {
 
 	// No repos registered — should succeed with no-op
 	logger := log.New(io.Discard, "", 0)
-	if err := runDog(context.Background(), db, "git-hygiene", librarian.NewInProcess(db), nil, logger); err != nil {
+	if err := runDog(context.Background(), db, "git-hygiene", librarian.NewInProcess(db), nil, nil, nil, logger); err != nil {
 		t.Fatalf("git-hygiene with no repos failed: %v", err)
 	}
 }
@@ -166,7 +166,7 @@ func TestRunDogs_NeverRun(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	// All dogs have no last-run timestamp → all are due → all should run
-	RunDogs(context.Background(), db, librarian.NewInProcess(db), nil, logger)
+	RunDogs(context.Background(), db, librarian.NewInProcess(db), nil, nil, nil, logger)
 
 	// All 4 dogs should have been marked as run
 	for _, name := range []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup"} {
@@ -194,7 +194,7 @@ func TestRunDogs_CooldownRespected(t *testing.T) {
 	}
 
 	logger := log.New(io.Discard, "", 0)
-	RunDogs(context.Background(), db, librarian.NewInProcess(db), nil, logger)
+	RunDogs(context.Background(), db, librarian.NewInProcess(db), nil, nil, nil, logger)
 
 	// No dog should have run again (within cooldown)
 	for _, name := range []string{"git-hygiene", "db-vacuum", "holonet-rotate", "mail-cleanup"} {
@@ -224,7 +224,7 @@ func TestRunDogs_RFC3339Cooldown(t *testing.T) {
 	db.QueryRow(`SELECT run_count FROM Dogs WHERE name = 'db-vacuum'`).Scan(&countBefore)
 
 	logger := log.New(io.Discard, "", 0)
-	RunDogs(context.Background(), db, librarian.NewInProcess(db), nil, logger)
+	RunDogs(context.Background(), db, librarian.NewInProcess(db), nil, nil, nil, logger)
 
 	var countAfter int
 	db.QueryRow(`SELECT run_count FROM Dogs WHERE name = 'db-vacuum'`).Scan(&countAfter)
@@ -400,8 +400,11 @@ func TestListDogs(t *testing.T) {
 	// D11 Phase 2 (sub-task C) added notification-override-cleanup
 	// (daily — purges ConvoyNotificationOverrides rows >7d after
 	// convoy terminal transition).
-	if len(dogs) != 40 {
-		t.Errorf("expected 40 built-in dogs (D8-T1 added repo-graph-scan; D9-P1 added architecture-health-report; D9 added archaeologist-sweep; D10 added architecture-doc-render; D11-P2 added notification-override-cleanup), got %d", len(dogs))
+	// D16 Phase 1B added golden-set-evaluator (weekly — evaluates
+	// every agent's golden-set fixtures and records accuracy into
+	// GoldenSetEvaluations for trend dashboards).
+	if len(dogs) != 41 {
+		t.Errorf("expected 41 built-in dogs (D16-P1B added golden-set-evaluator), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -429,7 +432,9 @@ func TestListDogs(t *testing.T) {
 		// D10 — architecture-doc-render.
 		"architecture-doc-render",
 		// D11 Phase 2 — notification-override-cleanup.
-		"notification-override-cleanup"} {
+		"notification-override-cleanup",
+		// D16 Phase 1B — golden-set-evaluator.
+		"golden-set-evaluator"} {
 		if !names[expected] {
 			t.Errorf("missing dog %q in ListDogs", expected)
 		}

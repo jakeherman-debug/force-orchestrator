@@ -77,7 +77,7 @@ func handleDogsRun(db *sql.DB) http.HandlerFunc {
 		if caErr != nil {
 			caClient = nil
 		}
-		runErr := agents.RunDogByName(r.Context(), db, name, libClient, caClient, logger)
+		runErr := agents.RunDogByName(r.Context(), db, name, libClient, caClient, nil, nil, logger)
 
 		resp := map[string]any{
 			"dog":    name,
