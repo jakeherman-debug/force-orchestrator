@@ -84,6 +84,7 @@ func createSchema(db *sql.DB) {
 		revert_target_task_id     INTEGER DEFAULT 0,
 		stage_id                  INTEGER DEFAULT NULL,
 		blast_radius_json         TEXT    NOT NULL DEFAULT '{}',
+		review_pass_count         INTEGER DEFAULT 0,
 		created_at                TEXT    DEFAULT (datetime('now'))
 	);`)
 	// Hot-table indexes (AUDIT-009, Fix #4). Every claim, dashboard refresh, and
@@ -3164,4 +3165,14 @@ func runMigrations(db *sql.DB) {
 	)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_api_deps_provider ON CrossRepoAPIDependencies(provider_api_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_cross_repo_api_deps_consumer ON CrossRepoAPIDependencies(consumer_repo)`)
+
+	// ── D17 Phase 1A — Senate amendment re-review pass counter ──────────────
+	// review_pass_count tracks how many Senate review passes a Feature has
+	// undergone due to material amendments. When HasMaterialAmendment fires
+	// and count < 3, a new SenateReview task is queued. At count >= 3, an
+	// operator escalation is emitted instead. DEFAULT 0 so pre-D17 rows
+	// read as "no re-review passes yet". ALTER TABLE ADD COLUMN is idempotent
+	// (silent no-op when the column already exists). The fresh-DB path
+	// already has this column from createSchema above.
+	db.Exec(`ALTER TABLE BountyBoard ADD COLUMN review_pass_count INTEGER DEFAULT 0`)
 }

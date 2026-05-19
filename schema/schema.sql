@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS BountyBoard (
     revert_target_task_id     INTEGER DEFAULT 0,   -- concern #7: the task this row reverts (cascade-revert flow)
     stage_id                  INTEGER DEFAULT NULL, -- D5.5 P2: FK → ConvoyStages.id; NULL = legacy/single-mode (task not bound to a specific stage); non-NULL = multi-stage convoy task
     blast_radius_json         TEXT    NOT NULL DEFAULT '{}', -- D8 T2: per-Feature blast-radius computed at convoy-creation time (modified_symbols, affected_consumer_repos, auto_included_tasks); empty '{}' on non-Feature rows + pre-T2 Features
+    review_pass_count         INTEGER DEFAULT 0,            -- D17 P1A: number of Senate re-review passes triggered by material amendments (cap = 3)
     created_at                TEXT    DEFAULT (datetime('now'))
 );
 -- Hot-table indexes (AUDIT-009, Fix #4). Without these, every ClaimBounty

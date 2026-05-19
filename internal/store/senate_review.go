@@ -65,6 +65,41 @@ func InsertSenateReview(db *sql.DB, r SenateReviewRow) (int, error) {
 	return int(id), nil
 }
 
+// GetSenateReviewPassCount returns the current review_pass_count for a Feature
+// (the number of Senate re-review passes triggered so far by material amendments).
+// Returns 0 if the row does not exist or the column is NULL.
+func GetSenateReviewPassCount(db *sql.DB, featureID int) (int, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT IFNULL(review_pass_count, 0)
+		  FROM BountyBoard
+		 WHERE id = ?`, featureID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("GetSenateReviewPassCount(feature=%d): %w", featureID, err)
+	}
+	return count, nil
+}
+
+// IncrementSenateReviewPassCount atomically increments review_pass_count for a
+// Feature row and returns the updated value. The increment is unconditional —
+// callers must read the count first with GetSenateReviewPassCount to enforce
+// the cap before calling this. Returns error on any DB write failure.
+func IncrementSenateReviewPassCount(db *sql.DB, featureID int) (int, error) {
+	_, err := db.Exec(`
+		UPDATE BountyBoard
+		   SET review_pass_count = IFNULL(review_pass_count, 0) + 1
+		 WHERE id = ?`, featureID)
+	if err != nil {
+		return 0, fmt.Errorf("IncrementSenateReviewPassCount(feature=%d): %w", featureID, err)
+	}
+	// Re-read the updated value so the caller has the confirmed post-increment count.
+	count, err := GetSenateReviewPassCount(db, featureID)
+	if err != nil {
+		return 0, fmt.Errorf("IncrementSenateReviewPassCount(feature=%d): re-read after increment: %w", featureID, err)
+	}
+	return count, nil
+}
+
 // ListSenateReviewsForFeature returns every Senator's verdict on the
 // given Feature, ordered by senator name (stable, idempotent for
 // dashboard rendering).

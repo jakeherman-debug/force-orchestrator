@@ -279,6 +279,69 @@ func runSenateReviewTask(ctx context.Context, db *sql.DB, agentName string, b *s
 		return
 	}
 
+	// D17 P1A — material-amendment re-review loop. If any Senator proposed
+	// at least one material amendment, re-queue a fresh SenateReview rather
+	// than advancing to AwaitingChancellorReview — up to a cap of 3 passes.
+	// At the cap, emit an operator escalation (amendments were not resolved
+	// in 3 passes; human review required).
+	hasMaterialAmendment := false
+	for _, v := range verdicts {
+		if v.HasMaterialAmendment() {
+			hasMaterialAmendment = true
+			break
+		}
+	}
+
+	const maxReviewPasses = 3
+	if hasMaterialAmendment {
+		passCount, pcErr := store.GetSenateReviewPassCount(db, p.FeatureID)
+		if pcErr != nil {
+			// Non-fatal: log and fall through to AwaitingChancellorReview so
+			// the pipeline does not stall on a transient read failure.
+			logger.Printf("Task %d: GetSenateReviewPassCount(feature=%d) failed: %v — falling through to AwaitingChancellorReview", b.ID, p.FeatureID, pcErr)
+		} else if passCount < maxReviewPasses {
+			// Increment the pass counter before re-queuing so concurrent tasks
+			// (stale-lock detector recovery) cannot double-count.
+			newCount, incErr := store.IncrementSenateReviewPassCount(db, p.FeatureID)
+			if incErr != nil {
+				logger.Printf("Task %d: IncrementSenateReviewPassCount(feature=%d) failed: %v — falling through to AwaitingChancellorReview", b.ID, p.FeatureID, incErr)
+			} else {
+				// Queue a new SenateReview task — keep the Feature in
+				// AwaitingSenateReview; the new task will drive the next pass.
+				if _, qErr := store.QueueSenateReview(db, p.FeatureID, p.TargetRepo); qErr != nil {
+					logger.Printf("Task %d: QueueSenateReview re-queue (pass %d) failed: %v — falling through to AwaitingChancellorReview", b.ID, newCount, qErr)
+				} else {
+					store.LogAudit(db, agentName, "senate-rereview-queued", p.FeatureID,
+						fmt.Sprintf("material amendment detected; pass=%d target_repo=%s", newCount, p.TargetRepo))
+					logger.Printf("Task %d: Senate re-queued SenateReview for Feature %d (pass %d/%d) — material amendment(s) detected",
+						b.ID, p.FeatureID, newCount, maxReviewPasses)
+					telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
+					if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+						logger.Printf("Task %d: SenateReview Completed status transition failed (post re-queue): %v", b.ID, upErr)
+					}
+					return
+				}
+			}
+		} else {
+			// 3-pass cap reached — escalate to operator instead of re-queuing.
+			store.LogAudit(db, agentName, "senate-amendment-cap-reached", p.FeatureID,
+				fmt.Sprintf("review_pass_count=%d >= cap=%d; escalating", passCount, maxReviewPasses))
+			logger.Printf("Task %d: Senate amendment 3-pass cap reached for Feature %d — escalating to operator", b.ID, p.FeatureID)
+			// Pattern P27 — escalation mail routes through emitOperatorMailHigh
+			// (StakesHigh: operator MUST see this same-day; it gates a blocked Feature).
+			emitOperatorMailHigh(ctx, db, agentName,
+				fmt.Sprintf("[SENATE ESCALATION] Feature #%d — amendment re-review cap (%d passes) reached", p.FeatureID, maxReviewPasses),
+				fmt.Sprintf("The Senate has performed %d re-review passes on Feature #%d due to material amendments, but the amendments were not resolved within the %d-pass cap.\n\nOperator action required: review the amendments, either apply them manually to the proposed plan and reset to AwaitingSenateReview, or override and advance to AwaitingChancellorReview.\n\nLatest Senator verdicts:\n%s",
+					passCount, p.FeatureID, maxReviewPasses, buildSenateFeedback(verdicts)),
+				p.FeatureID, store.MailTypeAlert)
+			telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
+			if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+				logger.Printf("Task %d: SenateReview Completed status transition failed (post cap-escalation): %v", b.ID, upErr)
+			}
+			return
+		}
+	}
+
 	logger.Printf("Task %d: Senate APPROVED Feature %d (%d Senator(s) concurred) — advancing to AwaitingChancellorReview",
 		b.ID, p.FeatureID, len(verdicts))
 	if _, advErr := store.UpdateBountyStatusFrom(db, p.FeatureID, "AwaitingSenateReview", "AwaitingChancellorReview"); advErr != nil {
