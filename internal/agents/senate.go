@@ -805,7 +805,9 @@ func runSenatorLLMOutputs(ctx context.Context, db *sql.DB, taskID int, repoID st
 	}
 	mcpConfig, _ := prof.MCPConfigArg()
 
-	raw, callErr := claude.AskClaudeCLIContext(ctx, systemPrompt, userPrompt,
+	raw, callErr := claude.CallWithTranscript(ctx,
+		claude.CallDescriptor{Agent: "senate", PromptVersion: "d14-onboarding-v1"},
+		systemPrompt, userPrompt,
 		prof.AllowedToolsArg(), prof.DisallowedToolsArg(), mcpConfig, 1)
 	if callErr != nil {
 		return senatorOnboardingLLMOutputs{}, fmt.Errorf("runSenatorLLMOutputs: LLM call: %w", callErr)

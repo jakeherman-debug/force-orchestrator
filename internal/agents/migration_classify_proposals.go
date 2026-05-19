@@ -184,7 +184,9 @@ func classifyBatch(ctx context.Context, db *sql.DB, batch []store.PromotionPropo
 	}
 
 	userPrompt := buildClassifyUserPrompt(batch)
-	raw, callErr := claude.AskClaudeCLIContext(ctx, classifySystemPrompt, userPrompt,
+	raw, callErr := claude.CallWithTranscript(ctx,
+		claude.CallDescriptor{Agent: "migration-classifier", PromptVersion: "d14-v1"},
+		classifySystemPrompt, userPrompt,
 		prof.AllowedToolsArg(), prof.DisallowedToolsArg(), mcpConfig, 1)
 	if callErr != nil {
 		return nil, fmt.Errorf("classifyBatch: LLM call: %w", callErr)
@@ -321,9 +323,8 @@ func sendClassificationSummaryMail(db *sql.DB, knowledgeAbsorbed, rulesFound int
 	}
 	sb.WriteString("\nReview rule candidates via `force migration classify-proposals` or the dashboard.")
 
-	store.SendMail(db,
+	emitOperatorMailMedium(context.Background(), db,
 		"migration-classifier",
-		"operator",
 		"[D14 MIGRATION] Proposal classification complete",
 		sb.String(),
 		0,
