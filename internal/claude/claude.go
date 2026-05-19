@@ -398,7 +398,7 @@ func RunCLIStreaming(prompt, allowedTools, disallowedTools, mcpConfig, dir strin
 // invocations route through force-bash-guard before exec'ing the real
 // shell. A nil/empty slice leaves the parent process env intact.
 func RunCLIStreamingContext(parentCtx context.Context, prompt, allowedTools, disallowedTools, mcpConfig, dir string, maxTurns int, timeout time.Duration, w io.Writer, extraEnv ...string) (string, error) {
-	// D3 Phase 1 — log-only treatments.Apply ingress (mirrors
+	// D3 Phase 2 (live) — treatments.Apply ingress (mirrors
 	// AskClaudeCLIContext). Astromech sessions route through here.
 	// D7: hook may stash a model override onto the returned ctx so a
 	// downstream `claude` exec runs the experimental arm's model.
@@ -578,11 +578,9 @@ func AskClaudeCLI(systemPrompt, userPrompt, allowedTools, disallowedTools, mcpCo
 func AskClaudeCLIContext(ctx context.Context, systemPrompt, userPrompt, allowedTools, disallowedTools, mcpConfig string, maxTurns int) (string, error) {
 	fullPrompt := fmt.Sprintf("SYSTEM INSTRUCTIONS:\n%s\n\nUSER PROMPT:\n%s", systemPrompt, userPrompt)
 
-	// D3 Phase 1 — log-only treatments.Apply ingress. Records the call
-	// descriptor + (empty in Phase 1) assignment intent without
-	// mutating the call. Phase 2 flips this live; Phase 1 ships the
-	// audit trail so the live flip is a config change, not a code
-	// change.
+	// D3 Phase 2 (live) — treatments.Apply ingress. Holdout check +
+	// experiment enrollment + descriptor rewrite run at the ingress so
+	// the active experiment arm governs the actual Claude call.
 	// D7: hook may stash a model override onto the returned ctx via
 	// withRequestedModel; defaultCLIRunner reads it back and emits
 	// `--model <id>` on the argv for the experimental arm.

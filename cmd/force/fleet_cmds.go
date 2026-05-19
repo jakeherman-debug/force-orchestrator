@@ -503,9 +503,13 @@ func cmdDaemon(db *sql.DB, args []string) {
 	// for Drill's git-op timeline + free-text search.
 	igit.SetOpLogDB(db)
 
-	// D3 Phase 1 — install the log-only treatments.Apply hook.
-	// Every Claude CLI invocation now records to TreatmentApplyLog
-	// (mode='log_only'). Phase 2 of D3 swaps this for live pass-through.
+	// D3 Phase 2 (live) — treatments.Apply hook wired to the live pipeline.
+	// Every Claude CLI invocation routes through treatments.Apply which: (1)
+	// checks holdout membership, (2) assigns experiment arms, (3) rewrites the
+	// CallDescriptor (model, prompt template), and (4) journals a
+	// TreatmentApplyLog row tagged mode='live'. Operators can roll back to
+	// log-only via `force config set treatments_apply_mode log_only` without a
+	// re-deploy; D16 P2 migration seeds 'live' on existing DBs.
 	// D7: the hook returns the resolved model id so the runner can swap
 	// it onto the argv as --model <id>, letting paired-runs experiments
 	// downgrade an agent to Haiku (or any other model) per-arm.
@@ -515,9 +519,9 @@ func cmdDaemon(db *sql.DB, args []string) {
 			NaturalUnitKind: "task",
 			NaturalUnitID:   taskID,
 		})
-		// Phase 1 fail-open: a write failure to TreatmentApplyLog is
-		// observability, not correctness. Log via the daemon's stdout
-		// (no operator mail flood) and let the agent's call proceed.
+		// Fail-open: a write failure to TreatmentApplyLog is observability,
+		// not correctness. Log via the daemon's stderr (no operator mail
+		// flood) and let the agent's call proceed with the original descriptor.
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[TREATMENTS-APPLY] %s/task %d: %v\n", agent, taskID, err)
 			return "", nil

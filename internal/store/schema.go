@@ -3065,4 +3065,18 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`ALTER TABLE PromotionProposals ADD COLUMN classification_status TEXT NOT NULL DEFAULT ''`)
 	db.Exec(`ALTER TABLE PromotionProposals ADD COLUMN suggested_scope       TEXT NOT NULL DEFAULT ''`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_classification ON PromotionProposals (classification_status) WHERE classification_status != ''`)
+
+	// ── D16 P2 — flip treatments.Apply from log-only to live ─────────────────
+	// D3 Phase 1 shipped with no SystemConfig row for treatments_apply_mode so
+	// activeApplyMode defaulted to ModeLive in code. However, any operator who
+	// ran `force config set treatments_apply_mode log_only` during Phase 1
+	// testing would have a persistent row keeping the fleet in log-only mode.
+	// This migration seeds the row to 'live' on first run (INSERT OR IGNORE so
+	// it is a no-op on fresh DBs and on DBs that already have the key set to
+	// 'live'; it also does NOT overwrite a deliberate operator-set 'log_only'
+	// row since INSERT OR IGNORE skips on key collision). The intent is that
+	// absence of the row and a 'live' row are both live; only an explicit
+	// 'log_only' row keeps the rollback mode active.
+	db.Exec(`INSERT OR IGNORE INTO SystemConfig (key, value)
+		VALUES ('treatments_apply_mode', 'live')`)
 }

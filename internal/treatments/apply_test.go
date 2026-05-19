@@ -388,6 +388,201 @@ func TestApply_OrthogonalOverlap_NoDoubleEnrollment(t *testing.T) {
 	}
 }
 
+// TestTreatmentsApply_Live — D16 P2 regression: Apply must run the live
+// pipeline (descriptor rewrite + ExperimentRuns write) when no SystemConfig
+// key is present (default) AND when the key is explicitly 'live'.
+//
+// Before D16 P2 any DB that had treatments_apply_mode = 'log_only' lingering
+// from Phase 1 testing would silently skip experiment enrollment; this test
+// confirms the observable state changes that prove the live path ran.
+//
+// Assertions:
+//   (a) happy path — descriptor is rewritten, ExperimentRuns row written
+//   (b) failure mode — holdout member is NOT enrolled despite active experiment
+//   (c) idempotence — Apply twice for the same unit produces exactly one
+//       ExperimentRuns row (sticky assignment)
+//   (d) log-only rollback — explicit 'log_only' key skips enrollment
+//   (e) migration gate — INSERT OR IGNORE seeds the 'live' key without
+//       overwriting a deliberate 'log_only' row
+func TestTreatmentsApply_Live(t *testing.T) {
+	// (a) happy path: no holdout, one running experiment, one treatment arm
+	// that rewrites the prompt template. Verify the descriptor comes back
+	// modified and an ExperimentRuns row lands.
+	t.Run("live_mode_rewrites_descriptor_and_records_run", func(t *testing.T) {
+		db := openDB(t)
+		ctx := context.Background()
+		// No SystemConfig row — activeApplyMode must default to ModeLive.
+		expID := seedRunningExperiment(t, db, "captain", "task")
+		seedTreatment(t, db, expID, "treatment", "captain/live-treatment@HEAD", 1.0)
+
+		in := CallDescriptor{
+			AgentName:       "captain",
+			NaturalUnitKind: "task",
+			NaturalUnitID:   9001,
+			PromptTemplate:  "captain/default@HEAD",
+			Model:           "claude-sonnet-4-6",
+		}
+		out, assignments, err := Apply(ctx, db, in)
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+
+		// Descriptor must have been rewritten by the treatment.
+		if out.PromptTemplate != "captain/live-treatment@HEAD" {
+			t.Errorf("descriptor not rewritten: PromptTemplate=%q, want captain/live-treatment@HEAD", out.PromptTemplate)
+		}
+		if len(assignments) != 1 {
+			t.Fatalf("expected 1 assignment (live mode); got %d", len(assignments))
+		}
+
+		// ExperimentRuns must have a row — this is the observable evidence that
+		// the live path ran (log-only produces zero rows).
+		var runs int
+		if err := db.QueryRow(`
+			SELECT COUNT(*) FROM ExperimentRuns
+			WHERE experiment_id = ? AND natural_unit_kind = 'task' AND natural_unit_id = 9001
+		`, expID).Scan(&runs); err != nil {
+			t.Fatalf("scan ExperimentRuns: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("ExperimentRuns rows: got %d, want 1 (live mode must write runs)", runs)
+		}
+
+		// TreatmentApplyLog must record mode='live'.
+		var logMode string
+		if err := db.QueryRow(`SELECT mode FROM TreatmentApplyLog ORDER BY id DESC LIMIT 1`).Scan(&logMode); err != nil {
+			t.Fatalf("scan TreatmentApplyLog: %v", err)
+		}
+		if logMode != ModeLive {
+			t.Errorf("TreatmentApplyLog.mode: got %q, want %q", logMode, ModeLive)
+		}
+	})
+
+	// (b) failure mode: holdout member must not be enrolled even in live mode.
+	t.Run("holdout_member_skips_enrollment_in_live_mode", func(t *testing.T) {
+		db := openDB(t)
+		ctx := context.Background()
+		mintFullCoverageHoldout(t, db)
+		expID := seedRunningExperiment(t, db, "council", "task")
+		seedTreatment(t, db, expID, "treatment", "council/treatment@HEAD", 1.0)
+
+		in := CallDescriptor{
+			AgentName:       "council",
+			NaturalUnitKind: "task",
+			NaturalUnitID:   8888,
+			PromptTemplate:  "council/default@HEAD",
+		}
+		out, assignments, err := Apply(ctx, db, in)
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		if !out.InHoldout {
+			t.Errorf("holdout member: expected InHoldout=true; got false")
+		}
+		if len(assignments) != 0 {
+			t.Errorf("holdout member: expected 0 assignments; got %d", len(assignments))
+		}
+		var runs int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ExperimentRuns WHERE experiment_id = ?`, expID).Scan(&runs); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if runs != 0 {
+			t.Errorf("holdout member produced %d ExperimentRuns; want 0", runs)
+		}
+	})
+
+	// (c) idempotence: Apply twice for the same unit produces exactly one
+	// ExperimentRuns row — the sticky-assignment invariant.
+	t.Run("idempotent_apply_yields_single_experiment_run", func(t *testing.T) {
+		db := openDB(t)
+		ctx := context.Background()
+		expID := seedRunningExperiment(t, db, "medic", "task")
+		seedTreatment(t, db, expID, "treatment", "medic/treatment@HEAD", 1.0)
+
+		in := CallDescriptor{
+			AgentName:       "medic",
+			NaturalUnitKind: "task",
+			NaturalUnitID:   7777,
+		}
+		for i := 0; i < 3; i++ {
+			if _, _, err := Apply(ctx, db, in); err != nil {
+				t.Fatalf("Apply attempt %d: %v", i, err)
+			}
+		}
+
+		var runs int
+		if err := db.QueryRow(`
+			SELECT COUNT(*) FROM ExperimentRuns
+			WHERE experiment_id = ? AND natural_unit_kind = 'task' AND natural_unit_id = 7777
+		`, expID).Scan(&runs); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("idempotence: got %d ExperimentRuns rows, want exactly 1", runs)
+		}
+	})
+
+	// (d) explicit log_only rollback via SystemConfig disables enrollment.
+	t.Run("log_only_systemconfig_disables_enrollment", func(t *testing.T) {
+		db := openDB(t)
+		ctx := context.Background()
+		store.SetConfig(db, SystemConfigApplyMode, ModeLogOnly)
+		expID := seedRunningExperiment(t, db, "captain", "task")
+		seedTreatment(t, db, expID, "treatment", "captain/treatment@HEAD", 1.0)
+
+		in := CallDescriptor{
+			AgentName:       "captain",
+			NaturalUnitKind: "task",
+			NaturalUnitID:   6666,
+			PromptTemplate:  "captain/default@HEAD",
+		}
+		out, assignments, err := Apply(ctx, db, in)
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		// Log-only: descriptor unchanged, no assignments, no ExperimentRuns row.
+		if out.PromptTemplate != "captain/default@HEAD" {
+			t.Errorf("log-only: descriptor was rewritten; got PromptTemplate=%q", out.PromptTemplate)
+		}
+		if len(assignments) != 0 {
+			t.Errorf("log-only: expected 0 assignments; got %d", len(assignments))
+		}
+		var runs int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ExperimentRuns WHERE experiment_id = ?`, expID).Scan(&runs); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if runs != 0 {
+			t.Errorf("log-only: expected 0 ExperimentRuns; got %d", runs)
+		}
+	})
+
+	// (e) D16 P2 migration: INSERT OR IGNORE seeds 'live' without overwriting
+	// a deliberate 'log_only' row. Simulates the runMigrations behaviour.
+	t.Run("migration_seeds_live_without_clobbering_log_only", func(t *testing.T) {
+		db := openDB(t)
+
+		// Case 1: no pre-existing row → migration seeds 'live'.
+		db.Exec(`INSERT OR IGNORE INTO SystemConfig (key, value)
+			VALUES ('treatments_apply_mode', 'live')`)
+		var v1 string
+		db.QueryRow(`SELECT value FROM SystemConfig WHERE key = 'treatments_apply_mode'`).Scan(&v1)
+		if v1 != "live" {
+			t.Errorf("migration case 1: got %q, want 'live'", v1)
+		}
+
+		// Case 2: pre-existing 'log_only' row → migration does NOT overwrite.
+		db2 := openDB(t)
+		store.SetConfig(db2, SystemConfigApplyMode, ModeLogOnly)
+		db2.Exec(`INSERT OR IGNORE INTO SystemConfig (key, value)
+			VALUES ('treatments_apply_mode', 'live')`)
+		var v2 string
+		db2.QueryRow(`SELECT value FROM SystemConfig WHERE key = 'treatments_apply_mode'`).Scan(&v2)
+		if v2 != ModeLogOnly {
+			t.Errorf("migration case 2: got %q, want %q (operator rollback must survive)", v2, ModeLogOnly)
+		}
+	})
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // helpers
 // ──────────────────────────────────────────────────────────────────────────

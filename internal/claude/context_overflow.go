@@ -206,8 +206,9 @@ func activeContextSizeDB() *sql.DB { return activeContextSizeDBHandle }
 
 // TreatmentApplyHook is the function signature the daemon installs to
 // route every Claude CLI invocation through `treatments.Apply` (D3
-// Phase 1 log-only mode; Phase 2+ live pass-through). Called once per
-// Claude call at the top of AskClaudeCLIContext / RunCLIStreamingContext.
+// Phase 2 live mode — holdout check + experiment enrollment + descriptor
+// rewrite). Called once per Claude call at the top of
+// AskClaudeCLIContext / RunCLIStreamingContext.
 //
 // The hook receives the (agent, taskID) tuple already on the call ctx
 // via WithClaudeCallContext + the daemon's DB handle. It returns:
