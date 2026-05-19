@@ -191,12 +191,26 @@ func DispatchConsumerIntegrationChecks(db *sql.DB, convoyID int, branches []stor
 		return 0, fmt.Errorf("DispatchConsumerIntegrationChecks(convoy=%d, feature=%d): %w",
 			convoyID, featureID, brErr)
 	}
-	if len(rec.AffectedConsumerRepos) == 0 {
+
+	// D15: union symbol-level consumers (D8 blast-radius) with API consumers
+	// (D15 CrossRepoAPIDependencies) so integration checks cover both surfaces.
+	// The union is computed here rather than in PostProcessBlastRadius so
+	// that D8 and D15 can evolve independently without re-running the blast
+	// radius computation.
+	consumerSet := map[string]struct{}{}
+	for _, r := range rec.AffectedConsumerRepos {
+		consumerSet[r] = struct{}{}
+	}
+	for _, r := range rec.APIConsumers {
+		consumerSet[r] = struct{}{}
+	}
+	if len(consumerSet) == 0 {
 		if logger != nil {
-			logger.Printf("DispatchConsumerIntegrationChecks: feature #%d has empty affected_consumer_repos — nothing to dispatch", featureID)
+			logger.Printf("DispatchConsumerIntegrationChecks: feature #%d has no consumer repos (symbol or API) — nothing to dispatch", featureID)
 		}
 		return 0, nil
 	}
+
 	// Pick the producer repo + ask-branch. v1: first ConvoyAskBranch row
 	// (sorted by repo via ListConvoyAskBranches's ORDER BY). For
 	// multi-producer convoys this is a simplification — the consumer test
@@ -218,7 +232,7 @@ func DispatchConsumerIntegrationChecks(db *sql.DB, convoyID int, branches []stor
 		return 0, nil
 	}
 	queued := 0
-	for _, consumer := range rec.AffectedConsumerRepos {
+	for consumer := range consumerSet {
 		// Don't ConsumerIntegrationCheck a producer against itself —
 		// that's just running the producer's own tests, which the
 		// producer's CI already does.

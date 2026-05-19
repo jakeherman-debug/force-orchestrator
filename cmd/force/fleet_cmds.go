@@ -20,6 +20,18 @@ import (
 	"force-orchestrator/internal/agents"
 	"force-orchestrator/internal/agents/engineering_corps"
 	"force-orchestrator/internal/analysis"
+	"force-orchestrator/internal/apiextract"
+	grpcclientextract "force-orchestrator/internal/apiextract/consumer/grpcclient"
+	javaclientextract "force-orchestrator/internal/apiextract/consumer/javaclient"
+	jsclientextract   "force-orchestrator/internal/apiextract/consumer/jsclient"
+	rubyclientextract "force-orchestrator/internal/apiextract/consumer/rubyclient"
+	expressextract    "force-orchestrator/internal/apiextract/express"
+	ktorextract       "force-orchestrator/internal/apiextract/ktor"
+	nestjsextract     "force-orchestrator/internal/apiextract/nestjs"
+	openapiextract    "force-orchestrator/internal/apiextract/openapi"
+	protoextract      "force-orchestrator/internal/apiextract/proto"
+	railsextract      "force-orchestrator/internal/apiextract/rails"
+	springextract     "force-orchestrator/internal/apiextract/spring"
 	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/codeartifact"
 	"force-orchestrator/internal/clients/databricks"
@@ -750,6 +762,24 @@ func cmdDaemon(db *sql.DB, args []string) {
 		}
 		go agents.SpawnArchaeologist(ctx, db, libClient, name)
 	}
+	// D15 Phase 6 — wire the ExtractorRegistry. This is the ONLY place in
+	// the codebase that imports concrete extractor packages. All other code
+	// (scanner, dog) depends only on the apiextract.ExtractorRegistry interface.
+	// Adding a new extractor: register it here and add its package import.
+	apiRegistry := apiextract.NewExtractorRegistry()
+	apiRegistry.RegisterProvider(&railsextract.Extractor{})
+	apiRegistry.RegisterProvider(&protoextract.Extractor{})
+	apiRegistry.RegisterProvider(&openapiextract.Extractor{})
+	apiRegistry.RegisterProvider(&springextract.Extractor{})
+	apiRegistry.RegisterProvider(&ktorextract.Extractor{})
+	apiRegistry.RegisterProvider(&expressextract.Extractor{})
+	apiRegistry.RegisterProvider(&nestjsextract.Extractor{})
+	apiRegistry.RegisterConsumer(&jsclientextract.Extractor{})
+	apiRegistry.RegisterConsumer(&rubyclientextract.Extractor{})
+	apiRegistry.RegisterConsumer(&javaclientextract.Extractor{})
+	apiRegistry.RegisterConsumer(&grpcclientextract.Extractor{})
+	agents.RegisterAPIExtractorRegistry(apiRegistry)
+
 	go agents.SpawnInquisitor(ctx, db, agents.InquisitorConfig{Librarian: libClient, CodeArtifact: caClient})
 
 	// D3 Phase 3 — Engineering Corps. Spawned AFTER the review-agent

@@ -173,6 +173,14 @@ var dogCooldowns = map[string]time.Duration{
 	// 2/3 (documented stub in dogs_repo_graph_scan.go). The 24h budget
 	// matches the freshness SLO ("MAX(last_scanned_at) within 24h").
 	"repo-graph-scan": 24 * time.Hour,
+	// D15 Phase 6 — repo-api-scan. Walks every registered repo with a
+	// local_path, dispatches files to the registered ProviderExtractors
+	// (rails/proto/openapi/spring/ktor/express/nestjs) and
+	// ConsumerExtractors (jsclient/rubyclient/javaclient/grpcclient), and
+	// upserts CrossRepoAPIs + CrossRepoAPIDependencies. Daily cadence
+	// matches repo-graph-scan. Ordered after repo-graph-scan so symbol
+	// edges are fresh before API edges are computed.
+	"repo-api-scan": 24 * time.Hour,
 	// D9 Phase 1 — architecture-health-report. Monthly longitudinal
 	// dog. Cooldown-only gate (30 days); the dog body itself does NOT
 	// additionally guard on day-of-month so a manual mid-month invocation
@@ -280,6 +288,10 @@ var dogOrder = []string{
 	// after lighter dogs have made forward progress on the cycle's
 	// cooperative work. 24h cooldown means the per-cycle hit is rare.
 	"repo-graph-scan",
+	// D15 Phase 6 — repo-api-scan. Ordered after repo-graph-scan so the
+	// symbol graph is fresh when the API graph runs. Both share a 24h
+	// cooldown so the combined scan window is once-per-day.
+	"repo-api-scan",
 	// D9 Phase 1 — architecture-health-report. Monthly longitudinal
 	// scan; runs last in the order because it walks every registered
 	// repo's full tree and is the most expensive dog by far.
@@ -507,6 +519,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogConvoyStageWatch(ctx, db, logger)
 	case "repo-graph-scan":
 		return dogRepoGraphScan(ctx, db, logger)
+	case "repo-api-scan":
+		return dogRepoAPIScan(ctx, db, logger)
 	case "architecture-health-report":
 		return dogArchitectureHealthReport(ctx, db, logger)
 	case "archaeologist-sweep":

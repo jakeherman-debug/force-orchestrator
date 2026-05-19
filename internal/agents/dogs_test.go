@@ -400,11 +400,14 @@ func TestListDogs(t *testing.T) {
 	// D11 Phase 2 (sub-task C) added notification-override-cleanup
 	// (daily — purges ConvoyNotificationOverrides rows >7d after
 	// convoy terminal transition).
+	// D15 Phase 6 added repo-api-scan (24h — walks registered repos,
+	// dispatches files to ProviderExtractors/ConsumerExtractors via the
+	// ExtractorRegistry, upserts CrossRepoAPIs / CrossRepoAPIDependencies).
 	// D16 Phase 1B added golden-set-evaluator (weekly — evaluates
 	// every agent's golden-set fixtures and records accuracy into
 	// GoldenSetEvaluations for trend dashboards).
-	if len(dogs) != 41 {
-		t.Errorf("expected 41 built-in dogs (D16-P1B added golden-set-evaluator), got %d", len(dogs))
+	if len(dogs) != 42 {
+		t.Errorf("expected 42 built-in dogs (D15-P6 added repo-api-scan, D16-P1B added golden-set-evaluator), got %d", len(dogs))
 	}
 	names := map[string]bool{}
 	for _, d := range dogs {
@@ -433,6 +436,8 @@ func TestListDogs(t *testing.T) {
 		"architecture-doc-render",
 		// D11 Phase 2 — notification-override-cleanup.
 		"notification-override-cleanup",
+		// D15 Phase 6 — repo-api-scan.
+		"repo-api-scan",
 		// D16 Phase 1B — golden-set-evaluator.
 		"golden-set-evaluator"} {
 		if !names[expected] {

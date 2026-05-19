@@ -237,6 +237,19 @@ func PostProcessBlastRadius(ctx context.Context, db *sql.DB, gc graph.Client, fe
 			LineNumber: s.Line,
 		})
 	}
+	// D15 union: collect API consumers for the repos touched by this convoy.
+	// For each modifying repo, query CrossRepoAPIs for its provider APIs,
+	// then GetAPIBlastRadius per API to find consumer repos. Union with
+	// AffectedConsumerRepos; duplicates are deduplicated.
+	// If D8 is not yet shipped (no CrossRepoAPIs rows) this is a no-op.
+	// D15: symbol→API mapping uses repo as the join key (same repo,
+	// any api_kind). Per the spec this is additive — D8 blast-radius
+	// behaviour is fully preserved.
+	apiConsumers := unionAPIBlastRadius(db, modifyingRepos, logger)
+	if len(apiConsumers) > 0 {
+		rec.APIConsumers = apiConsumers
+	}
+
 	if err := store.SetFeatureBlastRadius(db, featureID, rec); err != nil {
 		return rec, fmt.Errorf("PostProcessBlastRadius(feature=%d): persist: %w", featureID, err)
 	}
@@ -304,4 +317,50 @@ func QueueBlastRadiusSenateConsultations(db *sql.DB, featureID int, consumerRepo
 		}
 	}
 	return nil
+}
+
+// unionAPIBlastRadius queries CrossRepoAPIs for all provider APIs owned by
+// the modifying repos, then calls store.GetAPIBlastRadius per API to find
+// consumer repos. Returns a deduplicated, sorted list of consumer repo names.
+//
+// D15: called from PostProcessBlastRadius to union API-surface consumers with
+// the symbol-level consumer set from D8. When CrossRepoAPIs is empty (D15
+// scan not yet run) this returns nil — no-op.
+func unionAPIBlastRadius(db *sql.DB, modifyingRepos map[string]struct{}, logger blastRadiusLogger) []string {
+	if db == nil || len(modifyingRepos) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for repo := range modifyingRepos {
+		apis, err := store.ListCrossRepoAPIs(db, repo)
+		if err != nil {
+			if logger != nil {
+				logger.Printf("unionAPIBlastRadius: ListCrossRepoAPIs(%s): %v — skipping", repo, err)
+			}
+			continue
+		}
+		for _, api := range apis {
+			deps, dErr := store.GetAPIBlastRadius(db, api.ID)
+			if dErr != nil {
+				if logger != nil {
+					logger.Printf("unionAPIBlastRadius: GetAPIBlastRadius(api=%d): %v — skipping", api.ID, dErr)
+				}
+				continue
+			}
+			for _, dep := range deps {
+				if dep.ConsumerRepo != "" {
+					seen[dep.ConsumerRepo] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for repo := range seen {
+		out = append(out, repo)
+	}
+	sort.Strings(out)
+	return out
 }

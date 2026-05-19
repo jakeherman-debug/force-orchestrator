@@ -32,6 +32,11 @@ type BlastRadiusRecord struct {
 	ModifiedSymbols       []BlastRadiusSymbol `json:"modified_symbols"`
 	AffectedConsumerRepos []string            `json:"affected_consumer_repos"`
 	AutoIncludedTasks     []int               `json:"auto_included_tasks"`
+	// APIConsumers is the D15 additive extension: repos that consume this
+	// Feature's provider APIs (from CrossRepoAPIDependencies). Populated
+	// by PostProcessBlastRadius after the symbol-level computation.
+	// Empty on pre-D15 records; callers must treat nil and [] as equivalent.
+	APIConsumers []string `json:"api_consumers,omitempty"`
 }
 
 // BlastRadiusSymbol is one entry in BlastRadiusRecord.ModifiedSymbols.

@@ -98,6 +98,7 @@ The 40 dogs grouped by purpose, with cooldowns. Order within each group reflects
 **Cross-repo + architecture (D8–D10):**
 
 - `repo-graph-scan` (24 h) — walks registered repos; extracts exported symbols + import call sites into `CrossRepoSymbols` / `CrossRepoDependencies` for blast-radius analysis.
+- `repo-api-scan` (24 h) — walks registered repos; dispatches files to the `ExtractorRegistry` (rails/proto/openapi/spring/ktor/express/nestjs providers + jsclient/rubyclient/javaclient/grpcclient consumers); upserts `CrossRepoAPIs` and `CrossRepoAPIDependencies` for API-surface blast-radius (D15).
 - `architecture-health-report` (30 d) — monthly longitudinal scan; runs every BoS rule over the full codebase and renders `reports/architecture-health-YYYY-MM.md`.
 - `archaeologist-sweep` (7 d) — fans out per-repo `ArchaeologistSweep` tasks for the proactive debt-pattern agent.
 - `architecture-doc-render` (1 h) — re-renders `ARCHITECTURE.md` for every repo with `handoff_synthesis_enabled=1`.
@@ -108,7 +109,7 @@ The 40 dogs grouped by purpose, with cooldowns. Order within each group reflects
 
 ## Invariants
 
-1. **Inventory count is asserted.** `TestListDogs` (`internal/agents/dogs_test.go`) requires exactly 40 dogs and names the load-bearing subset; adding a dog requires updating the test in the same commit.
+1. **Inventory count is asserted.** `TestListDogs` (`internal/agents/dogs_test.go`) requires exactly 41 dogs and names the load-bearing subset; adding a dog requires updating the test in the same commit.
 2. **`spend-burn-watch` runs first; `task-spend-watch` runs second.** Both cost defenses must land before any subsequent dog or any subsequent claim cycle continues spending tokens.
 3. **E-stop short-circuits all dogs.** AUDIT-106 / Fix #1: no dogs run during emergency halt. The whole point of e-stop is to stop activity that costs money.
 4. **Per-tick context is cancellable from the daemon.** `SpawnInquisitor` derives `tickCtx` from the daemon `ctx`; per-dog ctx derives from `tickCtx`. Daemon SIGINT/SIGTERM cancels in-flight dog work.
