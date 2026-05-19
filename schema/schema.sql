@@ -1518,4 +1518,44 @@ CREATE TABLE IF NOT EXISTS DaemonStartLog (
 );
 CREATE INDEX IF NOT EXISTS idx_daemon_start_log_ts ON DaemonStartLog(ts);
 
+-- ── D14 Phase 1 — Tag-driven rule scoping ────────────────────────────────────
+-- Tags: operator-defined labels applied to repos. Used to scope FleetRules
+-- rows with agent_scope = 'senate:tag:<name>' so a rule fires only on repos
+-- carrying that tag (e.g. 'frontend', 'api', 'payments').
+CREATE TABLE IF NOT EXISTS Tags (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by  TEXT NOT NULL DEFAULT 'operator'
+);
+
+-- RepoTags: many-to-many join between repos and tags. source distinguishes
+-- operator-applied tags from LLM-suggested tags that have been accepted.
+-- FOREIGN KEY on tag enforces that the tag exists in Tags before being applied.
+CREATE TABLE IF NOT EXISTS RepoTags (
+    repo_name TEXT NOT NULL,
+    tag       TEXT NOT NULL,
+    added_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    added_by  TEXT NOT NULL DEFAULT 'operator',
+    source    TEXT NOT NULL DEFAULT 'operator',
+    PRIMARY KEY (repo_name, tag),
+    FOREIGN KEY (tag) REFERENCES Tags(name)
+);
+CREATE INDEX IF NOT EXISTS idx_repotags_tag ON RepoTags(tag);
+
+-- TagSuggestions: LLM-proposed tags awaiting operator acceptance or dismissal.
+-- status ∈ {'pending', 'accepted', 'dismissed'}.
+CREATE TABLE IF NOT EXISTS TagSuggestions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_name     TEXT NOT NULL,
+    tag           TEXT NOT NULL,
+    rationale     TEXT NOT NULL DEFAULT '',
+    suggested_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    suggested_by  TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    resolved_at   TEXT NOT NULL DEFAULT '',
+    resolved_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tag_suggestions_status ON TagSuggestions(status, suggested_at);
+
 -- ── Convoy events ─────────────────────────────────────────────────────────────
