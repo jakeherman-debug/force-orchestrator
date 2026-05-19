@@ -1112,13 +1112,9 @@ func handleRepos(db *sql.DB) http.HandlerFunc {
 func handleReposSubroutes(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jsonCORS(w)
-		if r.Method != http.MethodPost {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
 		// Path shape: /api/repos/{name}/{action}
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) != 4 || parts[0] != "api" || parts[1] != "repos" {
+		if len(parts) < 4 || parts[0] != "api" || parts[1] != "repos" {
 			http.NotFound(w, r)
 			return
 		}
@@ -1126,6 +1122,23 @@ func handleReposSubroutes(db *sql.DB) http.HandlerFunc {
 		action := parts[3]
 		if repoName == "" {
 			http.Error(w, `{"error":"missing repo name"}`, http.StatusBadRequest)
+			return
+		}
+
+		// D14 P4 — route /api/repos/{name}/tags[/{tag}] to the tags handler.
+		// This covers GET, POST, and DELETE on the repo-tags sub-resource.
+		if action == "tags" {
+			handleRepoTagsSubroutes(db, w, r, parts)
+			return
+		}
+
+		// Remaining mode-control actions require POST.
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if len(parts) != 4 {
+			http.NotFound(w, r)
 			return
 		}
 

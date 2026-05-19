@@ -3601,6 +3601,9 @@ function activateSenateTab(name) {
   });
   if (name === 'chambers') window.loadSenateChambers && window.loadSenateChambers();
   if (name === 'reviews')  window.loadSenateReviews  && window.loadSenateReviews();
+  // D14 P4 — Rules and Tags sub-tabs.
+  if (name === 'rules')    window.loadRulesTab        && window.loadRulesTab();
+  if (name === 'tags')     window.loadTagsTab         && window.loadTagsTab();
 }
 document.querySelectorAll('#senate-tabs .reflection-tab').forEach(b => {
   b.addEventListener('click', () => activateSenateTab(b.dataset.senateTab));
@@ -4987,3 +4990,637 @@ window.startPulseRefresh      = startPulseRefresh;
 window.stopPulseRefresh       = stopPulseRefresh;
 window.refreshPulseAll        = refreshPulseAll;
 window.refreshPulseNarrative  = refreshPulseNarrative;
+
+// ── D14 Phase 4 — Tags / TagSuggestions / Rules ───────────────────────────────
+//
+// Three new operator surfaces:
+//
+//   1. Pulse vital-sign card  — pending tag suggestions count
+//   2. Briefing banner        — if pending suggestions exist, show alert + link
+//   3. Senate "Rules" tab     — tag-scoped FleetRules per repo
+//   4. Senate "Tags" tab      — tag registry + repo-tag management + suggestions
+//
+// All DOM interactions use data-action; no inline handlers per CSP policy.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Pulse: pending tag suggestions vital card ─────────────────────────────────
+
+// renderPulseTagSuggestions — renders the "Pending attention" card with the
+// count of pending tag suggestions, fetched from the same endpoint as the
+// briefing banner.
+async function renderPulseTagSuggestions() {
+  const el = document.getElementById('pulse-tag-suggestions-content');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/tag-suggestions?status=pending');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const count = Array.isArray(data) ? data.length : 0;
+    _pulseClear(el);
+    const ul = document.createElement('ul');
+    ul.className = 'pulse-kv';
+    const li = document.createElement('li');
+    const k = document.createElement('span'); k.className = 'pulse-k';
+    k.appendChild(_pulseTextNode('Tag suggestions'));
+    const v = document.createElement('span'); v.className = 'pulse-v';
+    v.appendChild(_pulseTextNode(String(count)));
+    li.appendChild(k); li.appendChild(v);
+    ul.appendChild(li);
+    el.appendChild(ul);
+  } catch (e) {
+    _pulseRenderError('pulse-tag-suggestions-content', e);
+  }
+}
+
+// Extend loadPulse to also render the tag-suggestions card.
+const _origLoadPulseD14 = loadPulse;
+async function loadPulseD14(forceRefresh) {
+  await _origLoadPulseD14(forceRefresh);
+  await renderPulseTagSuggestions();
+}
+// Re-wire global so startPulseRefresh picks it up.
+window.loadPulse = loadPulseD14;
+
+// ── Briefing banner ───────────────────────────────────────────────────────────
+
+// fetchAndShowTagSuggestionBanner — called when the Briefing surface activates.
+// Shows a banner with the pending count if > 0.
+async function fetchAndShowTagSuggestionBanner() {
+  const banner = document.getElementById('briefing-tag-suggestion-banner');
+  const msg    = document.getElementById('briefing-tag-suggestion-msg');
+  if (!banner) return;
+  try {
+    const r = await fetch('/api/tag-suggestions?status=pending');
+    if (!r.ok) return;
+    const data = await r.json();
+    const count = Array.isArray(data) ? data.length : 0;
+    if (count > 0) {
+      if (msg) msg.textContent = count + ' tag suggestion' + (count === 1 ? '' : 's') + ' pending';
+      banner.classList.remove('hidden');
+    } else {
+      banner.classList.add('hidden');
+    }
+  } catch (_) {
+    banner.classList.add('hidden');
+  }
+}
+
+// goToTagSuggestions — called by the banner's "Review" button.
+// Switches to the Legacy surface (where the Senate tab lives) and opens
+// the Senate > Tags sub-tab.
+function goToTagSuggestions() {
+  if (window.showSurface) window.showSurface('legacy');
+  if (window.switchTab)   window.switchTab('senate');
+  if (window.activateSenateTab) window.activateSenateTab('tags');
+}
+window.goToTagSuggestions = goToTagSuggestions;
+
+// Extend loadBriefingQueue to also check tag suggestions.
+const _origLoadBriefingQueueD14 = window.loadBriefingQueue;
+async function loadBriefingQueueD14() {
+  if (_origLoadBriefingQueueD14) await _origLoadBriefingQueueD14();
+  await fetchAndShowTagSuggestionBanner();
+}
+window.loadBriefingQueue = loadBriefingQueueD14;
+
+// ── Senate "Rules" sub-tab ────────────────────────────────────────────────────
+
+// _rulesRepoCache — populated once from /api/repos to build the selector.
+let _rulesRepoCache = null;
+
+async function _ensureRulesRepoSelect() {
+  const sel = document.getElementById('rules-repo-select');
+  if (!sel || _rulesRepoCache) return;
+  try {
+    const r = await fetch('/api/repos');
+    if (!r.ok) return;
+    const repos = await r.json();
+    _rulesRepoCache = repos;
+    repos.forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    });
+  } catch (_) {}
+}
+
+async function loadRulesTab() {
+  await _ensureRulesRepoSelect();
+  const sel     = document.getElementById('rules-repo-select');
+  const summary = document.getElementById('rules-summary');
+  const target  = document.getElementById('rules-table');
+  if (!target) return;
+
+  const repo = sel ? sel.value : '';
+  const url  = repo ? '/api/rules?repo=' + encodeURIComponent(repo) : '/api/rules';
+
+  target.innerHTML = '<div class="reflection-empty">Loading&hellip;</div>';
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const rules = await r.json();
+    if (summary) summary.textContent = rules.length + ' rule' + (rules.length === 1 ? '' : 's');
+    if (rules.length === 0) {
+      target.innerHTML = '<div class="reflection-empty">(no active rules' + (repo ? ' for this repo' : '') + ')</div>';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'reflection-data-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Rule key', 'Scope', 'Category', 'Created', ''].forEach(h => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rules.forEach(rule => {
+      const tr = document.createElement('tr');
+      const td = col => {
+        const td = document.createElement('td');
+        td.textContent = col || '';
+        tr.appendChild(td);
+        return td;
+      };
+      td(rule.RuleKey || rule.rule_key);
+      td(rule.AgentScope || rule.agent_scope);
+      td(rule.Category || rule.category);
+      td((rule.CreatedAt || rule.created_at || '').slice(0, 16));
+      // Upgrade-scope button.
+      const btnTd = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'hdr-btn';
+      btn.textContent = 'Upgrade scope';
+      btn.setAttribute('data-action', 'showUpgradeScopeModal');
+      btn.setAttribute('data-arg', rule.RuleKey || rule.rule_key);
+      btnTd.appendChild(btn);
+      tr.appendChild(btnTd);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    target.innerHTML = '';
+    target.appendChild(table);
+  } catch (e) {
+    target.innerHTML = '<div class="reflection-error">' + escHtml(e.message) + '</div>';
+  }
+}
+window.loadRulesTab = loadRulesTab;
+
+// showUpgradeScopeModal — opens the upgrade-scope modal for a given rule key.
+function showUpgradeScopeModal(ruleKey) {
+  const modal    = document.getElementById('upgrade-scope-modal');
+  const keyLabel = document.getElementById('upgrade-scope-rule-key');
+  if (!modal) return;
+  if (keyLabel) keyLabel.textContent = ruleKey;
+  modal.setAttribute('data-current-rule-key', ruleKey);
+  modal.classList.remove('hidden');
+}
+window.showUpgradeScopeModal = showUpgradeScopeModal;
+
+// confirmUpgradeScope — POSTs the new scope and reloads the rules table.
+async function confirmUpgradeScope() {
+  const modal   = document.getElementById('upgrade-scope-modal');
+  const selEl   = document.getElementById('upgrade-scope-select');
+  if (!modal || !selEl) return;
+  const ruleKey = modal.getAttribute('data-current-rule-key');
+  const toScope = selEl.value;
+  if (!ruleKey || !toScope) return;
+  try {
+    const r = await fetch('/api/rules/' + encodeURIComponent(ruleKey) + '/upgrade-scope', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to_scope: toScope }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      showToast('Upgrade failed: ' + (j.error || 'HTTP ' + r.status), 'error');
+      return;
+    }
+    modal.classList.add('hidden');
+    showToast('Rule scope updated to ' + toScope);
+    if (window.loadRulesTab) window.loadRulesTab();
+  } catch (e) {
+    showToast('Upgrade failed: ' + e.message, 'error');
+  }
+}
+window.confirmUpgradeScope = confirmUpgradeScope;
+
+// ── Senate "Tags" sub-tab ─────────────────────────────────────────────────────
+
+async function loadTagsTab() {
+  await _ensureTagsRepoSelect();
+  await loadTagRegistry();
+  await loadTagSuggestions();
+}
+window.loadTagsTab = loadTagsTab;
+
+// _tagsRepoCache — populated once from /api/repos.
+let _tagsRepoCache = null;
+
+async function _ensureTagsRepoSelect() {
+  const sel = document.getElementById('tags-repo-select');
+  if (!sel || _tagsRepoCache) return;
+  try {
+    const r = await fetch('/api/repos');
+    if (!r.ok) return;
+    const repos = await r.json();
+    _tagsRepoCache = repos;
+    repos.forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    });
+  } catch (_) {}
+}
+
+// loadTagRegistry — fetch /api/tags and render the tag registry table.
+async function loadTagRegistry() {
+  const target = document.getElementById('tags-table');
+  if (!target) return;
+  target.innerHTML = '<div class="reflection-empty">Loading&hellip;</div>';
+  try {
+    const r = await fetch('/api/tags');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const tags = await r.json();
+    if (tags.length === 0) {
+      target.innerHTML = '<div class="reflection-empty">(no tags defined yet — create one with "+ New tag")</div>';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'reflection-data-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Name', 'Description', 'Created', ''].forEach(h => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    tags.forEach(tag => {
+      const tr = document.createElement('tr');
+      const td = col => {
+        const el = document.createElement('td');
+        el.textContent = col || '';
+        tr.appendChild(el);
+        return el;
+      };
+      td(tag.Name || tag.name);
+      td(tag.Description || tag.description);
+      td((tag.CreatedAt || tag.created_at || '').slice(0, 16));
+      // Delete button.
+      const btnTd = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'hdr-btn btn-danger';
+      btn.textContent = 'Delete';
+      btn.setAttribute('data-action', 'deleteTag');
+      btn.setAttribute('data-arg', tag.Name || tag.name);
+      btnTd.appendChild(btn);
+      tr.appendChild(btnTd);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    target.innerHTML = '';
+    target.appendChild(table);
+  } catch (e) {
+    target.innerHTML = '<div class="reflection-error">' + escHtml(e.message) + '</div>';
+  }
+}
+window.loadTagRegistry = loadTagRegistry;
+
+// deleteTag — DELETE /api/tags/{name}
+async function deleteTag(name) {
+  if (!name) return;
+  if (!confirm('Delete tag "' + name + '"? This will fail if the tag is still attached to any repo.')) return;
+  try {
+    const r = await fetch('/api/tags/' + encodeURIComponent(name), { method: 'DELETE' });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      showToast('Delete failed: ' + (j.error || 'HTTP ' + r.status), 'error');
+      return;
+    }
+    showToast('Tag "' + name + '" deleted');
+    loadTagRegistry();
+  } catch (e) {
+    showToast('Delete failed: ' + e.message, 'error');
+  }
+}
+window.deleteTag = deleteTag;
+
+// showCreateTagModal / confirmCreateTag
+function showCreateTagModal() {
+  const modal = document.getElementById('create-tag-modal');
+  if (!modal) return;
+  const nameEl = document.getElementById('create-tag-name');
+  const descEl = document.getElementById('create-tag-desc');
+  if (nameEl) nameEl.value = '';
+  if (descEl) descEl.value = '';
+  modal.classList.remove('hidden');
+}
+window.showCreateTagModal = showCreateTagModal;
+
+async function confirmCreateTag() {
+  const nameEl = document.getElementById('create-tag-name');
+  const descEl = document.getElementById('create-tag-desc');
+  const modal  = document.getElementById('create-tag-modal');
+  const name   = nameEl ? nameEl.value.trim() : '';
+  if (!name) { showToast('Tag name is required', 'error'); return; }
+  try {
+    const r = await fetch('/api/tags', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: descEl ? descEl.value.trim() : '' }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      showToast('Create failed: ' + (j.error || 'HTTP ' + r.status), 'error');
+      return;
+    }
+    if (modal) modal.classList.add('hidden');
+    showToast('Tag "' + name + '" created');
+    loadTagRegistry();
+  } catch (e) {
+    showToast('Create failed: ' + e.message, 'error');
+  }
+}
+window.confirmCreateTag = confirmCreateTag;
+
+// loadRepoTagsPanel — fetch /api/repos/{name}/tags for the selected repo.
+async function loadRepoTagsPanel() {
+  const sel    = document.getElementById('tags-repo-select');
+  const target = document.getElementById('repo-tags-table');
+  if (!target) return;
+  const repo = sel ? sel.value : '';
+  if (!repo) {
+    target.innerHTML = '<div class="reflection-empty">(select a repo first)</div>';
+    return;
+  }
+  target.innerHTML = '<div class="reflection-empty">Loading&hellip;</div>';
+  try {
+    const r = await fetch('/api/repos/' + encodeURIComponent(repo) + '/tags');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const repoTags = await r.json();
+    // Render + Add button row.
+    const wrap = document.createElement('div');
+    // Add-tag button.
+    const addBtn = document.createElement('button');
+    addBtn.className = 'hdr-btn primary';
+    addBtn.textContent = '+ Add tag';
+    addBtn.setAttribute('data-action', 'showAddRepoTagModal');
+    addBtn.setAttribute('data-arg', repo);
+    wrap.appendChild(addBtn);
+
+    if (repoTags.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'reflection-empty';
+      empty.style.marginTop = '8px';
+      empty.textContent = '(no tags attached to this repo)';
+      wrap.appendChild(empty);
+    } else {
+      const table = document.createElement('table');
+      table.className = 'reflection-data-table';
+      table.style.marginTop = '8px';
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      ['Tag', 'Source', 'Added', ''].forEach(h => {
+        const th = document.createElement('th');
+        th.textContent = h;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      repoTags.forEach(rt => {
+        const tr = document.createElement('tr');
+        const td = col => {
+          const el = document.createElement('td');
+          el.textContent = col || '';
+          tr.appendChild(el);
+          return el;
+        };
+        td(rt.Tag || rt.tag);
+        td(rt.Source || rt.source);
+        td((rt.AddedAt || rt.added_at || '').slice(0, 16));
+        const btnTd = document.createElement('td');
+        const btn = document.createElement('button');
+        btn.className = 'hdr-btn btn-danger';
+        btn.textContent = 'Remove';
+        btn.setAttribute('data-action', 'removeRepoTag');
+        btn.setAttribute('data-args', JSON.stringify([repo, rt.Tag || rt.tag]));
+        btnTd.appendChild(btn);
+        tr.appendChild(btnTd);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+    }
+    target.innerHTML = '';
+    target.appendChild(wrap);
+  } catch (e) {
+    target.innerHTML = '<div class="reflection-error">' + escHtml(e.message) + '</div>';
+  }
+}
+window.loadRepoTagsPanel = loadRepoTagsPanel;
+
+// showAddRepoTagModal — opens the add-repo-tag modal.
+async function showAddRepoTagModal(repo) {
+  const modal   = document.getElementById('add-repo-tag-modal');
+  const nameEl  = document.getElementById('add-repo-tag-repo-name');
+  const selEl   = document.getElementById('add-repo-tag-select');
+  if (!modal || !selEl) return;
+  if (nameEl) nameEl.textContent = repo;
+  modal.setAttribute('data-current-repo', repo);
+  // Populate tag selector.
+  selEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/tags');
+    if (r.ok) {
+      const tags = await r.json();
+      if (tags.length === 0) {
+        const opt = document.createElement('option');
+        opt.textContent = '(no tags defined)';
+        selEl.appendChild(opt);
+      } else {
+        tags.forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t.Name || t.name;
+          opt.textContent = t.Name || t.name;
+          selEl.appendChild(opt);
+        });
+      }
+    }
+  } catch (_) {}
+  modal.classList.remove('hidden');
+}
+window.showAddRepoTagModal = showAddRepoTagModal;
+
+// confirmAddRepoTag — POSTs /api/repos/{repo}/tags.
+async function confirmAddRepoTag() {
+  const modal  = document.getElementById('add-repo-tag-modal');
+  const selEl  = document.getElementById('add-repo-tag-select');
+  if (!modal || !selEl) return;
+  const repo = modal.getAttribute('data-current-repo');
+  const tag  = selEl.value;
+  if (!repo || !tag) return;
+  try {
+    const r = await fetch('/api/repos/' + encodeURIComponent(repo) + '/tags', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag, source: 'operator' }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      showToast('Add failed: ' + (j.error || 'HTTP ' + r.status), 'error');
+      return;
+    }
+    modal.classList.add('hidden');
+    showToast('Tag "' + tag + '" added to ' + repo);
+    loadRepoTagsPanel();
+  } catch (e) {
+    showToast('Add failed: ' + e.message, 'error');
+  }
+}
+window.confirmAddRepoTag = confirmAddRepoTag;
+
+// removeRepoTag — DELETE /api/repos/{repo}/tags/{tag}
+async function removeRepoTag(repo, tag) {
+  if (!repo || !tag) return;
+  try {
+    const r = await fetch('/api/repos/' + encodeURIComponent(repo) + '/tags/' + encodeURIComponent(tag), {
+      method: 'DELETE',
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      showToast('Remove failed: ' + (j.error || 'HTTP ' + r.status), 'error');
+      return;
+    }
+    showToast('Tag "' + tag + '" removed from ' + repo);
+    loadRepoTagsPanel();
+  } catch (e) {
+    showToast('Remove failed: ' + e.message, 'error');
+  }
+}
+window.removeRepoTag = removeRepoTag;
+
+// loadTagSuggestions — fetch /api/tag-suggestions?status=... and render.
+async function loadTagSuggestions() {
+  const statusEl = document.getElementById('tag-sug-status');
+  const target   = document.getElementById('tag-suggestions-table');
+  if (!target) return;
+  const status = statusEl ? statusEl.value : 'pending';
+  target.innerHTML = '<div class="reflection-empty">Loading&hellip;</div>';
+  try {
+    const url = '/api/tag-suggestions' + (status ? '?status=' + encodeURIComponent(status) : '');
+    const r   = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const suggestions = await r.json();
+    if (suggestions.length === 0) {
+      target.innerHTML = '<div class="reflection-empty">(no suggestions with status ' + escHtml(status || 'any') + ')</div>';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'reflection-data-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['ID', 'Repo', 'Tag', 'Rationale', 'Status', ''].forEach(h => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    suggestions.forEach(s => {
+      const tr = document.createElement('tr');
+      const td = col => {
+        const el = document.createElement('td');
+        el.textContent = col || '';
+        tr.appendChild(el);
+        return el;
+      };
+      td(String(s.ID || s.id || ''));
+      td(s.RepoName || s.repo_name);
+      td(s.Tag || s.tag);
+      td((s.Rationale || s.rationale || '').slice(0, 80));
+      td(s.Status || s.status);
+      const btnTd = document.createElement('td');
+      if ((s.Status || s.status) === 'pending') {
+        const acceptBtn = document.createElement('button');
+        acceptBtn.className = 'hdr-btn primary';
+        acceptBtn.textContent = 'Accept';
+        acceptBtn.setAttribute('data-action', 'acceptTagSuggestion');
+        acceptBtn.setAttribute('data-arg', String(s.ID || s.id));
+        btnTd.appendChild(acceptBtn);
+        btnTd.appendChild(document.createTextNode(' '));
+        const dismissBtn = document.createElement('button');
+        dismissBtn.className = 'hdr-btn';
+        dismissBtn.textContent = 'Dismiss';
+        dismissBtn.setAttribute('data-action', 'dismissTagSuggestion');
+        dismissBtn.setAttribute('data-arg', String(s.ID || s.id));
+        btnTd.appendChild(dismissBtn);
+      }
+      tr.appendChild(btnTd);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    target.innerHTML = '';
+    target.appendChild(table);
+  } catch (e) {
+    target.innerHTML = '<div class="reflection-error">' + escHtml(e.message) + '</div>';
+  }
+}
+window.loadTagSuggestions = loadTagSuggestions;
+
+// acceptTagSuggestion — POST /api/tag-suggestions/{id}/accept
+async function acceptTagSuggestion(id) {
+  try {
+    const r = await fetch('/api/tag-suggestions/' + encodeURIComponent(id) + '/accept', {
+      method: 'POST',
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      showToast('Accept failed: ' + (j.error || 'HTTP ' + r.status), 'error');
+      return;
+    }
+    showToast('Suggestion accepted — repo-tag created');
+    loadTagSuggestions();
+    fetchAndShowTagSuggestionBanner();
+    renderPulseTagSuggestions();
+  } catch (e) {
+    showToast('Accept failed: ' + e.message, 'error');
+  }
+}
+window.acceptTagSuggestion = acceptTagSuggestion;
+
+// dismissTagSuggestion — POST /api/tag-suggestions/{id}/dismiss
+async function dismissTagSuggestion(id) {
+  try {
+    const r = await fetch('/api/tag-suggestions/' + encodeURIComponent(id) + '/dismiss', {
+      method: 'POST',
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      showToast('Dismiss failed: ' + (j.error || 'HTTP ' + r.status), 'error');
+      return;
+    }
+    showToast('Suggestion dismissed');
+    loadTagSuggestions();
+    fetchAndShowTagSuggestionBanner();
+    renderPulseTagSuggestions();
+  } catch (e) {
+    showToast('Dismiss failed: ' + e.message, 'error');
+  }
+}
+window.dismissTagSuggestion = dismissTagSuggestion;
+
+// ── ESC key closes the new D14 modals (follows existing Sweep A pattern) ──────
+// The existing ESC handler in app.js already covers all .modal-backdrop elements
+// via the global keydown listener — no additional wiring needed here.
+
+// ── window.activateSenateTab is exposed for use by goToTagSuggestions ─────────
+window.activateSenateTab = activateSenateTab;

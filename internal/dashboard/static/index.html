@@ -97,6 +97,11 @@
       <h3>Trust dials</h3>
       <div id="pulse-dials-content" class="pulse-card-body">Loading…</div>
     </div>
+    <!-- D14 P4 — pending tag suggestions count -->
+    <div class="pulse-card pulse-card-tag-suggestions">
+      <h3>Pending attention</h3>
+      <div id="pulse-tag-suggestions-content" class="pulse-card-body">Loading…</div>
+    </div>
   </div>
 </div>
 <!-- ── D3 P6A.10 — Briefing SPA (Ship H) ──────────────────────────────────────
@@ -110,6 +115,17 @@
      (Sweep B); the reject-reason modal uses .modal-backdrop + .hidden
      (Sweep A). -->
 <div id="surface-briefing-pane" class="surface-pane" hidden>
+  <!-- D14 P4 — tag suggestion banner. Shown when pending suggestions exist.
+       Fetched from GET /api/tag-suggestions?status=pending on briefing load.
+       Clicking "Review" switches to the Tags sub-tab of the Senate tab. -->
+  <div id="briefing-tag-suggestion-banner" class="health-banner hidden" role="status"
+       style="background:rgba(255,180,0,0.08);border-color:var(--yellow)">
+    <span class="health-banner-icon">&#9873;</span>
+    <span class="health-banner-msg" id="briefing-tag-suggestion-msg"></span>
+    <button class="hdr-btn" style="margin-left:10px"
+            data-action="goToTagSuggestions">Review</button>
+  </div>
+
   <div class="briefing-layout">
     <!-- Queue list (left) -->
     <div class="briefing-queue">
@@ -725,16 +741,22 @@
     </div>
   </div>
 
-  <!-- ── D4 fix-loop-1 α — Senate tab ──────────────────────────────────────────
-       Two sub-tabs:
+  <!-- ── D4 fix-loop-1 α / D14 P4 — Senate tab ────────────────────────────────
+       Four sub-tabs:
          - Chambers:     active Senators + their scope / status
                          (fetch /api/senate/chambers)
          - Reviews:      per-feature review log + drill-down
-                         (fetch /api/senate/reviews + /api/senate/reviews/<id>) -->
+                         (fetch /api/senate/reviews + /api/senate/reviews/<id>)
+         - Rules:        D14 P4 — tag-scoped FleetRules per repo
+                         (fetch /api/rules?repo=<name>)
+         - Tags:         D14 P4 — tag registry + repo-tag management
+                         (fetch /api/tags, /api/repos/{name}/tags) -->
   <div class="tab-pane" id="tab-senate">
     <div id="senate-tabs" class="reflection-tabs" style="padding:6px 14px;border-bottom:1px solid var(--border)">
       <button class="reflection-tab reflection-tab-active" data-senate-tab="chambers">Chambers</button>
       <button class="reflection-tab" data-senate-tab="reviews">Review Log</button>
+      <button class="reflection-tab" data-senate-tab="rules">Rules</button>
+      <button class="reflection-tab" data-senate-tab="tags">Tags</button>
     </div>
 
     <div id="senate-pane-chambers" class="reflection-pane" style="padding:10px 14px">
@@ -777,6 +799,129 @@
       </div>
       <div id="senate-reviews-table" class="reflection-table"></div>
       <div id="senate-review-detail" class="reflection-table" style="margin-top:14px"></div>
+    </div>
+
+    <!-- ── D14 P4 — Rules sub-tab ─────────────────────────────────────────── -->
+    <div id="senate-pane-rules" class="reflection-pane" hidden style="padding:10px 14px">
+      <h3>Fleet rules</h3>
+      <p class="reflection-help">Active FleetRules resolved for the selected repo. Rules with scope <code>senate:tag:&lt;t&gt;</code> fire only for repos that carry that tag. Use "Upgrade scope" to widen a rule's reach. Fetch all active rules by leaving the repo selector blank.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label>Repo
+          <select id="rules-repo-select" class="field-select">
+            <option value="">(all active rules)</option>
+          </select>
+        </label>
+        <button class="hdr-btn" data-action="loadRulesTab">Refresh</button>
+        <span id="rules-summary" style="margin-left:auto;font-size:11px;color:var(--text2)"></span>
+      </div>
+      <div id="rules-table" class="reflection-table"></div>
+    </div>
+
+    <!-- ── D14 P4 — Tags sub-tab ──────────────────────────────────────────── -->
+    <div id="senate-pane-tags" class="reflection-pane" hidden style="padding:10px 14px">
+      <h3>Tag registry</h3>
+      <p class="reflection-help">Operator-defined tags applied to repos. Rules scoped to <code>senate:tag:&lt;t&gt;</code> activate for any repo that carries the matching tag. Pending tag suggestions are listed below the registry.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <button class="hdr-btn" data-action="loadTagsTab">Refresh</button>
+        <button class="hdr-btn primary" data-action="showCreateTagModal">+ New tag</button>
+      </div>
+      <div id="tags-table" class="reflection-table"></div>
+
+      <h3 style="margin-top:18px">Repo tags</h3>
+      <p class="reflection-help">View or edit tags attached to a specific repo.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label>Repo
+          <select id="tags-repo-select" class="field-select">
+            <option value="">(select a repo)</option>
+          </select>
+        </label>
+        <button class="hdr-btn" data-action="loadRepoTagsPanel">Load</button>
+      </div>
+      <div id="repo-tags-table" class="reflection-table"></div>
+
+      <h3 style="margin-top:18px">Tag suggestions</h3>
+      <p class="reflection-help">LLM-proposed tags awaiting operator review. Accept to create the RepoTag; dismiss to archive without action.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label>Status
+          <select id="tag-sug-status" class="field-select">
+            <option value="pending" selected>pending</option>
+            <option value="accepted">accepted</option>
+            <option value="dismissed">dismissed</option>
+            <option value="">all</option>
+          </select>
+        </label>
+        <button class="hdr-btn" data-action="loadTagSuggestions">Refresh</button>
+      </div>
+      <div id="tag-suggestions-table" class="reflection-table"></div>
+    </div>
+  </div>
+
+  <!-- ── D14 P4 — Create Tag modal ────────────────────────────────────────────
+       Uses the canonical .modal-backdrop + .hidden pattern (Sweep A). -->
+  <div class="modal-backdrop hidden" id="create-tag-modal">
+    <div class="modal-box" style="width:440px">
+      <div class="modal-header">
+        <h2>Create tag</h2>
+        <button class="modal-close" data-action="closeModal" data-arg="create-tag-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div>
+          <label class="field-label" for="create-tag-name">Tag name</label>
+          <input class="field-input" id="create-tag-name" type="text" placeholder="e.g. payments" style="width:100%">
+        </div>
+        <div style="margin-top:10px">
+          <label class="field-label" for="create-tag-desc">Description (optional)</label>
+          <input class="field-input" id="create-tag-desc" type="text" placeholder="Short description" style="width:100%">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-action="closeModal" data-arg="create-tag-modal">Cancel</button>
+        <button class="btn btn-primary" data-action="confirmCreateTag">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── D14 P4 — Upgrade rule scope modal ─────────────────────────────────────
+       Opens when operator clicks "Upgrade scope" on a rule row. -->
+  <div class="modal-backdrop hidden" id="upgrade-scope-modal">
+    <div class="modal-box" style="width:420px">
+      <div class="modal-header">
+        <h2>Upgrade rule scope</h2>
+        <button class="modal-close" data-action="closeModal" data-arg="upgrade-scope-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-top:0;color:var(--text2);font-size:13px">Rule: <strong id="upgrade-scope-rule-key"></strong></p>
+        <label class="field-label" for="upgrade-scope-select">New scope</label>
+        <select class="field-select" id="upgrade-scope-select" style="width:100%">
+          <option value="senate:*">senate:* — global (all repos)</option>
+          <option value="senate:tag:payments">senate:tag:payments</option>
+          <option value="senate:tag:ml">senate:tag:ml</option>
+          <option value="senate:tag:security">senate:tag:security</option>
+        </select>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-action="closeModal" data-arg="upgrade-scope-modal">Cancel</button>
+        <button class="btn btn-primary" data-action="confirmUpgradeScope">Upgrade</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── D14 P4 — Add repo-tag modal ────────────────────────────────────────── -->
+  <div class="modal-backdrop hidden" id="add-repo-tag-modal">
+    <div class="modal-box" style="width:400px">
+      <div class="modal-header">
+        <h2>Add tag to repo <span id="add-repo-tag-repo-name"></span></h2>
+        <button class="modal-close" data-action="closeModal" data-arg="add-repo-tag-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label class="field-label" for="add-repo-tag-select">Tag</label>
+        <select class="field-select" id="add-repo-tag-select" style="width:100%">
+        </select>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-action="closeModal" data-arg="add-repo-tag-modal">Cancel</button>
+        <button class="btn btn-primary" data-action="confirmAddRepoTag">Add</button>
+      </div>
     </div>
   </div>
 

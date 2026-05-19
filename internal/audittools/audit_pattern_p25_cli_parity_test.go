@@ -123,6 +123,19 @@ var p25Allowlist = map[string]string{
 	// "wrong consumers" is to fix the cross-repo graph (the dog
 	// `repo-graph-scan` re-emits) and re-trigger the convoy.
 	"/api/features/": "D8 T2 per-Feature blast-radius surface; GET-only — only writer is the Chancellor blast-radius post-process",
+
+	// D14 P4 — Tags / TagSuggestions / Rules operator surfaces.
+	// The dashboard endpoints are the primary operator surface; CLI
+	// parity (`force tag`, `force tag-suggestion`, `force rules`) is
+	// reasonable Phase 5+ follow-up once adoption signal exists.
+	// The GET verbs are read-only; the POST/DELETE verbs are operator-
+	// action but dashboard-only by design for Phase 4.
+	"/api/tags":             "D14 P4 tag registry; GET list + POST create — `force tag` CLI deferred to Phase 5",
+	"/api/tags/":            "D14 P4 tag DELETE by name — `force tag delete` CLI deferred to Phase 5",
+	"/api/tag-suggestions":  "D14 P4 tag suggestions; GET list + no POST (suggestions are LLM-created) — dashboard-only surface",
+	"/api/tag-suggestions/": "D14 P4 tag suggestion accept/dismiss — `force tag-suggestion` CLI deferred to Phase 5",
+	"/api/rules":            "D14 P4 FleetRules per-repo resolution; GET-only list view",
+	"/api/rules/":           "D14 P4 FleetRules scope upgrade — `force rules upgrade-scope` CLI deferred to Phase 5",
 }
 
 // p25CLIVerbs — the canonical set of CLI verbs known to exist in

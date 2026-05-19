@@ -260,6 +260,14 @@ func RunDashboardCtx(ctx context.Context, db *sql.DB, port int) {
 	mux.HandleFunc("/api/reflection/retro/generate", handleRetroGenerate(db))
 	mux.HandleFunc("/api/reflection/retro/save", handleRetroSave(db))
 
+	// ── D14 Phase 4 — Tags / TagSuggestions / Rules API.
+	mux.HandleFunc("/api/tags", handleTags(db))
+	mux.HandleFunc("/api/tags/", handleTagsSubroutes(db))
+	mux.HandleFunc("/api/tag-suggestions", handleTagSuggestions(db))
+	mux.HandleFunc("/api/tag-suggestions/", handleTagSuggestions(db))
+	mux.HandleFunc("/api/rules", handleRules(db))
+	mux.HandleFunc("/api/rules/", handleRules(db))
+
 	// ── D3 P6A.1 — Three-surface IA. Top-level navigation is capped at three
 	// surfaces forever: Pulse / Briefing / Reflection. Each handler emits a
 	// thin HTML shell that loads the SPA at the matching hash fragment.
