@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/clients/librarian"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/store"
 )
 
@@ -60,33 +61,34 @@ func TestDogHolonetRotate_SmallFile(t *testing.T) {
 
 func TestDogHolonetRotate_LargeFile(t *testing.T) {
 	dir := t.TempDir()
-	orig, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(orig)
+	t.Setenv("FORCE_DIR", dir)
+	forcepath.ResetDirCacheForTests()
+	t.Cleanup(forcepath.ResetDirCacheForTests)
 
-	// Create a file larger than the 50 MB threshold using Truncate
-	f, _ := os.Create("holonet.jsonl")
+	// Create a file larger than the 50 MB threshold using Truncate at the canonical path.
+	path := forcepath.HolonetEventStream()
+	f, _ := os.Create(path)
 	f.Close()
-	os.Truncate("holonet.jsonl", holonetMaxBytes+1)
+	os.Truncate(path, holonetMaxBytes+1)
 
 	logger := log.New(io.Discard, "", 0)
 	if err := dogHolonetRotate(logger); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Original file should be gone (renamed)
-	if _, statErr := os.Stat("holonet.jsonl"); statErr == nil {
+	if _, statErr := os.Stat(path); statErr == nil {
 		t.Error("large holonet.jsonl should have been rotated (renamed)")
 	}
 }
 
 func TestDogHolonetRotate_BigFile(t *testing.T) {
 	dir := t.TempDir()
-	orig, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(orig)
+	t.Setenv("FORCE_DIR", dir)
+	forcepath.ResetDirCacheForTests()
+	t.Cleanup(forcepath.ResetDirCacheForTests)
 
-	// Create a sparse 51MB file to exceed holonetMaxBytes (50MB)
-	path := "holonet.jsonl"
+	// Create a sparse 51MB file at the canonical path to exceed holonetMaxBytes (50MB).
+	path := forcepath.HolonetEventStream()
 	if err := os.WriteFile(path, nil, 0644); err != nil {
 		t.Fatal(err)
 	}
