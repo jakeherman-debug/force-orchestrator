@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -531,4 +532,117 @@ func repoRootSPA(t *testing.T) string {
 	}
 	t.Fatalf("repo root not found from %s", wd)
 	return ""
+}
+
+// TestSPA_BriefingSurface_Wired — D3 P6A.10 Ship H SPA wiring regression.
+//
+// Before Ship H, the Briefing surface was a placeholder ("Decision queue
+// + conversational triage. Conversational briefings land in 6A.10.") — the
+// backend (/api/briefing/queue + /api/briefing/decision/<kind>/<id> +
+// /api/briefing/decide + /api/briefing/reject + briefing_renderer.go)
+// shipped but the frontend never did. Ship H wires both ends; this test
+// pins the wiring so a future refactor that deletes the queue list or
+// detail panel fails CI before reaching the operator.
+//
+// Pins:
+//
+//  1. index.html has the two-column briefing layout containers + the
+//     reject-reason modal (the counter-proposal forcing path).
+//  2. app.js defines the loader / opener / decide / reject / refresh
+//     functions AND exports them on window for the data-action
+//     dispatcher.
+//  3. app.js references the four /api/briefing/* endpoints.
+//  4. The placeholder text from 6A.1 is gone (a future copy-paste would
+//     re-introduce it; the test fails loudly if it does).
+//  5. No inline event handlers in the new markup (P_DashboardNoInlineHandlers
+//     covers the whole SPA; this is the per-surface narrow check).
+func TestSPA_BriefingSurface_Wired(t *testing.T) {
+	root := repoRootSPA(t)
+
+	indexHTMLBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/index.html"))
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	indexHTML := string(indexHTMLBytes)
+
+	appJSBytes, err := os.ReadFile(filepath.Join(root, "internal/dashboard/static/app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	appJS := string(appJSBytes)
+
+	// (1) index.html: two-column layout containers + reject modal.
+	for _, marker := range []string{
+		`id="surface-briefing-pane"`,
+		`id="briefing-queue-list"`,
+		`id="briefing-detail"`,
+		`id="briefing-queue-count"`,
+		`class="briefing-layout"`,
+		`data-action="refreshBriefingQueue"`,
+		// Reject-reason modal — Sweep A modal-backdrop + hidden pattern.
+		`id="briefing-reject-modal"`,
+		`id="briefing-reject-kind"`,
+		`id="briefing-reject-reason"`,
+		`data-action="confirmBriefingReject"`,
+	} {
+		if !strings.Contains(indexHTML, marker) {
+			t.Errorf("SPA wiring (Ship H Briefing): index.html missing required marker %q", marker)
+		}
+	}
+
+	// (2) The 6A.1 placeholder text must be gone — a future refactor
+	// that re-introduces it would silently put the SPA back to its
+	// original empty state.
+	if strings.Contains(indexHTML, "Conversational briefings land in 6A.10") {
+		t.Errorf("SPA wiring (Ship H Briefing): index.html still contains the 6A.1 placeholder text — Ship H removed it, do not bring it back")
+	}
+
+	// (3) app.js: required function definitions + window exports.
+	for _, marker := range []string{
+		"function loadBriefingQueue(",
+		"function openBriefingDecision(",
+		"function submitBriefingDecide(",
+		"function submitBriefingReject(",
+		"function showBriefingRejectModal(",
+		"function confirmBriefingReject(",
+		"function startBriefingRefresh(",
+		"function stopBriefingRefresh(",
+		"window.loadBriefingQueue       = loadBriefingQueue",
+		"window.openBriefingDecision    = openBriefingDecision",
+		"window.submitBriefingDecide    = submitBriefingDecide",
+		"window.submitBriefingReject    = submitBriefingReject",
+		"window.startBriefingRefresh    = startBriefingRefresh",
+		"window.stopBriefingRefresh     = stopBriefingRefresh",
+	} {
+		if !strings.Contains(appJS, marker) {
+			t.Errorf("SPA wiring (Ship H Briefing): app.js missing %q", marker)
+		}
+	}
+
+	// (4) Backend endpoints referenced.
+	for _, endpoint := range []string{
+		"/api/briefing/queue",
+		"/api/briefing/decision/",
+		"/api/briefing/decide",
+		"/api/briefing/reject",
+	} {
+		if !strings.Contains(appJS, endpoint) {
+			t.Errorf("SPA wiring (Ship H Briefing): app.js does not reference %q — the loader cannot reach the backend", endpoint)
+		}
+	}
+
+	// (5) Sanity: no `onclick="…"` (or any inline on<event>=) inside the
+	// briefing-pane block. Pattern P_DashboardNoInlineHandlers does this
+	// fleet-wide; we add a narrow extra-check here so a copy-paste into
+	// this specific surface trips an obvious failure.
+	briefingStart := strings.Index(indexHTML, `id="surface-briefing-pane"`)
+	briefingEnd := strings.Index(indexHTML[briefingStart:], "<!-- ── D3 P6B SPA wiring")
+	if briefingStart >= 0 && briefingEnd > 0 {
+		briefingBlock := indexHTML[briefingStart : briefingStart+briefingEnd]
+		// Match `on<word>="` — any inline handler attribute.
+		inlineRe := regexp.MustCompile(`\bon[a-z]+="`)
+		if hit := inlineRe.FindString(briefingBlock); hit != "" {
+			t.Errorf("SPA wiring (Ship H Briefing): inline handler attribute %q found inside #surface-briefing-pane — use data-action instead", hit)
+		}
+	}
 }

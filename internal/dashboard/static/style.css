@@ -1198,6 +1198,287 @@ select option { background: var(--bg2); color: var(--text); }
   line-height: 1.5;
 }
 
+/* ── D3 P6A.10 — Briefing SPA (Ship H) ─────────────────────────────────────
+   Two-column layout: pending queue on the left, decision detail on the
+   right. Card stakes are colour-coded (medium = neutral, high = red
+   banner, awaiting-supply-recheck shows yellow accent). Reuses the
+   dashboard's existing card / modal vocabulary. */
+.briefing-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  gap: 12px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.briefing-queue {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  min-height: 0;
+}
+.briefing-queue-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  font-size: 12px;
+}
+.briefing-queue-header h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+}
+.briefing-queue-meta {
+  color: var(--text2);
+  font-size: 11px;
+}
+.briefing-queue-count {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--border);
+  color: var(--text);
+  text-align: center;
+  font-weight: 600;
+}
+.briefing-refresh-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  font-size: 14px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.briefing-refresh-btn:hover {
+  background: var(--border);
+}
+.briefing-queue-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.briefing-queue-empty {
+  padding: 18px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.briefing-queue-card {
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 80ms ease, background 80ms ease;
+}
+.briefing-queue-card:hover {
+  border-color: var(--accent);
+  background: var(--surface2);
+}
+.briefing-queue-card-selected {
+  border-color: var(--accent);
+  background: var(--surface2);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.briefing-queue-card-high {
+  border-left: 3px solid var(--red);
+}
+.briefing-queue-card-medium {
+  border-left: 3px solid var(--yellow);
+}
+.briefing-queue-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text2);
+}
+.briefing-queue-card-kind {
+  font-family: var(--mono, monospace);
+}
+.briefing-queue-card-stakes {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.briefing-queue-card-stakes-high {
+  background: rgba(255, 106, 105, 0.18);
+  color: var(--red);
+}
+.briefing-queue-card-stakes-medium {
+  background: rgba(210, 153, 34, 0.18);
+  color: var(--yellow);
+}
+.briefing-queue-card-stakes-low {
+  background: rgba(120, 200, 120, 0.18);
+  color: #6cba6c;
+}
+.briefing-queue-card-title {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.35;
+  word-break: break-word;
+}
+.briefing-queue-card-foot {
+  font-size: 10px;
+  color: var(--text2);
+}
+
+.briefing-detail {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-y: auto;
+  padding: 16px 20px;
+  min-height: 0;
+}
+.briefing-detail-empty,
+.briefing-detail-loading,
+.briefing-detail-error {
+  margin: auto;
+  padding: 24px;
+  color: var(--text2);
+  font-size: 13px;
+  text-align: center;
+}
+.briefing-detail-error {
+  color: var(--red);
+}
+.briefing-detail-empty-small {
+  color: var(--text2);
+  font-size: 12px;
+  padding: 4px 0;
+}
+.briefing-detail-head h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  color: var(--text);
+}
+.briefing-detail-meta {
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+.briefing-detail-banner {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+}
+.briefing-detail-banner-blocked {
+  background: rgba(255, 106, 105, 0.18);
+  border: 1px solid var(--red);
+  color: var(--red);
+}
+.briefing-detail-banner-decided {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+.briefing-detail-section {
+  margin-top: 14px;
+}
+.briefing-detail-section h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.briefing-detail-text {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.briefing-prior-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.briefing-prior-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text2);
+  flex-wrap: wrap;
+}
+.briefing-prior-id {
+  font-family: var(--mono, monospace);
+  color: var(--text);
+  font-weight: 600;
+}
+.briefing-prior-outcome {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.briefing-prior-outcome-approved {
+  background: rgba(120, 200, 120, 0.18);
+  color: #6cba6c;
+}
+.briefing-prior-outcome-rejected {
+  background: rgba(255, 106, 105, 0.18);
+  color: var(--red);
+}
+.briefing-prior-outcome-deferred,
+.briefing-prior-outcome-pending {
+  background: rgba(210, 153, 34, 0.18);
+  color: var(--yellow);
+}
+.briefing-prior-when,
+.briefing-prior-subsequent {
+  color: var(--text2);
+}
+.briefing-detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
 /* ── D3 P6A.2 — Heartbeat banner ───────────────────────────────────────── */
 .health-banner {
   display: flex;
