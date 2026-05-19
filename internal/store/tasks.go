@@ -48,8 +48,23 @@ var InfrastructureTaskTypes = []string{
 	"ArchaeologistProposeMigration",
 	"PRHandoffSynthesis",        // D10 — auto-generated reviewer narrative on draft PRs (opt-in)
 	"ConsumerIntegrationCheck",  // D8 Track 3 — synthetic integration test of consumer repos against producer's ask-branch
+	// D14 — Senate agents: SenateReview and SenatorOnboarding are pure fleet
+	// bookkeeping (senators vote on features; onboarding seeds their knowledge
+	// digest). Operator only sees them on failure.
+	"SenateReview",
+	"SenatorOnboarding",
 	"SenatorRefresh",            // D14 Phase 2 — periodic re-onboarding for active Senators (knowledge_digest, rule_suggestions, tag_suggestions)
 	"MigrationClassifyProposals", // D14 Phase 5 — one-shot LLM classifier for pending PromotionProposals (knowledge vs rule)
+	// D3 Phase 3 — Engineering Corps sub-agents. All EC task types are fleet
+	// plumbing: they author experiment manifests, monitor posteriors, assemble
+	// promotion/demotion proposals, author metrics, and refresh the holdout.
+	// Operator only cares when one of these fails.
+	"ECExperimentAuthor",
+	"ECExperimentMonitor",
+	"ECPromotionAuthor",
+	"ECDemotionAuthor",
+	"ECMetricAuthor",
+	"ECHoldoutMonitor",
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {
