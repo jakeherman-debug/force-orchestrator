@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"force-orchestrator/internal/daemon/wake"
+	"force-orchestrator/internal/forcepath"
 	"force-orchestrator/internal/notify"
 	"force-orchestrator/internal/store"
 )
@@ -330,5 +333,78 @@ func TestReconcilePostWake_DBDeadReturnsSentinel(t *testing.T) {
 	}
 	if !errors.Is(err, ErrPostWakeDBDead) {
 		t.Errorf("reconcilePostWake on closed DB: err = %v, want ErrPostWakeDBDead", err)
+	}
+}
+
+// TestReconcilePostWakeLoop_GoingToSleepSnapshots is the D12 P3
+// integration: a GoingToSleep event triggers store.SnapshotHolocron
+// against the live DB. We use a file-backed DB so VACUUM INTO has
+// real bytes to copy, and FORCE_DIR pointed at a temp dir so the
+// snapshot lands somewhere we can stat. The reconcile branch on
+// Woke also runs but is not the focus here.
+func TestReconcilePostWakeLoop_GoingToSleepSnapshots(t *testing.T) {
+	// Point FORCE_DIR + holocron at a temp dir. forcepath caches its
+	// resolved Dir() result across the entire test binary, so we MUST
+	// reset the cache after setting FORCE_DIR and on cleanup — otherwise
+	// a sibling test that called forcepath.Dir() first pins ~/.force/
+	// and our snapshot lands in the operator's real backups directory.
+	tmpDir := t.TempDir()
+	prevDir := os.Getenv("FORCE_DIR")
+	os.Setenv("FORCE_DIR", tmpDir)
+	forcepath.ResetDirCacheForTests()
+	defer func() {
+		if prevDir == "" {
+			os.Unsetenv("FORCE_DIR")
+		} else {
+			os.Setenv("FORCE_DIR", prevDir)
+		}
+		forcepath.ResetDirCacheForTests()
+	}()
+
+	dbPath := tmpDir + "/holocron.db"
+	db := store.InitHolocronDSN(dbPath + "?_busy_timeout=5000&_journal_mode=WAL")
+	defer db.Close()
+
+	events := make(chan wake.Event, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+
+	go func() {
+		reconcilePostWakeLoop(ctx, db, events)
+		close(done)
+	}()
+
+	events <- wake.GoingToSleep
+
+	// Poll for the snapshot file under tmpDir/backups/.
+	backupsDir := tmpDir + "/backups"
+	deadline := time.Now().Add(2 * time.Second)
+	var found bool
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(backupsDir)
+		if err == nil {
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasPrefix(e.Name(), "snapshot-pre-sleep-") {
+					found = true
+					break
+				}
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !found {
+		t.Errorf("GoingToSleep did not produce a snapshot under %s within 2s", backupsDir)
+	}
+
+	close(events)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatalf("reconcilePostWakeLoop did not exit after channel close")
 	}
 }

@@ -50,16 +50,116 @@
      These three surfaces fill in across 6A.7–6A.14. For now they display
      a "coming-online" placeholder so the operator sees the new IA without
      losing access to the existing widgets (folded under Legacy below). -->
+<!-- D3 P6A.7 / 6A.8 — Pulse SPA frontend (Ship G).
+     Consumes the already-shipped backend endpoints:
+       GET /api/pulse/snapshot   (store.PulseSnapshotFor)
+       GET /api/pulse/narrative  (agents.ListLatestNarrativeRenders)
+       GET /api/pulse/cinematic  (agents.BuildCinematic, sleep-detected only)
+     JS loaders (loadPulse / loadPulseNarrative / loadPulseCinematic) +
+     5s polling (startPulseRefresh / stopPulseRefresh) live in app.js.
+     Polling stops automatically when this pane is hidden (Sweep B uses the
+     same data-action delegated dispatcher pattern; no inline handlers). -->
 <div id="surface-pulse-pane" class="surface-pane" hidden>
-  <div class="surface-placeholder">
-    <h2>Pulse</h2>
-    <p>Ambient fleet view. Live narrative panel + fleet vital signs land in 6A.7 / 6A.8.</p>
+  <div class="pulse-toolbar">
+    <span class="pulse-title">Fleet Pulse</span>
+    <span id="pulse-last-refresh" class="pulse-last-refresh">—</span>
+    <button class="pulse-refresh-btn" data-action="refreshPulseAll" title="Refresh all pulse cards now">Refresh</button>
+  </div>
+  <div class="pulse-grid">
+    <!-- Vital signs: spend rate + queue snapshot -->
+    <div class="pulse-card pulse-card-vitals">
+      <h3>Fleet vital signs</h3>
+      <div id="pulse-vitals-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Currently running agents (Locked tasks) -->
+    <div class="pulse-card pulse-card-running">
+      <h3>Currently running</h3>
+      <div id="pulse-running-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Convoys in flight -->
+    <div class="pulse-card pulse-card-convoys">
+      <h3>Convoys in flight</h3>
+      <div id="pulse-convoys-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Narrative prose (haiku-rendered) -->
+    <div class="pulse-card pulse-card-narrative">
+      <h3>Fleet narrative</h3>
+      <div id="pulse-narrative-content" class="pulse-card-body">Loading…</div>
+      <button class="pulse-refresh-btn" data-action="refreshPulseNarrative">Refresh narrative</button>
+    </div>
+    <!-- Cinematic stream / sleep replay -->
+    <div class="pulse-card pulse-card-stream">
+      <h3>Recent activity</h3>
+      <div id="pulse-stream-content" class="pulse-card-body">Loading…</div>
+    </div>
+    <!-- Trust dials (per-agent slider state) -->
+    <div class="pulse-card pulse-card-dials">
+      <h3>Trust dials</h3>
+      <div id="pulse-dials-content" class="pulse-card-body">Loading…</div>
+    </div>
   </div>
 </div>
+<!-- ── D3 P6A.10 — Briefing SPA (Ship H) ──────────────────────────────────────
+     Two-column layout: the operator's pending decision queue on the left,
+     the focus-mode briefing detail on the right. Queue rows come from
+     GET /api/briefing/queue; tapping a row loads
+     GET /api/briefing/decision/<kind>/<id>. Approve / Reject / Defer
+     buttons POST back to /api/briefing/decide (and /api/briefing/reject for
+     the counter-proposal forcing path). Polls every 10s while the
+     surface is active; stops on deactivate. All wiring is data-action
+     (Sweep B); the reject-reason modal uses .modal-backdrop + .hidden
+     (Sweep A). -->
 <div id="surface-briefing-pane" class="surface-pane" hidden>
-  <div class="surface-placeholder">
-    <h2>Briefing</h2>
-    <p>Decision queue + conversational triage. Conversational briefings land in 6A.10.</p>
+  <div class="briefing-layout">
+    <!-- Queue list (left) -->
+    <div class="briefing-queue">
+      <div class="briefing-queue-header">
+        <h3>Decision queue</h3>
+        <span class="briefing-queue-meta">
+          <span id="briefing-queue-count" class="briefing-queue-count" aria-label="Pending decisions">0</span>
+          pending
+        </span>
+        <button class="briefing-refresh-btn" data-action="refreshBriefingQueue" title="Refresh queue" aria-label="Refresh queue">&#x21bb;</button>
+      </div>
+      <div id="briefing-queue-list" class="briefing-queue-list" role="list">
+        <div class="briefing-queue-empty">Loading&hellip;</div>
+      </div>
+    </div>
+    <!-- Detail panel (right) -->
+    <div class="briefing-detail" id="briefing-detail">
+      <div class="briefing-detail-empty">Select a decision from the queue.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Briefing reject-reason modal — counter-proposal forcing path.
+     POSTs to /api/briefing/reject which requires counter_proposal_kind
+     ∈ {whole_thing, different_approach, defer}. Uses the canonical
+     .modal-backdrop + .hidden pattern (Sweep A). -->
+<div class="modal-backdrop hidden" id="briefing-reject-modal">
+  <div class="modal-box" style="width:520px">
+    <div class="modal-header">
+      <h2>Reject decision <span id="briefing-reject-id"></span></h2>
+      <button class="modal-close" data-action="closeModal" data-arg="briefing-reject-modal">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div>
+        <label class="field-label" for="briefing-reject-kind">Counter-proposal kind</label>
+        <select class="field-select" id="briefing-reject-kind">
+          <option value="whole_thing">whole_thing &mdash; rewrite the whole thing (text &ge; 20 chars)</option>
+          <option value="different_approach">different_approach &mdash; same intent, different path (text &ge; 50 chars)</option>
+          <option value="defer">defer &mdash; ask again later</option>
+        </select>
+      </div>
+      <div style="margin-top:10px">
+        <label class="field-label" for="briefing-reject-reason">Reason / counter-proposal text</label>
+        <textarea class="field-textarea" id="briefing-reject-reason" rows="5" placeholder="Why are you rejecting? For whole_thing / different_approach, give the agent a concrete next step."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" data-action="closeModal" data-arg="briefing-reject-modal">Cancel</button>
+      <button class="btn btn-danger" data-action="confirmBriefingReject">Reject</button>
+    </div>
   </div>
 </div>
 

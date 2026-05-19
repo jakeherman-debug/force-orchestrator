@@ -2,14 +2,14 @@
 audience: both
 scope: Index of per-subsystem user/operator guides — one entry per major shipped subsystem.
 owner: D13
-last_reviewed: 2026-05-05
+last_reviewed: 2026-05-18
 ---
 
 # Subsystems
 
 This directory holds operator-facing user guides for each shipped subsystem. Closure reports under [`../closures/`](../closures/) carry the per-deliverable evidence trail; subsystem docs here are the durable user/operator reference.
 
-D13 P2 Wave B authored the per-subsystem pages below. Pages tagged "(planned)" are placeholder index entries reserved for the deliverable that ships them.
+D13 P2 Wave B authored the initial set of per-subsystem pages; the post-D13 hygiene sweep authored the remaining nine pages (daemon-lifecycle, state-files, arch-health, onboarding-cli, handoff-docs, fleet-memory, directives, dogs, security) — every page below now carries fully authored content (no `## Status: Stub` markers remain). Pages tagged "(planned)" in earlier revisions have been removed or absorbed.
 
 ## Authored pages
 
@@ -33,17 +33,12 @@ D13 P2 Wave B authored the per-subsystem pages below. Pages tagged "(planned)" a
 - [`cli-shelling.md`](cli-shelling.md) — `claude -p` invocation layering
 - [`cross-repo-graph.md`](cross-repo-graph.md) — D8 dependency graph
 - [`archaeologist.md`](archaeologist.md) — D9 operator-gated incident archive
-
-## Stub pages (navigation slots; later deliverables fill)
-
-Each stub carries the canonical metadata block plus a `## Status: Stub` H2 + a forward-pointer to the closure report or pattern doc that already covers the design. The stub-vs-allowlist call (D13 P3) lands a stub instead of suppressing the link so the navigation contract holds and the orphan-checker stays clean.
-
-- [`daemon-lifecycle.md`](daemon-lifecycle.md) — D12 daemon lifecycle, drain, supervisor, foreground mode
-- [`state-files.md`](state-files.md) — Sweep F canonical-path resolver (`~/.force/<name>`), `FORCE_DIR` override, Pattern P_CanonicalPaths
-- [`arch-health.md`](arch-health.md) — D9 architecture health report (`docs/arch-health-weights.yaml`)
-- [`onboarding-cli.md`](onboarding-cli.md) — D6 synthetic onboarding CLI
-- [`handoff-docs.md`](handoff-docs.md) — D10 synthetic handoff documentation
-- [`fleet-memory.md`](fleet-memory.md) — Fleet Memory + RAG + Librarian curator
-- [`directives.md`](directives.md) — Standing operator directives loaded from disk
-- [`dogs.md`](dogs.md) — Watchdog dogs (cooldowns + behavior reference)
-- [`security.md`](security.md) — Security posture overview (capability profiles, bash guard, scrubbing, repo-mode gating)
+- [`daemon-lifecycle.md`](daemon-lifecycle.md) — D12 daemon lifecycle (control surface, singleton, provenance, trust file, bundled dashboard)
+- [`state-files.md`](state-files.md) — canonical paths for runtime state files (`forcepath` resolver + `FORCE_DIR` override)
+- [`arch-health.md`](arch-health.md) — D9 monthly architecture-health report (longitudinal companion to the Archaeologist)
+- [`onboarding-cli.md`](onboarding-cli.md) — D6 synthetic onboarding CLI (`force onboard <repo>` renderer)
+- [`handoff-docs.md`](handoff-docs.md) — D10 synthetic handoff documentation (PRHandoffSynthesis + ARCHITECTURE.md)
+- [`fleet-memory.md`](fleet-memory.md) — Librarian-mediated cross-agent memory (FleetMemory + FTS5 + weighted retrieval)
+- [`directives.md`](directives.md) — FleetRules as source-of-truth for CLAUDE.md, FIX-LOG.md, and agent prompt injection
+- [`dogs.md`](dogs.md) — Inquisitor dog cohort (cooldowns, dispatch order, operator overrides)
+- [`security.md`](security.md) — Security posture (capability profiles, bash guard, inbound scrubbing, repo-mode gating, `.forceignore`)

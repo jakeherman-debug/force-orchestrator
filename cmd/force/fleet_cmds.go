@@ -758,7 +758,7 @@ func cmdDaemon(db *sql.DB, args []string) {
 		Name:      "EngineeringCorps-1",
 		DB:        db,
 		Librarian: libClient,
-		Metrics:   metrics.NewInProcess(),
+		Metrics:   metrics.NewInProcess(db),
 	})
 
 	// D4 Phase 3 — force-orchestrator self-onboarding. Per

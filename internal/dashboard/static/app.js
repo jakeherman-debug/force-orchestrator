@@ -2843,6 +2843,348 @@ if (!window.location.hash) {
   try { history.replaceState(null, '', '#/pulse'); } catch (_) {}
 }
 
+// ── D3 P6A.10 — Briefing SPA (Ship H) ─────────────────────────────────────
+//
+// Consumes the existing /api/briefing/* backend (handlers_briefing.go +
+// briefing_renderer.go). Two-column SPA:
+//
+//   GET  /api/briefing/queue              → list of pending decisions
+//   GET  /api/briefing/decision/<kind>/<id> → full briefing render (haiku)
+//   POST /api/briefing/decide             → operator submits verdict
+//   POST /api/briefing/reject             → forced counter-proposal path
+//
+// Refresh loop is 10s (slower than Pulse's narrative tick since decisions
+// are operator-paced, not fleet-paced). The interval is set up only while
+// the Briefing surface is active — entering the surface starts the poll,
+// leaving it stops the poll.
+const BRIEFING_REFRESH_MS = 10000;
+const BRIEFING_STATE = {
+  queue:        [],
+  selected:     null,   // { kind, id }
+  detail:       null,   // last fetched briefing render
+  refreshHandle: 0,
+  rejectTarget: null,   // briefing render row whose reject modal is open
+};
+
+// loadBriefingQueue — fetch the pending decision queue and render it.
+async function loadBriefingQueue() {
+  const wrap = document.getElementById('briefing-queue-list');
+  const count = document.getElementById('briefing-queue-count');
+  if (!wrap) return;
+  try {
+    const data = await api('/api/briefing/queue');
+    const queue = (data && data.queue) || [];
+    BRIEFING_STATE.queue = queue;
+    if (count) count.textContent = String(queue.length);
+    if (queue.length === 0) {
+      wrap.innerHTML = '<div class="briefing-queue-empty">No pending decisions. The fleet is quiet.</div>';
+      return;
+    }
+    const sel = BRIEFING_STATE.selected;
+    wrap.innerHTML = queue.map(row => {
+      const isSel = sel && sel.kind === row.decision_kind && sel.id === row.decision_id;
+      const stakes = String(row.stakes_tier || 'medium');
+      const argList = JSON.stringify([row.decision_kind, row.decision_id])
+        .replace(/'/g, '&#39;');
+      return `<div class="briefing-queue-card briefing-queue-card-${escHtml(stakes)}${isSel ? ' briefing-queue-card-selected' : ''}"
+                   role="listitem"
+                   data-action="openBriefingDecision"
+                   data-args='${argList}'>
+        <div class="briefing-queue-card-head">
+          <span class="briefing-queue-card-kind">${escHtml(row.decision_kind || 'decision')}</span>
+          <span class="briefing-queue-card-stakes briefing-queue-card-stakes-${escHtml(stakes)}">${escHtml(stakes)}</span>
+        </div>
+        <div class="briefing-queue-card-title">#${row.decision_id} ${escHtml(row.title || '(no title)')}</div>
+        <div class="briefing-queue-card-foot">${escHtml(fmtShortDate(row.created_at))}</div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    wrap.innerHTML = `<div class="briefing-queue-empty">Failed to load queue: ${escHtml(e.message)}</div>`;
+  }
+}
+
+// refreshBriefingQueue — operator-driven manual refresh (the ↻ button).
+async function refreshBriefingQueue() {
+  await loadBriefingQueue();
+}
+
+// openBriefingDecision — load the full briefing render for one (kind, id)
+// pair and paint the detail panel.
+async function openBriefingDecision(kind, id) {
+  if (!kind || !id) return;
+  BRIEFING_STATE.selected = { kind: String(kind), id: parseInt(id, 10) };
+  // Re-render queue so the selected card highlights.
+  if (Array.isArray(BRIEFING_STATE.queue) && BRIEFING_STATE.queue.length) {
+    // Cheap re-render — same data, different selected highlight.
+    const wrap = document.getElementById('briefing-queue-list');
+    if (wrap) {
+      // Trigger a fresh paint without re-fetching.
+      await loadBriefingQueueRenderOnly();
+    }
+  }
+  const panel = document.getElementById('briefing-detail');
+  if (!panel) return;
+  panel.innerHTML = '<div class="briefing-detail-loading">Loading briefing&hellip;</div>';
+  try {
+    const url = `/api/briefing/decision/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`;
+    const data = await api(url);
+    BRIEFING_STATE.detail = data;
+    renderBriefingDetail(data);
+  } catch (e) {
+    panel.innerHTML = `<div class="briefing-detail-error">Failed to load decision: ${escHtml(e.message)}</div>`;
+  }
+}
+
+// loadBriefingQueueRenderOnly — re-render the queue from BRIEFING_STATE.queue
+// without re-fetching. Used to update the selected-card highlight after
+// the operator clicks a row.
+async function loadBriefingQueueRenderOnly() {
+  const wrap = document.getElementById('briefing-queue-list');
+  if (!wrap) return;
+  const queue = BRIEFING_STATE.queue || [];
+  if (queue.length === 0) return;
+  const sel = BRIEFING_STATE.selected;
+  wrap.innerHTML = queue.map(row => {
+    const isSel = sel && sel.kind === row.decision_kind && sel.id === row.decision_id;
+    const stakes = String(row.stakes_tier || 'medium');
+    const argList = JSON.stringify([row.decision_kind, row.decision_id])
+      .replace(/'/g, '&#39;');
+    return `<div class="briefing-queue-card briefing-queue-card-${escHtml(stakes)}${isSel ? ' briefing-queue-card-selected' : ''}"
+                 role="listitem"
+                 data-action="openBriefingDecision"
+                 data-args='${argList}'>
+      <div class="briefing-queue-card-head">
+        <span class="briefing-queue-card-kind">${escHtml(row.decision_kind || 'decision')}</span>
+        <span class="briefing-queue-card-stakes briefing-queue-card-stakes-${escHtml(stakes)}">${escHtml(stakes)}</span>
+      </div>
+      <div class="briefing-queue-card-title">#${row.decision_id} ${escHtml(row.title || '(no title)')}</div>
+      <div class="briefing-queue-card-foot">${escHtml(fmtShortDate(row.created_at))}</div>
+    </div>`;
+  }).join('');
+}
+
+// renderBriefingDetail — paint the right-hand panel from a /decision payload.
+// Payload shape: { briefing: BriefingRender, effective_stakes_tier, trust_dial }.
+function renderBriefingDetail(data) {
+  const panel = document.getElementById('briefing-detail');
+  if (!panel) return;
+  if (!data || !data.briefing) {
+    panel.innerHTML = '<div class="briefing-detail-empty">No briefing data.</div>';
+    return;
+  }
+  const br = data.briefing;
+  const tier = data.effective_stakes_tier || 'medium';
+  const dial = (data.trust_dial != null) ? data.trust_dial : '';
+  let prior = [];
+  try { prior = JSON.parse(br.prior_similar_decisions_json || '[]') || []; }
+  catch (_) { prior = []; }
+
+  const stateBanner = (() => {
+    if (br.operator_decision) {
+      return `<div class="briefing-detail-banner briefing-detail-banner-decided">Already decided: ${escHtml(br.operator_decision)}</div>`;
+    }
+    if (tier === 'high') {
+      return '<div class="briefing-detail-banner briefing-detail-banner-blocked">HIGH stakes &mdash; counter-proposal required to reject.</div>';
+    }
+    return '';
+  })();
+
+  const priorHTML = prior.length === 0
+    ? '<div class="briefing-detail-empty-small">No prior similar decisions.</div>'
+    : `<ul class="briefing-prior-list">${prior.map(p =>
+        `<li><span class="briefing-prior-id">#${p.decision_id}</span>
+              <span class="briefing-prior-outcome briefing-prior-outcome-${escHtml(p.outcome || 'pending')}">${escHtml(p.outcome || 'pending')}</span>
+              <span class="briefing-prior-when">${escHtml(fmtShortDate(p.decided_at))}</span>
+              <span class="briefing-prior-subsequent">subsequent: ${escHtml(p.subsequent_outcome || 'pending')}</span>
+        </li>`).join('')}</ul>`;
+
+  const actionsHTML = br.operator_decision
+    ? '<div class="briefing-detail-empty-small">Decision already recorded.</div>'
+    : `<div class="briefing-detail-actions">
+         <button class="btn btn-primary" data-action="submitBriefingDecide" data-args='[${br.id},"approved"]'>Approve</button>
+         <button class="btn" data-action="submitBriefingDecide" data-args='[${br.id},"deferred"]'>Defer</button>
+         <button class="btn btn-danger" data-action="showBriefingRejectModal" data-args='[${br.id},"${escHtml(br.decision_kind || '')}"]'>Reject&hellip;</button>
+       </div>`;
+
+  panel.innerHTML = `
+    <div class="briefing-detail-head">
+      <div>
+        <h3>${escHtml(br.decision_kind || 'decision')} #${br.decision_id}</h3>
+        <div class="briefing-detail-meta">
+          rendered ${escHtml(fmtTS(br.rendered_at))}
+          &middot; effective tier <strong>${escHtml(tier)}</strong>
+          &middot; trust dial ${escHtml(String(dial))}
+        </div>
+      </div>
+    </div>
+    ${stateBanner}
+    <section class="briefing-detail-section">
+      <h4>Briefing</h4>
+      <div class="briefing-detail-text">${escHtml(br.briefing_text || '')}</div>
+    </section>
+    <section class="briefing-detail-section">
+      <h4>Prior similar decisions</h4>
+      ${priorHTML}
+    </section>
+    <section class="briefing-detail-section">
+      <h4>Decide</h4>
+      ${actionsHTML}
+    </section>
+  `;
+}
+
+// submitBriefingDecide — POST /api/briefing/decide. Used for approve / defer
+// (and rejected-from-direct-button when tier is medium and we don't need a
+// counter-proposal). The high-stakes reject path goes through
+// showBriefingRejectModal → confirmBriefingReject → /api/briefing/reject.
+async function submitBriefingDecide(briefingID, verdict) {
+  if (!briefingID || !verdict) return;
+  if (!['approved', 'rejected', 'deferred'].includes(verdict)) return;
+  try {
+    await fetch('/api/briefing/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        briefing_id: briefingID,
+        decision: verdict,
+        decision_time_seconds: 0,
+      }),
+    }).then(r => {
+      if (!r.ok && r.status !== 204) {
+        return r.json().then(j => { throw new Error(j.error || ('HTTP ' + r.status)); });
+      }
+    });
+    if (typeof showToast === 'function') showToast(`Decision recorded: ${verdict}`, 'ok');
+    // Clear the detail panel and refresh the queue.
+    const panel = document.getElementById('briefing-detail');
+    if (panel) panel.innerHTML = '<div class="briefing-detail-empty">Select a decision from the queue.</div>';
+    BRIEFING_STATE.selected = null;
+    BRIEFING_STATE.detail = null;
+    await loadBriefingQueue();
+  } catch (e) {
+    if (typeof showToast === 'function') showToast('Decide failed: ' + e.message, 'err');
+  }
+}
+
+// showBriefingRejectModal — open the counter-proposal modal.
+function showBriefingRejectModal(briefingID, decisionKind) {
+  if (!briefingID) return;
+  BRIEFING_STATE.rejectTarget = { briefingID: briefingID, decisionKind: String(decisionKind || '') };
+  const lbl = document.getElementById('briefing-reject-id');
+  if (lbl) lbl.textContent = '#' + briefingID;
+  const ta = document.getElementById('briefing-reject-reason');
+  if (ta) ta.value = '';
+  const kind = document.getElementById('briefing-reject-kind');
+  if (kind) kind.value = 'whole_thing';
+  const modal = document.getElementById('briefing-reject-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+// confirmBriefingReject — submit the modal.
+async function confirmBriefingReject() {
+  const t = BRIEFING_STATE.rejectTarget;
+  if (!t) return;
+  const kindEl = document.getElementById('briefing-reject-kind');
+  const taEl   = document.getElementById('briefing-reject-reason');
+  const kind = kindEl ? kindEl.value : 'whole_thing';
+  const text = taEl ? taEl.value : '';
+  try {
+    await submitBriefingReject(t.briefingID, t.decisionKind, kind, text);
+    const modal = document.getElementById('briefing-reject-modal');
+    if (modal) modal.classList.add('hidden');
+    BRIEFING_STATE.rejectTarget = null;
+  } catch (e) {
+    // Toast already shown inside submitBriefingReject.
+  }
+}
+
+// submitBriefingReject — POST /api/briefing/reject. Routes a counter-proposal
+// (whole_thing | different_approach | defer). The endpoint validates
+// minimum text lengths (≥20 for whole_thing, ≥50 for different_approach).
+async function submitBriefingReject(briefingID, decisionKind, counterKind, reason) {
+  if (!briefingID || !counterKind) {
+    if (typeof showToast === 'function') showToast('briefing_id + counter_proposal_kind required', 'err');
+    throw new Error('briefing_id + counter_proposal_kind required');
+  }
+  try {
+    const r = await fetch('/api/briefing/reject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        briefing_id:           briefingID,
+        decision_kind:         decisionKind || '',
+        counter_proposal_kind: counterKind,
+        text:                  reason || '',
+      }),
+    });
+    if (!r.ok) {
+      let msg = 'HTTP ' + r.status;
+      try { const j = await r.json(); msg = j.error || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    if (typeof showToast === 'function') showToast('Reject routed (' + counterKind + ')', 'ok');
+    // Clear and refresh.
+    const panel = document.getElementById('briefing-detail');
+    if (panel) panel.innerHTML = '<div class="briefing-detail-empty">Select a decision from the queue.</div>';
+    BRIEFING_STATE.selected = null;
+    BRIEFING_STATE.detail = null;
+    await loadBriefingQueue();
+  } catch (e) {
+    if (typeof showToast === 'function') showToast('Reject failed: ' + e.message, 'err');
+    throw e;
+  }
+}
+
+// startBriefingRefresh / stopBriefingRefresh — manage the 10s poll. The
+// poll only runs while the Briefing surface is the active surface; we
+// also fire an immediate fetch so the operator doesn't wait for the
+// first tick.
+function startBriefingRefresh() {
+  if (BRIEFING_STATE.refreshHandle) return; // already running
+  loadBriefingQueue();
+  BRIEFING_STATE.refreshHandle = setInterval(loadBriefingQueue, BRIEFING_REFRESH_MS);
+}
+
+function stopBriefingRefresh() {
+  if (BRIEFING_STATE.refreshHandle) {
+    clearInterval(BRIEFING_STATE.refreshHandle);
+    BRIEFING_STATE.refreshHandle = 0;
+  }
+}
+
+// Wrap showSurface so entering / leaving the Briefing surface manages
+// the poll. We deliberately wrap rather than touch the original — the
+// legacy + reflection flows are untouched.
+const _origShowSurfaceBriefing = showSurface;
+showSurface = function(name) {
+  const prev = currentSurfaceFromHash();
+  _origShowSurfaceBriefing(name);
+  if (name === 'briefing') {
+    startBriefingRefresh();
+  } else if (prev === 'briefing') {
+    stopBriefingRefresh();
+  }
+};
+
+// Expose handlers on window for the delegated data-action dispatcher.
+window.loadBriefingQueue       = loadBriefingQueue;
+window.refreshBriefingQueue    = refreshBriefingQueue;
+window.openBriefingDecision    = openBriefingDecision;
+window.submitBriefingDecide    = submitBriefingDecide;
+window.submitBriefingReject    = submitBriefingReject;
+window.showBriefingRejectModal = showBriefingRejectModal;
+window.confirmBriefingReject   = confirmBriefingReject;
+window.startBriefingRefresh    = startBriefingRefresh;
+window.stopBriefingRefresh     = stopBriefingRefresh;
+
+// If the boot URL is already #/briefing, kick off the poll. The wrapped
+// showSurface already ran during boot, but at the time of the original
+// showSurface() call our wrapper wasn't installed yet — so we re-evaluate
+// here to cover the deep-link case.
+if (currentSurfaceFromHash() === 'briefing') {
+  startBriefingRefresh();
+}
+
 // ── D3 P6A.2 — Heartbeat banner ───────────────────────────────────────────
 // Poll /api/dashboard/health every 30s. Show the yellow banner when the
 // most recent heartbeat is older than 60s (the API reports `fresh: false`).
@@ -4311,3 +4653,337 @@ window.switchTab = function(name) {
 if (SAVED_FILTER_TABS.includes(S.activeTab)) {
   loadSavedFiltersForTab(S.activeTab);
 }
+
+// ── D3 P6A.7 / 6A.8 — Pulse SPA frontend (Ship G) ────────────────────────
+// The Pulse surface consumes three backend endpoints that already exist:
+//
+//   GET /api/pulse/snapshot   — PulseSnapshot{spend, active_agents, convoys,
+//                               queue, trust_dials}
+//   GET /api/pulse/narrative  — {narratives: NarrativeRow[]} (prose +
+//                               rendered_at + cost)
+//   GET /api/pulse/cinematic  — CinematicPayload | {sleep_detected:false}
+//
+// We poll /api/pulse/snapshot every 5s while the Pulse surface is the
+// active one and stop polling on deactivation. The narrative and
+// cinematic endpoints are fetched once per activation (cheap; the
+// narrative renderer agent's tick is 30s so faster polling is wasted).
+const PULSE_REFRESH_MS = 5000;
+let pulseRefreshTimer = null;
+let pulseInflight = false;
+
+// ── Renderers (DOM-construction; no innerHTML for untrusted strings) ──
+function _pulseTextNode(s) { return document.createTextNode(s == null ? '' : String(s)); }
+function _pulseClear(el) {
+  if (!el) return;
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+function _pulseEmpty(el, msg) {
+  if (!el) return;
+  _pulseClear(el);
+  const span = document.createElement('span');
+  span.className = 'pulse-empty';
+  span.appendChild(_pulseTextNode(msg || '(no data)'));
+  el.appendChild(span);
+}
+
+function renderPulseVitals(snap) {
+  const el = document.getElementById('pulse-vitals-content');
+  if (!el) return;
+  const spend = (snap && snap.spend) || {};
+  const queue = (snap && snap.queue) || {};
+  _pulseClear(el);
+  const ul = document.createElement('ul');
+  ul.className = 'pulse-kv';
+  function row(label, value) {
+    const li = document.createElement('li');
+    const k = document.createElement('span'); k.className = 'pulse-k';
+    k.appendChild(_pulseTextNode(label));
+    const v = document.createElement('span'); v.className = 'pulse-v';
+    v.appendChild(_pulseTextNode(value));
+    li.appendChild(k); li.appendChild(v);
+    return li;
+  }
+  const fmtUSD = n => '$' + (Number(n) || 0).toFixed(2);
+  ul.appendChild(row('Spend (1h)',      fmtUSD(spend.hourly_usd)));
+  ul.appendChild(row('Projected today', fmtUSD(spend.projected_today_usd)));
+  ul.appendChild(row('7d avg / day',    fmtUSD(spend.last_7d_avg_usd)));
+  ul.appendChild(row('Queue total',     String(queue.total || 0)));
+  ul.appendChild(row('High-stakes',     String(queue.high_stakes || 0)));
+  ul.appendChild(row('Medium-stakes',   String(queue.medium_stakes || 0)));
+  if (spend.top_burner_task_id) {
+    ul.appendChild(row('Top-burner task', '#' + spend.top_burner_task_id));
+  }
+  el.appendChild(ul);
+}
+
+function renderPulseRunning(snap) {
+  const el = document.getElementById('pulse-running-content');
+  if (!el) return;
+  const agents = (snap && snap.active_agents) || [];
+  if (agents.length === 0) {
+    _pulseEmpty(el, 'No agents are currently locked on a task.');
+    return;
+  }
+  _pulseClear(el);
+  const table = document.createElement('table');
+  table.className = 'pulse-table';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  ['Agent', 'Task', 'Locked at'].forEach(h => {
+    const th = document.createElement('th');
+    th.appendChild(_pulseTextNode(h));
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  agents.forEach(a => {
+    const tr = document.createElement('tr');
+    const tdA = document.createElement('td');
+    tdA.appendChild(_pulseTextNode(a.agent || '(unowned)'));
+    const tdT = document.createElement('td');
+    tdT.appendChild(_pulseTextNode('#' + a.task_id));
+    const tdL = document.createElement('td');
+    tdL.className = 'pulse-mono';
+    tdL.appendChild(_pulseTextNode(a.locked_at || '—'));
+    tr.appendChild(tdA); tr.appendChild(tdT); tr.appendChild(tdL);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  el.appendChild(table);
+}
+
+function renderPulseConvoys(snap) {
+  const el = document.getElementById('pulse-convoys-content');
+  if (!el) return;
+  const convoys = (snap && snap.convoys) || [];
+  if (convoys.length === 0) {
+    _pulseEmpty(el, 'No convoys in flight.');
+    return;
+  }
+  _pulseClear(el);
+  const ul = document.createElement('ul');
+  ul.className = 'pulse-list';
+  convoys.forEach(c => {
+    const li = document.createElement('li');
+    const idSpan = document.createElement('span'); idSpan.className = 'pulse-convoy-id';
+    idSpan.appendChild(_pulseTextNode('#' + c.id));
+    const nameSpan = document.createElement('span'); nameSpan.className = 'pulse-convoy-name';
+    nameSpan.appendChild(_pulseTextNode(' ' + (c.name || '(unnamed)')));
+    const statusSpan = document.createElement('span'); statusSpan.className = 'pulse-pill';
+    statusSpan.appendChild(_pulseTextNode(c.status || 'Unknown'));
+    li.appendChild(idSpan);
+    li.appendChild(nameSpan);
+    li.appendChild(statusSpan);
+    ul.appendChild(li);
+  });
+  el.appendChild(ul);
+}
+
+function renderPulseDials(snap) {
+  const el = document.getElementById('pulse-dials-content');
+  if (!el) return;
+  const dials = (snap && snap.trust_dials) || [];
+  if (dials.length === 0) {
+    _pulseEmpty(el, 'No trust dials configured yet.');
+    return;
+  }
+  _pulseClear(el);
+  const wrap = document.createElement('div');
+  wrap.className = 'pulse-dials-grid';
+  dials.forEach(d => {
+    const cell = document.createElement('div');
+    cell.className = 'pulse-dial-cell';
+    const name = document.createElement('div');
+    name.className = 'pulse-dial-name';
+    name.appendChild(_pulseTextNode(d.agent || '(agent)'));
+    const meter = document.createElement('div');
+    meter.className = 'pulse-dial-meter';
+    const fill = document.createElement('div');
+    fill.className = 'pulse-dial-fill';
+    const pct = Math.max(0, Math.min(100, Number(d.dial_value) || 0));
+    fill.style.width = pct + '%';
+    meter.appendChild(fill);
+    const val = document.createElement('div');
+    val.className = 'pulse-dial-val';
+    val.appendChild(_pulseTextNode(String(pct)));
+    cell.appendChild(name);
+    cell.appendChild(meter);
+    cell.appendChild(val);
+    wrap.appendChild(cell);
+  });
+  el.appendChild(wrap);
+}
+
+function renderPulseNarrative(payload) {
+  const el = document.getElementById('pulse-narrative-content');
+  if (!el) return;
+  const rows = (payload && payload.narratives) || [];
+  if (rows.length === 0) {
+    _pulseEmpty(el, 'No narrative renders yet — the renderer ticks every 30s.');
+    return;
+  }
+  _pulseClear(el);
+  rows.slice(0, 5).forEach(n => {
+    const block = document.createElement('div');
+    block.className = 'pulse-narrative-block';
+    const ts = document.createElement('div');
+    ts.className = 'pulse-narrative-ts pulse-mono';
+    ts.appendChild(_pulseTextNode(n.rendered_at || ''));
+    const prose = document.createElement('div');
+    prose.className = 'pulse-narrative-prose';
+    prose.appendChild(_pulseTextNode(n.prose || '(empty)'));
+    block.appendChild(ts);
+    block.appendChild(prose);
+    el.appendChild(block);
+  });
+}
+
+function renderPulseStream(payload) {
+  const el = document.getElementById('pulse-stream-content');
+  if (!el) return;
+  if (payload && payload.sleep_detected === false) {
+    _pulseEmpty(el, 'No sleep window detected — fleet is live.');
+    return;
+  }
+  if (!payload || (!payload.event_count && !(payload.narrative_replay || []).length)) {
+    _pulseEmpty(el, 'Quiet window.');
+    return;
+  }
+  _pulseClear(el);
+  const meta = document.createElement('div');
+  meta.className = 'pulse-stream-meta pulse-mono';
+  const dur = Number(payload.sleep_duration_sec) || 0;
+  const mins = Math.round(dur / 60);
+  meta.appendChild(_pulseTextNode(
+    'Replay: ' + payload.event_count + ' events · ' + mins + ' min window'));
+  el.appendChild(meta);
+  const ul = document.createElement('ul');
+  ul.className = 'pulse-list';
+  (payload.narrative_replay || []).slice(0, 6).forEach(n => {
+    const li = document.createElement('li');
+    li.appendChild(_pulseTextNode(n.prose || ''));
+    ul.appendChild(li);
+  });
+  el.appendChild(ul);
+}
+
+function _pulseRenderError(targetId, err) {
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  _pulseClear(el);
+  const span = document.createElement('span');
+  span.className = 'pulse-error';
+  span.appendChild(_pulseTextNode('Error: ' + (err && err.message ? err.message : String(err))));
+  el.appendChild(span);
+}
+
+function _updatePulseRefreshStamp() {
+  const el = document.getElementById('pulse-last-refresh');
+  if (!el) return;
+  const now = new Date();
+  el.textContent = 'Updated ' + now.toLocaleTimeString();
+}
+
+// ── Loaders ──────────────────────────────────────────────────────────────
+async function loadPulse(forceRefresh) {
+  if (pulseInflight && !forceRefresh) return;
+  pulseInflight = true;
+  try {
+    const r = await fetch('/api/pulse/snapshot');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const snap = await r.json();
+    renderPulseVitals(snap);
+    renderPulseRunning(snap);
+    renderPulseConvoys(snap);
+    renderPulseDials(snap);
+    _updatePulseRefreshStamp();
+  } catch (e) {
+    _pulseRenderError('pulse-vitals-content', e);
+  } finally {
+    pulseInflight = false;
+  }
+}
+
+async function loadPulseNarrative() {
+  try {
+    const r = await fetch('/api/pulse/narrative?limit=5');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    renderPulseNarrative(data);
+  } catch (e) {
+    _pulseRenderError('pulse-narrative-content', e);
+  }
+}
+
+async function loadPulseCinematic() {
+  try {
+    const r = await fetch('/api/pulse/cinematic');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    renderPulseStream(data);
+  } catch (e) {
+    _pulseRenderError('pulse-stream-content', e);
+  }
+}
+
+// ── data-action handlers ────────────────────────────────────────────────
+function refreshPulseAll() {
+  loadPulse(true);
+  loadPulseNarrative();
+  loadPulseCinematic();
+}
+function refreshPulseNarrative() {
+  loadPulseNarrative();
+}
+
+// ── Polling lifecycle ────────────────────────────────────────────────────
+function startPulseRefresh() {
+  stopPulseRefresh();
+  // Kick an immediate load so the operator sees data without waiting for
+  // the first tick.
+  loadPulse(true);
+  loadPulseNarrative();
+  loadPulseCinematic();
+  pulseRefreshTimer = setInterval(() => {
+    // Only the snapshot is on the 5s cadence; narrative/cinematic stay
+    // on manual / activation triggers to respect the haiku cost cap.
+    loadPulse(false);
+  }, PULSE_REFRESH_MS);
+}
+
+function stopPulseRefresh() {
+  if (pulseRefreshTimer != null) {
+    clearInterval(pulseRefreshTimer);
+    pulseRefreshTimer = null;
+  }
+}
+
+// Wrap showSurface so Pulse polling lifecycle is bound to surface
+// activation/deactivation. The hashchange listener registered earlier
+// calls showSurface() under the hood; this wrapper sees every transition.
+const _origShowSurfacePulse = window.showSurface || showSurface;
+window.showSurface = function(name) {
+  _origShowSurfacePulse(name);
+  if (name === 'pulse') {
+    startPulseRefresh();
+  } else {
+    stopPulseRefresh();
+  }
+};
+
+// Boot: if Pulse is the initial surface (the default), kick polling now.
+if (currentSurfaceFromHash() === 'pulse') {
+  // Defer to the next tick so the DOM-ready state is consistent with how
+  // other surface loaders bootstrap themselves.
+  setTimeout(startPulseRefresh, 0);
+}
+
+// data-action exports — dispatchAction looks up handlers on window.
+window.loadPulse              = loadPulse;
+window.loadPulseNarrative     = loadPulseNarrative;
+window.loadPulseCinematic     = loadPulseCinematic;
+window.startPulseRefresh      = startPulseRefresh;
+window.stopPulseRefresh       = stopPulseRefresh;
+window.refreshPulseAll        = refreshPulseAll;
+window.refreshPulseNarrative  = refreshPulseNarrative;

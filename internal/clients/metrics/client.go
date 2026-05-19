@@ -5,10 +5,12 @@
 // fleet dashboard renders score-over-time charts on top of it.
 //
 // Implementation timeline:
-//   - D0 (this commit): interface definition + ErrNotImplemented stubs.
-//   - D3 (paired-runs + Engineering Corps deliverable): the real
-//     in-process implementation lands here, sourced from the Metrics /
-//     MetricVersions tables the deliverable introduces.
+//   - D0: interface definition + ErrNotImplemented stubs.
+//   - D3 (paired-runs + Engineering Corps deliverable): wiring through
+//     fleet_cmds.go EC dispatch (Metrics: metrics.NewInProcess(db)).
+//   - Ship I: the in-process body lands here, routing each method
+//     through the MetricVersions and ExperimentRuns tables (see
+//     inprocess.go's doc comment for the storage mapping).
 //   - Later: gRPC backing for shared multi-tenant operation.
 //
 // Pattern P16 (audit_pattern_p16_clients_interfaces_test.go) enforces
@@ -57,14 +59,13 @@ type MetricVersion struct {
 
 var (
 	// ErrNoScore — Score called against a (run, metric, version)
-	// triple that has no recorded value.
+	// triple that has no recorded value (no row, NULL score, version
+	// mismatch, or metric_name mismatch on a row whose score_source is
+	// set).
 	ErrNoScore = errors.New("metrics: no score recorded for this run")
 
 	// ErrMetricExists — RegisterMetric called for a (Name, Version)
 	// pair that already exists. Versions are immutable; bump Version
 	// to publish a change.
 	ErrMetricExists = errors.New("metrics: metric version already registered")
-
-	// ErrNotImplemented — D0 stub guard.
-	ErrNotImplemented = errors.New("metrics: not implemented (D3 deliverable)")
 )
