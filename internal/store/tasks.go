@@ -49,6 +49,7 @@ var InfrastructureTaskTypes = []string{
 	"PRHandoffSynthesis",        // D10 — auto-generated reviewer narrative on draft PRs (opt-in)
 	"ConsumerIntegrationCheck",  // D8 Track 3 — synthetic integration test of consumer repos against producer's ask-branch
 	"SenatorRefresh",            // D14 Phase 2 — periodic re-onboarding for active Senators (knowledge_digest, rule_suggestions, tag_suggestions)
+	"MigrationClassifyProposals", // D14 Phase 5 — one-shot LLM classifier for pending PromotionProposals (knowledge vs rule)
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {

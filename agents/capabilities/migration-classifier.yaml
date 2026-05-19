@@ -1,0 +1,20 @@
+agent: migration-classifier
+description: |
+  MigrationClassifyProposals — D14 Phase 5 one-shot LLM classifier that
+  separates pending PromotionProposals into "knowledge observations" (facts
+  a Senator should know) and "enforceable rules" (testable standards). Pure
+  reasoning over the proposal's key, description, and evidence JSON; no
+  tool access required.
+builtin_tools: []
+mcp_servers: []
+notes: |
+  The classifier issues one AskClaudeCLIContext call per batch of up to
+  20 proposals. It returns JSON with classification + suggested_scope +
+  rationale for each proposal. The agent then either absorbs the proposal
+  as a SenateMemory row (knowledge) or marks it awaiting_scope_review
+  (rule). No file-system or GitHub access is needed — the entire context
+  comes from the PromotionProposals table.
+
+  Live-Haiku gating applies: when LIVE_HAIKU_DISABLED is set (tests/CI),
+  the classify path returns a deterministic stub result so no LLM call is
+  spent during unit tests.

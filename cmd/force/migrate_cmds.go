@@ -34,24 +34,34 @@ const prFlowSnapshotPrefix = "holocron.db.pre-pr-flow."
 // cmdMigrate dispatches `force migrate <subcommand>`.
 func cmdMigrate(ctx context.Context, db *sql.DB, args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: force migrate pr-flow [--dry-run] [--rollback --confirm]")
-		os.Exit(1)
-	}
-	// Top-level --help is intercepted here before dispatching.
-	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
-		fmt.Println("Usage: force migrate pr-flow [--dry-run] [--rollback --confirm]")
+		fmt.Println("Usage: force migrate <subcommand> [flags]")
 		fmt.Println()
 		fmt.Println("Subcommands:")
 		fmt.Println("  pr-flow [--dry-run] [--rollback --confirm]")
 		fmt.Println("        Migrate / rollback the PR-flow schema add-on.")
+		fmt.Println("  classify-proposals [--dry-run]")
+		fmt.Println("        D14 Phase 5: classify pending PromotionProposals as knowledge or rules.")
+		os.Exit(1)
+	}
+	// Top-level --help is intercepted here before dispatching.
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		fmt.Println("Usage: force migrate <subcommand> [flags]")
+		fmt.Println()
+		fmt.Println("Subcommands:")
+		fmt.Println("  pr-flow [--dry-run] [--rollback --confirm]")
+		fmt.Println("        Migrate / rollback the PR-flow schema add-on.")
+		fmt.Println("  classify-proposals [--dry-run]")
+		fmt.Println("        D14 Phase 5: classify pending PromotionProposals as knowledge or rules.")
 		return
 	}
 	switch args[0] {
 	case "pr-flow":
 		cmdMigratePRFlow(ctx, db, args[1:])
+	case "classify-proposals":
+		cmdMigrateClassifyProposals(ctx, db, args[1:])
 	default:
 		fmt.Printf("Unknown migration: %s\n", args[0])
-		fmt.Println("Usage: force migrate pr-flow [--dry-run] [--rollback --confirm]")
+		fmt.Println("Usage: force migrate <subcommand> [flags]")
 		os.Exit(1)
 	}
 }
@@ -449,4 +459,72 @@ func cmdRepoSetPRFlow(db *sql.DB, args []string) {
 		state = "on"
 	}
 	fmt.Printf("pr_flow_enabled for %s → %s\n", name, state)
+}
+
+// ── `force migrate classify-proposals [--dry-run]` ───────────────────────────
+//
+// D14 Phase 5: classifies all unclassified pending PromotionProposals using
+// an LLM call. Knowledge observations are absorbed into SenateMemory;
+// enforceable rules are marked awaiting_scope_review for operator sign-off.
+//
+// --dry-run prints what would happen without writing to the DB.
+
+func cmdMigrateClassifyProposals(ctx context.Context, db *sql.DB, args []string) {
+	fs := flag.NewFlagSet("migrate classify-proposals", flag.ContinueOnError)
+	dryRunFlag := fs.Bool("dry-run", false, "show what the classifier would do without writing")
+	helped, perr := parseSubcommandFlags(fs, args, "migrate classify-proposals",
+		"D14 Phase 5: classify pending PromotionProposals as knowledge or enforceable rules.",
+		[]flagDoc{
+			{Name: "--dry-run", Desc: "print what would be classified without writing to the DB"},
+			{Name: "--help, -h", Desc: "show this help and exit"},
+		},
+		[]string{
+			"force migrate classify-proposals",
+			"force migrate classify-proposals --dry-run",
+		})
+	if helped {
+		return
+	}
+	if perr != nil {
+		os.Exit(2)
+	}
+
+	dryRun := *dryRunFlag
+	if dryRun {
+		fmt.Println("D14 Phase 5 — classify-proposals [dry-run]")
+		fmt.Println("==========================================")
+	} else {
+		fmt.Println("D14 Phase 5 — classify-proposals")
+		fmt.Println("=================================")
+	}
+
+	logger := newCLILogger()
+	knowledgeAbsorbed, rulesFound, err := agents.RunMigrationClassifyProposals(ctx, db, dryRun, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if dryRun {
+		fmt.Printf("\n[dry-run] Would absorb %d proposals as knowledge, surface %d as rules awaiting scope review.\n",
+			knowledgeAbsorbed, rulesFound)
+	} else {
+		fmt.Printf("\nClassification complete: %d absorbed as knowledge, %d surfaced as rules awaiting scope review.\n",
+			knowledgeAbsorbed, rulesFound)
+		if rulesFound > 0 {
+			fmt.Println("A fleet-mail summary has been sent to operator.")
+		}
+	}
+}
+
+// newCLILogger returns a minimal logger that writes to stdout, suitable
+// for CLI command contexts (not the daemon fleet.log).
+func newCLILogger() interface{ Printf(string, ...any) } {
+	return &cliLogger{}
+}
+
+type cliLogger struct{}
+
+func (l *cliLogger) Printf(format string, args ...any) {
+	fmt.Printf(format+"\n", args...)
 }

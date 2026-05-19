@@ -825,11 +825,17 @@ CREATE TABLE IF NOT EXISTS PromotionProposals (
     -- D4 Phase 0: source FleetMemory.id for Librarian-emitted candidates.
     -- 0 means "no source memory" (EC promotions, operator-direct-write rows).
     -- Used by EmitHypothesisCandidates for idempotence (one candidate per memory).
-    source_memory_id   INTEGER NOT NULL DEFAULT 0
+    source_memory_id   INTEGER NOT NULL DEFAULT 0,
+    -- D14 Phase 5: LLM classification of each proposal into knowledge vs rule.
+    -- '' = unclassified, 'absorbed_as_knowledge', 'awaiting_scope_review'.
+    classification_status TEXT NOT NULL DEFAULT '',
+    -- LLM-recommended scope for enforceable-rule proposals.
+    suggested_scope       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp   ON PromotionProposals (experiment_id);
 CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);
 CREATE INDEX IF NOT EXISTS idx_promotion_proposals_source_memory ON PromotionProposals (source_memory_id) WHERE source_memory_id != 0;
+CREATE INDEX IF NOT EXISTS idx_promotion_proposals_classification ON PromotionProposals (classification_status) WHERE classification_status != '';
 
 -- ── D4 Phase 0 — ConflictTickets ─────────────────────────────────────────────
 -- Pairs of FleetMemory rows the librarian-conflict-watch dog flagged as

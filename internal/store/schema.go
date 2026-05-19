@@ -830,11 +830,14 @@ func createSchema(db *sql.DB) {
 		rejection_rationale TEXT   DEFAULT '',
 		revert_task_id     INTEGER DEFAULT 0,
 		refiled_feature_id INTEGER DEFAULT 0,
-		source_memory_id   INTEGER NOT NULL DEFAULT 0
+		source_memory_id   INTEGER NOT NULL DEFAULT 0,
+		classification_status TEXT NOT NULL DEFAULT '',
+		suggested_scope       TEXT NOT NULL DEFAULT ''
 	);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_exp ON PromotionProposals (experiment_id);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_state ON PromotionProposals (ratified_at, rejected_at);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_source_memory ON PromotionProposals (source_memory_id) WHERE source_memory_id != 0;`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_classification ON PromotionProposals (classification_status) WHERE classification_status != '';`)
 
 	// D4 Phase 0 — ConflictTickets: pairs of FleetMemory rows that the
 	// librarian-conflict-watch dog flagged as contradictory. Operator-
@@ -3050,4 +3053,16 @@ func runMigrations(db *sql.DB) {
 	db.Exec(`UPDATE SenateChambers SET status = 'active'
 		WHERE status = 'onboarding'
 		  AND senator_name IN (SELECT DISTINCT senator FROM SenateMemory)`)
+
+	// ── D14 Phase 5 — PromotionProposal migration classifier columns ─────────
+	// classification_status tracks the LLM classification result for each
+	// pending proposal: '' (unclassified), 'absorbed_as_knowledge',
+	// 'awaiting_scope_review'. Default '' so pre-D14-P5 rows are readable
+	// as "not yet classified". ALTER TABLE ADD COLUMN is idempotent (silent
+	// no-op when the column already exists).
+	// suggested_scope carries the LLM-recommended scope for enforceable-rule
+	// proposals (e.g. 'senate:*', 'senate:tag:api', 'senate:myrepo').
+	db.Exec(`ALTER TABLE PromotionProposals ADD COLUMN classification_status TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`ALTER TABLE PromotionProposals ADD COLUMN suggested_scope       TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotion_proposals_classification ON PromotionProposals (classification_status) WHERE classification_status != ''`)
 }
