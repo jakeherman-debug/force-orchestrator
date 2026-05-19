@@ -1,0 +1,9 @@
+[
+  {"api_kind": "http_route", "api_identifier": "GET /api/v1/users/:id",            "source_line": 10, "extractor": "ktor-routing"},
+  {"api_kind": "http_route", "api_identifier": "POST /api/v1/users",               "source_line": 14, "extractor": "ktor-routing"},
+  {"api_kind": "http_route", "api_identifier": "PUT /api/v1/users/:id",            "source_line": 17, "extractor": "ktor-routing"},
+  {"api_kind": "http_route", "api_identifier": "DELETE /api/v1/users/:id",         "source_line": 21, "extractor": "ktor-routing"},
+  {"api_kind": "http_route", "api_identifier": "GET /api/v1/admin/dashboard",      "source_line": 26, "extractor": "ktor-routing"},
+  {"api_kind": "http_route", "api_identifier": "POST /api/v1/admin/users/:id/ban", "source_line": 29, "extractor": "ktor-routing"},
+  {"api_kind": "http_route", "api_identifier": "GET /health",                      "source_line": 34, "extractor": "ktor-routing"}
+]

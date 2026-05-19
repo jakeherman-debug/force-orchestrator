@@ -1,0 +1,7 @@
+[
+  {"api_kind": "http_route", "api_identifier": "GET /api/v1/users/:id",    "source_line": 11, "extractor": "spring-annotation"},
+  {"api_kind": "http_route", "api_identifier": "POST /api/v1/users",       "source_line": 16, "extractor": "spring-annotation"},
+  {"api_kind": "http_route", "api_identifier": "PUT /api/v1/users/:id",    "source_line": 21, "extractor": "spring-annotation"},
+  {"api_kind": "http_route", "api_identifier": "DELETE /api/v1/users/:id", "source_line": 26, "extractor": "spring-annotation"},
+  {"api_kind": "http_route", "api_identifier": "GET /api/v1/search",       "source_line": 31, "extractor": "spring-annotation"}
+]
