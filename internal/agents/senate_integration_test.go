@@ -96,8 +96,9 @@ func loadBountyWithPayload(t *testing.T, db *sql.DB, id int) *store.Bounty {
 // TestSenatorOnboarding_ForceOrchestratorRepo seeds a fresh DB, queues
 // SenatorOnboarding for "force-orchestrator", runs the task with a
 // mock Librarian returning a canned candidate slice, asserts the
-// chamber is in 'onboarding', a PromotionProposal landed for the
-// candidate, and SenateMemory has at least one bootstrap entry.
+// chamber is in 'active' (D14 P2: onboarding now auto-transitions to
+// active), a PromotionProposal landed for the candidate, and
+// SenateMemory has at least one bootstrap entry.
 func TestSenatorOnboarding_ForceOrchestratorRepo(t *testing.T) {
 	t.Setenv("LIVE_HAIKU_DISABLED", "1")
 	db := store.InitHolocronDSN(":memory:")
@@ -118,7 +119,7 @@ func TestSenatorOnboarding_ForceOrchestratorRepo(t *testing.T) {
 	logger := &senateTestLogger{}
 	runSenatorOnboardingTask(context.Background(), db, "Senate-test", bounty, lib, logger)
 
-	// 1. Chamber row should exist + be in onboarding.
+	// 1. Chamber row should exist + be in 'active' (D14 P2 auto-transitions).
 	chamber, err := store.GetSenateChamber(db, "force-orchestrator")
 	if err != nil {
 		t.Fatalf("GetSenateChamber: %v", err)
@@ -126,8 +127,8 @@ func TestSenatorOnboarding_ForceOrchestratorRepo(t *testing.T) {
 	if chamber == nil {
 		t.Fatal("chamber missing after onboarding")
 	}
-	if chamber.Status != "onboarding" {
-		t.Errorf("chamber.Status = %q, want onboarding", chamber.Status)
+	if chamber.Status != "active" {
+		t.Errorf("chamber.Status = %q, want active (D14 P2: onboarding auto-transitions)", chamber.Status)
 	}
 
 	// 2. At least one PromotionProposal candidate row.
@@ -558,11 +559,13 @@ func TestSenateReview_OperatorOverridePath(t *testing.T) {
 		t.Errorf("rejected_reason = %q, want contains 'operator override'", rejReason)
 	}
 
-	// Chamber should still be in onboarding (a rejected candidate
-	// doesn't advance the chamber to active).
+	// D14 P2: the chamber is now auto-transitioned to 'active' during
+	// onboarding itself, so a rejected candidate does NOT revert the
+	// chamber — it stays active. The rejection is still recorded in
+	// PromotionProposals.rejected_at + rejected_reason (auditable).
 	chamber, _ := store.GetSenateChamber(db, "force-orchestrator")
-	if chamber == nil || chamber.Status != "onboarding" {
-		t.Errorf("chamber.Status = %v, want onboarding (rejection should not advance)", chamber)
+	if chamber == nil || chamber.Status != "active" {
+		t.Errorf("chamber.Status = %v, want active (D14 P2: onboarding auto-transitions regardless of candidate fate)", chamber)
 	}
 }
 

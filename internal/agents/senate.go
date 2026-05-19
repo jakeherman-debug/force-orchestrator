@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"force-orchestrator/internal/agents/capabilities"
+	"force-orchestrator/internal/claude"
 	"force-orchestrator/internal/clients/librarian"
 	"force-orchestrator/internal/senate"
 	"force-orchestrator/internal/store"
@@ -106,16 +107,19 @@ func SpawnSenate(ctx context.Context, db *sql.DB, name string, lib librarian.Cli
 			continue
 		}
 
-		// Try claiming SenateReview first (the live-pipeline path); fall
-		// back to SenatorOnboarding (the bootstrap path) when no review
-		// work is queued. Onboarding is comparatively rare so the order
-		// keeps the steady-state path tight.
+		// Priority order: SenateReview (live pipeline) > SenatorOnboarding
+		// (bootstrap) > SenatorRefresh (periodic re-scan). Onboarding and
+		// refresh are rare relative to the review steady-state.
 		if b, claimed := store.ClaimBounty(db, "SenateReview", name); claimed {
 			runSenateReviewTask(ctx, db, name, b, lib, logger)
 			continue
 		}
 		if b, claimed := store.ClaimBounty(db, "SenatorOnboarding", name); claimed {
 			runSenatorOnboardingTask(ctx, db, name, b, lib, logger)
+			continue
+		}
+		if b, claimed := store.ClaimBounty(db, "SenatorRefresh", name); claimed {
+			runSenatorRefreshTask(ctx, db, name, b, lib, logger)
 			continue
 		}
 		time.Sleep(time.Duration(2500+rand.Intn(1000)) * time.Millisecond)
@@ -486,22 +490,85 @@ func buildSenateFeedback(verdicts []senate.Verdict) string {
 		strings.Join(lines, "\n")
 }
 
+// senatorOnboardingLLMOutputs is the parsed result of the 3-output senator
+// onboarding LLM call. All three arrays must be present (empty is fine).
+type senatorOnboardingLLMOutputs struct {
+	KnowledgeDigest []senatorKnowledgeFact   `json:"knowledge_digest"`
+	RuleSuggestions []senatorRuleSuggestion  `json:"rule_suggestions"`
+	TagSuggestions  []senatorTagSuggestion   `json:"tag_suggestions"`
+}
+
+// senatorKnowledgeFact is one entry in the knowledge_digest LLM output.
+type senatorKnowledgeFact struct {
+	Fact     string `json:"fact"`
+	Weight   int    `json:"weight"` // 1–5; 5=critical, 1=trivia
+	Category string `json:"category"` // architecture|testing|patterns|conventions|risks
+}
+
+// senatorRuleSuggestion is one entry in the rule_suggestions LLM output.
+type senatorRuleSuggestion struct {
+	RuleKey        string `json:"rule_key"`
+	Description    string `json:"description"`
+	SuggestedScope string `json:"suggested_scope"` // senate:<repo>|senate:*|senate:tag:<t>
+	Rationale      string `json:"rationale"`
+}
+
+// senatorTagSuggestion is one entry in the tag_suggestions LLM output.
+type senatorTagSuggestion struct {
+	Tag       string `json:"tag"`
+	Rationale string `json:"rationale"`
+}
+
+// senatorOnboardingSystemPrompt builds the system prompt for the 3-output
+// LLM call issued during SenatorOnboarding and SenatorRefresh.
+func senatorOnboardingSystemPrompt(repoName string) string {
+	return fmt.Sprintf(`You are a Senate advisor for the repository "%s".
+
+You have been given context about this repository: its README content, a recent git log summary, existing SenateMemory entries (facts already known about the repo), and a file-tree sketch.
+
+Your task is to produce exactly 3 JSON arrays in a single JSON object:
+
+1. knowledge_digest — observable facts about this repo. Rules:
+   - Each fact must be concrete and verifiable, not an opinion.
+   - Weight by importance: 5=critical architectural invariant, 4=important, 3=notable, 2=minor, 1=trivia.
+   - Category must be one of: architecture, testing, patterns, conventions, risks.
+   - Aim for 5–20 facts. Zero facts is acceptable if you have insufficient context.
+
+2. rule_suggestions — enforceable coding/process standards this repo should follow. Rules:
+   - Only suggest things that are genuinely verifiable in code review or CI.
+   - suggested_scope must be one of: "senate:%s" (repo-specific), "senate:*" (global), or "senate:tag:<tagname>" (tag-scoped).
+   - Be conservative — 0 suggestions is acceptable and preferred over vague suggestions.
+   - rule_key must use kebab-case and be globally unique (prefix with "senate-%s-" for repo-specific rules).
+
+3. tag_suggestions — tags this repo likely belongs to. Rules:
+   - Prefer existing tags where possible; suggest new ones only if clearly warranted.
+   - Each tag must be a short lowercase kebab-case label (e.g. "go", "rails", "monolith", "microservice").
+   - Aim for 1–5 tags. Zero is acceptable.
+
+Respond with ONLY a valid JSON object with exactly these three keys. No prose, no markdown fences, no explanation:
+{
+  "knowledge_digest": [...],
+  "rule_suggestions": [...],
+  "tag_suggestions": [...]
+}
+
+%s`, repoName, repoName, repoName, promptInjectionClause)
+}
+
 // runSenatorOnboardingTask runs one onboarding pass for the repo named
 // in the payload. Steps:
 //
 //  1. Insert / update the SenateChambers row in 'onboarding' state.
-//  2. Call librarian.BootstrapSenatorRules to produce candidate rules.
-//  3. For each candidate, EmitCandidate via the Librarian Client (the
-//     Phase 3 wiring of the "production path" described in Phase 0).
-//     This routes through the standard PromotionProposal pipeline —
-//     operator ratifies before the rule lands in FleetRules.
-//  4. Seed an initial SenateMemory entry derived from the digest.
+//  2. Call librarian.BootstrapSenatorRules to produce candidate rules (legacy
+//     path — emits PromotionProposals).
+//  3. Run the 3-output LLM call (knowledge_digest, rule_suggestions,
+//     tag_suggestions) — gated by liveHaikuDisabled().
+//  4. Persist knowledge_digest entries as SenateMemory rows (type="knowledge_digest").
+//  5. Persist rule_suggestions as PromotionProposals (status="suggested_by_senator").
+//  6. Persist tag_suggestions as TagSuggestions rows; create missing Tags rows first.
+//  7. Transition the chamber to 'active'.
 //
-// The chamber stays in 'onboarding' until at least one ratified rule
-// lands; the first call to AdvanceSenateChamberOnRatification (below)
-// flips it to 'active'. Phase 3 ships a passive listener that
-// integration tests can call directly; the dashboard ratification flow
-// hooks into it in a follow-up.
+// After step 7 the senator is operational and will be consulted in SenateReview.
 func runSenatorOnboardingTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
 	sessionID := telemetry.NewSessionID()
 	logger.Printf("[%s] Senate claimed SenatorOnboarding %d", sessionID, b.ID)
@@ -540,9 +607,7 @@ func runSenatorOnboardingTask(ctx context.Context, db *sql.DB, agentName string,
 		return
 	}
 
-	// 2. Bootstrap candidate rules via the Librarian Client. The Phase 0
-	// stub is the deterministic fallback; the production path runs the
-	// LLM-authored bootstrap when LIVE_HAIKU_DISABLED is unset.
+	// 2. Bootstrap candidate rules via the Librarian Client (legacy path).
 	candidates, err := lib.BootstrapSenatorRules(ctx, p.RepoID)
 	if err != nil {
 		msg := fmt.Sprintf("SenatorOnboarding: BootstrapSenatorRules failed: %v", err)
@@ -554,12 +619,6 @@ func runSenatorOnboardingTask(ctx context.Context, db *sql.DB, agentName string,
 	}
 	logger.Printf("Task %d: BootstrapSenatorRules produced %d candidate rule(s) for %s", b.ID, len(candidates), p.RepoID)
 
-	// 3. Emit each candidate as a PromotionProposal. The candidate's
-	// rule body becomes proposed_content; the rationale + evidence are
-	// folded into the evidence_summary_json so operators see WHY at
-	// ratification time. Anti-cheat: this is the ONLY rule-promotion
-	// path from the Senate package — direct FleetRules writes are
-	// AST-forbidden by Pattern P34.
 	emitted := 0
 	for _, cand := range candidates {
 		evidenceJSON, mErr := json.Marshal(map[string]string{
@@ -586,52 +645,321 @@ func runSenatorOnboardingTask(ctx context.Context, db *sql.DB, agentName string,
 		logger.Printf("Task %d: emitted PromotionProposal %d for rule %s", b.ID, propID, cand.RuleKey)
 	}
 
-	// 4. Seed initial memory entries derived from the digest. The
-	// SenatorOnboarding step seeds at least one memory row so the
-	// Senator's prompt context isn't empty on its first review.
-	digest, digestErr := lib.RefreshSenatorMemoryDigest(ctx, p.RepoID)
+	// 3–6. Run the 3-output LLM call and persist results.
+	llmOut, llmErr := runSenatorLLMOutputs(ctx, db, b.ID, p.RepoID, lib, logger)
+	if llmErr != nil {
+		// Non-fatal: the legacy bootstrap already ran. Log and continue to
+		// the active transition so the Senator is not stuck in 'onboarding'
+		// forever due to a transient LLM error.
+		logger.Printf("Task %d: senatorLLMOutputs for %s failed: %v — proceeding with empty outputs", b.ID, p.RepoID, llmErr)
+		llmOut = senatorOnboardingLLMOutputs{}
+	}
+
+	factCount := persistSenatorKnowledgeDigest(db, b.ID, p.RepoID, llmOut.KnowledgeDigest, logger)
+	ruleCount := persistSenatorRuleSuggestions(ctx, db, b.ID, p.RepoID, p.Scope, llmOut.RuleSuggestions, lib, logger)
+	tagCount := persistSenatorTagSuggestions(db, b.ID, p.RepoID, llmOut.TagSuggestions, logger)
+
+	// Fall back to legacy digest-based memory if no LLM facts were produced.
+	if factCount == 0 {
+		seedDigestMemory(ctx, db, b.ID, p.RepoID, lib, logger)
+	}
+
+	// 7. Transition chamber to 'active' — senator is now operational.
+	if err := store.SetSenateChamberStatus(db, p.RepoID, "active"); err != nil {
+		logger.Printf("Task %d: SetSenateChamberStatus(active) for %s failed: %v — chamber remains onboarding", b.ID, p.RepoID, err)
+	} else {
+		logger.Printf("Task %d: status=active knowledge_facts=%d rule_suggestions=%d tag_suggestions=%d",
+			b.ID, factCount, ruleCount, tagCount)
+	}
+
+	store.LogAudit(db, agentName, "senator-onboarded", b.ID,
+		fmt.Sprintf("repo=%s candidates=%d facts=%d rules=%d tags=%d", p.RepoID, emitted, factCount, ruleCount, tagCount))
+	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
+	if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
+		logger.Printf("Task %d: SenatorOnboarding Completed status transition failed: %v", b.ID, err)
+	}
+}
+
+// runSenatorRefreshTask re-runs the 3-output LLM pass for an already-active
+// Senator to incorporate new repo state into SenateMemory, rule suggestions,
+// and tag suggestions. The chamber remains 'active' throughout — a refresh
+// is a non-destructive append, not a re-onboarding.
+func runSenatorRefreshTask(ctx context.Context, db *sql.DB, agentName string, b *store.Bounty, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
+	sessionID := telemetry.NewSessionID()
+	logger.Printf("[%s] Senate claimed SenatorRefresh %d", sessionID, b.ID)
+
+	var p senatorOnboardingPayload // same payload shape
+	if err := json.Unmarshal([]byte(b.Payload), &p); err != nil {
+		msg := fmt.Sprintf("SenatorRefresh payload parse failed: %v", err)
+		if fbErr := store.FailBounty(db, b.ID, msg); fbErr != nil {
+			logger.Printf("Task %d: FailBounty after payload parse failure also failed (%v)", b.ID, fbErr)
+		}
+		telemetry.EmitEvent(telemetry.EventTaskFailed(sessionID, agentName, b.ID, msg))
+		return
+	}
+	if p.RepoID == "" {
+		msg := "SenatorRefresh: payload missing repo_id"
+		if fbErr := store.FailBounty(db, b.ID, msg); fbErr != nil {
+			logger.Printf("Task %d: FailBounty after invalid payload also failed (%v)", b.ID, fbErr)
+		}
+		return
+	}
+	if p.Scope == "" {
+		p.Scope = "repo:" + p.RepoID
+	}
+
+	// Confirm the chamber is still active before spending an LLM call.
+	chamber, chamberErr := store.GetSenateChamber(db, p.RepoID)
+	if chamberErr != nil {
+		msg := fmt.Sprintf("SenatorRefresh: GetSenateChamber(%s) failed: %v", p.RepoID, chamberErr)
+		if fbErr := store.FailBounty(db, b.ID, msg); fbErr != nil {
+			logger.Printf("Task %d: FailBounty also failed (%v)", b.ID, fbErr)
+		}
+		return
+	}
+	if chamber == nil || chamber.Status != "active" {
+		// Senator was retired/suspended between queue time and claim time.
+		// Complete without error — the dog will stop queuing when it's gone.
+		logger.Printf("Task %d: SenatorRefresh(%s): chamber status=%v — completing without refresh",
+			b.ID, p.RepoID, chamber)
+		if upErr := store.UpdateBountyStatus(db, b.ID, "Completed"); upErr != nil {
+			logger.Printf("Task %d: SenatorRefresh Completed status transition failed: %v", b.ID, upErr)
+		}
+		return
+	}
+
+	llmOut, llmErr := runSenatorLLMOutputs(ctx, db, b.ID, p.RepoID, lib, logger)
+	if llmErr != nil {
+		logger.Printf("Task %d: senatorLLMOutputs for %s failed: %v — completing without persisting outputs", b.ID, p.RepoID, llmErr)
+		llmOut = senatorOnboardingLLMOutputs{}
+	}
+
+	factCount := persistSenatorKnowledgeDigest(db, b.ID, p.RepoID, llmOut.KnowledgeDigest, logger)
+	ruleCount := persistSenatorRuleSuggestions(ctx, db, b.ID, p.RepoID, p.Scope, llmOut.RuleSuggestions, lib, logger)
+	tagCount := persistSenatorTagSuggestions(db, b.ID, p.RepoID, llmOut.TagSuggestions, logger)
+
+	if markErr := store.MarkSenateChamberRefreshed(db, p.RepoID); markErr != nil {
+		logger.Printf("Task %d: MarkSenateChamberRefreshed(%s): %v", b.ID, p.RepoID, markErr)
+	}
+	logger.Printf("Task %d: SenatorRefresh complete — status=active knowledge_facts=%d rule_suggestions=%d tag_suggestions=%d",
+		b.ID, factCount, ruleCount, tagCount)
+
+	store.LogAudit(db, agentName, "senator-refreshed", b.ID,
+		fmt.Sprintf("repo=%s facts=%d rules=%d tags=%d", p.RepoID, factCount, ruleCount, tagCount))
+	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
+	if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
+		logger.Printf("Task %d: SenatorRefresh Completed status transition failed: %v", b.ID, err)
+	}
+}
+
+// runSenatorLLMOutputs issues the 3-output LLM call and returns the parsed
+// outputs. When liveHaikuDisabled() is set (tests/CI), returns a minimal
+// deterministic fixture so tests never spend an LLM call. A failure to parse
+// the LLM response returns an error; the caller decides how to handle it.
+func runSenatorLLMOutputs(ctx context.Context, db *sql.DB, taskID int, repoID string, lib librarian.Client, logger interface{ Printf(string, ...any) }) (senatorOnboardingLLMOutputs, error) {
+	if liveHaikuDisabled() || SpendCapExceeded(db) {
+		// Deterministic stub — minimal valid output for tests.
+		return senatorOnboardingLLMOutputs{
+			KnowledgeDigest: []senatorKnowledgeFact{
+				{Fact: fmt.Sprintf("Senator %s onboarded (deterministic stub).", repoID), Weight: 1, Category: "conventions"},
+			},
+			RuleSuggestions: []senatorRuleSuggestion{},
+			TagSuggestions:  []senatorTagSuggestion{},
+		}, nil
+	}
+
+	// Pull the senator's existing memory for context.
+	existingMem, memErr := store.ListSenateMemory(db, repoID, 20)
+	if memErr != nil {
+		logger.Printf("Task %d: ListSenateMemory(%s) failed: %v — proceeding without memory context", taskID, repoID, memErr)
+	}
+	var memSummary strings.Builder
+	for _, m := range existingMem {
+		fmt.Fprintf(&memSummary, "- [%s] %s\n", m.Topic, m.Summary)
+	}
+
+	// Pull a recent-commits digest.
+	digest, digestErr := lib.RefreshSenatorMemoryDigest(ctx, repoID)
+	var digestSummary string
 	if digestErr != nil {
-		// A digest refresh failure is non-fatal — seed a minimal entry
-		// so the chamber still has a memory anchor for its first review.
-		logger.Printf("Task %d: RefreshSenatorMemoryDigest(%s) failed: %v — seeding minimal memory anchor", b.ID, p.RepoID, digestErr)
+		logger.Printf("Task %d: RefreshSenatorMemoryDigest(%s) failed: %v — proceeding without digest", taskID, repoID, digestErr)
+		digestSummary = "(digest unavailable)"
+	} else {
+		digestSummary = digest.APISurfaceSummary
+		if digest.NotesForOperator != "" {
+			digestSummary += "\n\n" + digest.NotesForOperator
+		}
+	}
+
+	systemPrompt := senatorOnboardingSystemPrompt(repoID)
+	userPrompt := fmt.Sprintf(
+		"Repository: %s\n\nExisting memory entries:\n%s\n\nRecent digest:\n%s",
+		repoID,
+		WrapUserContent("existing_memory", memSummary.String()),
+		WrapUserContent("digest", digestSummary),
+	)
+
+	prof, profErr := capabilities.LoadProfile("senate")
+	if profErr != nil {
+		return senatorOnboardingLLMOutputs{}, fmt.Errorf("runSenatorLLMOutputs: LoadProfile: %w", profErr)
+	}
+	mcpConfig, _ := prof.MCPConfigArg()
+
+	raw, callErr := claude.AskClaudeCLIContext(ctx, systemPrompt, userPrompt,
+		prof.AllowedToolsArg(), prof.DisallowedToolsArg(), mcpConfig, 1)
+	if callErr != nil {
+		return senatorOnboardingLLMOutputs{}, fmt.Errorf("runSenatorLLMOutputs: LLM call: %w", callErr)
+	}
+
+	clean := claude.ExtractJSON(raw)
+	var out senatorOnboardingLLMOutputs
+	if parseErr := json.Unmarshal([]byte(clean), &out); parseErr != nil {
+		return senatorOnboardingLLMOutputs{}, fmt.Errorf("runSenatorLLMOutputs: parse JSON: %w (raw=%q)", parseErr, clean[:min(len(clean), 200)])
+	}
+	return out, nil
+}
+
+// persistSenatorKnowledgeDigest inserts knowledge_digest facts as SenateMemory
+// rows (type="knowledge_digest"). Returns the count inserted.
+func persistSenatorKnowledgeDigest(db *sql.DB, taskID int, repoID string, facts []senatorKnowledgeFact, logger interface{ Printf(string, ...any) }) int {
+	inserted := 0
+	for _, f := range facts {
+		if f.Fact == "" {
+			continue
+		}
+		w := float64(f.Weight)
+		if w < 1 {
+			w = 1
+		}
+		if w > 5 {
+			w = 5
+		}
+		topic := "knowledge_digest"
+		if f.Category != "" {
+			topic = "knowledge_digest:" + f.Category
+		}
+		if _, err := store.InsertSenateMemory(db, store.SenateMemoryEntry{
+			Senator: repoID,
+			Topic:   topic,
+			Summary: f.Fact,
+			Source:  "knowledge_digest",
+			Weight:  w,
+		}); err != nil {
+			logger.Printf("Task %d: persistSenatorKnowledgeDigest insert failed: %v", taskID, err)
+			continue
+		}
+		inserted++
+	}
+	return inserted
+}
+
+// persistSenatorRuleSuggestions emits rule_suggestions as PromotionProposals.
+// Returns the count emitted.
+func persistSenatorRuleSuggestions(ctx context.Context, db *sql.DB, taskID int, repoID, scope string, rules []senatorRuleSuggestion, lib librarian.Client, logger interface{ Printf(string, ...any) }) int {
+	emitted := 0
+	for _, r := range rules {
+		if r.RuleKey == "" || r.Description == "" {
+			continue
+		}
+		suggestedScope := r.SuggestedScope
+		if suggestedScope == "" {
+			suggestedScope = "senate:" + repoID
+		}
+		evidenceJSON, mErr := json.Marshal(map[string]string{
+			"rationale":       r.Rationale,
+			"suggested_scope": suggestedScope,
+			"origin":          "senate-onboarding-llm",
+			"repo":            repoID,
+			"scope":           scope,
+		})
+		if mErr != nil {
+			logger.Printf("Task %d: marshal evidence for rule %s: %v", taskID, r.RuleKey, mErr)
+			continue
+		}
+		propID, eErr := lib.EmitCandidate(ctx, librarian.Candidate{
+			HypothesisKey: r.RuleKey,
+			HypothesisRaw: r.Description,
+			EvidenceJSON:  string(evidenceJSON),
+		})
+		if eErr != nil {
+			logger.Printf("Task %d: EmitCandidate(%s) failed: %v", taskID, r.RuleKey, eErr)
+			continue
+		}
+		logger.Printf("Task %d: emitted PromotionProposal %d for senator rule %s", taskID, propID, r.RuleKey)
+		emitted++
+	}
+	return emitted
+}
+
+// persistSenatorTagSuggestions inserts tag_suggestions into the TagSuggestions
+// table. If a tag does not exist in the Tags table, it is created first with
+// the rationale as the description. Returns the count inserted.
+func persistSenatorTagSuggestions(db *sql.DB, taskID int, repoID string, tags []senatorTagSuggestion, logger interface{ Printf(string, ...any) }) int {
+	inserted := 0
+	for _, ts := range tags {
+		if ts.Tag == "" {
+			continue
+		}
+		// Ensure the tag exists; create if missing (idempotent via INSERT OR IGNORE).
+		_, tagErr := store.GetTag(db, ts.Tag)
+		if tagErr != nil {
+			// Tag does not exist — create it.
+			createErr := store.CreateTag(db, ts.Tag, ts.Rationale, "librarian:senate-onboarding")
+			if createErr != nil {
+				logger.Printf("Task %d: CreateTag(%q) failed: %v — skipping suggestion", taskID, ts.Tag, createErr)
+				continue
+			}
+			logger.Printf("Task %d: created new tag %q (rationale=%q)", taskID, ts.Tag, ts.Rationale)
+		}
+		_, sugErr := store.CreateTagSuggestion(db, repoID, ts.Tag, ts.Rationale, "librarian:senate-onboarding")
+		if sugErr != nil {
+			logger.Printf("Task %d: CreateTagSuggestion(%q, %q) failed: %v", taskID, repoID, ts.Tag, sugErr)
+			continue
+		}
+		inserted++
+	}
+	return inserted
+}
+
+// seedDigestMemory is the fallback memory-seeding path used when the LLM
+// produces zero knowledge_digest facts. Calls RefreshSenatorMemoryDigest and
+// inserts the APISurfaceSummary and NotesForOperator into SenateMemory.
+func seedDigestMemory(ctx context.Context, db *sql.DB, taskID int, repoID string, lib librarian.Client, logger interface{ Printf(string, ...any) }) {
+	digest, digestErr := lib.RefreshSenatorMemoryDigest(ctx, repoID)
+	if digestErr != nil {
+		logger.Printf("Task %d: RefreshSenatorMemoryDigest(%s) failed: %v — seeding minimal memory anchor", taskID, repoID, digestErr)
 		if _, mErr := store.InsertSenateMemory(db, store.SenateMemoryEntry{
-			Senator: p.RepoID,
+			Senator: repoID,
 			Topic:   "onboarding",
-			Summary: fmt.Sprintf("Senator %s onboarded; digest refresh deferred (%v).", p.RepoID, digestErr),
+			Summary: fmt.Sprintf("Senator %s onboarded; digest refresh deferred (%v).", repoID, digestErr),
 			Source:  "bootstrap",
 			Weight:  1.0,
 		}); mErr != nil {
-			logger.Printf("Task %d: minimal-memory insert failed: %v", b.ID, mErr)
+			logger.Printf("Task %d: minimal-memory insert failed: %v", taskID, mErr)
 		}
-	} else {
+		return
+	}
+	if digest.APISurfaceSummary != "" {
 		if _, mErr := store.InsertSenateMemory(db, store.SenateMemoryEntry{
-			Senator: p.RepoID,
+			Senator: repoID,
 			Topic:   "api-surface",
 			Summary: digest.APISurfaceSummary,
 			Source:  "bootstrap",
 			Weight:  1.0,
 		}); mErr != nil {
-			logger.Printf("Task %d: api-surface memory insert failed: %v", b.ID, mErr)
-		}
-		if digest.NotesForOperator != "" {
-			if _, mErr := store.InsertSenateMemory(db, store.SenateMemoryEntry{
-				Senator: p.RepoID,
-				Topic:   "notes-for-operator",
-				Summary: digest.NotesForOperator,
-				Source:  "bootstrap",
-				Weight:  0.8,
-			}); mErr != nil {
-				logger.Printf("Task %d: notes-for-operator memory insert failed: %v", b.ID, mErr)
-			}
+			logger.Printf("Task %d: api-surface memory insert failed: %v", taskID, mErr)
 		}
 	}
-
-	logger.Printf("Task %d: SenatorOnboarding complete — chamber=%s status=onboarding candidates_emitted=%d", b.ID, p.RepoID, emitted)
-	store.LogAudit(db, agentName, "senator-onboarded", b.ID,
-		fmt.Sprintf("repo=%s candidates=%d", p.RepoID, emitted))
-	telemetry.EmitEvent(telemetry.EventTaskCompleted(sessionID, agentName, b.ID))
-	if err := store.UpdateBountyStatus(db, b.ID, "Completed"); err != nil {
-		logger.Printf("Task %d: SenatorOnboarding Completed status transition failed: %v", b.ID, err)
+	if digest.NotesForOperator != "" {
+		if _, mErr := store.InsertSenateMemory(db, store.SenateMemoryEntry{
+			Senator: repoID,
+			Topic:   "notes-for-operator",
+			Summary: digest.NotesForOperator,
+			Source:  "bootstrap",
+			Weight:  0.8,
+		}); mErr != nil {
+			logger.Printf("Task %d: notes-for-operator memory insert failed: %v", taskID, mErr)
+		}
 	}
 }
 

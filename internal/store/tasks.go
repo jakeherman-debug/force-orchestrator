@@ -48,6 +48,7 @@ var InfrastructureTaskTypes = []string{
 	"ArchaeologistProposeMigration",
 	"PRHandoffSynthesis",        // D10 — auto-generated reviewer narrative on draft PRs (opt-in)
 	"ConsumerIntegrationCheck",  // D8 Track 3 — synthetic integration test of consumer repos against producer's ask-branch
+	"SenatorRefresh",            // D14 Phase 2 — periodic re-onboarding for active Senators (knowledge_digest, rule_suggestions, tag_suggestions)
 }
 
 var infrastructureTaskTypeSet = func() map[string]bool {
@@ -777,6 +778,44 @@ func QueueSenatorOnboarding(db *sql.DB, repoID, triggeredBy string) (int, error)
 	}
 	id, _ := res.LastInsertId()
 	return int(id), nil
+}
+
+// QueueSenatorRefresh enqueues a SenatorRefresh task for the named repo if no
+// non-terminal SenatorRefresh task already exists for it (dedup). The task is
+// picked up by SpawnSenate → runSenatorRefreshTask which re-runs the 3-output
+// onboarding LLM pass (knowledge_digest, rule_suggestions, tag_suggestions)
+// against the current repo state and appends fresh SenateMemory rows.
+//
+// Returns (taskID, alreadyExisted, error). alreadyExisted=true means the dedup
+// gate fired and no new row was inserted.
+func QueueSenatorRefresh(db *sql.DB, repoID, triggeredBy string) (int, bool, error) {
+	if repoID == "" {
+		return 0, false, fmt.Errorf("QueueSenatorRefresh: repoID required")
+	}
+	// Dedup: if a non-terminal SenatorRefresh already exists for this repo, skip.
+	var existing int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM BountyBoard
+		 WHERE type = 'SenatorRefresh'
+		   AND target_repo = ?
+		   AND status IN ('Pending', 'Locked')`, repoID).Scan(&existing); err != nil {
+		return 0, false, fmt.Errorf("QueueSenatorRefresh(%s): dedup check: %w", repoID, err)
+	}
+	if existing > 0 {
+		return 0, true, nil
+	}
+	payload := fmt.Sprintf(`{"repo_id":%q,"scope":%q,"triggered_by":%q}`,
+		repoID, "repo:"+repoID, triggeredBy)
+	res, err := db.Exec(
+		`INSERT INTO BountyBoard
+		   (parent_id, target_repo, type, status, payload, priority, created_at)
+		 VALUES (0, ?, 'SenatorRefresh', 'Pending', ?, 0, datetime('now'))`,
+		repoID, payload)
+	if err != nil {
+		return 0, false, fmt.Errorf("QueueSenatorRefresh(%s): %w", repoID, err)
+	}
+	id, _ := res.LastInsertId()
+	return int(id), false, nil
 }
 
 // AddConvoyTask creates a CodeEdit subtask within a convoy. status should be
