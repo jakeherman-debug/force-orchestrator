@@ -25,7 +25,7 @@ Cooldowns range from `0` (every Inquisitor tick = every 5 min, used for cheap po
 
 ## Inventory
 
-The 40 dogs grouped by purpose, with cooldowns. Order within each group reflects `dogOrder`.
+The 43 dogs grouped by purpose, with cooldowns. Order within each group reflects `dogOrder`.
 
 **Spend defense (run first; skipped during e-stop):**
 
@@ -107,9 +107,17 @@ The 40 dogs grouped by purpose, with cooldowns. Order within each group reflects
 
 - `notification-override-cleanup` (24 h) — purges `ConvoyNotificationOverrides` rows >7 d after convoy terminal transition.
 
+**Golden-set evaluation (D16 P1B):**
+
+- `golden-set-evaluator` (7 d) — runs `RunWeeklyEvaluatorDog` for every registered agent's fixture set; records per-fixture pass/fail into `GoldenSetEvaluations` for accuracy-trend dashboards. Gated by `IsEstopped + SpendCapExceeded` so it never burns tokens during emergency halt.
+
+**Holdout snapshot (D17 P1B):**
+
+- `holdout-snapshot` (24 h) — computes a deterministic SHA-256 fleet-state hash (task distribution by status, active agent counts by type, distinct model tiers from `TreatmentSpecs`) and writes it into `GlobalHoldouts.fleet_state_hash` for every active holdout row. Pure DB reads + one UPDATE per active holdout; no LLM calls or external I/O.
+
 ## Invariants
 
-1. **Inventory count is asserted.** `TestListDogs` (`internal/agents/dogs_test.go`) requires exactly 41 dogs and names the load-bearing subset; adding a dog requires updating the test in the same commit.
+1. **Inventory count is asserted.** `TestListDogs` (`internal/agents/dogs_test.go`) requires exactly 43 dogs and names the load-bearing subset; adding a dog requires updating the test in the same commit.
 2. **`spend-burn-watch` runs first; `task-spend-watch` runs second.** Both cost defenses must land before any subsequent dog or any subsequent claim cycle continues spending tokens.
 3. **E-stop short-circuits all dogs.** AUDIT-106 / Fix #1: no dogs run during emergency halt. The whole point of e-stop is to stop activity that costs money.
 4. **Per-tick context is cancellable from the daemon.** `SpawnInquisitor` derives `tickCtx` from the daemon `ctx`; per-dog ctx derives from `tickCtx`. Daemon SIGINT/SIGTERM cancels in-flight dog work.

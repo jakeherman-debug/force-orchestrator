@@ -335,3 +335,27 @@ func GetConfig(db *sql.DB, key, defaultVal string) string {
 func SetConfig(db *sql.DB, key, value string) {
 	db.Exec(`INSERT OR REPLACE INTO SystemConfig (key, value) VALUES (?, ?)`, key, value)
 }
+
+// UpdateHoldoutFleetStateHash sets fleet_state_hash on the GlobalHoldouts
+// row identified by holdoutID. Returns an error if the row doesn't exist or
+// the update fails — callers must propagate the error (no silent failures).
+func UpdateHoldoutFleetStateHash(db *sql.DB, holdoutID int, hash string) error {
+	if db == nil {
+		return fmt.Errorf("UpdateHoldoutFleetStateHash: db is nil")
+	}
+	res, err := db.Exec(
+		`UPDATE GlobalHoldouts SET fleet_state_hash = ? WHERE id = ?`,
+		hash, holdoutID,
+	)
+	if err != nil {
+		return fmt.Errorf("UpdateHoldoutFleetStateHash(id=%d): %w", holdoutID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("UpdateHoldoutFleetStateHash(id=%d): rows affected: %w", holdoutID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("UpdateHoldoutFleetStateHash(id=%d): holdout not found", holdoutID)
+	}
+	return nil
+}

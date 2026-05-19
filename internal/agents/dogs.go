@@ -219,6 +219,14 @@ var dogCooldowns = map[string]time.Duration{
 	// the dog itself is gated by IsEstopped + SpendCapExceeded so it
 	// never burns tokens during an emergency halt.
 	"golden-set-evaluator": 7 * 24 * time.Hour,
+	// D17 Phase 1B — holdout-snapshot. Computes a deterministic SHA-256
+	// fleet-state hash (task distribution by status, active agent counts
+	// by type, distinct model tiers from TreatmentSpecs) and writes it
+	// into GlobalHoldouts.fleet_state_hash for every active holdout row.
+	// Daily cadence — the fleet state changes slowly (model upgrades,
+	// experiment configuration changes) and once-per-day sampling is
+	// sufficient for the analyst's longitudinal comparison use case.
+	"holdout-snapshot": 24 * time.Hour,
 }
 
 // dogOrder determines the execution order of dogs within each inquisitor cycle.
@@ -318,6 +326,10 @@ var dogOrder = []string{
 	// is the heaviest dog in the roster. Running after all structural
 	// dogs ensures a healthy fleet state before paying evaluation cost.
 	"golden-set-evaluator",
+	// D17 Phase 1B — holdout-snapshot. Ordered after golden-set-evaluator
+	// so it sees the post-evaluation fleet state. Pure DB reads + a single
+	// UPDATE; no LLM calls, no external I/O.
+	"holdout-snapshot",
 }
 
 // RunDogs checks each built-in dog against its cooldown and runs any that are due.
@@ -531,6 +543,8 @@ func runDog(ctx context.Context, db *sql.DB, name string, lib librarian.Client, 
 		return dogNotificationOverrideCleanup(db, logger)
 	case "golden-set-evaluator":
 		return dogGoldenSetEvaluator(ctx, db, evaluators, versions, logger)
+	case "holdout-snapshot":
+		return dogHoldoutSnapshot(ctx, db, logger)
 	default:
 		return fmt.Errorf("unknown dog: %s", name)
 	}
