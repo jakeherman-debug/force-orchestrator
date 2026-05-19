@@ -1,0 +1,10 @@
+[
+  "GET /users",
+  "POST /users",
+  "GET /users/:id",
+  "PUT /users/:id",
+  "DELETE /users/:id",
+  "GET /users/:userId/posts",
+  "POST /users/:userId/posts",
+  "GET /health"
+]

@@ -1,0 +1,11 @@
+{
+  "rpcs": [
+    "UserService/GetUser",
+    "UserService/CreateUser",
+    "UserService/DeleteUser"
+  ],
+  "events": [
+    "events.UserCreated",
+    "events.UserDeleted"
+  ]
+}
